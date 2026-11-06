@@ -40,9 +40,7 @@ type Scenario = {
 	extraIds?: string[];
 	claimArgs?: string[];
 	explicitDb?: boolean;
-	disableCheck?: boolean;
-	disableConsistency?: boolean;
-	authority?: "source" | "failed" | "missing" | "stale" | "nonblocking-refusal" | "blocking-admitted" | "duplicate";
+	authority?: "source" | "failed" | "missing" | "invalid";
 	config?: "cut" | "malformed" | "missing" | "default-missing" | "unlisted" | "no-milestone";
 	labels?: string[];
 };
@@ -69,28 +67,14 @@ async function claim(options: Scenario = {}) {
 			if (!executable) throw new Error(`CUTCLAIM1 fixture requires ${utility}`);
 			symlinkSync(executable, join(bin, utility));
 		}
-		let source = shimSource;
-		if (options.disableCheck) {
-			const start = source.indexOf("# NEEDSDIRCLAIM1 / CUTCLAIM1:");
-			const end = source.indexOf("# REPLAYABLE1 claim/review gate", start);
-			if (start < 0 || end <= start) throw new Error("CUTCLAIM1 disabled-check mutation did not match");
-			source = source.slice(0, start) + source.slice(end);
-		}
-		if (options.disableConsistency) {
-			const verifier = join(release, "scripts/claim_verdict.py");
-			const verdictSource = readFileSync(verifier, "utf8");
-			const check = '    if len(cut) != 1 or cut[0]["blocking"] != (cut[0]["code"] != "CLAIM_CUT_ADMITTED"):\n        raise ValueError("claim authority did not return one consistent cut adjudication")';
-			if (!verdictSource.includes(check)) throw new Error("CUTCLAIM1 consistency mutation did not match");
-			writeFileSync(verifier, verdictSource.replace(check, ""));
-		}
 		const shim = join(release, "scripts/br-shim.sh");
-		writeFileSync(shim, source);
+		writeFileSync(shim, shimSource);
 		const mutations = join(scratch.path, "mutations.jsonl");
 		const unexpected = join(scratch.path, "unexpected-tracker-argv");
 		const rows = ["k-1", "k-2"].map(id => ({
 			id, title: `Claim ${id}`, status: "open", assignee: null,
 			labels: options.labels ?? [], dependencies: [], updated_at: "2026-10-30T00:00:00Z",
-			acceptance_criteria: "- [ ] [a] [build] claim path works `true` -> rc 0; planted negative: out-of-cut claim refused",
+			acceptance_criteria: "- [ ] [a] [build] claim path works `true` -> rc 0; planted negative: foreign custody refused",
 		}));
 		const readFlags = ["--no-auto-import", "--no-auto-flush"];
 		const trackerArgv = [
@@ -186,9 +170,8 @@ esac
 `, { mode: 0o755 });
 		const authority = options.authority ?? "source";
 		if (authority !== "missing") {
-			// The installed-layout launcher executes C's actual CLI, not an echoed verdict.
-			// Alter only real native findings to emulate stale or malformed authorities.
-			const alteredLauncher = ["stale", "nonblocking-refusal", "blocking-admitted", "duplicate"].includes(authority) ? `#!${process.execPath}
+			// Exercise malformed native authority data without manufacturing an allow verdict.
+			const alteredLauncher = authority === "invalid" ? `#!${process.execPath}
 import { run } from ${JSON.stringify(join(root, "src/kitlib/run.ts"))};
 import { fixtureDeadlineS } from ${JSON.stringify(join(root, "tests/cli/fixture-process.ts"))};
 const result = await run([process.execPath, ${JSON.stringify(join(root, "src/cli.ts"))}, ...process.argv.slice(2)],
@@ -197,19 +180,9 @@ if (result.timed_out || result.truncated || ![0, 1].includes(result.rc)) {
   throw new Error("real preflight fixture failed: " + new TextDecoder().decode(result.stderr));
 }
 const doc = JSON.parse(new TextDecoder().decode(result.stdout));
-const cutCodes = ["CLAIM_CUT_ADMITTED", "CLAIM_OUT_OF_CUT", "CLAIM_CUT_UNKNOWN"];
-const variant = ${JSON.stringify(authority)};
-let findings = doc.data.findings;
-if (variant === "stale") findings = findings.filter(finding => !cutCodes.includes(finding.code));
-else if (variant === "duplicate") findings = [...findings, ...findings.filter(finding => cutCodes.includes(finding.code))];
-else findings = findings.map(finding => cutCodes.includes(finding.code)
-  ? { ...finding, blocking: variant === "blocking-admitted" } : finding);
-doc.data.findings = findings;
-doc.data.blocking = findings.filter(finding => finding.blocking).length;
-doc.ok = doc.data.blocking === 0;
-doc.data.overall = doc.ok ? "OK" : "FINDINGS";
+doc.data.findings = null;
 console.log(JSON.stringify(doc));
-process.exitCode = doc.ok ? 0 : 1;
+process.exitCode = 0;
 ` : "";
 			const launcher = authority === "failed"
 				? `#!${process.execPath}\nconsole.error("native authority unavailable"); process.exitCode = 7;\n`
@@ -255,80 +228,37 @@ process.exitCode = doc.ok ? 0 : 1;
 	}
 }
 
-test("CUTCLAIM1 actual shim admits k-1 and refuses k-2 on cut[k-1]", async () => {
-	const denied = await claim();
-	expect(denied.timedOut).toBe(false);
-	expect(denied.rc).toBe(4);
-	expect(denied.output).toContain("CLAIM_OUT_OF_CUT");
-	expect(denied.output).toContain("k-1");
-	expect(denied.mutations).toBe("");
-	const allowed = await claim({ id: "k-1" });
-	expect(allowed.timedOut).toBe(false);
-	expect(allowed.rc).toBe(0);
-	expect(allowed.mutations).toContain('"id":"k-1"');
+test("RETIREGUARD1 actual shim claims unpinned authorized work with its explicit tracker", async () => {
+	for (const explicitDb of [false, true]) {
+		const allowed = await claim({ explicitDb });
+		expect(allowed.timedOut).toBe(false);
+		expect(allowed.rc, allowed.output).toBe(0);
+		expect(allowed.mutations).toContain('"id":"k-2"');
+	}
 }, CASE_BUDGET_MS);
 
-test("CUTCLAIM1 explicit --db binds the actual tracker rather than cwd or the first session", async () => {
-	const denied = await claim({ explicitDb: true });
-	expect(denied.rc).toBe(4);
-	expect(denied.output).toContain("CLAIM_OUT_OF_CUT");
-	expect(denied.mutations).toBe("");
-	const allowed = await claim({ explicitDb: true, id: "k-1" });
-	expect(allowed.rc, allowed.output).toBe(0);
-	expect(allowed.mutations).toContain('"id":"k-1"');
-}, CASE_BUDGET_MS);
-
-test("CUTCLAIM1 disabled-check mutant admits the same forbidden claim", async () => {
-	const denied = await claim();
-	expect(denied.rc).toBe(4);
-	expect(denied.output).toContain("CLAIM_OUT_OF_CUT");
-	const mutant = await claim({ disableCheck: true });
-	expect(mutant.rc).toBe(0);
-	expect(mutant.mutations).toContain('"id":"k-2"');
-}, CASE_BUDGET_MS);
-
-for (const authority of ["missing", "failed", "stale"] as const) {
-	(authority === "missing" ? bunTest.serial : test)(`CUTCLAIM1 ${authority} native authority cannot silently bypass admission`, async () => {
+for (const authority of ["missing", "failed", "invalid"] as const) {
+	bunTest.serial(`native ${authority} authority cannot grant unreadable custody`, async () => {
 		const result = await claim({ authority, id: "k-1" });
 		expect(result.rc).toBe(4);
-		expect(result.output).toContain("CLAIM_CUT_UNKNOWN");
+		expect(result.output).toContain("BR_SHIM_CLAIM_UNKNOWN");
 		expect(result.mutations).toBe("");
 	}, CASE_BUDGET_MS);
 }
 
-test("CUTCLAIM1 malformed nonblocking refusal is rejected and disabling consistency exposes the bypass", async () => {
-	const denied = await claim({ authority: "nonblocking-refusal" });
-	expect(denied.rc).toBe(4);
-	expect(denied.output).toContain("CLAIM_CUT_UNKNOWN");
-	expect(denied.mutations).toBe("");
-	const mutant = await claim({ authority: "nonblocking-refusal", disableConsistency: true });
-	expect(mutant.rc).toBe(0);
-	expect(mutant.mutations).toContain('"id":"k-2"');
-}, CASE_BUDGET_MS);
-
-for (const authority of ["blocking-admitted", "duplicate"] as const) {
-	(authority === "blocking-admitted" ? bunTest.serial : test)(`CUTCLAIM1 ${authority} cut verdict is malformed and cannot admit`, async () => {
-		const result = await claim({ authority, id: "k-1" });
-		expect(result.rc, result.output).toBe(4);
-		expect(result.output).toContain("CLAIM_CUT_UNKNOWN");
-		expect(result.mutations).toBe("");
-	}, CASE_BUDGET_MS);
-}
-
-test("CUTCLAIM1 multi-ID claim cannot forward an off-cut second target", async () => {
+test("native multi-ID claims remain target-bound", async () => {
 	const result = await claim({ id: "k-1", extraIds: ["k-2"] });
 	expect(result.rc).toBe(4);
-	expect(result.output).toContain("CLAIM_CUT_UNKNOWN");
+	expect(result.output).toContain("BR_SHIM_CLAIM_UNKNOWN");
 	expect(result.output).toContain("multi-ID");
 	expect(result.mutations).toBe("");
 }, CASE_BUDGET_MS);
 
 for (const config of ["missing", "malformed"] as const) {
-	(config === "malformed" ? bunTest.serial : test)(`CUTCLAIM1 ${config} configured cut input fails closed through actual shim`, async () => {
+	test(`RETIREGUARD1 ${config} irrelevant cut does not veto actual shim claim`, async () => {
 		const result = await claim({ config, id: "k-1" });
-		expect(result.rc).toBe(4);
-		expect(result.output).toContain("CLAIM_CUT_UNKNOWN");
-		expect(result.mutations).toBe("");
+		expect(result.rc, result.output).toBe(0);
+		expect(result.mutations).toContain('"id":"k-1"');
 	}, CASE_BUDGET_MS);
 }
 

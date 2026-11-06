@@ -13,13 +13,15 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { envelope, parseFindingLines, unjudged, type Envelope, type Finding, type PreflightAct } from "./kitlib/findings.ts";
+import { envelope, parseFindingLines, unjudged } from "./kitlib/findings.ts";
+import type { Envelope, Finding, PreflightAct } from "./kitlib/findings.ts";
 import { run } from "./kitlib/run.ts";
 import { validatePriorArtComment } from "./grader-next.ts";
-import { admitClaimCut, type ClaimCutRead } from "./claim-cut.ts";
-import { checkPublishedCommits as checkPublishedCommitShas, type PublicationGit, type PublishedCommitCheck } from "../extensions/kit-published-commit.ts";
+import { checkPublishedCommits as checkPublishedCommitShas } from "../extensions/kit-published-commit.ts";
+import type { PublicationGit, PublishedCommitCheck } from "../extensions/kit-published-commit.ts";
 export { extractCitedCommitReferences } from "../extensions/kit-published-commit.ts";
 export type { CitedCommitReference, PublishedCommitCheck, PublishedCommitStatus } from "../extensions/kit-published-commit.ts";
+type TrackerRead = (args: string[]) => Promise<unknown>;
 
 const MEMBER_DEADLINE_S = 120;
 const SELFTEST_DEADLINE_S = 180;
@@ -126,7 +128,7 @@ export async function preflightCommit(repo: string, options: { message?: string;
 	return envelope("commit", null, snapshot, findings);
 }
 
-interface BeadView { id: string; status: string; assignee: string | null; updated_at: string; acceptance: { index: number; checked: boolean; text: string }[]; labels: string[]; raw: Record<string, unknown> }
+interface BeadView { id: string; status: string; assignee: string | null; updated_at: string; acceptance: { index: number; checked: boolean; text: string }[]; labels: string[] }
 
 /** Claim reads bind the raw tracker explicitly; other transitions retain their PATH namespace and budget. */
 async function readTracker(repo: string, env: Record<string, string>, args: string[], claim: boolean): Promise<unknown> {
@@ -151,7 +153,7 @@ async function missingBeadDetail(repo: string, env: Record<string, string>, id: 
 	return `br show ${id} failed (exit ${rc}): ${firstLine || "no message"}; unmet prerequisite: bead resolvable in bound tracker (${binding})`;
 }
 
-async function readBead(repo: string, id: string, env: Record<string, string>, read: ClaimCutRead, claim: boolean): Promise<BeadView | Finding> {
+async function readBead(repo: string, id: string, env: Record<string, string>, read: TrackerRead, claim: boolean): Promise<BeadView | Finding> {
 	let doc: unknown;
 	try { doc = await read(["show", id, "--json"]); } catch (error) {
 		return unjudged("br", null, await missingBeadDetail(repo, env, id, -1, error instanceof Error ? error.message : String(error), claim));
@@ -162,24 +164,18 @@ async function readBead(repo: string, id: string, env: Record<string, string>, r
 	const acText = typeof b.acceptance_criteria === "string" ? b.acceptance_criteria : "";
 	const acceptance = acText.split("\n").filter(l => /^- \[[ xX]\]/.test(l)).map((l, i) => ({ index: i + 1, checked: /^- \[[xX]\]/.test(l), text: l }));
 	return { id: String(b.id), status: String(b.status), assignee: typeof b.assignee === "string" && b.assignee ? b.assignee : null,
-		updated_at: String(b.updated_at ?? ""), acceptance, labels: Array.isArray(b.labels) ? b.labels.map(String) : [], raw: b };
+		updated_at: String(b.updated_at ?? ""), acceptance, labels: Array.isArray(b.labels) ? b.labels.map(String) : [] };
 }
 
 const PHASE_TAG = /\[(build|landed|live)\]/;
 
 /** The tracker transition predicates, every one judged, none applied. */
-export async function preflightBead(act: Exclude<PreflightAct, "commit" | "publish" | "scratch-release">, repo: string, id: string, options: { actor?: string; env?: Record<string, string>; read?: ClaimCutRead } = {}): Promise<Envelope> {
+export async function preflightBead(act: Exclude<PreflightAct, "commit" | "publish" | "scratch-release">, repo: string, id: string, options: { actor?: string; env?: Record<string, string>; read?: TrackerRead } = {}): Promise<Envelope> {
 	const env = { ...process.env, ...(options.env ?? {}) } as Record<string, string>;
 	const claim = act === "claim";
 	const read = options.read ?? ((args: string[]) => readTracker(repo, env, args, claim));
 	const bead = await readBead(repo, id, env, read, claim);
-	if ("gate" in bead) {
-		if (act !== "claim") return envelope(act, id, "unknown", [bead]);
-		const cut = await admitClaimCut({ repo, id, env, read });
-		return envelope(act, id, "unknown", [bead, {
-			gate: "claim-cut", code: cut.code, detail: cut.detail, remedy: cut.remedy, fix: null, blocking: cut.blocking,
-		}]);
-	}
+	if ("gate" in bead) return envelope(act, id, "unknown", [bead]);
 	const snapshot = `bead:${bead.updated_at || "no-updated-at"}`;
 	const f: Finding[] = [];
 	const push = (code: string, detail: string, remedy: string, fix: string[] | null = null) => f.push({ gate: "br-policy", code, detail, remedy, fix, blocking: true });
@@ -210,8 +206,6 @@ export async function preflightBead(act: Exclude<PreflightAct, "commit" | "publi
 		if (bead.assignee) push("ASSIGNED", `${id} is assigned to ${bead.assignee}`, "pick another bead or ask the holder");
 		if (bead.labels.includes("needs-director")) push("NEEDS_DIRECTOR", `${id} carries an unresolved director disposition (needs-director)`, "route it to the director; claim only after the label is resolved with a recorded disposition");
 		if (gated.length) push("GATED_LABEL", `${id} carries ${gated.join(", ")}`, "route it; never claim a human-gate, owner-decision or kind:process bead");
-		const cut = await admitClaimCut({ repo, id, env, bead: bead.raw, read });
-		f.push({ gate: "claim-cut", code: cut.code, detail: cut.detail, remedy: cut.remedy, fix: null, blocking: cut.blocking });
 		if (actor) {
 			let n = 0;
 			try {

@@ -5,20 +5,21 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep 
 import { fileURLToPath } from "node:url";
 import type { PullRefusal } from "../src/fleet-watch";
 import { ccSpool } from "../src/cc-spool.ts";
-import { holderVerdict, readLivenessSourcesAsync, type HolderVerdict } from "../src/holder-liveness.ts";
+import { holderVerdict, readLivenessSourcesAsync } from "../src/holder-liveness.ts";
+import type { HolderVerdict } from "../src/holder-liveness.ts";
 import { gateFromReason, recordGateEvent, trackerAct } from "./gate-events";
-import { constraintGuidance, constraintLine, fleetWatchPath } from "./kit-goal-keepalive";
 import { parseCommit, planAutocomplete } from "./commit-autocomplete";
 import { renderEnvelope } from "../src/kitlib/findings.ts";
 import { agentMailStorageRoot } from "../src/holder-liveness.ts";
 import { projectAgentBrShimPath } from "../src/gate-plane.ts";
-import { admitClaimCut } from "../src/claim-cut.ts";
-import { captureMineReplay, type MineReplay } from "../src/mine-replay.ts";
+import { captureMineReplay } from "../src/mine-replay.ts";
+import type { MineReplay } from "../src/mine-replay.ts";
 import { resolveCustodyScript } from "../src/custody.ts";
 import { classifyMineResult } from "../src/mine-cause.ts";
-import { briefEditsFiles, briefHandbackRefusal, briefTargets, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
+import { briefHandbackRefusal, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
-import { readSpawnModelInputs, resolveSpawnPatterns, resolveTaskModels, taskModelRefusal, type SpawnModelIdentity } from "../src/spawn-model.ts";
+import { readSpawnModelInputs, resolveSpawnPatterns, resolveTaskModels, taskModelRefusal } from "../src/spawn-model.ts";
+import type { SpawnModelIdentity } from "../src/spawn-model.ts";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -70,13 +71,6 @@ import { readSpawnModelInputs, resolveSpawnPatterns, resolveTaskModels, taskMode
  * scripts/br-update-lint.py) before the command executes; exit 4 refuses with
  * the failing check names and the WHAT:/WHY: template. A helper that cannot
  * run warns BEAD_LINT_UNVERIFIED and allows (the helpers' fail-open contract).
- *
- * ASKBLOCK1: roster builder/grader seats cannot open `ask` dialogs. They send
- * QUESTION mail naming their held bead instead. Unbound sessions may ask; an
- * unreadable roster explicitly warns and allows asking.
- * ASKDEFAULT1: a director or chief seat with an active goal cannot open an `ask`
- * that names a recommended option; it takes that option, records the decision and
- * reports it. Asks with no recommended option, or with no active goal, are allowed.
  */
 
 export interface FlywheelExecResult {
@@ -177,7 +171,6 @@ export const SCRATCH_DISPOSAL_REFUSED = "SCRATCH_DISPOSAL_REFUSED";
 export const EXPORT_INDEX_REFUSED = "EXPORT_INDEX_REFUSED";
 export const GOAL_END_REFUSED = "GOAL_END_REFUSED";
 export const GOAL_SEND_REFUSED = "GOAL_SEND_REFUSED";
-export const NO_WAIT_REFUSED = "NO_WAIT_REFUSED";
 
 const IDENTITY_ENV = ["BR_ACTOR", "BR_AGENT_NAME", "AGENT_NAME"] as const;
 /** br 0.7.4 global/close/update options that consume a value. */
@@ -1217,7 +1210,6 @@ export async function paneIdentities(exec: FlywheelExec, env: Record<string, str
 export type BeadState = { ok: true; id: string; status: string; assignee: string | null; updatedAt: string | null } | { ok: false; why: string };
 type BeadStateWithAuthorship = BeadState & {
 	authorship?: { known: boolean; createdBy: string | null; doneAuthors: string[]; comments: { author: string; text: string; createdAt: number }[]; acceptance: string | null };
-	priorArt?: { required: boolean; comments: unknown[] };
 };
 
 function isDoneFirstComment(text: string): boolean {
@@ -1290,13 +1282,6 @@ export async function readBeadState(exec: FlywheelExec, request: Pick<TrackerReq
 				status,
 				assignee: owner === "" ? null : owner,
 				authorship,
-				priorArt: {
-					required: !["chore", "docs", "process"].includes(String(field(row, "issue_type")))
-						&& !(Array.isArray(field(row, "labels")) && (field(row, "labels") as unknown[]).some(label => ["kind:process", "kind:chore", "kind:docs"].includes(String(label))))
-						&& (["bug", "feature"].includes(String(field(row, "issue_type")))
-							|| (Array.isArray(field(row, "labels")) && (field(row, "labels") as unknown[]).includes("kind:fix"))),
-					comments: Array.isArray(field(row, "comments")) ? field(row, "comments") as unknown[] : [],
-				},
 				updatedAt: typeof revised === "string" ? revised : null,
 			};
 		}
@@ -1383,7 +1368,7 @@ export function admissionOwner(env: Record<string, string | undefined>): string 
 	return null;
 }
 
-/** Same roster membership used by ASKBLOCK1/ASKDEFAULT1, never task-authored roles. */
+/** Operator roster membership for the retained spawn-model policy. */
 function rosterRoles(parsed: unknown): { sessions: Record<string, unknown>; chiefs: string[] } {
 	const rows = field(parsed, "sessions");
 	if (rows === null || typeof rows !== "object" || Array.isArray(rows)) throw new Error("sessions is not an object");
@@ -1403,35 +1388,6 @@ function orchestrationSeat(name: string, sessions: Record<string, unknown>, chie
 	});
 }
 
-/** ASKDEFAULT1: the session's goal is active when its latest `mode_change` transcript entry is mode `goal` (omp's
-agent-session persists `appendModeChange(mode, { goal })` on every goal transition; kit-goal-keepalive reads the same
-entry). `goal_paused`, `none`, no entry or an unreadable transcript read as not active. */
-export function goalActive(ctx: FlywheelContext): boolean {
-	let entries: readonly unknown[];
-	try {
-		entries = ctx.sessionManager?.getEntries?.() ?? [];
-	} catch {
-		return false;
-	}
-	for (let i = entries.length - 1; i >= 0; i--) {
-		if (field(entries[i], "type") === "mode_change") return field(entries[i], "mode") === "goal";
-	}
-	return false;
-}
-
-/** ASKDEFAULT1: the label of the first question's `recommended` option in an `ask` input, if any question names one. */
-export function recommendedLabel(input: unknown): string | undefined {
-	const questions = field(input, "questions");
-	if (!Array.isArray(questions)) return undefined;
-	for (const question of questions) {
-		const index = field(question, "recommended");
-		const options = field(question, "options");
-		if (typeof index !== "number" || !Array.isArray(options)) continue;
-		const label = field(options[index], "label");
-		if (typeof label === "string") return label;
-	}
-	return undefined;
-}
 
 /** GOAL_END_REFUSED (J-2026-10-18-44): a fleet seat never ends its own goal. In a session with a fleet identity
 (admissionOwner), the goal tool's `drop` and `complete` ops are refused; `create`, `get` and `resume` pass. A chief or
@@ -1486,196 +1442,6 @@ export function checkGoalSend(event: FlywheelToolCallEvent, owner: string | null
 	};
 }
 
-/** KEEPALIVE2a (ompkit-774u.50.1, J-2026-10-29-18): every wait refusal is kit-goal-keepalive's one wake text with the
-guard header inserted after its line 1: the seat's constraint line, then `kit-flywheel-guard <CODE>: …` (gateFromReason
-finds it in the first three lines), then the NO-WORK sentence that lets a seat off the constraint stop.
-The default reads the process's own fleet-watch and cwd; the tool_call handler passes the session's. */
-export type WaitGuidance = () => string;
-const processWaitGuidance: WaitGuidance = () =>
-	constraintGuidance(constraintLine({ fleetWatch: fleetWatchPath(process.env), cwd: process.cwd(), now: Date.now() }));
-
-function waitRefusal(header: string, next: WaitGuidance): FlywheelToolCallResult {
-	const [constraint, ...rest] = next().split("\n");
-	return { block: true, reason: [constraint, header, ...rest].join("\n") };
-}
-
-/** `sleep` duration suffixes in seconds. String parsing only; no regex. */
-const SLEEP_UNIT_SECONDS: Record<string, number> = { "": 1, s: 1, m: 60, h: 3600, d: 86400 };
-
-/** A `sleep` duration operand in seconds, or null for flags and non-duration words. */
-function sleepOperandSeconds(word: string): number | null {
-	if (word.length === 0 || word[0] === "-") return null;
-	let num = word;
-	let unit = "";
-	const last = word[word.length - 1]!;
-	if ((last >= "a" && last <= "z") || (last >= "A" && last <= "Z")) {
-		num = word.slice(0, -1);
-		unit = last.toLowerCase();
-	}
-	if (!(unit in SLEEP_UNIT_SECONDS) || num.length === 0) return null;
-	let dots = 0;
-	for (const ch of num) {
-		if (ch === ".") dots += 1;
-		else if (ch < "0" || ch > "9") return null;
-	}
-	if (dots > 1) return null;
-	const value = Number(num);
-	if (!Number.isFinite(value)) return null;
-	return value * SLEEP_UNIT_SECONDS[unit]!;
-}
-
-/** Interpreter basenames whose operand may be an `idle_wait.py` script path (`python3.13` matches by prefix). */
-const WAIT_SCRIPT_RUNNERS: Record<string, true> = { python: true, node: true, bun: true, deno: true };
-
-/** Effective argv lists: assignments and wrappers stripped, `sh -c` scripts followed (depth 3). */
-function noWaitArgvs(command: string, depth = 0): string[][] {
-	const found: string[][] = [];
-	for (const raw of shellCommands(command)) {
-		let at = 0;
-		while (at < raw.length && (isAssignment(raw[at]!) || WRAPPERS[raw[at]!] === true)) at += 1;
-		const argv = raw.slice(at);
-		if (argv.length === 0) continue;
-		const name = basename(argv[0]!);
-		if (SHELL_WRAPPERS[name] === true && depth < MAX_SHELL_DEPTH) {
-			const script = shellScript(argv);
-			if (script !== undefined) found.push(...noWaitArgvs(script, depth + 1));
-			continue;
-		}
-		found.push(argv);
-	}
-	return found;
-}
-
-/** NO_WAIT_REFUSED (J-2026-10-18-43): a fleet seat never idles on a timer. In a session with a fleet identity
-(admissionOwner), a bash call that runs idle_wait.py (directly or as an interpreter operand) or `sleep` for
-30 s or more in total (bare, chained, wrapped, or in sh -c) is refused. `sleep` under 30 s and sessions
-without a fleet identity pass untouched. */
-export function checkNoWait(event: FlywheelToolCallEvent, owner: string | null, next: WaitGuidance = processWaitGuidance): FlywheelToolCallResult | undefined {
-	if (owner === null || event.toolName !== "bash") return undefined;
-	if (field(event.input, "async") === true) return undefined;
-	const command = field(event.input, "command");
-	if (typeof command !== "string" || command.trim().length === 0) return undefined;
-	for (const argv of noWaitArgvs(command)) {
-		const name = basename(argv[0]!);
-		if (name === "idle_wait.py"
-			|| ((WAIT_SCRIPT_RUNNERS[name] === true || name.startsWith("python3")) && argv.slice(1).some(word => basename(word) === "idle_wait.py"))) {
-			return waitRefusal(`kit-flywheel-guard ${NO_WAIT_REFUSED}: ${owner} may not idle-wait in a fleet seat (J-2026-10-18-43): `
-				+ "this call runs idle_wait.py. Nothing was executed.", next);
-		}
-		if (name === "sleep") {
-			let total = 0;
-			let seen = false;
-			for (const word of argv.slice(1)) {
-				const seconds = sleepOperandSeconds(word);
-				if (seconds === null) continue;
-				seen = true;
-				total += seconds;
-			}
-			if (seen && total >= 30) {
-				return waitRefusal(`kit-flywheel-guard ${NO_WAIT_REFUSED}: ${owner} may not idle-wait in a fleet seat (J-2026-10-18-43): `
-					+ `this call runs \`sleep\` for about ${total} s (>= 30 s). Nothing was executed.`, next);
-			}
-		}
-	}
-	return undefined;
-}
-export const WAIT_REFUSED = "WAIT_REFUSED";
-
-/** The BGWAIT1 sentence before the shared guidance (ompkit-fp72.19.1.24): a seat never parks its turn on its own background work. */
-const BG_WAIT_NEXT = "A pending job result arrives at a later tool boundary; never block your turn on it. Nothing was executed.";
-
-/** Shell loop openers: a `sleep` inside one parks the turn, however short the single sleep. */
-const BG_LOOP_OPENERS: Record<string, true> = { for: true, while: true, until: true, do: true };
-/** Shell list keywords joining commands without a `;`/`&` separator the splitter sees: `do sleep 5`
-arrives as one word list, so the tail is evaluated as a nested command too. */
-const BG_KEYWORD_OPENERS: Record<string, true> = { do: true, then: true, else: true };
-
-/** `time.sleep(<seconds>)` durations in a code fragment, parsed without evaluation. */
-function timeSleepSeconds(fragment: string): number[] {
-	const found: number[] = [];
-	const pattern = /time\s*\.\s*sleep\s*\(\s*(\d+(?:\.\d+)?)/g;
-	let match: RegExpExecArray | null;
-	while ((match = pattern.exec(fragment)) !== null) found.push(Number(match[1]));
-	return found;
-}
-
-/** Whole-word loop keywords in a code fragment (shell loops and `while True:` / `for …:` python loops). */
-function hasLoopWord(fragment: string): boolean {
-	for (const word of fragment.split(/[^A-Za-z]+/)) {
-		if (word === "for" || word === "while" || word === "until") return true;
-	}
-	return false;
-}
-
-function bgWaitRefusal(owner: string, detail: string, next: WaitGuidance): FlywheelToolCallResult {
-	return waitRefusal(`kit-flywheel-guard ${WAIT_REFUSED}: ${owner} may not block its turn on its own background work (BGWAIT1): ${detail} ${BG_WAIT_NEXT}`, next);
-}
-
-/** BGWAIT1 (ompkit-fp72.19.1.24): a fleet seat never blocks its turn on its own background work. In a session
-with a fleet identity (admissionOwner), the `wait` tool is refused, as is any blocking poll: a non-async bash
-loop (for/while/until) containing `sleep`, `sleep` totalling >= 30 s across the call, and eval/python
-`time.sleep` in a loop or totalling >= 20 s. The refusal names the next action. Async bash jobs and short
-single sleeps pass untouched, as do sessions without a fleet identity and subagent sessions.
-OMP ExtensionContext.agent.kind is authoritative (not depth or inherited env):
-src/extensibility/extensions/types.ts:520-536,731-732; task/executor.ts:4663-4666.
-The session manager's parentSession is not sufficient: ordinary forks also set it
-(src/session/session-manager.ts:3944). */
-export function checkBgWait(event: FlywheelToolCallEvent, owner: string | null, ctx?: Pick<FlywheelContext, "agent">, next: WaitGuidance = processWaitGuidance): FlywheelToolCallResult | undefined {
-	if (owner === null || ctx?.agent?.kind === "sub") return undefined;
-	const tool = typeof event.toolName === "string" ? event.toolName.toLowerCase() : "";
-	if (tool === "wait") {
-		return bgWaitRefusal(owner, "this call uses the `wait` tool.", next);
-	}
-	if (tool === "bash") {
-		if (field(event.input, "async") === true) return undefined;
-		const command = field(event.input, "command");
-		if (typeof command !== "string" || command.trim().length === 0) return undefined;
-		const argvs = noWaitArgvs(command);
-		let sleepTotal = 0;
-		let sleepSeen = false;
-		let loop = false;
-		for (const argv of argvs) {
-			if (BG_LOOP_OPENERS[argv[0]!] === true) loop = true;
-			const starts = argv.length > 1 && BG_KEYWORD_OPENERS[argv[0]!] === true ? [argv, argv.slice(1)] : [argv];
-			for (const words of starts) {
-				if (basename(words[0]!) !== "sleep") continue;
-				for (const word of words.slice(1)) {
-					const seconds = sleepOperandSeconds(word);
-					if (seconds === null) continue;
-					sleepSeen = true;
-					sleepTotal += seconds;
-				}
-			}
-		}
-		if (loop && sleepSeen) {
-			return bgWaitRefusal(owner, "this call parks the turn in a sleep-poll loop.", next);
-		}
-		if (sleepSeen && sleepTotal >= 30) {
-			return bgWaitRefusal(owner, `this call runs \`sleep\` for about ${sleepTotal} s in total (>= 30 s).`, next);
-		}
-		const naps = timeSleepSeconds(command);
-		if (naps.length > 0) {
-			const total = naps.reduce((a, b) => a + b, 0);
-			const looped = loop || hasLoopWord(command);
-			if (looped || total >= 20) {
-				return bgWaitRefusal(owner, `this call idles in time.sleep for about ${total} s${looped ? " in a loop" : ""} (>= 20 s or looped).`, next);
-			}
-		}
-		return undefined;
-	}
-	if (tool === "eval") {
-		const code = field(event.input, "code");
-		if (typeof code !== "string") return undefined;
-		const naps = timeSleepSeconds(code);
-		if (naps.length === 0) return undefined;
-		const total = naps.reduce((a, b) => a + b, 0);
-		if (hasLoopWord(code) || total >= 20) {
-			return bgWaitRefusal(owner, `this eval idles in time.sleep for about ${total} s (>= 20 s or looped).`, next);
-		}
-		return undefined;
-	}
-	return undefined;
-}
 
 /** Refuse finite Bash work that explicitly disables the OMP deadline. `owner`
 is the server-side session identity; the native tool-call id attributes the
@@ -1823,6 +1589,10 @@ async function checkNativeClaim(request: TrackerRequest, deps: TrackerMutationDe
 			class: "unsafe_custody", bead: found.id, actor: "UNKNOWN director",
 			next: `${found.id} is ${found.status}; consult the original disposition, do not reopen it to acquire work`,
 		});
+		if (request.operation === "claim" && found.status === "blocked") return refuseClaim({
+			class: "unsafe_custody", bead: found.id, actor,
+			next: `${found.id} is blocked; resolve its actual prerequisite before claiming`,
+		});
 		if (request.operation === "start" && found.assignee === null) return refuseClaim({
 			class: "unsupported_native", bead: found.id, actor,
 			next: `use br update ${found.id} --claim --actor ${actor}; a status update alone does not atomically award ownership`,
@@ -1839,21 +1609,6 @@ async function checkNativeClaim(request: TrackerRequest, deps: TrackerMutationDe
 			class: "unsafe_custody", bead: request.ids[0] ?? null, actor,
 			next: `${actor} already holds active ${other}; release it (br update ${other} --status open --assignee "" --if-unchanged <updated_at>) or land it before claiming another implementation`,
 		});
-		for (const id of request.ids) {
-			const cut = await admitClaimCut({
-				repo: bound.cwd, id, env: deps.env, home: deps.home, ...(bound.db ? { db: bound.db } : {}),
-				read: async args => {
-					const result = await execJson(deps.exec, bound, args);
-					if (!result.ok) throw new Error(result.why);
-					return result.value;
-				},
-			});
-			if (cut.blocking) return {
-				block: true,
-				reason: JSON.stringify({ guard: "kit-flywheel-guard", code: cut.code, bead: id, cut: cut.cut,
-					alternative: cut.alternative, detail: cut.detail, remedy: cut.remedy }),
-			};
-		}
 	}
 	return undefined;
 }
@@ -2413,52 +2168,6 @@ function updateLintArgv(args: string[]): string[] | null {
 	return content ? [...positional, ...flags] : null;
 }
 
-/** GAPFADE1: producer adapters only; all prose rules live in the commit member. */
-export async function checkGapMentions(event: FlywheelToolCallEvent, exec: FlywheelExec, cwd: string): Promise<FlywheelToolCallResult | undefined> {
-	const texts: string[] = [];
-	if (event.toolName === "bash") {
-		const command = field(event.input, "command");
-		if (typeof command === "string") {
-			for (const line of brCommandLines(command, cwd, homedir())) {
-				const args = line.argv.slice(1);
-				const at = args.indexOf("comments");
-				if (at < 0 || args[at + 1] !== "add") continue;
-				const tail = args.slice(at + 3);
-				const positional: string[] = [];
-				let explicit: string | undefined;
-				for (let i = 0; i < tail.length; i += 1) {
-					const word = tail[i]!;
-					const eq = word.indexOf("=");
-					const key = eq < 0 ? word : word.slice(0, eq);
-					const value = () => eq < 0 ? tail[++i] : word.slice(eq + 1);
-					if (["--message", "--content", "-m"].includes(key)) explicit = value();
-					else if (["--file", "-f"].includes(key)) {
-						const path = value();
-						try { explicit = readFileSync(resolve(line.cwd, path ?? ""), "utf8"); }
-						catch { return { block: true, reason: "GAP_SCAN_UNVERIFIED: cannot read comment file before mutation" }; }
-					} else if (["--author", "--actor", "--db", "--lock-timeout"].includes(key)) value();
-					else if (!word.startsWith("-")) positional.push(word);
-				}
-				const text = explicit ?? positional.join(" ");
-				if (text) texts.push(text);
-			}
-		}
-	}
-	let mail: unknown = event.input;
-	if (event.toolName === "write" && String(field(event.input, "path")).includes("send_message")) {
-		try { mail = JSON.parse(String(field(event.input, "content"))); } catch { mail = null; }
-	}
-	const subject = field(mail, "subject");
-	if ((String(event.toolName).includes("send_message") || event.toolName === "write")
-		&& typeof subject === "string" && /\b(?:DONE|PROGRESS)\b/.test(subject)) texts.push(subject);
-	for (const text of texts) {
-		const scanner = fileURLToPath(new URL("../scripts/check-gap-mention.sh", import.meta.url));
-		const result = await exec("sh", [scanner, "--findings-text", text], { cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
-		if (result.code !== 0 || result.killed) return { block: true, reason: "GAP_SCAN_UNVERIFIED: shared gap scanner could not judge producer text. " + (result.stderr ?? "") };
-		if (result.stdout.includes("GAP_UNFILED")) return { block: true, reason: result.stdout };
-	}
-	return undefined;
-}
 
 /**
  * LINTEVERY1 (ompkit-nskhp): a bash call running `br create` or `br update`
@@ -2698,202 +2407,6 @@ function incompleteCloseClause(reason: string | null): string | null {
 	return null;
 }
 
-const PRIOR_ART_LINE = "prior=<url or repo path:line> did=<what they do> applied=<what we changed>";
-/** Fixed rollout boundary; sitrep reads this same constant rather than duplicating it. */
-export const PRIOR_GATE_ACTIVATION = "2026-11-03T08:00:00Z";
-
-/**
- * A citation token is an http(s) URL or a repo path:line (path:12, path:12-20, path:4,9), optionally wrapped
- * in "(" or "[" or followed by ),;.] punctuation. Plain scans, no backtracking regex (PRIORFORMAT1).
- */
-function isCitationToken(raw: string): boolean {
-	let token = raw;
-	while (token.startsWith("(") || token.startsWith("[")) token = token.slice(1);
-	while (token.length > 0 && "),;.]".includes(token[token.length - 1]!)) token = token.slice(0, -1);
-	if (token.startsWith("http://") || token.startsWith("https://")) return token.length > token.indexOf("//") + 2;
-	const colon = token.lastIndexOf(":");
-	if (colon <= 0 || token.includes("=")) return false;
-	const line = token.slice(colon + 1);
-	return line.length > 0 && [...line].every(ch => (ch >= "0" && ch <= "9") || ch === "-" || ch === ",")
-		&& line[0]! >= "0" && line[0]! <= "9";
-}
-
-/**
- * A citation is a structured line, not an arbitrary URL pasted into a DONE report: `prior=` followed by at least
- * one URL or path:line token before ` did=`, then non-empty did= and applied= on the same line. Extra sources and
- * notes may sit between the first token and did= (PRIORFORMAT1: every 11-04 builder note did, and 0 of 5 matched
- * the old single-token shape). `prior=none searched=<non-empty>` is the recorded no-prior-art form.
- */
-export function validPriorArtLine(text: string): boolean {
-	if (text.length > 16_384) return false;
-	return text.split(/\r?\n/).some(line => {
-		const none = /\bprior=none\s+searched=(.+)$/.exec(line);
-		if (none) return none[1]!.replace(/[\s,[\]{}"'`;]/g, "").length > 0;
-		const at = line.search(/\bprior=/);
-		if (at < 0) return false;
-		const rest = line.slice(at + "prior=".length);
-		if (rest.length === 0 || /^\s/.test(rest)) return false;
-		const did = rest.search(/\sdid=\S/);
-		if (did < 0) return false;
-		const afterDid = rest.slice(did + 1 + "did=".length);
-		const applied = afterDid.search(/\sapplied=\S/);
-		if (applied < 0 || afterDid.slice(0, applied).trim().length === 0) return false;
-		return rest.slice(0, did).split(/\s+/).some(isCitationToken);
-	});
-}
-
-/** PRIORFORMAT1: most sibling checkouts scanned for a bead's first commit, and the per-process cache of them. */
-const PRIOR_SIBLING_REPO_CAP = 16;
-const priorSiblingCache = new Map<string, string[]>();
-
-/**
- * Git checkouts that share one tracker: the directories next to the close cwd and next to the tracker's
- * own repo whose .beads/beads.db realpath equals the tracker db's realpath. Derived from the
- * filesystem, never a hardcoded list; only directories holding .git are returned, so git never runs
- * outside a checkout. Cached per process and computed only at close time.
- */
-function priorSiblingCheckouts(trackerDb: string, cwd: string): string[] {
-	let tracker: string;
-	try { tracker = realpathSync(trackerDb); } catch { return []; }
-	const key = `${tracker}\0${cwd}`;
-	const cached = priorSiblingCache.get(key);
-	if (cached) return cached;
-	const found: string[] = [];
-	const seen = new Set<string>();
-	let self = "";
-	try { self = realpathSync(cwd); } catch { /* cwd unreadable: nothing to exclude */ }
-	const parents = [...new Set([dirname(cwd), dirname(dirname(dirname(tracker)))])];
-	outer: for (const parent of parents) {
-		let names: string[];
-		try { names = readdirSync(parent); } catch { continue; }
-		for (const name of names.sort()) {
-			if (found.length >= PRIOR_SIBLING_REPO_CAP) break outer;
-			const dir = join(parent, name);
-			let real: string;
-			try { real = realpathSync(dir); } catch { continue; }
-			if (real === self || seen.has(real)) continue;
-			seen.add(real);
-			try {
-				if (!existsSync(join(dir, ".git"))) continue;
-				if (realpathSync(join(dir, ".beads", "beads.db")) !== tracker) continue;
-			} catch { continue; }
-			found.push(dir);
-		}
-	}
-	priorSiblingCache.set(key, found);
-	return found;
-}
-
-async function checkPriorArtClose(found: BeadStateWithAuthorship, request: TrackerRequest, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
-	if (!found.ok || !found.priorArt?.required) return undefined;
-	const refuse = (why: string): FlywheelToolCallResult => ({
-		block: true,
-		reason: `kit-flywheel-guard PRIOR_ART_REFUSED: ${found.id}: ${why}. Add a timestamped tracker comment before implementation: ${PRIOR_ART_LINE} OR prior=none searched=<non-empty list of queries/sources>. A close reason cannot establish an earlier citation; no close was executed.`,
-	});
-	const citations = found.priorArt.comments.flatMap(comment => {
-		const text = field(comment, "text");
-		const at = field(comment, "created_at");
-		const time = typeof at === "string" ? Date.parse(at) : NaN;
-		return typeof text === "string" && validPriorArtLine(text) && Number.isFinite(time) ? [time] : [];
-	});
-	try {
-		const escaped = found.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		const commitTimes = async (cwd: string): Promise<number[] | string> => {
-			const commits = await deps.exec("git", ["log", "--all", "--extended-regexp", `--grep=Bead:[[:space:]]+${escaped}([^[:alnum:]_.-]|$)`, "--format=%ct"], { cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
-			if (commits.code !== 0 || commits.killed) return "first implementation commit lookup failed";
-			const stamps = commits.stdout.trim() ? commits.stdout.trim().split(/\s+/).map(value => Number(value) * 1000) : [];
-			if (stamps.some(time => !Number.isFinite(time))) return "unreadable implementation commit time";
-			return stamps;
-		};
-		const local = await commitTimes(request.cwd);
-		if (typeof local === "string") return refuse(local);
-		let stamps = local;
-		let basis = "first implementation commit";
-		let tracker = "";
-		if (!stamps.length) {
-			let db = request.db;
-			if (!db) {
-				const info = await deps.exec(request.bin, ["info", "--json", "--no-auto-import", "--no-auto-flush"], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
-				if (info.code !== 0 || info.killed) return refuse("claim-time tracker discovery failed");
-				db = field(JSON.parse(info.stdout), "database_path") as string;
-			}
-			if (typeof db !== "string" || !db) return refuse("claim-time database path unavailable");
-			tracker = db;
-			// PRIORFORMAT1: a bead tracked here is often built in a sibling checkout sharing this tracker.
-			for (const sibling of priorSiblingCheckouts(isAbsolute(db) ? db : resolve(request.cwd, db), request.cwd)) {
-				const times = await commitTimes(sibling);
-				if (typeof times !== "string") stamps = stamps.concat(times);
-			}
-		}
-		let first = stamps.length ? Math.min(...stamps) : NaN;
-		if (!stamps.length) {
-			const sql = `SELECT min(created_at) FROM events WHERE issue_id='${found.id.replace(/'/g, "''")}' AND event_type='status_changed' AND new_value='in_progress'`;
-			const claim = await deps.exec("sqlite3", ["-readonly", tracker, sql], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
-			if (claim.code !== 0 || claim.killed) return refuse("in_progress claim-time lookup failed");
-			// CLOSECANCEL1: owner-cancelled work has neither implementation nor claim history.
-			// Only a successful empty lookup qualifies; unreadable history still fails closed.
-			const reason = request.reason;
-			if (claim.stdout.trim() === "" && reason !== null && reason.length <= 16_384
-				&& /\bJ-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2,6}\b/.test(reason)
-				&& /\b[0-9a-f]{7,40}\b/i.test(reason)) return undefined;
-			first = Date.parse(claim.stdout.trim());
-			basis = "first in_progress claim";
-		}
-		if (!Number.isFinite(first)) {
-			return refuse(`${basis} timestamp unavailable: no commit in ${request.cwd} carries "Bead: ${found.id}" and the bead was never claimed in_progress. If its work landed in another checkout that shares this tracker, run the close from that checkout (cd <that repo> && br --db <this tracker's beads.db> close ${found.id} ...), so its implementation commit is found`);
-		}
-		if (first < Date.parse(PRIOR_GATE_ACTIVATION)) return {
-			additionalContext: `kit-flywheel-guard PRIOR_ART_GRANDFATHERED (activation ${PRIOR_GATE_ACTIVATION}): ${found.id} ${basis} at ${new Date(first).toISOString()} predates activation; prior-art timing gate exempt, independent-close checks still apply.`,
-		};
-		if (citations.length === 0) return refuse("missing valid prior-art line with a readable comment timestamp");
-		if (!citations.some(time => time < first)) return refuse(`citation must be before ${basis} at ${new Date(first).toISOString()}`);
-		return undefined;
-	} catch (error) {
-		return refuse(`prior-art timing lookup failed (${error instanceof Error ? error.message : String(error)})`);
-	}
-}
-
-/** Bead ids a brief names: prefix-hash with a digit in the hash, optionally dotted children (ompkit-fp72.120.16.190). */
-const BRIEF_BEAD_ID = /(?<![\w./-])([a-z][a-z0-9]{1,15}-(?=[a-z0-9]{3})[a-z0-9]{0,15}\d[a-z0-9]{0,15}(?:\.\d{1,6}){0,8})(?![\w/-]|\.\w)/g;
-
-/**
- * PRIORSPAWN1 (ompkit-fp72.120.16.192): R45's prior-art step is enforced when build work starts, not
- * only at close, where a missed citation makes verified work permanently unclosable. A build task (a
- * brief with a Change section or reserved paths) that names a bead is refused until that bead carries a
- * validPriorArtLine comment. Comments come through the close path's readBeadState read and timeout; a
- * tracker that cannot answer refuses, never admits.
- */
-export async function checkPriorArtSpawn(input: unknown, cwd: string, exec: FlywheelExec): Promise<string | undefined> {
-	const context = typeof field(input, "context") === "string" ? field(input, "context") as string : "";
-	const tasks = field(input, "tasks");
-	if (!Array.isArray(tasks) || context.length > 1_000_000) return undefined;
-	const checked = new Map<string, string | undefined>();
-	for (const item of tasks) {
-		if (!item || typeof item !== "object") continue;
-		const task = item as Record<string, unknown>;
-		const body = typeof task.task === "string" ? task.task : "";
-		if (body.length > 1_000_000 || !briefEditsFiles(task, context)) continue;
-		const text = `${context}\n${body}`;
-		const ids = new Set([...text.matchAll(BRIEF_BEAD_ID)].map(match => match[1]!));
-		for (const id of ids) {
-			if (!checked.has(id)) {
-				let verdict: string | undefined = `tracker read unavailable`;
-				for (const target of briefTargets(text, cwd)) {
-					const found = await readBeadState(exec, { bin: "br", cwd: target, operation: "close" }, id);
-					if (!found.ok) { verdict = `tracker read failed: ${found.why}`; continue; }
-					const comments = found.priorArt?.comments ?? [];
-					verdict = !found.priorArt?.required || comments.some(comment => { const t = field(comment, "text"); return typeof t === "string" && validPriorArtLine(t); })
-						? undefined : "no comment carries a valid prior-art line";
-					break;
-				}
-				checked.set(id, verdict);
-			}
-			const why = checked.get(id);
-			if (why) return `kit-flywheel-guard PRIOR_ART_SPAWN_REFUSED: build task names ${id}: ${why}. Fix: br comment add ${id} "prior=<repo path:line> did=<what it does> applied=<what we change>" (or prior=none searched=<queries>), then respawn. A verification, diagnosis or replay brief starts with \`no-edit: verify\` or \`no-edit: diagnose\`.`;
-		}
-	}
-	return undefined;
-}
 
 export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps, attempts: CloseAttempt[] = []): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
@@ -2963,9 +2476,6 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 						+ "and let an independent verifier run the close; no close was executed.",
 				};
 			}
-			const priorResult = await checkPriorArtClose(found, request, deps);
-			if (priorResult?.block === true) return priorResult;
-			if (priorResult?.additionalContext) closeNotes.push(priorResult.additionalContext);
 			const orphaned = await checkCloseOrphansDependents(request, id, released, deps);
 			if (orphaned !== undefined) return orphaned;
 			const assignee = found.assignee?.trim();
@@ -3244,7 +2754,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 					const cause = String((error as Error)?.message ?? error).slice(0, 600).replace(/\s+/g, " ").slice(0, 300);
 					return { block: true, reason: `${taskModelRefusal([{ index: 0, agent: "task", patterns: [], reason: "SPAWN_INPUTS_UNOBSERVABLE" }])}\ncause: ${cause}` };
 				}
-				const reason = await checkTaskBrief(event.input, ctx.cwd, pi.exec) ?? await checkPriorArtSpawn(event.input, ctx.cwd, pi.exec);
+				const reason = await checkTaskBrief(event.input, ctx.cwd, pi.exec);
 				if (reason) return { block: true, reason };
 			}
 			if (event.toolName === "write") {
@@ -3256,53 +2766,6 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 				}
 			}
 			if (event.toolName === "edit" || (event.toolName === "write" && typeof field(event.input, "path") === "string" && !String(field(event.input, "path")).includes("://"))) buildWorkObserved = true;
-			if (event.toolName === "ask") {
-				// AGENT_NAME is set by the fleet launcher; older tmux seats use the
-				// same Agent Mail pane-identity binding as the other guard checks.
-				const name = env.AGENT_NAME?.trim() || (await paneIdentities(pi.exec, env, home, [ctx.cwd]))[0];
-				let sessions: Record<string, unknown>;
-				let chiefs: string[] = [];
-				try {
-					({ sessions, chiefs } = rosterRoles(JSON.parse(readFileSync(rosterPath, "utf8"))));
-				} catch (error) {
-					const warning = `kit-flywheel-guard ASKBLOCK1: roster unreadable (${rosterPath}: ${error instanceof Error ? error.message : String(error)}); ask allowed (fail-open).`;
-					ctx.ui?.notify(warning, "warning");
-					return { additionalContext: warning };
-				}
-				if (!name) return undefined;
-				const director = orchestrationSeat(name, sessions, chiefs);
-				for (const session of Object.values(sessions)) {
-					const seats = field(session, "seats");
-					if (seats === null || typeof seats !== "object" || Array.isArray(seats)) continue;
-					const seat = Object.entries(seats).find(([seatName]) => seatName.toLowerCase() === name.toLowerCase())?.[1];
-					const role = field(seat, "role");
-					if (role !== "builder" && role !== "grader") continue;
-					// The held bead lives in a tracker the seat used, not only its cwd's: read every tracker this
-					// session reached plus the cwd's, and with no `.beads` ancestor let br discover from the cwd.
-					const trackers = new Map<string, TrackerRef>(sessionTrackers);
-					let here: TrackerRef = { key: `cwd:${ctx.cwd}`, bin: "br", cwd: ctx.cwd };
-					try {
-						here = trackerOf({ bin: "br", rest: [], cwd: ctx.cwd }, env) ?? here;
-					} catch { /* br's own discovery from the cwd still answers. */ }
-					if (!trackers.has(here.key)) trackers.set(here.key, here);
-					const held = new Set<string>();
-					for (const tracker of trackers.values()) {
-						try {
-							const owned = await readOwnedBeads(pi.exec, tracker, name);
-							if (owned.ok) for (const row of owned.rows) if (row.status === "in_progress") held.add(row.id);
-						} catch { /* Missing tracker information never permits a worker modal. */ }
-					}
-					const bead = held.size > 0 ? [...held].join(", ") : "the bead you hold";
-					return { block: true, reason: `kit-flywheel-guard ASKBLOCK1: ask refused for ${role} seat ${name}; no dialog opened. Send QUESTION mail to your director naming ${bead}; questions never block work.` };
-				}
-				if (director && goalActive(ctx)) {
-					const label = recommendedLabel(event.input);
-					if (label !== undefined) {
-						return { block: true, reason: `kit-flywheel-guard ASKDEFAULT1: ask refused for ${name} in goal mode; no dialog opened. Take the recommended option "${label}", record it as a decision (rule, alternatives, who may overrule), report it in your next REPORT, and keep working; questions never block (J-2026-10-27-75).` };
-					}
-				}
-				return undefined;
-			}
 			if (typeof event.toolCallId === "string" && typeof event.toolName === "string") {
 				// The bash tool's own `cwd` input is where the command runs, not the session cwd.
 				const toolCwd = event.toolName.toLowerCase() === "bash" ? field(event.input, "cwd") : undefined;
@@ -3313,11 +2776,6 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			// message and every call stays allowed (ompkit-j27dd).
 			const goalEnd = checkGoalEnd(event, admissionOwner(env)) ?? checkGoalSend(event, admissionOwner(env));
 			if (goalEnd !== undefined) return goalEnd;
-			const waitNext = () => constraintGuidance(constraintLine({ fleetWatch: fleetWatchPath(env, home), cwd: ctx.cwd, now: Date.now() }));
-			const noWait = checkNoWait(event, admissionOwner(env), waitNext);
-			if (noWait !== undefined) return noWait;
-			const bgWait = checkBgWait(event, admissionOwner(env), ctx, waitNext);
-			if (bgWait !== undefined) return bgWait;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
 			const clone = checkCloneScratch(event, { env, home, sessionCwd: ctx.cwd });
@@ -3326,8 +2784,6 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (exportIndex !== undefined) return exportIndex;
 			const dbLiteral = checkTrackerDbLiteral(event);
 			if (dbLiteral !== undefined) return dbLiteral;
-			const gap = await checkGapMentions(event, pi.exec, ctx.cwd);
-			if (gap !== undefined) return gap;
 			const lint = await checkBeadLint(event, { exec: pi.exec, home, sessionCwd: ctx.cwd, scriptsDir: deps.lintScriptsDir });
 			if (lint?.block === true) return lint;
 			if (lint?.additionalContext) ctx.ui?.notify(lint.additionalContext, "warning");

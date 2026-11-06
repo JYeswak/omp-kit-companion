@@ -4,14 +4,16 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import { delimiter, dirname, join } from "node:path";
 import { countCaseRows } from "../../src/test-runner.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
-import { previewKitRelease, stageKitRelease, validateReleaseManifest, type ReleaseAsset } from "../../src/kit-release.ts";
+import { previewKitRelease, stageKitRelease, validateReleaseManifest } from "../../src/kit-release.ts";
+import type { ReleaseAsset } from "../../src/kit-release.ts";
 import { packageSourceRevision, packageSecretOutputGuard, checkPackagedExtensionLoads, checkPackagedScriptDependencies } from "../../scripts/package-release.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 import { repo, caseCwd, nativeCacheEnv, output, stubFirstPath, authorityPath, platform, key, indexPath,
  asset, bytes, index, sourceRevision, sourceGit, installArgs, installCandidate, run, candidateEnv,
- type Candidate } from "./package-release-fixture.ts";
+} from "./package-release-fixture.ts";
+import type { Candidate } from "./package-release-fixture.ts";
 test("native release refuses a drifted or duplicate policy import before staging", () => {
 	const source = readFileSync(join(repo, "extensions", "secret-output-guard.ts"));
 	const original = '"../src/secret-output-policy.v1.json"';
@@ -568,35 +570,14 @@ test("GUARDLOAD1: extension load gate fails a ../src/ escape naming file and mod
 	expect(checkPackagedExtensionLoads(fixed)).toEqual([]);
 });
 
-test("SHIPSCRIPTS1: actual archive scanner consumer allows cited comments/mail and refuses missing runtime dependencies", async () => {
+test("SHIPSCRIPTS1: actual archive retains script dependency validation without a prose scanner requirement", async () => {
 	const stage = ownedTmp("shipped-script-consumers", { root: output }).path;
 	const extracted = await runBounded(["tar", "-xf", join(output, asset.filename), "-C", stage],
 		{ cwd: output, deadline_s: 30 });
 	expect(extracted.rc, new TextDecoder().decode(extracted.stderr)).toBe(0);
-	console.log(new Date().toISOString(), "SHIPSCRIPTS1 actual archive consumer positive and unfiled negatives");
+	console.log(new Date().toISOString(), "SHIPSCRIPTS1 actual archive dependency validation");
 	expect(await checkPackagedScriptDependencies(stage)).toEqual([]);
 
-	const scanner = join(stage, "scripts/check-gap-mention.sh");
-	const scannerBytes = readFileSync(scanner);
-	rmSync(scanner);
-	console.log(new Date().toISOString(), "SHIPSCRIPTS1 omitted referenced scanner must name its dependency");
-	const missingScanner = await checkPackagedScriptDependencies(stage);
-	expect(missingScanner).toEqual([{
-		file: "extensions/kit-flywheel-guard.ts",
-		error: "MISSING_SCRIPT_DEPENDENCY scripts/check-gap-mention.sh",
-	}]);
-	writeFileSync(scanner, scannerBytes);
-
-	const library = join(stage, "scripts/kitlib-findings.sh");
-	const libraryBytes = readFileSync(library);
-	rmSync(library);
-	console.log(new Date().toISOString(), "SHIPSCRIPTS1 scanner alone is insufficient: missing findings library refuses");
-	const missingLibrary = await checkPackagedScriptDependencies(stage);
-	expect(missingLibrary.map(item => item.file)).toEqual(["extensions/kit-flywheel-guard.ts"]);
-	expect(missingLibrary[0]?.error).toContain("kitlib-findings.sh");
-	expect(missingLibrary[0]?.error).toContain("GAP_SCAN_UNVERIFIED");
-	writeFileSync(library, libraryBytes);
-	expect(await checkPackagedScriptDependencies(stage)).toEqual([]);
 
 	// An additional extension proves the check derives references, rather than
 	// special-casing the flywheel's scanner name.

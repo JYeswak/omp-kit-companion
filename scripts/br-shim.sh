@@ -310,14 +310,12 @@ if [ "$gate_sub" = "create" ]; then
 	fi
 fi
 
-# NEEDSDIRCLAIM1 / CUTCLAIM1: native preflight owns claim admission. Prefer
-# the installed runtime; only a source checkout with Bun may use the fallback.
-# Require an adjudicated cut finding so an older CLI cannot silently admit.
+# Native preflight retains ownership, readiness and authorization checks.
 if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && [ "$gate_claim" = 1 ]; then
-	[ "$gate_extra_ids" = 0 ] || fail "CLAIM_CUT_UNKNOWN multi-ID claims are unsupported; claim one bead per invocation"
-	claim_self_dir=$(dirname -- "$self_path") || fail "CLAIM_CUT_UNKNOWN cannot resolve claim authority"
-	claim_kit_root=$(CDPATH='' cd -- "$claim_self_dir/.." && pwd) || fail "CLAIM_CUT_UNKNOWN cannot resolve claim authority"
-	command -v python3 >/dev/null 2>&1 || fail "CLAIM_CUT_UNKNOWN python3 is required to read native claim authority"
+	[ "$gate_extra_ids" = 0 ] || fail "BR_SHIM_CLAIM_UNKNOWN multi-ID claims are unsupported; claim one bead per invocation"
+	claim_self_dir=$(dirname -- "$self_path") || fail "BR_SHIM_CLAIM_UNKNOWN cannot resolve claim authority"
+	claim_kit_root=$(CDPATH='' cd -- "$claim_self_dir/.." && pwd) || fail "BR_SHIM_CLAIM_UNKNOWN cannot resolve claim authority"
+	command -v python3 >/dev/null 2>&1 || fail "BR_SHIM_CLAIM_UNKNOWN python3 is required to read native claim authority"
 	claim_preflight() {
 		python3 -c '
 import os, sys
@@ -326,7 +324,7 @@ from kitlib_run import run
 result = run(sys.argv[3:], deadline_s=60, cwd=sys.argv[2], env=dict(os.environ), max_output_bytes=4 * 1024 * 1024)
 sys.stderr.buffer.write(result.stderr)
 if result.timed_out or result.truncated or result.rc is None:
-    sys.stderr.write("CLAIM_CUT_UNKNOWN native claim authority exceeded its execution bounds\n")
+    sys.stderr.write("BR_SHIM_CLAIM_UNKNOWN native claim authority exceeded its execution bounds\n")
     sys.exit(2)
 sys.stdout.buffer.write(result.stdout)
 sys.exit(result.rc if result.rc >= 0 else 2)
@@ -345,9 +343,9 @@ sys.exit(result.rc if result.rc >= 0 else 2)
 		claim_probe=$(BEADS_DB="$tracker_db_path" BR_REAL="$real" claim_preflight bun run --no-env-file --config=/dev/null "$claim_kit_root/src/cli.ts" preflight claim "$gate_id" --project "$tracker_project" --actor "$AGENT_NAME" --json)
 		claim_rc=$?
 	else
-		fail "CLAIM_CUT_UNKNOWN native claim authority unavailable; install omp-kit or provide the source checkout's existing Bun runtime"
+		fail "BR_SHIM_CLAIM_UNKNOWN native claim authority unavailable; install omp-kit or provide the source checkout's existing Bun runtime"
 	fi
-	claim_verdict=$(printf '%s' "$claim_probe" | python3 "$claim_self_dir/claim_verdict.py" "$gate_id" "$claim_rc") || fail "CLAIM_CUT_UNKNOWN native claim authority failed or returned an incomplete verdict (rc=$claim_rc)"
+	claim_verdict=$(printf '%s' "$claim_probe" | python3 -c 'import runpy, sys; sys.path.insert(0, sys.argv[1]); sys.argv = sys.argv[2:]; runpy.run_path(sys.argv[0], run_name="__main__")' "$claim_self_dir" "$claim_self_dir/claim_verdict.py" "$gate_id" "$claim_rc") || fail "BR_SHIM_CLAIM_UNKNOWN native claim authority failed or returned an incomplete verdict (rc=$claim_rc)"
 	[ "$claim_verdict" = "PASS" ] || fail "$claim_verdict"
 fi
 

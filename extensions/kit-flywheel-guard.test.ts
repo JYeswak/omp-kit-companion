@@ -2,16 +2,16 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import kitFlywheelGuard, { FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, type FlywheelBeforeSubagentSpawnEvent, type FlywheelContext, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
-import { checkNoWait, normalizeRemoteUrl, validPriorArtLine } from "./kit-flywheel-guard";
-import { checkBgWait } from "./kit-flywheel-guard";
-import { gateFromReason } from "./gate-events";
-import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
+import kitFlywheelGuard, { FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, normalizeRemoteUrl } from "./kit-flywheel-guard";
+import type { FlywheelBeforeSubagentSpawnEvent, FlywheelContext, FlywheelExecResult, FlywheelToolCallResult } from "./kit-flywheel-guard";
+import { createFlywheelHost, toolCall, bashInput } from "../tests/fleet-guard/kit-flywheel-host";
+import type { FakeHost, Responder } from "../tests/fleet-guard/kit-flywheel-host";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { run, runSync } from "../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "../tests/cli/fixture-process.ts";
 import { briefContract, briefTargets, checkTaskBrief, renderBrief } from "../src/brief.ts";
-import { loadSpawnModelRuntime, type SpawnModelIdentity } from "../src/spawn-model.ts";
+import { loadSpawnModelRuntime } from "../src/spawn-model.ts";
+import type { SpawnModelIdentity } from "../src/spawn-model.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -63,7 +63,7 @@ function brTable(table: Record<string, FlywheelExecResult>): Responder {
 }
 
 
-// --- ASKBLOCK1 -----------------------------------------------------------
+// Human questions remain native tool interactions, independent of roster role.
 
 async function askSeat(name?: string, roster: unknown = {
 	chiefs: { lead: "PeachLeopard", peers: ["QuietBadger"] },
@@ -84,88 +84,11 @@ async function askSeat(name?: string, roster: unknown = {
 	return { h, result: result as FlywheelToolCallResult | undefined };
 }
 
-// --- ASKDEFAULT1 ---------------------------------------------------------
 
 const withDefault = { questions: [
 	{ id: "a", question: "Scope?", options: [{ label: "Narrow" }, { label: "Wide" }] },
 	{ id: "b", question: "Busy-seat send verdict?", options: [{ label: "Drop" }, { label: "Queue and retry" }], recommended: 1 },
 ] };
-const noDefault = { questions: [{ id: "a", question: "Which?", options: [{ label: "Left" }, { label: "Right" }] }] };
-
-for (const name of ["RusticPine", "PeachLeopard", "QuietBadger"]) {
-	test(`ASKDEFAULT1: goal-mode ${name} ask naming a recommended option is refused with take-record-report`, async () => {
-		const { h, result } = await askSeat(name, undefined, true, withDefault, "goal");
-		let dialogs = 0;
-		if (result?.block !== true) dialogs++;
-		expect(dialogs).toBe(0);
-		expect(result?.reason).toContain("ASKDEFAULT1");
-		expect(result?.reason).toContain(`"Queue and retry"`);
-		expect(result?.reason).toContain("record it as a decision (rule, alternatives, who may overrule)");
-		expect(result?.reason).toContain("next REPORT");
-		expect(result?.reason).toContain("keep working");
-		expect(h.sent).toEqual([]);
-	});
-	test(`ASKDEFAULT1 control: goal-mode ${name} ask with no recommended option is allowed`, async () => {
-		const { result } = await askSeat(name, undefined, true, noDefault, "goal");
-		expect(result?.block).not.toBe(true);
-	});
-	for (const mode of [undefined, "goal_paused", "none"]) {
-		test(`ASKDEFAULT1 control: ${name} with no active goal (${mode ?? "no mode entry"}) may ask with a recommended option`, async () => {
-			const { result } = await askSeat(name, undefined, true, withDefault, mode);
-			expect(result?.block).not.toBe(true);
-		});
-	}
-}
-
-for (const name of ["SilverCondor", "JadeThrush"]) {
-	test(`ASKDEFAULT1 control: goal-mode ${name} worker stays refused as ASKBLOCK1`, async () => {
-		const { result } = await askSeat(name, undefined, true, withDefault, "goal");
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain("ASKBLOCK1");
-		expect(result?.reason).toContain("QUESTION mail");
-	});
-}
-
-test("ASKDEFAULT1 control: goal-mode unbound session with a recommended option is allowed", async () => {
-	const { result } = await askSeat(undefined, undefined, true, withDefault, "goal");
-	expect(result?.block).not.toBe(true);
-});
-
-for (const name of ["SilverCondor", "JadeThrush"]) {
-	test(`ASKBLOCK1: ${name} worker ask is refused before the host opens a dialog`, async () => {
-		const { h, result } = await askSeat(name);
-		let dialogs = 0;
-		if (result?.block !== true) dialogs++;
-		expect(dialogs).toBe(0);
-		expect(result?.reason).toContain("QUESTION mail");
-		expect(result?.reason).toContain("ompkit-worker-task");
-		expect(h.sent).toEqual([]);
-	});
-}
-
-test("ASKBLOCK1: unknown held bead still refuses and names the bead you hold", async () => {
-	const { result } = await askSeat("SilverCondor", undefined, false);
-	expect(result?.block).toBe(true);
-	expect(result?.reason).toContain("the bead you hold");
-	expect(result?.reason).toContain("QUESTION mail");
-});
-
-for (const name of ["RusticPine", "PeachLeopard", undefined]) {
-	test(`ASKBLOCK1 control: ${name ?? "unbound session"} ask is allowed`, async () => {
-		const { result } = await askSeat(name);
-		expect(result?.block).not.toBe(true);
-	});
-}
-
-for (const roster of [null, "{broken", { sessions: null }]) {
-	test(`ASKBLOCK1 control: unreadable roster ${JSON.stringify(roster)} allows and says so`, async () => {
-		const { h, result } = await askSeat("SilverCondor", roster);
-		expect(result?.block).not.toBe(true);
-		expect(result?.additionalContext).toContain("roster");
-		expect(result?.additionalContext).toContain("allowed");
-		expect(h.notices.join("\n")).toContain("allowed");
-	});
-}
 
 // --- COMPACTION_REREAD ---------------------------------------------------
 
@@ -497,185 +420,6 @@ test("SELF_CLOSE_REFUSED negative: a different closer is allowed silently", asyn
 	expect(h.notices).toEqual([]);
 });
 
-for (const specimen of [
-	{ name: "missing citation", text: "", at: "2026-11-01T08:00:00Z", refused: true },
-	{ name: "late citation", text: "prior=https://example.org/design did=requires sections applied=enforced sections", at: "2026-11-01T10:00:00Z", refused: true },
-	{ name: "early citation", text: "prior=src/gate.ts:12 did=requires sections applied=enforced sections", at: "2026-11-01T08:00:00Z", refused: false },
-	{ name: "early none", text: "prior=none searched=required-checks, ADR considered options", at: "2026-11-01T08:00:00Z", refused: false },
-	{ name: "empty search", text: "prior=none searched=[]", at: "2026-11-01T08:00:00Z", refused: true },
-	{ name: "chore exemption", text: "", at: "2026-11-01T10:00:00Z", type: "chore", refused: false },
-	{ name: "process exemption", text: "", at: "2026-11-01T10:00:00Z", labels: ["kind:process"], refused: false },
-	{ name: "fix label", text: "", at: "2026-11-01T08:00:00Z", type: "task", labels: ["kind:fix"], refused: true },
-	{ name: "early claim fallback", text: "prior=none searched=ADR patterns", at: "2026-11-01T08:00:00Z", noCommit: true, refused: false },
-	{ name: "late claim fallback", text: "prior=none searched=ADR patterns", at: "2026-11-01T10:00:00Z", noCommit: true, refused: true },
-	{ name: "equal timestamp", text: "prior=none searched=ADR patterns", at: "2026-11-01T09:00:00Z", refused: true },
-	{ name: "grandfathered commit", text: "", at: "", started: "2026-11-03T07:59:59Z", refused: false },
-	{ name: "grandfathered claim", text: "", at: "", started: "2026-11-03T07:59:59Z", noCommit: true, refused: false },
-	{ name: "activation boundary", text: "", at: "", started: "2026-11-03T08:00:00Z", refused: true },
-]) {
-	test(`PRIORGATE1: ${specimen.name}`, async () => {
-		const project = freshDir(base, "prior-");
-		const row = { id: "kit-prior", status: "in_review", assignee: "Builder", created_by: "Filer",
-			issue_type: specimen.type ?? "bug", labels: specimen.labels ?? [],
-			comments: specimen.text ? [{ author: "Builder", text: specimen.text, created_at: specimen.at.replace("2026-11-01", "2026-11-04") }] : [] };
-		const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Verifier" }, respond: call => {
-			if (call.command === "git") return { code: 0, stdout: specimen.noCommit ? "" : `${Date.parse(specimen.started ?? "2026-11-04T09:00:00Z") / 1000}\n` };
-			if (call.args[0] === "info") return { code: 0, stdout: '{"database_path":"/tracker/beads.db"}' };
-			if (call.command === "sqlite3") return { code: 0, stdout: `${specimen.started ?? "2026-11-04T09:00:00Z"}\n` };
-			return brTable({ "kit-prior": { code: 0, stdout: JSON.stringify([row]) } })(call);
-		} });
-		const result = await toolCall(h, project, 'br close kit-prior --reason "bun test -> 8 passed"');
-		expect(result?.block === true).toBe(specimen.refused);
-		if (specimen.name.startsWith("grandfathered")) expect(result?.additionalContext).toContain("PRIOR_ART_GRANDFATHERED (activation 2026-11-03T08:00:00Z)");
-		if (specimen.refused) {
-			expect(result?.reason).toContain("PRIOR_ART_REFUSED");
-			expect(result?.reason).toContain("prior=<url or repo path:line> did=<what they do> applied=<what we changed>");
-			if (specimen.name === "late citation") expect(result?.reason).toContain("before first implementation commit");
-		}
-	});
-}
-
-for (const specimen of [
-	{ name: "owner cancellation", reason: "Cancelled by owner J-2026-11-06-08, commit c763895e5c", refused: false },
-	{ name: "bare reason", reason: "cancelled", refused: true },
-	{ name: "decision without commit", reason: "Cancelled by owner J-2026-11-06-08", refused: true },
-	{ name: "commit without decision", reason: "Cancelled at commit c763895e5c", refused: true },
-	{ name: "malformed decision", reason: "Cancelled J-2026-11-06, commit c763895e5c", refused: true },
-	{ name: "short commit", reason: "Cancelled J-2026-11-06-08, commit c76389", refused: true },
-	{ name: "claimed work", reason: "Cancelled J-2026-11-06-08, commit c763895e5c", claim: "2026-11-06T09:00:00Z", refused: true },
-	{ name: "implemented work", reason: "Cancelled J-2026-11-06-08, commit c763895e5c", commit: "1793955600", refused: true },
-	{ name: "failed claim lookup", reason: "Cancelled J-2026-11-06-08, commit c763895e5c", claimCode: 1, refused: true },
-	{ name: "unreadable claim", reason: "Cancelled J-2026-11-06-08, commit c763895e5c", claim: "unreadable", refused: true },
-]) {
-	test(`CLOSECANCEL1: ${specimen.name}`, async () => {
-		const project = freshDir(base, "close-cancel-");
-		const row = { id: "kit-cancel", status: "deferred", assignee: null, created_by: "Filer",
-			issue_type: "bug", labels: [], comments: [] };
-		const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Verifier" }, respond: call => {
-			if (call.command === "git") return { code: 0, stdout: specimen.commit ?? "" };
-			if (call.command === "sqlite3") return { code: specimen.claimCode ?? 0, stdout: specimen.claim ?? "" };
-			return brTable({ "kit-cancel": { code: 0, stdout: JSON.stringify([row]) } })(call);
-		} });
-		const result = await toolCall(h, project, `br --db /tracker/beads.db close kit-cancel --reason '${specimen.reason}'`);
-		expect(result?.block === true).toBe(specimen.refused);
-		if (specimen.refused) expect(result?.reason).toContain("PRIOR_ART_REFUSED");
-	});
-}
-
-test("PRIORGATE1: bounded validator rejects long near-misses and empty fields", () => {
-	expect(validPriorArtLine("prior=https://example.org did=required sections applied=added gate")).toBe(true);
-	for (const text of ["prior=none searched=", "prior=none searched= [ , ]", "prior=src/gate.ts did=x applied=y", "prior=https://example.org did= applied=y"]) {
-		expect(validPriorArtLine(text)).toBe(false);
-	}
-	const started = performance.now();
-	expect(validPriorArtLine("prior=https://example.org did=" + "x".repeat(16000))).toBe(false);
-	console.log(`PRIORGATE1 16029-character near-miss: ${(performance.now() - started).toFixed(3)} ms`);
-	expect(validPriorArtLine("x".repeat(16385))).toBe(false);
-});
-
-test("PRIORFORMAT1: a real citation followed by more sources or notes before did= is accepted", () => {
-	// The five 2026-11-04 builder notes in shape: several sources joined by +, a parenthetical, or a
-	// non-citation word before the first path:line. 0 of 5 matched the single-token form.
-	for (const text of [
-		"prior=/opt/homebrew/bin/git-filter-repo:4476,4782 + /Users/x/guard.py:184,386 + https://git-scm.com/docs/githooks#_reference_transaction (fetched 2026-11-04: 'invoked by any Git command') did=moves refs through update-ref applied=a reviewed transform is admitted",
-		"prior=mktemp(1) contract (POSIX/BSD man mktemp: on failure exits >0) plus omp-kit-companion src/output.ts:70 (errors render stdout) did=prints nothing on failure applied=--print-dir",
-		"prior=omp-kit-companion/scripts/full-suite-verdict.sh:81-91 (SUITESHIMPATH1 refuses a shim br) did=refuses the shim applied=resolveRealBr skips it",
-		"prior=omp-kit-companion/src/mine.ts:416 (MINE1 67f835b939: any guard.decision failure -> guard-failure:<engine>) + omp-kit/scripts/cc/collect_session.py:2 did=maps failures applied=observed exits excluded",
-		"prior=scripts/cc/cc_spool_gzip.py:166 refuse_delete (manifest + HORIZON_DAYS 90), scripts/cc/ccbackup.py:79 rotate keep 7 did=rotates applied=retain verb",
-		"first line\nprior=(src/a.ts:12) did=x applied=y",
-	]) expect(validPriorArtLine(text)).toBe(true);
-});
-
-test("PRIORFORMAT1: no URL or path:line before did=, an empty field, or out-of-order fields stay refused", () => {
-	for (const text of [
-		"prior=mktemp(1) contract (POSIX man page) did=x applied=y",
-		"prior=see the design notes did=x applied=y",
-		"did=x applied=y prior=src/a.ts:3",
-		"prior=src/a.ts:3 did=x",
-		"prior=src/a.ts:3 applied=y did=x",
-		"prior=src/a.ts:3 did=  applied=y",
-		"prior= src/a.ts:3 did=x applied=y",
-		"prior=a=b:3 did=x applied=y",
-		"prior=:12 did=x applied=y",
-		"prior=file.ts:12abc did=x applied=y",
-		"prior=http:// did=x applied=y",
-	]) expect(validPriorArtLine(text)).toBe(false);
-	const started = performance.now();
-	expect(validPriorArtLine("prior=" + "a:1 ".repeat(4000))).toBe(false);
-	expect(validPriorArtLine("prior=src/a.ts:1 did=" + "y ".repeat(8000))).toBe(false);
-	const elapsed = performance.now() - started;
-	console.log(`PRIORFORMAT1 two 16 KiB near-misses: ${elapsed.toFixed(3)} ms`);
-	expect(elapsed).toBeLessThan(fixtureDeadlineS(1) * 1000);
-});
-
-test("PRIORGATE1: real git uses committer time and exact bead identity", async () => {
-	const project = freshDir(base, "prior-git-");
-	const git = async (...args: string[]) => {
-		const result = await run(["/usr/bin/git", "-c", "core.hooksPath=/dev/null", ...args], {
-			cwd: project, deadline_s: 10, max_output_bytes: 65536, env: { ...process.env,
-				GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.org",
-				GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.org",
-				GIT_AUTHOR_DATE: "2026-10-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-11-04T09:00:00Z" } as Record<string, string> });
-		expect(result.rc).toBe(0);
-		return { code: result.rc!, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
-	};
-	await git("init", "-q");
-	await git("commit", "--allow-empty", "-qm", "Implementation\n\nBead: kit-prior.1");
-	for (const [id, at, refused] of [
-		["kit-prior.1", "2026-11-04T08:00:00Z", false],
-		["kit-prior.1", "2026-11-04T10:00:00Z", true],
-		["kit-prior", "2026-11-04T10:00:00Z", true],
-	] as const) {
-		const row = { id, status: "in_review", assignee: "Builder", created_by: "Filer", issue_type: "feature",
-			comments: [{ author: "Builder", text: "prior=none searched=required checks", created_at: at }] };
-		const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Verifier" }, respond: call => {
-			if (call.command === "git") return git(...call.args);
-			if (call.args[0] === "info") return { code: 0, stdout: '{"database_path":"/tracker/beads.db"}' };
-			if (call.command === "sqlite3") return { code: 0, stdout: "2026-11-04T09:00:00Z\n" };
-			return brTable({ [id]: { code: 0, stdout: JSON.stringify([row]) } })(call);
-		} });
-		expect((await toolCall(h, project, `br close ${id} --reason "bun test -> 3 passed"`))?.block === true).toBe(refused);
-	}
-}, 30_000);
-
-test("PRIORFORMAT1: a bead whose commit is only in a sibling checkout sharing the tracker resolves its first commit time", async () => {
-	const parent = freshDir(base, "prior-xrepo-");
-	const shared = join(parent, "tracker", ".beads");
-	mkdirSync(shared, { recursive: true });
-	writeFileSync(join(shared, "beads.db"), "");
-	const git = async (cwd: string, ...args: string[]) => {
-		const result = await run(["/usr/bin/git", "-c", "core.hooksPath=/dev/null", ...args], {
-			cwd, deadline_s: 10, max_output_bytes: 65536, env: { ...process.env,
-				GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.org",
-				GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.org",
-				GIT_AUTHOR_DATE: "2026-10-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-11-04T09:00:00Z" } as Record<string, string> });
-		return { code: result.rc!, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
-	};
-	for (const name of ["a", "b"]) {
-		mkdirSync(join(parent, name, ".beads"), { recursive: true });
-		symlinkSync(join(shared, "beads.db"), join(parent, name, ".beads", "beads.db"));
-		expect((await git(join(parent, name), "init", "-q")).code).toBe(0);
-	}
-	expect((await git(join(parent, "a"), "commit", "--allow-empty", "-qm", "Unrelated")).code).toBe(0);
-	expect((await git(join(parent, "b"), "commit", "--allow-empty", "-qm", "Implementation\n\nBead: kit-xrepo.1")).code).toBe(0);
-	const repoA = join(parent, "a");
-	for (const [id, at, refused, text] of [
-		["kit-xrepo.1", "2026-11-04T08:00:00Z", false, ""],
-		["kit-xrepo.1", "2026-11-04T10:00:00Z", true, "citation must be before first implementation commit at 2026-11-04T09:00:00.000Z"],
-		["kit-xrepo.2", "2026-11-04T08:00:00Z", true, "first in_progress claim timestamp unavailable"],
-	] as const) {
-		const row = { id, status: "in_review", assignee: "Builder", created_by: "Filer", issue_type: "feature",
-			comments: [{ author: "Builder", text: "prior=src/x.ts:4 (note) + https://e.org did=a applied=b", created_at: at }] };
-		const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Verifier" }, respond: call => {
-			if (call.command === "git") return git(call.options?.cwd ?? repoA, ...call.args);
-			if (call.command === "sqlite3") return { code: 0, stdout: "\n" };
-			return brTable({ [id]: { code: 0, stdout: JSON.stringify([row]) } })(call);
-		} });
-		const result = await toolCall(h, repoA, `br --db ${JSON.stringify(join(shared, "beads.db"))} close ${id} --reason "bun test -> 3 passed"`);
-		expect(result?.block === true).toBe(refused);
-		if (text) expect(result?.reason).toContain(text);
-	}
-}, 30_000);
 
 // --- FILERCLOSE1 ---------------------------------------------------------
 
@@ -1103,107 +847,6 @@ test("GOAL_SEND_REFUSED negatives: arm_seat, ordinary sends, mentions and identi
 	expect(await callAs(person, cwd, "s", "bash", { command: "tern send 5 paste '/goal set x'" })).toEqual([undefined]);
 });
 
-/** KEEPALIVE2a (ompkit-774u.50.1): a fixture fleet-watch whose session repo is `cwd`, with a fresh declared constraint. */
-function constraintSeat(cwd: string): { env: Record<string, string>; line: string } {
-	const config = join(cwd, "fleet-watch.json");
-	const constraint = {
-		name: "full-suite wall", value: 900, budget: 600, read_at: new Date(Date.now() - 3600_000).toISOString(),
-		producer: { command: "omp-kit test --full --json", field: "wall_s" }, clearing_bead: "fx-1", set_by: "FixtureLead", decision: "J-fixture",
-	};
-	writeFileSync(config, JSON.stringify({ chief: { agent: "FixtureLead" }, sessions: [{ session: "fx", repo: cwd, milestone: { epic: "e", pinned: ["fx-1"], constraint } }] }));
-	return { env: { AGENT_NAME: "CopperTrout", OMP_KIT_FLEET_WATCH_CONFIG: config }, line: "CONSTRAINT full-suite wall 900/600 clearing=fx-1 holder=unknown" };
-}
-
-/** KEEPALIVE2 [a][c]: the refusal starts with the constraint line, the guard header follows on line 2 (still attributed
- * to its code by gate-events), then kit-goal-keepalive's shared text. */
-function expectConstraintFirst(reason: string | undefined, line: string, code: string): void {
-	const lines = String(reason).split("\n");
-	expect(lines[0]).toBe(line);
-	expect(lines[1]).toStartWith(`kit-flywheel-guard ${code}: `);
-	expect(gateFromReason(String(reason))).toBe(code);
-	expect(lines[2]).toContain("send one NO-WORK line to your director and end the turn");
-	expect(lines[3]).toContain("never idles");
-	expect(lines[4]).toContain("comment on the nearest bead");
-	for (const banned of ["never wait", "downtime", "reality-check", "as a bead", "profiling"]) expect(String(reason).toLowerCase()).not.toContain(banned);
-}
-
-/** The BG_WAIT_NEXT text before KEEPALIVE2a (4ca4bee06d), kept verbatim as the planted negative. */
-const OLD_BG_WAIT_NEXT = "Take the next item now: your held beads, other seats' in_review beads ready for grading, bead DAG repair, "
-	+ "/skill:reality-check-for-project, then /skill:profiling-software-performance followed by "
-	+ "/skill:extreme-software-optimization. A pending job result arrives at a later tool boundary; never block your turn on it. Nothing was executed.";
-
-test("WAIT_REFUSED KEEPALIVE2 planted: restoring the old BG_WAIT_NEXT text fails the constraint-first case", async () => {
-	const cwd = freshDir(base, "bgwait-old-");
-	const seat = constraintSeat(cwd);
-	const h = await createFlywheelHost(base, { env: seat.env });
-	const [result] = await callAs(h, cwd, "w", "wait", {});
-	const reason = String((result as FlywheelToolCallResult)?.reason);
-	expectConstraintFirst(reason, seat.line, "WAIT_REFUSED"); // control: the shipped text passes
-	const restored = reason.replace("A pending job result arrives at a later tool boundary; never block your turn on it. Nothing was executed.", OLD_BG_WAIT_NEXT);
-	expect(restored).not.toBe(reason);
-	expect(() => expectConstraintFirst(restored, seat.line, "WAIT_REFUSED")).toThrow();
-	// The pre-KEEPALIVE2a layout (header first, old text, no constraint line) fails too.
-	expect(() => expectConstraintFirst(`kit-flywheel-guard WAIT_REFUSED: CopperTrout may not block its turn on its own background work (BGWAIT1): this call uses the \`wait\` tool. ${OLD_BG_WAIT_NEXT}`, seat.line, "WAIT_REFUSED")).toThrow();
-});
-
-test("NO_WAIT_REFUSED KEEPALIVE2: a fleet seat's idle_wait.py and sleep >= 30 s are refused, bare chained wrapped or sh -c, led by the constraint line", async () => {
-	const cwd = freshDir(base, "nowait-");
-	const seat = constraintSeat(cwd);
-	const h = await createFlywheelHost(base, { env: seat.env });
-	for (const command of [
-		"python3 scripts/idle_wait.py --minutes 10",
-		"python3.13 /tmp/idle_wait.py",
-		"./tools/idle_wait.py",
-		"idle_wait.py && br ready --json",
-		"make build && python3 scripts/idle_wait.py",
-		"sh -c 'sleep 60'",
-		"bash -lc \"python3 idle_wait.py\"",
-		"env sleep 45",
-		"sleep 600",
-		"sleep 30",
-		"sleep 30s",
-		"sleep 5m",
-		"sleep 1h",
-		"sleep 20 20",
-		"make build && sleep 120",
-		"BR_ACTOR=X sh -c 'sleep 90'",
-	]) {
-		const [result] = await callAs(h, cwd, "w", "bash", { command });
-		expect((result as FlywheelToolCallResult)?.block).toBe(true);
-		expect((result as FlywheelToolCallResult)?.reason).toContain("NO_WAIT_REFUSED");
-		expectConstraintFirst((result as FlywheelToolCallResult)?.reason, seat.line, "NO_WAIT_REFUSED");
-	}
-});
-
-test("NO_WAIT_REFUSED negatives: short sleeps, mere mentions and identity-less sessions pass", async () => {
-	const cwd = freshDir(base, "nowait-");
-	const seat = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
-	for (const command of [
-		"sleep 2",
-		"sleep 29",
-		"sleep 0.5",
-		"sleep 10 && make test",
-		"sleep --version",
-		"echo sleep 600",
-		"echo idle_wait.py",
-		"grep -n 'sleep 600' scripts/poll.sh",
-		"grep -rn idle_wait.py docs/",
-	]) {
-		expect(await callAs(seat, cwd, "s", "bash", { command })).toEqual([undefined]);
-	}
-	const person = await createFlywheelHost(base, { env: {} });
-	expect(await callAs(person, cwd, "s", "bash", { command: "sleep 600" })).toEqual([undefined]);
-	expect(await callAs(person, cwd, "s", "bash", { command: "python3 idle_wait.py" })).toEqual([undefined]);
-});
-
-test("NO_WAIT_REFUSED seam: the pure check refuses the planted wait with the given guidance and passes without identity", () => {
-	const event = { toolCallId: "w", toolName: "bash", input: { command: "sleep 600" } };
-	const refusal = checkNoWait(event, "CopperTrout", () => "CONSTRAINT none declarer=FixtureLead");
-	expect(refusal?.block).toBe(true);
-	expect(refusal?.reason.split("\n").slice(0, 2)).toEqual(["CONSTRAINT none declarer=FixtureLead", expect.stringContaining("kit-flywheel-guard NO_WAIT_REFUSED: ")]);
-	expect(gateFromReason(String(refusal?.reason))).toBe("NO_WAIT_REFUSED");
-	expect(checkNoWait(event, null)).toBeUndefined();
-});
 
 test("shell -c flag pattern: matches -c and -lc, rejects --c and -cx, and stays linear on a long near-miss", () => {
 	const flag = /^-[A-Za-z]*c$/;
@@ -1747,95 +1390,8 @@ test("DRAIN1 custody: repairs on ownerless or open beads pass", async () => {
 	expect(await drainCall({ "k-9": { status: "open", assignee: null } }, {}, "br update k-9 --assignee Next")).toBeUndefined();
 });
 
-// --- BGWAIT1 (ompkit-fp72.19.1.24): seats never block their turn on their own background work ---
-
-test("WAIT_REFUSED KEEPALIVE2: a fleet seat's wait tool call is refused, names the later tool boundary and leads with the constraint line (BGWAIT1)", async () => {
-	const cwd = freshDir(base, "bgwait-");
-	const seat = constraintSeat(cwd);
-	const h = await createFlywheelHost(base, { env: seat.env });
-	for (const input of [{}, { timeout: 120000 }]) {
-		const [result] = await callAs(h, cwd, "w", "wait", input);
-		expect((result as FlywheelToolCallResult)?.block).toBe(true);
-		expect((result as FlywheelToolCallResult)?.reason).toContain("WAIT_REFUSED");
-		expect((result as FlywheelToolCallResult)?.reason).toContain("later tool boundary");
-		expectConstraintFirst((result as FlywheelToolCallResult)?.reason, seat.line, "WAIT_REFUSED");
-	}
-});
-
-test("SUBAGENTWAIT1: inherited fleet identity allows subagent wait, not main-seat wait", async () => {
-	const cwd = freshDir(base, "bgwait-child-");
-	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
-	const event = { toolCallId: "w", toolName: "wait", input: {} };
-	for (const kind of ["sub", "main"] as const) {
-		const ctx = { ...h.ctx(cwd), agent: { kind, id: kind, name: kind, depth: 0 } };
-		const [result] = await h.emit("tool_call", event, ctx);
-		if (kind === "sub") expect(result).toBeUndefined();
-		else expect((result as FlywheelToolCallResult)?.reason).toContain("WAIT_REFUSED");
-	}
-	// The exemption must not bypass another guard: NO_WAIT_REFUSED still owns long sleeps.
-	const [otherGuard] = await h.emit("tool_call", {
-		toolCallId: "sleep", toolName: "bash", input: { command: "sleep 600" },
-	}, { ...h.ctx(cwd), agent: { kind: "sub", id: "child", name: "child", depth: 0 } });
-	expect((otherGuard as FlywheelToolCallResult)?.reason).toContain("NO_WAIT_REFUSED");
-});
-
-test("WAIT_REFUSED KEEPALIVE2: a fleet seat's sleep-poll loops, chained sleeps and time.sleep idles are refused, led by the constraint line (BGWAIT1)", async () => {
-	const cwd = freshDir(base, "bgwait-");
-	const seat = constraintSeat(cwd);
-	const h = await createFlywheelHost(base, { env: seat.env });
-	for (const command of [
-		"for i in $(seq 1 100); do [ -f rc ] && break; sleep 10; done",
-		"while [ ! -f rc ]; do sleep 5; done",
-		"until make ready; do sleep 10; done",
-		"sleep 20 && sleep 20",
-		"sleep 15; make test; sleep 15",
-		"python3 -c \"import time; time.sleep(30)\"",
-		"python3 -c \"import time\nwhile True:\n    time.sleep(5)\"",
-		"python3 -c \"import time\nfor i in range(10):\n    time.sleep(1)\n    poll()\"",
-	]) {
-		const [result] = await callAs(h, cwd, "w", "bash", { command });
-		expect((result as FlywheelToolCallResult)?.block).toBe(true);
-		expect((result as FlywheelToolCallResult)?.reason).toContain("WAIT_REFUSED");
-		expectConstraintFirst((result as FlywheelToolCallResult)?.reason, seat.line, "WAIT_REFUSED");
-	}
-	const [evaled] = await callAs(h, cwd, "e", "eval", { language: "py", code: "import time\nwhile True:\n    time.sleep(5)" });
-	expect((evaled as FlywheelToolCallResult)?.block).toBe(true);
-	expect((evaled as FlywheelToolCallResult)?.reason).toContain("WAIT_REFUSED");
-});
-
-test("WAIT_REFUSED negatives: async jobs, short single sleeps and identity-less sessions pass (BGWAIT1)", async () => {
-	const cwd = freshDir(base, "bgwait-");
-	const seat = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
-	for (const input of [
-		{ command: "sleep 2" },
-		{ command: "sleep 10 && make test" },
-		{ command: "for f in *.log; do echo $f; done" },
-		{ command: "python3 -c \"import time; time.sleep(2)\"" },
-		{ command: "for i in $(seq 1 100); do [ -f rc ] && break; sleep 10; done", async: true },
-		{ command: "sleep 60", async: true },
-	]) {
-		expect(await callAs(seat, cwd, "s", "bash", input)).toEqual([undefined]);
-	}
-	expect(await callAs(seat, cwd, "e", "eval", { language: "py", code: "import time\ntime.sleep(2)" })).toEqual([undefined]);
-	const person = await createFlywheelHost(base, { env: {} });
-	expect(await callAs(person, cwd, "s", "bash", { command: "for i in $(seq 1 5); do sleep 10; done" })).toEqual([undefined]);
-	expect(await callAs(person, cwd, "w", "wait", {})).toEqual([undefined]);
-});
-
-test("WAIT_REFUSED seam: the pure check refuses each planted form and passes without identity", () => {
-	const wait = checkBgWait({ toolCallId: "w", toolName: "wait", input: {} }, "CopperTrout", undefined, () => "CONSTRAINT none declarer=FixtureLead");
-	expect(wait?.reason.split("\n").slice(0, 2)).toEqual(["CONSTRAINT none declarer=FixtureLead", expect.stringContaining("kit-flywheel-guard WAIT_REFUSED: ")]);
-	expect(gateFromReason(String(wait?.reason))).toBe("WAIT_REFUSED");
-	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "while true; do sleep 1; done" } }, "CopperTrout")?.block).toBe(true);
-	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "sleep 20 && sleep 20" } }, "CopperTrout")?.block).toBe(true);
-	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "python3 -c \"import time; time.sleep(30)\"" } }, "CopperTrout")?.block).toBe(true);
-	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "sleep 2" } }, "CopperTrout")).toBeUndefined();
-	expect(checkBgWait({ toolCallId: "w", toolName: "wait", input: {} }, null)).toBeUndefined();
-});
-
-// --- CUTCLAIM1: exercise the registered tool_call handler, never a helper-only admission ---
+// Native custody reads remain authoritative; train metadata is irrelevant.
 type CutBead = { id: string; status: string; assignee: string | null; labels?: string[] | null };
-type CutEdge = { issue_id: string; depends_on_id: string; type: string; status: string };
 
 async function cutFixture() {
 	const repo = freshDir(base, "cutclaim-");
@@ -1844,203 +1400,25 @@ async function cutFixture() {
 	writeFileSync(config, JSON.stringify({ sessions: [{ session: "fixture", repo, milestone }] }));
 	const rows: Record<string, CutBead> = {};
 	for (const id of ["k-1", "k-2", "k-3"]) rows[id] = { id, status: "open", assignee: null, labels: [] };
-	const graph: Record<string, CutEdge[]> = { "k-1": [], "k-2": [], "k-3": [] };
-	// CUTREADBULK1: admission reads `list` (active rows), `blocked` (edges, in_progress omitted, as native br does) and a
-	// batched `show` for in_progress beads; every answer comes from the same rows and dep-list graph the cases edit.
-	const ACTIVE: Record<string, true> = { open: true, in_progress: true, blocked: true, rework: true, in_review: true };
+	// No global graph reads: only the target and the caller's actual claims matter.
 	const respond: Responder = call => {
 		if (call.command === "tmux") return { code: 1, stdout: "", stderr: "no server" };
 		if (call.command === "env") return { code: 0, stdout: "", stderr: "" };
 		if (call.args[0] === "show") {
 			const ids = call.args.slice(1).filter(arg => !arg.startsWith("--") && !arg.endsWith(".db"));
 			if (ids.some(id => !rows[id])) return { code: 3, stdout: "", stderr: "missing fixture bead" };
-			return { code: 0, stdout: JSON.stringify(ids.map(id => ({ ...rows[id], dependencies: (graph[id] ?? []).map(edge =>
-				({ id: edge.depends_on_id, dependency_type: edge.type, status: edge.status })) }))) };
+			return { code: 0, stdout: JSON.stringify(ids.map(id => rows[id])) };
 		}
 		if (call.args[0] === "list" && call.args.includes("--assignee")) return { code: 0, stdout: JSON.stringify({ issues: [], total: 0 }) };
-		if (call.args[0] === "list") return { code: 0, stdout: JSON.stringify({ issues: Object.values(rows).filter(row => ACTIVE[row.status] === true), has_more: false }) };
-		if (call.args[0] === "blocked") {
-			const open = Object.values(rows).filter(row => row.status !== "in_progress" && row.status !== "closed");
-			if (open.some(row => !graph[row.id])) return { code: 3, stdout: "", stderr: "missing fixture graph" };
-			// A malformed fixture edge (rooted at another bead) reaches admission as a malformed row.
-			const issues = open.map(row => ({ id: row.id, blocked_by: graph[row.id]!
-				.filter(edge => edge.type === "blocks" && (edge.issue_id !== row.id || ACTIVE[edge.status] === true))
-				.map(edge => edge.issue_id === row.id ? edge.depends_on_id : null) }))
-				.filter(row => row.blocked_by.length > 0);
-			return { code: 0, stdout: JSON.stringify({ issues, has_more: false }) };
-		}
-		if (call.args[0] === "dep" && call.args[1] === "list") {
-			const edges = graph[call.args[2] ?? ""];
-			return edges ? { code: 0, stdout: JSON.stringify(edges) } : { code: 3, stdout: "", stderr: "missing fixture graph" };
-		}
 		return { code: 99, stdout: "", stderr: "unexpected fixture read" };
 	};
 	const env = { BR_ACTOR: "Holder", OMP_KIT_FLEET_WATCH_CONFIG: config, BEADS_DB: join(repo, ".beads", "beads.db"), BEADS_DIR: "" };
 	const h = await createFlywheelHost(base, { env, home: repo, respond });
-	return { repo, config, milestone, rows, graph, h, respond };
+	return { repo, config, rows, h };
 }
 
-test("CUTCLAIM1 [a]: real guarded k-2 claim refuses the cut and names eligible k-1; k-1 passes", async () => {
-	const f = await cutFixture();
-	const refused = await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim");
-	expect(refused?.block).toBe(true);
-	expect(JSON.parse(refused?.reason ?? "{}")).toMatchObject({
-		code: "CLAIM_OUT_OF_CUT", bead: "k-2", cut: "cut", alternative: "k-1",
-	});
-	expect(refused?.reason).toContain("nearest eligible pinned alternative: k-1");
-	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-1 --claim")).toBeUndefined();
-});
 
-test("CUTCLAIM1 [b]: open transitive blocks prerequisites pass from active pins, never closed or parent/related-only", async () => {
-	const f = await cutFixture();
-	f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "k-3", type: "blocks", status: "open" }];
-	f.graph["k-3"] = [{ issue_id: "k-3", depends_on_id: "k-2", type: "blocks", status: "open" }];
-	f.rows["k-1"]!.status = "in_review";
-	f.rows["k-1"]!.assignee = "Builder";
-	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim")).toBeUndefined();
-	f.rows["k-1"]!.status = "in_progress";
-	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim")).toBeUndefined();
-	for (const status of ["in_progress", "rework", "blocked", "in_review"]) {
-		f.rows["k-3"]!.status = status;
-		f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "k-3", type: "blocks", status }];
-		expect(await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim")).toBeUndefined();
-	}
-	f.rows["k-1"]!.status = "closed";
-	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_OUT_OF_CUT");
-	f.rows["k-1"]!.status = "open";
-	for (const type of ["parent-child", "related", "blocks"]) {
-		f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "k-2", type, status: type === "blocks" ? "closed" : "open" }];
-		expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_OUT_OF_CUT");
-	}
-	// An open-looking edge cannot resurrect a closed intermediate prerequisite.
-	f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "k-3", type: "blocks", status: "open" }];
-	f.rows["k-3"]!.status = "closed";
-	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_OUT_OF_CUT");
-});
-
-test("CUTCLAIM1 [c]: every no-cut shape admits pillar-less claims without cut graph reads", async () => {
-	const f = await cutFixture();
-	const unrelated = freshDir(base, "cutclaim-unrelated-");
-	for (const sessions of [
-		[{ session: "fixture", repo: f.repo }],
-		[{ session: "other", repo: unrelated, milestone: f.milestone }],
-		[],
-	]) {
-		writeFileSync(f.config, JSON.stringify({ sessions }));
-		for (const labels of [[], undefined, null]) {
-			f.rows["k-2"]!.labels = labels;
-			const before = f.h.execs.length;
-			expect(await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim")).toBeUndefined();
-			const reads = f.h.execs.slice(before);
-			expect(reads.filter(call => call.args[0] === "show")).toHaveLength(1);
-			expect(reads.filter(call => call.args[0] === "dep")).toHaveLength(0);
-		}
-	}
-	rmSync(f.config);
-	// Missing explicitly configured authority remains an error, not an absent default.
-	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_CUT_UNKNOWN");
-	for (const db of [join(f.repo, ".beads", "beads.db"), join(f.repo, "custom-tracker.db")]) {
-		const stock = await createFlywheelHost(base, { env: {
-			BR_ACTOR: "Holder", BEADS_DB: db, BEADS_DIR: "", XDG_CONFIG_HOME: join(f.repo, "stock-config"),
-		}, home: f.repo, respond: f.respond });
-		f.rows["k-2"]!.labels = [];
-		expect(await toolCall(stock, f.repo, "br --actor Holder update k-2 --claim")).toBeUndefined();
-		expect(stock.execs.filter(call => call.args[0] === "show")).toHaveLength(1);
-		expect(stock.execs.filter(call => call.args[0] === "dep")).toHaveLength(0);
-	}
-});
-
-test("CUTCLAIM1: malformed declarations and graph reads fail closed, never pillar fallback", async () => {
-	const f = await cutFixture();
-	f.rows["k-2"]!.labels = ["pillar:proven"];
-	for (const body of ["{", JSON.stringify({ sessions: {} }), JSON.stringify({ sessions: [{ repo: f.repo, milestone: { ...f.milestone, pinned: "k-1" } }] })]) {
-		writeFileSync(f.config, body);
-		expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_CUT_UNKNOWN");
-	}
-	writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, milestone: f.milestone }] }));
-	delete f.graph["k-1"];
-	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_CUT_UNKNOWN");
-	f.graph["k-1"] = [{ issue_id: "another-bead", depends_on_id: "k-2", type: "blocks", status: "open" }];
-	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_CUT_UNKNOWN");
-});
-
-test("CUTCLAIM1: canonical explicit tracker binding wins over a first unrelated session", async () => {
-	const f = await cutFixture();
-	const caller = freshDir(base, "cutclaim-caller-");
-	const alias = join(caller, "tracker-alias");
-	symlinkSync(f.repo, alias);
-	writeFileSync(f.config, JSON.stringify({ sessions: [
-		{ session: "unrelated", repo: caller, milestone: { ...f.milestone, pinned: ["k-2"] } },
-		{ session: "tracker", repo: alias, milestone: f.milestone },
-	] }));
-	const command = `br --db ${JSON.stringify(join(alias, ".beads", "beads.db"))} --actor Holder update k-2 --claim`;
-	expect((await toolCall(f.h, caller, command))?.reason).toContain("CLAIM_OUT_OF_CUT");
-	const graphReads = f.h.execs.filter(call => call.args[0] === "blocked" || (call.args[0] === "list" && !call.args.includes("--assignee")));
-	expect(graphReads.length).toBeGreaterThan(0);
-	expect(graphReads.every(call => call.args.includes(join(alias, ".beads", "beads.db")))).toBe(true);
-});
-
-test("CUTCLAIM1 planted negative: removing admission refusal from the actual guard makes the original assertion fail", async () => {
-	const f = await cutFixture();
-	const hostUrl = new URL("../tests/fleet-guard/kit-flywheel-host.ts", import.meta.url).href;
-	const script = `
-		import { plugin } from "bun";
-		import assert from "node:assert/strict";
-		let applied = false;
-		plugin({ name: "cutclaim1-mutant", setup(build) {
-			build.onLoad({ filter: /kit-flywheel-guard[.]ts$/ }, async ({ path }) => {
-				const source = await Bun.file(path).text();
-				const site = "if (cut.blocking) return {";
-				if (source.split(site).length !== 2) throw new Error("MUTATION_SITE_NOT_UNIQUE");
-				applied = true;
-				return { contents: source.replace(site, "if (false) return {"), loader: "ts" };
-			});
-		}});
-		// The mutation plugin must be registered before this loading-boundary import.
-		const { createFlywheelHost, toolCall } = await import(${JSON.stringify(hostUrl)});
-		const h = await createFlywheelHost(${JSON.stringify(base)}, {
-			env: { BR_ACTOR: "Holder", OMP_KIT_FLEET_WATCH_CONFIG: ${JSON.stringify(f.config)},
-				BEADS_DB: ${JSON.stringify(join(f.repo, ".beads", "beads.db"))}, BEADS_DIR: "" },
-			home: ${JSON.stringify(f.repo)},
-			respond: call => ({ code: 0, stderr: "", stdout: JSON.stringify(
-				call.args[0] === "list" ? { issues: [], total: 0 } : call.args[0] === "dep" ? [] :
-				[{ id: call.args[1], status: "open", assignee: null, labels: [] }]
-			) }),
-		});
-		const pin = await toolCall(h, ${JSON.stringify(f.repo)}, "br --actor Holder update k-1 --claim");
-		assert.equal(pin, undefined, "pin control must pass");
-		const refused = await toolCall(h, ${JSON.stringify(f.repo)}, "br --actor Holder update k-2 --claim");
-		assert.equal(applied, true, "mutation must load");
-		console.log(JSON.stringify({ applied, pinPassed: pin === undefined, outOfCutBlocked: refused?.block === true }));
-		assert.equal(refused?.block, true, "CUTCLAIM1_OFF_CUT_ASSERTION");
-	`;
-	const result = await run([process.execPath, "--eval", script], { cwd: f.repo, deadline_s: 60, max_output_bytes: 65536 });
-	expect(result.rc).not.toBe(0);
-	expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({ applied: true, pinPassed: true, outOfCutBlocked: false });
-	expect(new TextDecoder().decode(result.stderr)).toContain("CUTCLAIM1_OFF_CUT_ASSERTION");
-});
-
-test("CUTCLAIM1: pin order, explicit membership, omitted labels, empty cuts and strict config bytes", async () => {
-	const f = await cutFixture();
-	writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, milestone: { epic: "cut", pinned: ["k-3", "k-1"] } }] }));
-	expect(JSON.parse((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason ?? "{}").alternative).toBe("k-3");
-	delete f.rows["k-3"];
-	delete f.rows["k-1"]!.labels;
-	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-1 --claim")).toBeUndefined();
-	f.rows["k-1"]!.labels = null;
-	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-1 --claim")).toBeUndefined();
-	writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo }] }));
-	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-1 --claim")).toBeUndefined();
-	f.rows["k-1"]!.labels = ["pillar:proven"];
-	writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, milestone: { epic: "empty-cut", pinned: [] } }] }));
-	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-1 --claim"))?.reason).toContain("CLAIM_OUT_OF_CUT");
-	const config = JSON.stringify({ sessions: [{ repo: f.repo, milestone: { epic: "cut", pinned: ["k-1"] } }], note: "BYTE" });
-	const marker = config.indexOf("BYTE");
-	writeFileSync(f.config, Buffer.concat([Buffer.from(config.slice(0, marker)), Buffer.from([0xff]), Buffer.from(config.slice(marker + 4))]));
-	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-1 --claim"))?.reason).toContain("CLAIM_CUT_UNKNOWN");
-});
-
-test("CUTCLAIM1 owned rework resumes without a second claim", async () => {
+test("native owned rework resumes without a second claim", async () => {
 	const f = await cutFixture();
 	f.rows["k-1"]!.status = "rework";
 	f.rows["k-1"]!.assignee = "Holder";
@@ -2093,8 +1471,8 @@ test("BRIEFCONTRACT1 live tool-call boundary refuses a planted build and admits 
 	const contract = await briefContract(project);
 	const [admitted] = await h.emit("tool_call", { toolCallId: "brief-present", toolName: "task", input: { ...input, context: `${input.context}\n${renderBrief(contract)}` } }, h.ctx(project));
 	expect((admitted as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
-	const [readonly] = await h.emit("tool_call", { toolCallId: "brief-read", toolName: "task", input: { ...input, tasks: [{ task: "Read-only: analyze the implementation" }] } }, h.ctx(project));
-	expect((readonly as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
+	const [readOnlyResult] = await h.emit("tool_call", { toolCallId: "brief-read", toolName: "task", input: { ...input, tasks: [{ task: "Read-only: analyze the implementation" }] } }, h.ctx(project));
+	expect((readOnlyResult as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
 });
 
 describe("BRIEFREPOWORD1 pasted brief text never names a target", () => {
@@ -2177,62 +1555,6 @@ describe("BRIEFREPOWORD1 pasted brief text never names a target", () => {
 	});
 });
 
-describe("PRIORSPAWN1 spawn-time prior-art gate", () => {
-	const id = "ompkit-fp72.120.16.190";
-	const setup = async (comments: unknown[] | "unreadable") => {
-		const project = freshDir(base, "priorspawn-");
-		const execute: Responder = async call => {
-			if (call.command === "br") {
-				if (comments === "unreadable") return { code: 1, stdout: "", stderr: "database is locked" };
-				return { code: 0, stdout: JSON.stringify([{ id: call.args[1], status: "open", assignee: null, issue_type: "bug", created_by: "Lead", comments }]), stderr: "" };
-			}
-			const result = await runFixtureAsync([call.command, ...call.args], { cwd: call.options?.cwd ?? project, env: { ...process.env, GIT_CEILING_DIRECTORIES: base, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
-			return { code: result.rc ?? 1, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
-		};
-		expect((await execute({ command: "git", args: ["init", "-q", "--template=", project] })).code).toBe(0);
-		const h = await createFlywheelHost(base, { respond: execute });
-		const spawn = async (task: string) => {
-			const [verdict] = await h.emit("tool_call", { toolCallId: `ps-${freshSeq++}`, toolName: "task", input: { context: `Repo: ${project}`, tasks: [{ task }] } }, h.ctx(project));
-			return verdict as FlywheelToolCallResult | undefined;
-		};
-		return { spawn, h };
-	};
-	const build = `# Target\nBead ${id}. These paths are reserved for you: src/x.ts.\n# Change\nFix the bug.`;
-
-	test("PRIORSPAWN1 planted: a build brief whose bead has no prior= comment is refused with the fix command", async () => {
-		const { spawn } = await setup([{ author: "Lead", text: "started", created_at: "2026-11-04T00:00:00Z" }]);
-		const verdict = await spawn(build);
-		const reason = String(verdict?.reason ?? "");
-		expect(verdict?.block).toBe(true);
-		expect(reason).toContain(`PRIOR_ART_SPAWN_REFUSED: build task names ${id}`);
-		expect(reason).toContain(`br comment add ${id} "prior=`);
-	});
-
-	test("PRIORSPAWN1 control: the same brief with a valid prior= comment is admitted", async () => {
-		const { spawn } = await setup([{ author: "Lead", text: "prior=src/brief.ts:189 did=checks briefs applied=spawn gate", created_at: "2026-11-04T00:00:00Z" }]);
-		expect((await spawn(build))?.block).not.toBe(true);
-	});
-
-	test("PRIORSPAWN1 control: a verify-only brief is admitted without a tracker read", async () => {
-		const { spawn, h } = await setup([]);
-		expect((await spawn(`no-edit: verify\n# Target\nBead ${id}. Replay acceptance.\n# Change\nNone`))?.block).not.toBe(true);
-		expect(h.execs.filter(call => call.command === "br")).toEqual([]);
-	});
-
-	test("PRIORSPAWN1 planted: an unreadable tracker is refused, never admitted", async () => {
-		const { spawn } = await setup("unreadable");
-		expect(await spawn(build)).toMatchObject({ block: true, reason: expect.stringContaining("tracker read failed") });
-	});
-
-	test("PRIORSPAWN1 bead-id pattern: dotted ids match, path and word tokens do not, long near-miss is bounded", async () => {
-		const { spawn, h } = await setup([]);
-		await spawn(`# Change\nedit extensions/kit-flywheel-guard.ts and omp-kit-companion; utf-8 only.`);
-		expect(h.execs.filter(call => call.command === "br")).toEqual([]);
-		const started = performance.now();
-		await spawn(`# Change\n${"a1-".repeat(20_000)}x`);
-		expect(performance.now() - started).toBeLessThan(2000);
-	});
-});
 
 test("BRIEFCONTRACT1 parent's task-result hook refuses DONE without preflight, admits clean evidence and analysis controls", async () => {
 	const h = await createFlywheelHost(base);
@@ -2461,4 +1783,91 @@ describe("AGENTMODEL1 native final-policy boundary", () => {
 		expect((await finalPolicy(OPUS, { role: "builder" }))?.block).not.toBe(true);
 		expect((await finalPolicy(OPUS, { subagent: true }))?.block).not.toBe(true);
 	});
+});
+
+describe("RETIREGUARD1 legitimate work", () => {
+	for (const name of ["SilverCondor", "JadeThrush", "RusticPine", "PeachLeopard"]) {
+		test(`human questions: ${name} may request explicit human authority`, async () => {
+			const { result } = await askSeat(name, undefined, true, withDefault, "goal");
+			expect(result?.block).not.toBe(true);
+		});
+	}
+	test("flat work selection: unpinned repair survives an unreadable cut, not unreadable custody", async () => {
+		const f = await cutFixture();
+		expect(await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim")).toBeUndefined();
+		writeFileSync(f.config, "{broken");
+		expect(await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim")).toBeUndefined();
+		f.rows["k-2"]!.status = "blocked";
+		expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_REFUSED");
+		f.rows["k-2"]!.status = "open";
+		f.rows["k-2"]!.assignee = "Peer";
+		expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_REFUSED");
+		delete f.rows["k-2"];
+		expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_REFUSED");
+	});
+	test("gap prose: first comment and mail proceed with no scanner available", async () => {
+		const h = await createFlywheelHost(base, { respond: () => ({ code: 127, stdout: "", stderr: "scanner unavailable" }) });
+		expect(await toolCall(h, base, "br comments add kit-1 'the gate should say X; gap in output'")).toBeUndefined();
+		const [mail] = await h.emit("tool_call", { toolName: "write", input: {
+			path: "xd://mcp__mcp_agent_mail_send_message", content: JSON.stringify({ subject: "DONE gap in output" }),
+		} }, h.ctx(base));
+		expect(mail).toBeUndefined();
+		// Rewording the description cannot bypass acceptance replay.
+		expect((await toolCall(h, base, 'br close kit-1 --reason "gap fixed; acceptance not run"'))?.reason).toContain("NARROW_CLOSE_REFUSED");
+	});
+	test("owned job completion: main seat can collect native wait and bounded timers", async () => {
+		const h = await createFlywheelHost(base, { env: { AGENT_NAME: "Builder" } });
+		expect(await callAs(h, base, "wait-owned", "wait", {})).toEqual([undefined]);
+		expect(await bashInput(h, { command: "python3 scripts/idle_wait.py", timeout: 60 })).toBeUndefined();
+		expect(await bashInput(h, { command: "sleep 30", timeout: 60 })).toBeUndefined();
+		expect((await bashInput(h, { command: "while true; do sleep 1; done", timeout: 0 }))?.reason).toContain("FINITE_JOB_NO_DEADLINE");
+		const failed = await run([process.execPath, "-e", "process.exit(7)"], { deadline_s: 10, max_output_bytes: 1024 });
+		expect(failed.rc).toBe(7);
+	});
+	test("prior art is not a close password; incomplete acceptance still refuses", async () => {
+		const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Verifier" }, respond: brTable({
+			"kit-fix": { code: 0, stdout: JSON.stringify([{ id: "kit-fix", status: "in_review",
+				assignee: "Builder", created_by: "Filer", issue_type: "bug", comments: [] }]) },
+		}) });
+		expect(await toolCall(h, base, 'br close kit-fix --reason "bun test -> 8 passed"')).toBeUndefined();
+		expect((await toolCall(h, base, 'br close kit-fix --reason "acceptance not run"'))?.reason).toContain("NARROW_CLOSE_REFUSED");
+	});
+	test("bounded task context: authorized build launches without a citation password", async () => {
+		const project = stockRepo();
+		const h = await createFlywheelHost(base, { respond: call => call.command === "br"
+			? { code: 127, stdout: "", stderr: "tracker unavailable" }
+			: { code: 0, stdout: project, stderr: "" } });
+		const [verdict] = await h.emit("tool_call", { toolName: "task", input: {
+			context: `Repo: ${project}`,
+			tasks: [{ task: "# Target\nBead ompkit-abc1.1. These paths are reserved for you: src/x.ts.\n# Change\nFix the authorized bug.\n# Acceptance\nRun the consumer test." }],
+		} }, h.ctx(project));
+		expect((verdict as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
+	});
+});
+
+test("RETIREGUARD1 restored wait veto kills the owned-job PASS control", async () => {
+	const allocation = ownedTmp("retired-wait-mutant", { root: base });
+	try {
+		const preload = join(allocation.path, "restore-wait.ts");
+		writeFileSync(preload, `
+			Bun.plugin({ name: "restore-retired-wait-veto", setup(build) {
+				build.onLoad({ filter: /kit-flywheel-guard[.]ts$/ }, async ({ path }) => {
+					const source = await Bun.file(path).text();
+					const site = 'const guardVerdict = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> => {';
+					if (source.split(site).length !== 2) throw new Error("RESTORE_SITE_NOT_UNIQUE");
+					return { contents: source.replace(site, site + '\\nif (event.toolName === "wait" && admissionOwner(env) !== null) return { block: true, reason: "restored main-seat wait veto" };'), loader: "ts" };
+				});
+			} });
+		`);
+		const result = await run([process.execPath, "test", "--preload", preload, import.meta.path,
+			"-t", "owned job completion: main seat"], {
+			deadline_s: fixtureDeadlineS(30), max_output_bytes: 65536, cwd: import.meta.dir,
+			env: { ...process.env, TMPDIR: allocation.path },
+		});
+		expect(result.timed_out).toBe(false);
+		expect(result.rc).toBe(1);
+		const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
+		expect(output).toContain("restored main-seat wait veto");
+		expect(output).toContain("1 fail");
+	} finally { allocation.cleanup(); }
 });

@@ -50,7 +50,6 @@ function memberRules(member: string, source: string): BriefRule[] {
 	else if (member.includes("wallclock")) add("literal test fixture deadlines and unmeasured timing assertions", "use fixtureDeadlineS() from tests/cli/fixture-process.ts; measured product bounds name their p99 and headroom");
 	else if (member.includes("br-init")) add("unparseable tracker shell including heredocs inside command substitution", "use literal argv and description/acceptance files rather than a heredoc inside $(...)");
 	else if (member.includes("stale-worktree")) add("stale or foreign-bead landed-line deletion", "review each affected hunk and its landed commit/bead; restore unintended deletions; only an author-decided replacement may declare Supersedes (never automatic)");
-	else if (member.includes("gap-mention")) add("GAP_UNFILED: an unfiled gap in prose", "name the owning bead in each sentence or explicitly explain Gap-Bead: none (<reason>)");
 	else if (member.includes("pysafe")) add("unbounded Python reads/waits or dynamic shell strings", "use bounded kitlib process/file primitives and argv, not variable-built bash -c");
 	else if (member.includes("fresh-gate") || member.endsWith("/fresh-gate.sh")) {
 		if (source.includes("live coverage")) add("changed TTSR rules without live scenario coverage", "add fire plus quiet corpus rows and fire/near-miss tests/live/scenarios.json scenarios; update README rule count");
@@ -204,8 +203,6 @@ export async function briefCandidates(contract: BriefContract, paths: readonly s
 	} finally { allocation.cleanup(); }
 }
 
-/** PRIORSPAWN1: the brief contract teaches the prior-art step the spawn guard enforces. */
-export const BRIEF_PRIOR_ART_STEP = "[prior-art] Refuses: a build task naming a bead with no prior-art comment (PRIOR_ART_SPAWN_REFUSED). Comply: br comment add <id> \"prior=<repo path:line> did=<...> applied=<...>\" before spawning; a verification, diagnosis or replay brief starts with `no-edit: verify` or `no-edit: diagnose`.";
 /**
  * SCRATCHNULL1 (ompkit-fp72.120.16.194): `jq -r .data.dir` on a refused `scratch new` yields the path `null`; teach the
  * fail-closed form. PRINTDIRCAP1 (ompkit-fp72.120.16.240): the taught form also keeps the release capability in an
@@ -218,7 +215,7 @@ export const BRIEF_SCRATCH_STEP = "[scratch] Hazard: a refused `scratch new` pip
 
 export function renderBrief(contract: BriefContract, candidates: readonly BriefCandidate[] = []): string {
 	return [`Gate contract: ${contract.repo}`, ...contract.rules.map(rule => `[${rule.member}] Refuses: ${rule.refuses}. Comply: ${rule.compliant}.`),
-		BRIEF_PRIOR_ART_STEP, BRIEF_SCRATCH_STEP,
+		BRIEF_SCRATCH_STEP,
 		...candidates.map(row => `${row.review} ${row.path}:${row.line}\n${row.hunk}`), contract.marker].join("\n");
 }
 

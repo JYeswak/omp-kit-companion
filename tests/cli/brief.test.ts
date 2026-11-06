@@ -1,7 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { BRIEF_WINDOW_MINUTES, briefCandidates, briefContract, checkTaskBrief, GENERIC_COMPLY, renderBrief, type BriefExec } from "../../src/brief.ts";
+import { BRIEF_WINDOW_MINUTES, briefCandidates, briefContract, checkTaskBrief, GENERIC_COMPLY, renderBrief } from "../../src/brief.ts";
+import type { BriefExec } from "../../src/brief.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 
@@ -51,14 +52,14 @@ test("BRIEFSTABLE1 brief derives required rules from installed members and sourc
 	await git(repo, "commit", "-qm", "land checks\n\nBead: fixture-checks");
 	const commit = join(repo, ".git/hooks/hooks.d/commit-msg");
 	mkdirSync(commit);
-	for (const [name, file] of [["49-omp-kit-stale-worktree", "check-stale-worktree.sh"], ["47-omp-kit-gap-mention", "check-gap-mention.sh"]]) {
+	for (const [name, file] of [["49-omp-kit-stale-worktree", "check-stale-worktree.sh"]]) {
 		const path = join(commit, name!);
 		writeFileSync(path, readFileSync(join(source, "scripts", file!)));
 		chmodSync(path, 0o755);
 	}
 	const contract = await briefContract(repo, execute);
 	const text = renderBrief(contract);
-	for (const requirement of ["runFixtureAsync", "ownedTmp", "fixtureDeadlineS", "br-init", "schema-compat", "Supersedes", "GAP_UNFILED", "live scenario coverage", "exports are read-only", "changelog.d/<bead-without-ompkit-prefix>", "commit-preflight.sh --files", "--tests <changed test files>"]) expect(text).toContain(requirement);
+	for (const requirement of ["runFixtureAsync", "ownedTmp", "fixtureDeadlineS", "br-init", "schema-compat", "Supersedes", "live scenario coverage", "exports are read-only", "changelog.d/<bead-without-ompkit-prefix>", "commit-preflight.sh --files", "--tests <changed test files>"]) expect(text).toContain(requirement);
 	expect(contract.rules.every(rule => rule.member.length > 0 && rule.refuses.length > 0 && rule.compliant.length > 0)).toBe(true);
 	expect(contract.installed).toBe(true);
 	expect(text.split("\n").at(-1)).toBe(contract.marker);

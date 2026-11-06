@@ -4,7 +4,6 @@ import { closeSync, constants, existsSync, fsyncSync, linkSync, lstatSync, mkdir
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run as runBounded } from "../src/kitlib/run.ts";
-import type { FlywheelExec } from "../extensions/kit-flywheel-guard.ts";
 import { RELEASE_BINARY_NAME, RELEASE_MANIFEST_NAME, validateReleaseManifest } from "../src/kit-release.ts";
 import type { ReleaseAsset } from "../src/kit-release.ts";
 import { RELEASE_DATA_FILES } from "../src/release-assets.ts";
@@ -34,7 +33,7 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 	"scripts/br-create-guard.py",
 	"scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py", "scripts/fresh-gate.sh",
 	"scripts/suite-metrics.py", "scripts/suite-hermetic-env.sh", "scripts/suite-lease.sh",
-	"scripts/check-gap-mention.sh", "scripts/kitlib-findings.sh",
+	"scripts/kitlib-findings.sh",
 	"scripts/kitlib_tmp.py", "scripts/kitlib-tmp.sh", "scripts/kitlib-proc.sh", "scripts/kitlib-shimpath.sh", "scripts/kitlib_lock.py", "scripts/kitlib_io.py", "scripts/kitlib_proc.py", "scripts/kitlib_jsonl.py", "scripts/kitlib_poll.py", "scripts/kitlib_artifact.py", "scripts/tempsafe_check.py", "scripts/check-staged-tempsafe.sh",
 	"scripts/gate_event_replay.py", "scripts/cc-credential-shapes.v1.json", "scripts/secret-output-policy.v1.json",
 	"scripts/test-budget.ts", "scripts/gate-ci-only.tsv", ".github/test-budget.json",
@@ -42,7 +41,7 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 	"scripts/kitlib-ratchet-signal-baseline.json",
 	"scripts/check-commit-kitlib-reversal.sh", "scripts/native-br-preserve.py",
 	"scripts/br_init_check.py", "scripts/check-staged-br-init.sh",
-	"scripts/sources.py", "scripts/check-staged-sources.sh", "docs/sources.md",
+	"scripts/sources.py", "docs/sources.md",
 	"scripts/bead_lint.py", "scripts/ac_phase.py", "scripts/br_create_guard_core.py", "scripts/br-create-lint.py", "scripts/br-update-lint.py", "scripts/box-lint.ts",
 	"scripts/tern-docs-census.py", "scripts/tern-script-routes.json",
 	"docs/tern-integration.md", "docs/tern-verb-map.md", "docs/tern-coverage.tsv",
@@ -358,46 +357,9 @@ export async function checkPackagedScriptDependencies(stagedRoot: string): Promi
 			}
 		}
 	}
-	if (failures.length > 0) return failures;
-	const probe = await runBounded([process.execPath, "-e",
-		`import { probePackagedGapConsumer } from ${JSON.stringify(import.meta.url)}; await probePackagedGapConsumer(${JSON.stringify(stagedRoot)});`],
-		{ cwd: stagedRoot, deadline_s: 30 });
-	if (probe.rc !== 0 || probe.timed_out || probe.truncated) {
-		const decoder = new TextDecoder();
-		const detail = `${decoder.decode(probe.stdout)}${decoder.decode(probe.stderr)}`.trim();
-		failures.push({ file: "extensions/kit-flywheel-guard.ts",
-			error: detail.slice(0, 1000) || `CONSUMER_EXIT_${probe.rc}` });
-	}
 	return failures;
 }
 
-/** Runs in a fresh child so archive module identity/cache cannot fall back to the checkout. */
-export async function probePackagedGapConsumer(stagedRoot: string): Promise<void> {
-	// The module is genuinely runtime-selected from the candidate archive.
-	const { checkGapMentions } = await import(pathToFileURL(join(stagedRoot, "extensions/kit-flywheel-guard.ts")).href);
-	if (typeof checkGapMentions !== "function") throw new Error("GAP_CONSUMER_MISSING");
-	const decoder = new TextDecoder();
-	const exec: FlywheelExec = async (command, args, options) => {
-		const result = await runBounded([command, ...args], {
-			cwd: options?.cwd, deadline_s: (options?.timeout ?? 15000) / 1000,
-		});
-		if (result.truncated) throw new Error("CONSUMER_EXEC_OUTPUT_TRUNCATED");
-		return { code: result.rc ?? 1, killed: result.killed,
-			stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
-	};
-	for (const kind of ["comment", "mail"]) {
-		const event = (text: string) => kind === "comment"
-			? { toolName: "bash", input: { command: `br comments add ompkit-ab12c '${text}'` } }
-			: { toolName: "write", input: { path: "xd://mcp__mcp_agent_mail_send_message",
-				content: JSON.stringify({ subject: `DONE ${text}` }) } };
-		const valid = await checkGapMentions(event("the gate should say X for ompkit-ab12c"), exec, stagedRoot);
-		if (valid?.block) throw new Error(`CITED_${kind}_REFUSED: ${valid.reason}`);
-		const invalid = await checkGapMentions(event("the gate should say X"), exec, stagedRoot);
-		if (invalid?.block !== true || !invalid.reason.includes("GAP_UNFILED"))
-			throw new Error(`UNFILED_${kind}_NOT_REFUSED`);
-		console.log(JSON.stringify({ at: new Date().toISOString(), consumer: kind, cited: "allowed", unfiled: "refused" }));
-	}
-}
 
 /** Never publish a standalone installer whose generated runner predates canonical source. */
 export async function checkInstallerBootstrap(sourceRoot: string): Promise<void> {

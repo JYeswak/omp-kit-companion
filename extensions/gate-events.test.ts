@@ -29,17 +29,17 @@ test("gateFromReason: JSON code, prose code, and the guard name as fallback", ()
 	expect(gateFromReason(JSON.stringify({ guard: "kit-flywheel-guard" }))).toBe("kit-flywheel-guard");
 });
 
-test("gateFromReason planted (KEEPALIVE2a): a refusal led by the constraint line keeps its line-2 header's code", () => {
-	const waitRefusal = [
+test("gateFromReason: a prefixed refusal preserves its own code within three lines", () => {
+	const refusal = [
 		"CONSTRAINT full-suite wall 900/600 clearing=fx-1 holder=FixtureBuilder",
-		"kit-flywheel-guard WAIT_REFUSED: CopperTrout may not block its turn on its own background work (BGWAIT1): this call uses the `wait` tool.",
-		"If your next action does not move this line ... send one NO-WORK line to your director and end the turn.",
+		"kit-flywheel-guard CLAIM_REFUSED: peer retains custody.",
+		"Choose ready work without taking peer bytes.",
 	].join("\n");
-	expect(gateFromReason(waitRefusal)).toBe("WAIT_REFUSED");
-	expect(gateFromReason(`CONSTRAINT none declarer=Lead\nkit-flywheel-guard NO_WAIT_REFUSED: x`)).toBe("NO_WAIT_REFUSED");
+	expect(gateFromReason(refusal)).toBe("CLAIM_REFUSED");
+	expect(gateFromReason(`CONSTRAINT none declarer=Lead\nkit-flywheel-guard SELF_CLOSE_REFUSED: x`)).toBe("SELF_CLOSE_REFUSED");
 	expect(gateFromReason(`CONSTRAINT none declarer=Lead\nNo valid constraint.\n[kit-agent-mail-guard] AM_IDENTITY_MISMATCH: y`)).toBe("AM_IDENTITY_MISMATCH");
-	// Bounded: a header quoted past line 3 is not the refusal's own, so the first token stands.
-	expect(gateFromReason("CONSTRAINT x\na\nb\nkit-flywheel-guard WAIT_REFUSED: quoted")).toBe("CONSTRAINT");
+	// A quoted header beyond line three is not the refusal's own.
+	expect(gateFromReason("CONSTRAINT x\na\nb\nkit-flywheel-guard CLAIM_REFUSED: quoted")).toBe("CONSTRAINT");
 	// Linear on a long multi-line near-miss: only three lines are split and matched.
 	const nearMiss = `kit-flywheel-guard ${"a".repeat(50_000)}\n`.repeat(200);
 	const t0 = performance.now();
