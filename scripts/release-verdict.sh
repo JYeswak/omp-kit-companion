@@ -34,6 +34,14 @@
 # Exit: the verdict runner's status (0 PASS), else the ci-only step's when the runner passed; 0 when
 # another run will cover the commit, 2 usage, 75 when the suite lease refuses (queue full, wait bound).
 set -eu
+# Pin before the first Git/Python/tool lookup, including the private-copy bootstrap.
+rv_root=${RELEASE_VERDICT_ROOT:-$(CDPATH='' cd -- "$(/usr/bin/dirname "$0")/.." && pwd -P)}
+# shellcheck source=scripts/fixed-env.sh
+. "$rv_root/scripts/fixed-env.sh"
+if [ "${1:-}" = --check-env ]; then
+	cd "$rv_root/scripts"
+	exec python3 -B -m suite-metrics runtime-environment
+fi
 # Run from a private copy (ompkit-6xxhu): a running sh reads its script as it goes, so a commit that
 # rewrites this file while a verdict runs (e78aa29091 did, 2026-11-01) would feed the live run new bytes
 # at old offsets. exec keeps the pid, so the lock still names this process; the copy unlinks itself

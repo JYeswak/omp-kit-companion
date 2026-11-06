@@ -46,6 +46,9 @@
 # Exit: 0 installed/released (or dry run complete), 2 usage, 4 refused (a prepare may already be published).
 # bash only, never `sh`: macOS /bin/sh is bash in POSIX mode, which runs the early stages, then aborts on the process
 # substitution at the sign stage with no failing command, so the EXIT trap re-exited 0 (2026-10-22 lead run of 0.2.73).
+ROOT="$(cd "$(/usr/bin/dirname "$0")/.." && pwd -P)"
+# shellcheck source=scripts/fixed-env.sh
+. "$ROOT/scripts/fixed-env.sh"
 if [ -z "${BASH_VERSION:-}" ] || (set -o | grep -q '^posix[[:space:]]*on'); then
 	echo "release-local: run it with bash (./scripts/release-local.sh), not sh" >&2
 	exit 2
@@ -53,7 +56,11 @@ fi
 set -euo pipefail
 
 REPO="${OMP_KIT_REPO:-JYeswak/omp-kit-companion}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# Read-only probe exercises the same bootstrap as an actual cut, before any mutation.
+if [ "${1:-}" = --check-env ]; then
+	cd "$ROOT/scripts"
+	exec python3 -B -m suite-metrics runtime-environment
+fi
 SHIP=(darwin-arm64-none linux-arm64-gnu linux-x64-gnu)
 AUTHORITY='Developer ID Application: Joshua Nowak (XGL9CXRCT5)'
 NOTARY_PROFILE="${OMP_KIT_NOTARY_PROFILE:-omp-kit-notary}"
@@ -597,8 +604,8 @@ esac
 verdict_mismatch() {
 	case "$1" in PASS | RUNTIME_MISMATCH*) ;; *) return 0 ;; esac
 	case "$2" in PASS | RUNTIME_MISMATCH*) ;; *) return 0 ;; esac
-	case "$1" in RUNTIME_MISMATCH*) die "$1 (main verdict of prepare $SOURCE; rerun release-local under the PATH that judged it)" ;; esac
-	case "$2" in RUNTIME_MISMATCH*) die "$2 (ci-only verdict of prepare $SOURCE; rerun release-local under the PATH that judged it)" ;; esac
+	case "$1" in RUNTIME_MISMATCH*) die "$1 (main verdict of prepare $SOURCE; requalify with the pinned kit environment)" ;; esac
+	case "$2" in RUNTIME_MISMATCH*) die "$2 (ci-only verdict of prepare $SOURCE; requalify with the pinned kit environment)" ;; esac
 }
 verdict_mismatch "$main_result" "$ci_result"
 substep ''

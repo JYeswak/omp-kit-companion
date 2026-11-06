@@ -15,7 +15,9 @@ if [ "${GIT_DIR+x}" = x ]; then echo "FRESH-GATE: REFUSED caller GIT_DIR is set"
 if [ "${GIT_WORK_TREE+x}" = x ]; then echo "FRESH-GATE: REFUSED caller GIT_WORK_TREE is set" >&2; exit 1; fi
 if [ "${BEADS_DB+x}" = x ]; then echo "FRESH-GATE: REFUSED caller BEADS_DB is set" >&2; exit 1; fi
 
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
+# shellcheck source=scripts/fixed-env.sh
+. "$SCRIPT_DIR/fixed-env.sh"
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)
 COMMIT=HEAD
 BASE=

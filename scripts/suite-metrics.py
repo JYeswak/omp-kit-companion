@@ -32,6 +32,7 @@ JUDGING_FILES = (
     "scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py",
     "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
     "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
+    "scripts/fixed-env.sh",
     "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/kitlib-proc.sh", "scripts/kitlib-shimpath.sh",
     # SUITESERIAL1 (ompkit-fp72.120.16.264): the suite lease the runner takes and the kitlib lock and process
     # identity it uses, so land's archived judge carries them and a lease change never reuses a verdict.
@@ -73,6 +74,12 @@ def runtime_parts() -> tuple[str, dict[str, str]]:
     git_exec_path = git_exec.stdout.decode("utf-8", errors="strict").strip()
     if not git_exec_path:
         raise ValueError("git exec path is empty")
+    python = run(["python3", "--version"], deadline_s=10)
+    if python.rc != 0 or python.timed_out or python.truncated:
+        raise ValueError("python3 version is unavailable or incomplete")
+    python_version = python.stdout.decode("utf-8", errors="strict").strip().removeprefix("Python ")
+    if not python_version:
+        raise ValueError("python3 version is empty")
     search_path = os.environ.get("PATH", "")
     path_parts = search_path.split(os.pathsep)
     # Git prepends its exec directory to PATH for hooks, once per nested git
@@ -87,10 +94,11 @@ def runtime_parts() -> tuple[str, dict[str, str]]:
         "FULL_SUITE_TIMEOUT_SECS": os.environ.get("FULL_SUITE_TIMEOUT_SECS", "1800"),
         "GIT_EXEC_PATH": git_exec_path,
         "LANG": os.environ.get("LANG", "C"),
+        "LC_ALL": os.environ.get("LC_ALL", ""),
         "PATH": search_path,
     }
     return (f"{platform.system()}/{platform.machine()}/bun-{bun_version}"
-            f"/python-{sys.version.split()[0]}"), environment
+            f"/python-{python_version}"), environment
 
 
 def environment_digest(environment: dict[str, str]) -> str:
@@ -103,6 +111,22 @@ def runtime_identity() -> str:
     """Bind executable versions and the environment inputs admitted to the full-suite runner."""
     prefix, environment = runtime_parts()
     return f"{prefix}/env-{environment_digest(environment)}"
+
+
+def pin_runtime() -> None:
+    """Use the shell policy even for direct Python verdict-store invocations."""
+    policy = Path(__file__).resolve().with_name("fixed-env.sh")
+    result = run(["/bin/sh", "-c", '. "$1"; exec env -0', "fixed-env", str(policy)], deadline_s=10)
+    if result.rc != 0 or result.timed_out or result.truncated:
+        raise ValueError("pinned runtime environment is unavailable")
+    selected = {}
+    for item in result.stdout.decode("utf-8", errors="strict").split("\0"):
+        key, separator, value = item.partition("=")
+        if separator and key in ("PATH", "LANG", "LC_ALL"):
+            selected[key] = value
+    if set(selected) != {"PATH", "LANG", "LC_ALL"}:
+        raise ValueError("pinned runtime environment is incomplete")
+    os.environ.update(selected)
 
 
 def hex_digest(value: object, length: int = 64) -> bool:
@@ -523,6 +547,7 @@ def main() -> int:
     identity.add_argument("--root", required=True)
     identity.add_argument("--scope", choices=("full", "focused"), required=True)
     subs.add_parser("runtime")
+    subs.add_parser("runtime-environment", help="Print the judged runtime and its admitted environment")
     subs.add_parser("judging-files", help="Print the canonical judged-file closure, one repository-relative path per line")
     copies = subs.add_parser("check-judging-copies", help="Reject fixture-local literal copies of the judged-file closure")
     copies.add_argument("paths", nargs="+")
@@ -571,7 +596,14 @@ def main() -> int:
             print(judge_identity(args.root, args.scope))
             return 0
         if args.action == "runtime":
+            pin_runtime()
             print(runtime_identity())
+            return 0
+        if args.action == "runtime-environment":
+            pin_runtime()
+            prefix, environment = runtime_parts()
+            print(json.dumps({"runtime": f"{prefix}/env-{environment_digest(environment)}",
+                              "environment": environment}, sort_keys=True))
             return 0
         if args.action == "run":
             if args.parent_fd is not None:

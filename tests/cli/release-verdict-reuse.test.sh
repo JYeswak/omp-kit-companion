@@ -89,6 +89,9 @@ cat >"$seed/docs/releases/v0.2.83.md" <<'EOF'
 ## 4. Error budget
 Synthetic fixture only; no production claim.
 EOF
+# Pin synthetic tools in the fixture's own policy so the caller cannot select them.
+# shellcheck disable=SC2016 # expand PATH when the fixture policy is sourced
+printf '\nPATH="%s:$PATH"\nexport PATH\n' "$TMP/fake-bin" >>"$seed/scripts/fixed-env.sh"
 git -C "$seed" add -A
 git -C "$seed" commit -qm '[test] VERDICTID1 checkout fixture'
 source_sha=$(git -C "$seed" rev-parse HEAD)

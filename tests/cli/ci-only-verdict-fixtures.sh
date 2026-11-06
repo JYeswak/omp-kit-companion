@@ -17,6 +17,9 @@ cio_fixture() {
 		cp "$KITREPO/$cio_path" "$cio_repo/$cio_path" || return 1
 	done
 	cp "${CIO_STORE_UNDER_TEST:-$KITREPO/scripts/full-suite-verdict-store.py}" "$cio_repo/scripts/full-suite-verdict-store.py" || return 1
+	# Fixture tools are part of this committed judge policy, not a caller PATH override.
+	# shellcheck disable=SC2016 # expand PATH when the fixture policy is sourced
+	printf '\nPATH="%s:$PATH"\nexport PATH\n' "${cio_repo%/*}/bin" >>"$cio_repo/scripts/fixed-env.sh"
 	# shellcheck disable=SC2016 # the stub's own $1, expanded when it runs
 	printf '#!/bin/sh\ncase "${1:-}" in --test-workers) printf "1\\n" ;; *) exit 0 ;; esac\n' >"$cio_repo/scripts/fresh-gate.sh"
 	printf '#!/bin/sh\nexit 0\n' >"$cio_repo/scripts/full-suite-verdict.sh"

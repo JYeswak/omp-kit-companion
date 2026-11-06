@@ -459,6 +459,15 @@ def validate_minimum_report(report: object, files: list[dict], wall_ms: object,
     return expected
 
 
+def validate_runtime_environment(environment: object, runtime: str) -> None:
+    metrics = load_metrics(Path(__file__).resolve().parent.parent)
+    if (not isinstance(environment, dict) or not isinstance(environment.get("PATH"), str)
+            or not all(isinstance(key, str) and isinstance(value, str) for key, value in environment.items())
+            or not runtime.endswith("/env-" + metrics.environment_digest(environment))):
+        raise ValueError("record environment differs from its runtime")
+
+
+
 def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, role: str | None = None,
                     checks: str | None = None, runtime: str | None = None,
                     suite_root: Path | None = None, repo: Path | None = None,
@@ -478,6 +487,8 @@ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, ro
                 or not isinstance(entry_runtime, str) or not entry_runtime):
             raise ValueError("record identity is incomplete")
         normalized_identity(entry_tree, entry_role, entry_checks, entry_runtime)
+        if "environment" in entry:
+            validate_runtime_environment(entry["environment"], entry_runtime)
         judge = entry.get("judge")
         if (not isinstance(judge, dict) or judge.get("role") != entry_role
                 or judge.get("checks_sha256") != entry_checks or judge.get("runtime") != entry_runtime):
@@ -741,7 +752,7 @@ CI_ONLY_GITHUB_ONLY = {
 CI_ONLY_BUN_ARGS = ("test", "--timeout=120000")
 CI_ONLY_ENV = (("OMP_KIT_HEAVY_MAX_WAIT_S", "180"), ("OMP_KIT_DISK_OBSERVER", "statfs"))
 CI_ONLY_KEYS = frozenset(("version", "kind", "tree", "commit", "checks", "runtime", "spec", "verdict", "files",
-                          "log_sha256", "finished_ms"))
+                          "environment", "log_sha256", "finished_ms"))
 CI_ONLY_FILE_KEYS = frozenset(("path", "timeout_s", "rc", "timed_out", "duration_ms"))
 CI_ONLY_OUTPUT_BYTES = 4 << 20
 CI_ONLY_TIMEOUT_RC = 124  # the coreutils `timeout` status release-local's runs report
@@ -806,6 +817,7 @@ def validate_ci_only_record(path: Path, *, tree: str, checks: str, runtime: str)
             raise ValueError("ci-only record schema is invalid")
         if entry["tree"] != tree or entry["checks"] != checks or entry["runtime"] != runtime:
             raise ValueError("ci-only record identity differs")
+        validate_runtime_environment(entry["environment"], runtime)
         if path.name != ci_only_key(tree, checks, runtime) + ".json":
             raise ValueError("ci-only record filename does not match its identity")
         if not valid_hex(entry["commit"], (40, 64)) or entry["spec"] != ci_only_spec():
@@ -941,6 +953,7 @@ def run_ci_only(repo: Path, commit: str, *, judge_root: Path, suite_root: Path, 
         log += f"=== {row['path']} stdout\n".encode("utf-8") + stdout + f"\n=== {row['path']} stderr\n".encode("utf-8") + stderr + b"\n"
     entry = {"version": 1, "kind": "ci-only", "tree": tree, "commit": commit, "checks": checks, "runtime": runtime,
              "spec": ci_only_spec(), "verdict": verdict, "files": rows,
+             "environment": load_metrics(judge_root).runtime_parts()[1],
              "log_sha256": hashlib.sha256(log).hexdigest(), "finished_ms": int(time.time() * 1000)}
     if evidence.is_symlink() or evidence.is_file():
         evidence.unlink()
@@ -1167,4 +1180,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    load_metrics(Path(__file__).resolve().parent.parent).pin_runtime()
     raise SystemExit(main())

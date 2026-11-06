@@ -41,7 +41,9 @@
 # lists scripts/suite-lease.sh refuses when it is missing.
 set -eu
 umask 077
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
+# shellcheck source=scripts/fixed-env.sh
+. "$SCRIPT_DIR/fixed-env.sh"
 # shellcheck source=scripts/kitlib-proc.sh
 . "$SCRIPT_DIR/kitlib-proc.sh"
 run_started_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
@@ -98,7 +100,7 @@ if [ -n "$shim_br" ]; then
 	esac
 fi
 if [ "$CHECK_ENV" = 1 ]; then
-	echo "FULL_SUITE_ENV: ok (br=${shim_br:-absent})"
+	(cd "$SCRIPT_DIR" && python3 -B -m suite-metrics runtime-environment)
 	exit 0
 fi
 if [ -z "$ROOT" ] || [ -z "$COMMIT" ]; then
@@ -153,6 +155,8 @@ checks=$(python3 "$SCRIPT_DIR/suite-metrics.py" identity --root "$SCRIPT_DIR/.."
 runtime=$(python3 "$SCRIPT_DIR/suite-metrics.py" runtime) || {
 	fail "the complete judging runtime identity is unreadable"; exit 1;
 }
+RUNTIME_ENVIRONMENT=$(cd "$SCRIPT_DIR" && python3 -B -m suite-metrics runtime-environment) || exit 1
+export RUNTIME_ENVIRONMENT
 if [ -z "$CACHE_DIR" ]; then CACHE_DIR=${FULL_SUITE_VERDICT_CACHE_DIR:-}; fi
 # An explicit store is an isolated one (tests, fixtures); its suite lease lives beside it (suite-lease.sh).
 STORE_OVERRIDE=$CACHE_DIR
@@ -856,6 +860,7 @@ finish_logs "$log_entry"
 write_complete_verdict() {
 MINIMUM_RUN="$minimum_run" METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" python3 - <<'PYEOF'
 import hashlib, json, math, os
+environment = json.loads(os.environ["RUNTIME_ENVIRONMENT"])["environment"]
 log_digest = hashlib.sha256()
 with open(os.environ["LOG"], "rb") as log:
     for chunk in iter(lambda: log.read(1024 * 1024), b""):
@@ -892,6 +897,7 @@ entry = {
     "judge_role": os.environ["ROLE"],
     "checks": os.environ["CHECKS"],
     "runtime": os.environ["RUNTIME"],
+    "environment": environment,
     "verdict": os.environ["VERDICT"],
     "exit_code": int(os.environ["CODE"]),
     "judge": {"role": os.environ["ROLE"], "checks_sha256": os.environ["CHECKS"], "runtime": os.environ["RUNTIME"]},
