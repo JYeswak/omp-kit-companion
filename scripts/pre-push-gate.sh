@@ -356,6 +356,7 @@ while IFS= read -r gate_path; do
 	case "$gate_path" in
 		src/*|tests/*|bin/*|bunfig.toml|tsconfig.json|package.json|\
 		scripts/pre-push-gate.sh|scripts/fresh-gate.sh|scripts/check-*.sh|\
+		scripts/gate-wiring.py|.omp/gate-wiring.json|\
 		scripts/full-suite-verdict.sh|scripts/full-suite-verdict-store.py|\
 		scripts/suite-metrics.py|scripts/suite-hermetic-env.sh|scripts/suite-lease.sh|\
 		scripts/kitlib*|scripts/pysafe.py|scripts/tempsafe_check.py|scripts/br_init_check.py|\
@@ -380,6 +381,20 @@ if [ -n "${base_ref:-}" ]; then
 	base_archive="$base_root/tree"
 	git -C "$ROOT" archive "$base_ref" | tar -xf - -C "$base_archive" || { printf 'pre-push-gate: cannot extract base archive\n' >&2; exit 1; }
 	gate_scripts="$base_archive"
+fi
+# GATE1 item 6: audit candidate bytes with the base's checker and repo policy.
+# On first adoption only, the candidate supplies the checker/policy. Never read
+# these from the shared worktree, and never turn an absent checker into a pass.
+if [ -f "$gate_scripts/.omp/gate-wiring.json" ] || [ -f "$archive/.omp/gate-wiring.json" ]; then
+	wiring_scripts="$gate_scripts"
+	[ -f "$wiring_scripts/scripts/gate-wiring.py" ] || wiring_scripts="$archive"
+	if [ ! -f "$wiring_scripts/scripts/gate-wiring.py" ]; then
+		printf 'RED gate-wiring: configured audit checker missing\n' >&2
+		exit 1
+	fi
+	(cd "$wiring_scripts" && python3 -B scripts/gate-wiring.py --repo "$archive" --policy-root "$gate_scripts")
+else
+	printf 'SKIP gate-wiring: .omp/gate-wiring.json not configured; no wiring judgment\n'
 fi
 if [ -n "${base_ref:-}" ]; then
 	merge_base=$(git -C "$ROOT" merge-base "$local_sha" "$base_ref") || { printf 'pre-push-gate: cannot find merge base\n' >&2; exit 1; }
