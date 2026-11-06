@@ -27,8 +27,9 @@
 #     stale train finishing late cannot steal Latest from a newer release.
 #   wait-release-idle --repo R [--workflow release.yml] [--timeout SEC]
 #     Blocks until no in_progress/queued release.yml run remains, so two
-#     trains never dispatch overlapping releases. GH_BIN overrides the gh
-#     binary (test seam).
+#     trains never dispatch overlapping releases. Requires GH_TOKEN,
+#     GITHUB_TOKEN or an authenticated gh account. GH_BIN overrides the gh
+#     binary (test seam); missing credentials refuse before querying the lane.
 #   bump --version V --date YYYY-MM-DD [--repo DIR]
 #     The upstream oh-my-pi release commit (scripts/release.ts): fold
 #     changelog.d/ into CHANGELOG.md [Unreleased], promote it to
@@ -250,6 +251,11 @@ wait-release-idle)
 	done
 	[ -n "$repo" ] || { echo "wait-release-idle: --repo is required" >&2; exit 2; }
 	GH_BIN=${GH_BIN:-gh}
+	if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ] \
+		&& ! "$GH_BIN" auth status --active >/dev/null 2>&1; then
+		echo "wait-release-idle: REFUSED: missing-github-token (GH_TOKEN, GITHUB_TOKEN or gh auth login required)" >&2
+		exit 4
+	fi
 	deadline=$(($(date +%s) + timeout))
 	while :; do
 		in_progress=$("$GH_BIN" run list --repo "$repo" --workflow "$workflow" --status in_progress --json databaseId --jq 'length') \
