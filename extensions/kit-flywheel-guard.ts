@@ -3230,8 +3230,10 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 						const reason = taskModelRefusal(resolveTaskModels(event.input, inputs.agents, inputs.settings, parent));
 						if (reason) return { block: true, reason };
 					}
-				} catch {
-					return { block: true, reason: taskModelRefusal([{ index: 0, agent: "task", patterns: [], reason: "SPAWN_INPUTS_UNOBSERVABLE" }]) };
+				} catch (error) {
+					// ompkit-fp72.120.16.45: the swallowed cause hid an unresolvable OMP import; name it.
+					const cause = String((error as Error)?.message ?? error).slice(0, 600).replace(/\s+/g, " ").slice(0, 300);
+					return { block: true, reason: `${taskModelRefusal([{ index: 0, agent: "task", patterns: [], reason: "SPAWN_INPUTS_UNOBSERVABLE" }])}\ncause: ${cause}` };
 				}
 				const reason = await checkTaskBrief(event.input, ctx.cwd, pi.exec) ?? await checkPriorArtSpawn(event.input, ctx.cwd, pi.exec);
 				if (reason) return { block: true, reason };
