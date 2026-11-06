@@ -83,5 +83,88 @@ mv "$gate.off" "$gate"
 git -C "$repo" checkout -q -b side
 if (cd "$repo" && sh "$CHECK" "$msg" > "$TMP/out" 2>&1); then ok; else bad "side-branch: rc!=0"; fi
 
+
+# COMMITONCE1: exercise the real phase dispatcher, not a second selection table.
+# Phase bodies are bounded fixture checks here; staged-candidate smoke runs cover
+# the actual compiler/harness. An unrelated broken compiler must not block docs,
+# while a changed compiler input must still refuse with its original status.
+fresh_source=${FRESH_GATE_SOURCE:-$REPO/scripts/fresh-gate.sh}
+python3 - "$fresh_source" "$TMP/dispatch-functions.sh" <<'PY'
+import sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_text()
+functions = []
+for name in ("phase_needed", "run_step", "judge_budget", "run_gate"):
+    start = source.find("\n" + name + "() {")
+    if start < 0:
+        if name == "phase_needed":
+            continue  # Incumbent dispatcher has no selector; docs must fail below.
+        raise SystemExit("missing gate function: " + name)
+    end = source.index("\n}\n", start)
+    functions.append(source[start + 1:end + 3])
+Path(sys.argv[2]).write_text("".join(functions))
+PY
+cat > "$TMP/dispatch.sh" <<'EOF'
+set -eu
+. "$1"
+SCRIPT_DIR=$2
+WORK=$3
+CHANGED=$4
+COMMIT=fixture
+BASE=fixture-base
+disk_pressure_flag() { :; }
+record_run() { :; }
+gate_manifest() { echo manifest >>"$WORK/calls"; }
+gate_file_budget_policy() { echo file-budget-policy >>"$WORK/calls"; }
+gate_cli_compile() {
+	echo cli-compile >>"$WORK/calls"
+	[ ! -f "$WORK/BROKEN" ] || return 7
+}
+gate_cli_boot() { echo cli-boot >>"$WORK/calls"; }
+gate_harness() { echo harness-gate >>"$WORK/calls"; }
+gate_notes() { echo notes >>"$WORK/calls"; }
+gate_readme() { echo readme >>"$WORK/calls"; }
+gate_focused() { echo focused >>"$WORK/calls"; }
+run_gate
+EOF
+dispatch() {
+	mkdir -p "$TMP/dispatch-work"
+	: >"$TMP/dispatch-work/calls"
+	if sh "$TMP/dispatch.sh" "$TMP/dispatch-functions.sh" "$REPO/scripts" "$TMP/dispatch-work" "$1" >"$TMP/dispatch.out" 2>&1; then
+		dispatch_rc=0
+	else
+		dispatch_rc=$?
+	fi
+}
+all_phases='manifest file-budget-policy cli-compile cli-boot harness-gate notes readme focused'
+dispatch 'src/cli.ts'
+same "$dispatch_rc" 0 "code: passing control"
+same "$(paste -sd ' ' "$TMP/dispatch-work/calls")" "$all_phases" "code: ordered phases"
+printf 'broken compiler input\n' >"$TMP/dispatch-work/BROKEN"
+for path in docs/guide.md changelog.d/x-1.md; do
+	dispatch "$path"
+	same "$dispatch_rc" 0 "$path: unrelated broken compiler skipped"
+	same "$(paste -sd ' ' "$TMP/dispatch-work/calls")" 'notes focused' "$path: no broad runtime phases"
+done
+dispatch 'src/cli.ts'
+same "$dispatch_rc" 7 "code: planted broken read input refuses"
+same "$(paste -sd ' ' "$TMP/dispatch-work/calls")" 'manifest file-budget-policy cli-compile' "code: stop at first red"
+rm "$TMP/dispatch-work/BROKEN"
+for path in README.md rules/example.md cases/cases.tsv .github/test-budget.json tests/cli/example.test.ts; do
+	case "$path" in
+		README.md) expected='notes readme focused' ;;
+		rules/*) expected='manifest harness-gate notes readme focused' ;;
+		cases/*) expected='harness-gate notes focused' ;;
+		.github/test-budget.json) expected='file-budget-policy notes focused' ;;
+		tests/*) expected='notes focused' ;;
+	esac
+	dispatch "$path"
+	same "$dispatch_rc" 0 "$path: passing control"
+	same "$(paste -sd ' ' "$TMP/dispatch-work/calls")" "$expected" "$path: input-scoped phases"
+done
+# A mixed diff must take the union, not let its first docs path hide code.
+dispatch 'docs/guide.md
+src/cli.ts'
+same "$(paste -sd ' ' "$TMP/dispatch-work/calls")" "$all_phases" "mixed diff: code still judged"
 printf 'commit-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

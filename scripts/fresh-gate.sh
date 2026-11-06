@@ -1142,6 +1142,32 @@ fi
 # GATESCR1: the steps run in the background and this shell waits, because a POSIX shell defers a
 # trap until its foreground job ends; with a hung suite in the foreground, HUP/INT/TERM never ran
 # the handler. `wait` returns on the signal, so the handler stops the tree and removes WORK.
+# COMMITONCE1: broad phases need only their input trees. Keep executable
+# dependencies conservative: src/ includes heavy's transitive CLI imports;
+# scripts/ includes dynamically loaded helpers. Notes judge immutable commit
+# provenance, and focused discovers tests that directly read even a docs path,
+# so neither can be skipped from a directory name alone. Unknown/new phases and
+# an unscoped invocation run, rather than silently losing a check.
+phase_needed() {
+	case "$1" in
+		manifest|file-budget-policy|cli-compile|cli-boot|harness-gate|readme) ;;
+		*) return 0 ;;
+	esac
+	[ -n "$CHANGED" ] || return 0
+	for input_path in $CHANGED; do
+		case "$input_path" in
+			src/*|scripts/*|bin/*|bunfig.toml|tsconfig.json|package.json) return 0 ;;
+		esac
+		case "$1:$input_path" in
+			manifest:rules/*|manifest:rules-fleet/*|manifest:MANIFEST*.tsv|\
+			file-budget-policy:.github/test-budget.json|\
+			harness-gate:rules/*|harness-gate:cases/*|harness-gate:MANIFEST*.tsv|\
+			readme:README.md|readme:rules/*|readme:skills/*) return 0 ;;
+		esac
+	done
+	return 1
+}
+
 run_gate() {
 	gate_started_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
 	gate_load_start=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
@@ -1158,6 +1184,10 @@ run_gate() {
 	gate_rc=0
 	for phase in manifest:gate_manifest file-budget-policy:gate_file_budget_policy cli-compile:gate_cli_compile cli-boot:gate_cli_boot \
 		harness-gate:gate_harness notes:gate_notes readme:gate_readme focused:gate_focused; do
+		if ! phase_needed "${phase%%:*}"; then
+			echo "SKIP ${phase%%:*}: no changed input paths"
+			continue
+		fi
 		run_step "${phase%%:*}" "${phase#*:}" || { gate_rc=$?; break; }
 	done
 	elapsed=$(($(date +%s) - started))
