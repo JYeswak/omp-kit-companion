@@ -1,10 +1,12 @@
-import { execFile, type ExecFileException } from "node:child_process";
+import { execFile } from "node:child_process";
+import type { ExecFileException } from "node:child_process";
 import { constants } from "node:fs";
 import type { Stats } from "node:fs";
 import { promisify } from "node:util";
 import { open, realpath, lstat, readlink } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
-import { resolveFilesystemWriteTarget, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent } from "./scratch.ts";
+import { resolveFilesystemWriteTarget } from "./scratch.ts";
+import type { FleetGuardBlock, FleetGuardContext, FleetGuardEvent } from "./scratch.ts";
 import { pathToFileURL } from "node:url";
 import { resolveOmpIdentity } from "../paths.ts";
 import { parseOwnerFile } from "../scratch.ts";
@@ -261,6 +263,9 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 			if (segments.some(segment => segment.toLowerCase().includes("prompt") || segment.toLowerCase().startsWith("packet")) ||
 				segments.includes("skills") || (segments[segments.length - 2] === "rules" && physical.endsWith(".md")))
 				return refuse("instruction or packet artifact belongs in a repository home");
+			// Empty sentinels carry no source bytes; matching an empty tracked file
+			// is not copy evidence. Ownership, canonical paths and artifact checks still apply.
+			if (content === "") continue;
 			const hash = (await git(repo, ["hash-object", "--stdin", "--no-filters"], content)).trim();
 			if (!GIT_OBJECT_ID.test(hash)) return refuse("Git blob identity is unavailable");
 			if (blobs.has(hash)) return refuse("tracked-source-copy content matches the canonical Git index");

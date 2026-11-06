@@ -2,6 +2,7 @@ import { afterAll, afterEach, expect, test } from "bun:test";
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { check } from "../../src/fleet-guard/durability.ts";
+import { handleToolCall } from "../../extensions/fleet-guard.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 afterAll(cleanupAllOwnedTmp);
 
@@ -40,6 +41,35 @@ test("index-only source content blocks even a differently named scratch target w
 	expect(await check(event, f.context)).toBeUndefined();
 	f.index("src/canonical.ts", event.input.content);
 	expect((await check(event, f.context))?.reason).toContain("tracked-source-copy content");
+});
+
+test("DONEGUARD1: empty queue sentinels are not copies of indexed empty files", async () => {
+	const f = fixture();
+	f.index("src/__init__.py", "");
+	const path = join(f.scratch, "omp-workers", "queue", "worker", "DONE");
+	expect(await handleToolCall({ toolName: "write", input: { path, content: "" } }, f.context)).toBeUndefined();
+	// A sentinel name is not a bypass for real source bytes.
+	const source = "export const canonical = 1;\n";
+	f.index("src/canonical.ts", source);
+	expect((await handleToolCall({ toolName: "write", input: { path, content: source } }, f.context))?.reason)
+		.toContain("tracked-source-copy content");
+	expect((await handleToolCall({ toolName: "write", input: { path } }, f.context))?.reason)
+		.toContain("content cannot be established");
+});
+
+test("DONEGUARD1: materialized empty files do not turn empty writes into source copies", async () => {
+	const f = fixture();
+	const source = "export const canonical = 1;\n";
+	f.index("canonical.ts", source);
+	writeFileSync(join(f.repo, "canonical.ts"), "");
+	const path = join(f.scratch, "queue", "complete");
+	expect(await handleToolCall({ toolName: "write", input: { path, content: "" } }, f.context)).toBeUndefined();
+	// Path identity still proves a copy even when the payload is empty.
+	expect((await handleToolCall({ toolName: "write", input: { path: join(f.scratch, "canonical.ts"), content: "" } }, f.context))?.reason)
+		.toContain("tracked-source-copy path");
+	writeFileSync(join(f.repo, "canonical.ts"), "modified canonical source\n");
+	expect((await handleToolCall({ toolName: "write", input: { path, content: "modified canonical source\n" } }, f.context))?.reason)
+		.toContain("materialized canonical source");
 });
 test("SCRATCHFP1: nested synthetic src fixture stays quiet while byte-equal shadow copy fires", async () => {
 	const f = fixture();
