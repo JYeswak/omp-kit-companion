@@ -14,6 +14,8 @@
 //      Install snippets resolve the latest release at run time.
 //   3. The readme-update gate (skill readme-update, --profile product) passes when it is installed;
 //      the repo's own structural checks always run (CI has no skills directory).
+//   4. When policy/extensions.json is present, the marked default profile extension list
+//      names exactly that policy's extensions (not the separate package.json plugin inventory).
 //
 // Applicability (README APPLY1, ompkit-v66l.22.3). The staged-readme hook runs this checker in any repo with a README
 // obligation (check-staged-readme.sh: README.md or scripts/readme-check.ts in the index or HEAD), and CFS's README is
@@ -235,6 +237,33 @@ function releaseTagIn(repo: string): (version: string) => ReleaseTag {
 	};
 }
 
+/** The default profile selection is distinct from the plugin's package.json extension inventory. */
+function defaultExtensionFindings(readme: string, root: string): string[] {
+	const policyPath = join(root, "policy", "extensions.json");
+	if (!existsSync(policyPath)) {
+		console.log("NOT_APPLICABLE default-extensions: no policy/extensions.json");
+		return [];
+	}
+	const policy: unknown = JSON.parse(readFileSync(policyPath, "utf8"));
+	if (!policy || typeof policy !== "object" || !("extensions" in policy) || !Array.isArray(policy.extensions)
+		|| !policy.extensions.every((id: unknown) => typeof id === "string"))
+		usage(`${policyPath} must declare an extensions string array`);
+	const extensions: string[] = policy.extensions;
+	const startMarker = "<!-- default-extensions:start -->", endMarker = "<!-- default-extensions:end -->";
+	const start = readme.indexOf(startMarker), end = readme.indexOf(endMarker);
+	if (start < 0 || end < start)
+		return ["README.md has no marked default extension list (<!-- default-extensions:start --> … <!-- default-extensions:end -->)"];
+	const listed = readme.slice(start + startMarker.length, end).split("\n")
+		.map(line => line.trim()).filter(line => line.startsWith("- `") && line.endsWith("`"))
+		.map(line => line.slice(3, -1));
+	const findings: string[] = [];
+	for (const id of extensions)
+		if (!listed.includes(id)) findings.push(`README.md is missing default extension \`${id}\` (policy/extensions.json)`);
+	for (const id of listed)
+		if (!extensions.includes(id)) findings.push(`README.md lists non-default extension \`${id}\` (policy/extensions.json)`);
+	return findings;
+}
+
 async function main(argv: string[]): Promise<number> {
 	let root = resolve(import.meta.dir, "..");
 	let readmePath: string | undefined;
@@ -271,6 +300,7 @@ async function main(argv: string[]): Promise<number> {
 		if (typeof version === "string" && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) releaseVersion = version;
 	} catch { releaseVersion = undefined; }
 	const findings = checkReadme(readme, { registry, inventory, release, sections: kitPolicy }, releaseVersion, releaseTagIn(repo));
+	findings.push(...defaultExtensionFindings(readme, root));
 	const count = (value: number | null) => value ?? "undeclared";
 	console.log(`readme-check: ${registry ? `registry ${registry.commands.length} commands, ${registry.scopes.length} doctor scopes (${registryPath})` : "no registry"}; ${count(inventory.rules)} rules, ${count(inventory.extensions)} extensions, ${count(inventory.skills)} skills`);
 	if (!registry) console.log("NOT_APPLICABLE command-reference: no COMMANDS registry at src/commands.ts; the command reference and command/scope counts are not judged");

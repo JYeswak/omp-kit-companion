@@ -1,0 +1,1 @@
+- Document the default profile extension selection from `policy/extensions.json`; the README checker now rejects missing or stale entries.

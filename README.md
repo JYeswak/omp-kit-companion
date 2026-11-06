@@ -156,18 +156,38 @@ The repo is an OMP plugin. `package.json` declares 12 extensions:
 | Extension | Hooks | Behavior |
 |---|---|---|
 | `kit-guard-optin.ts` | `tool_call` | Loads the guard from `KIT_GUARD_SRC` for repos with `.omp/kit-guard.json`; a missing guard blocks every tool call |
-| `fleet-guard.ts` | `tool_call` | Always on: refuses `plutil -extract|-convert|-replace|-insert|-remove` without `-o` (`PLUTIL_IN_PLACE`) and system-temp writes. Opt-in: home-root writes and source copies, branches and worktrees, writes outside `var/agent-tmp/` without the caller's exclusive reservation (`WRITE_OWN_*`), `AGENT_MAIL_BYPASS`/`AGENT_MAIL_GUARD_MODE` (`BYPASS_ENV`), overlong hot-path reservations |
+| `fleet-guard.ts` | `tool_call` | Always refuses in-place `plutil` and system-temp writes. Opt-in: home writes, source copies, branches/worktrees, writes without exclusive reservations, mail-guard bypasses and overlong reservations |
 | `kit-save-guard.ts` | session and tool hooks | Opt-in only: tracks session writes, reprompts at most twice for unsaved work, then warns. Never commits, stashes or pushes |
-| `kit-flywheel-guard.ts` | `session_compact`, `tool_call` | After compaction, re-reads `AGENTS.md` and the in-progress bead; refuses a self-close (`SELF_CLOSE_REFUSED`), `blocked` without an open fix (`BLOCK_REFUSED`) and a close that strands a blocked bead (`BLOCK_RELEASE_REQUIRED`) |
+| `kit-flywheel-guard.ts` | `session_compact`, `tool_call` | Re-reads instructions and the active bead after compaction; refuses self-closes, blocking without an open fix, and closes that strand blocked beads |
 | `kit-agent-mail-guard.ts` | `tool_call`, `tool_result` | Opt-in: refuses mail not sent as the seat, off-list subjects, untyped `ack_required`, long or secret bodies, bulk reads |
-| `kit-composer-state.ts` | session and turn hooks | Opt-in: publishes whether the seat's composer holds a draft (never its text), so reloads and arms read the seat, not its screen |
-| `kit-inbox-wake.ts` | session start, timer | Opt-in: delivers the seat's own new Agent Mail in process at its next step, so mail wakes a busy seat |
-| `kit-callback.ts` | `agent_end` | For `fleet-watch.json` worker panes, sends the last `DONE`/`BLOCKED` line to the coordinator via `ntm send`. Never blocks |
-| `secret-output-guard.ts` | `tool_call`, `tool_execution_end` | Redacts secret-shaped tool output (gh token shapes, keychain passwords, `cf-secret` values, binding tokens) before emission; safe metadata passes through byte-identical |
+| `kit-composer-state.ts` | session and turn hooks | Opt-in: publishes draft presence, never text, for reloads and arms |
+| `kit-inbox-wake.ts` | session start, timer | Opt-in: delivers the seat's new Agent Mail at its next step |
+| `kit-callback.ts` | `agent_end` | Sends worker `DONE`/`BLOCKED` lines to the coordinator via `ntm send`; never blocks |
+| `secret-output-guard.ts` | `tool_call`, `tool_execution_end` | Redacts secret-shaped output; preserves safe metadata byte-identical |
 
-Installing the plugin loads all twelve. `omp-kit apply extensions` installs only
-the two listed in `policy/extensions.json` (`kit-guard-optin.ts` and
-`fleet-guard.ts`) into the profiles you select.
+Installing the plugin loads the extensions declared in `package.json`.
+`omp-kit apply extensions` installs the defaults from `policy/extensions.json`
+into the profiles you select:
+
+<!-- default-extensions:start -->
+- `kit-guard-optin.ts`
+- `fleet-guard.ts`
+- `adapter.ts`
+- `cass-search.ts`
+- `dcg-tool-bridge.ts`
+- `ee-ambient-session-start.ts`
+- `ee-failure-journal.ts`
+- `jev-memory-filter.ts`
+- `observational-tool-result.ts`
+- `rch-lane-bind-bridge.ts`
+- `rch-mutator.ts`
+- `skill-topology-session-start.ts`
+- `slb-guard-fail-closed.ts`
+- `zestgraph-danger-gate.ts`
+- `zeststream-cast-spawn-cap.ts`
+<!-- default-extensions:end -->
+
+`bun scripts/readme-check.ts` keeps this list equal to the policy.
 
 ### Skills
 
