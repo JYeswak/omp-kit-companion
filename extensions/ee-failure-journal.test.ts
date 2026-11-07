@@ -1,9 +1,26 @@
 import { strict as assert } from "node:assert";
-import { test } from "bun:test";
+import { afterEach, beforeEach, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { ownedTmp, type OwnedTmp } from "../src/kitlib/tmp.ts";
 import {
   createBashFailureJournalAdapter,
   type SpawnProcess,
 } from "./ee-failure-journal.ts";
+
+let capture: OwnedTmp;
+let savedPath: string | undefined;
+beforeEach(() => {
+  capture = ownedTmp("ee-capture-adapter");
+  writeFileSync(join(capture.path, "zestgraph-ee-capture"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  savedPath = process.env.PATH;
+  process.env.PATH = capture.path;
+});
+afterEach(() => {
+  if (savedPath === undefined) delete process.env.PATH;
+  else process.env.PATH = savedPath;
+  capture.cleanup();
+});
 
 function resultEvent(overrides: Record<string, unknown>): Record<string, unknown> {
   return {
@@ -18,11 +35,11 @@ function resultEvent(overrides: Record<string, unknown>): Record<string, unknown
   };
 }
 
-function recordingSpawn(exitCode: number, calls: string[][]): SpawnProcess {
+function recordingSpawn(exitCode: number, calls: string[][], payloads: string[] = []): SpawnProcess {
   return (argv) => {
     calls.push(argv);
     return {
-      stdin: { write() {}, end() {} },
+      stdin: { write(text) { payloads.push(text); }, end() {} },
       stderr: new ReadableStream({ start(controller) { controller.close(); } }),
       exited: Promise.resolve(exitCode),
       kill() {},
@@ -32,8 +49,9 @@ function recordingSpawn(exitCode: number, calls: string[][]): SpawnProcess {
 
 test("non-zero Bash result invokes the capture adapter with command bytes only on stdin", async () => {
   const calls: string[][] = [];
+  const payloads: string[] = [];
   const adapter = createBashFailureJournalAdapter({
-    spawn: recordingSpawn(0, calls),
+    spawn: recordingSpawn(0, calls, payloads),
     seen: new Set(),
   });
 
@@ -44,8 +62,19 @@ test("non-zero Bash result invokes the capture adapter with command bytes only o
     }),
   );
 
-  assert.deepEqual(calls, [["/Users/josh/.local/bin/zestgraph-ee-capture"]]);
+  assert.deepEqual(calls, [[join(capture.path, "zestgraph-ee-capture")]]);
+  assert.equal(payloads.length, 1);
+  assert.deepEqual(JSON.parse(payloads[0]).tool_input, { command: "SECRET=do-not-copy; exit 7" });
+  assert.deepEqual(JSON.parse(payloads[0]).tool_response, { exit_code: 7, stderr_tail: "failure" });
   assert.equal(calls[0].includes("SECRET=do-not-copy; exit 7"), false);
+});
+
+test("the absent optional capture adapter stands down without invoking a process", async () => {
+  process.env.PATH = join(capture.path, "missing");
+  const calls: string[][] = [];
+  const adapter = createBashFailureJournalAdapter({ spawn: recordingSpawn(0, calls), seen: new Set() });
+  await adapter.handle(resultEvent({ toolCallId: "missing-capture" }));
+  assert.deepEqual(calls, []);
 });
 
 test("zero, missing, and unparseable exit codes are silent", async () => {

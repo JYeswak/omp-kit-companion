@@ -1,4 +1,3 @@
-const CAPTURE_BIN = "/Users/josh/.local/bin/zestgraph-ee-capture";
 const CAPTURE_TIMEOUT_MS = 9_500;
 const MAX_FIELD_CHARS = 16_384;
 
@@ -105,8 +104,8 @@ function capturePayload(event: OmpToolResultEvent, code: number, cwd: string): C
   };
 }
 
-async function invokeCapture(payload: CapturePayload, spawn: SpawnProcess): Promise<boolean> {
-  const child = spawn([CAPTURE_BIN], {
+async function invokeCapture(payload: CapturePayload, spawn: SpawnProcess, captureBin: string): Promise<boolean> {
+  const child = spawn([captureBin], {
     cwd: payload.cwd,
     stdin: "pipe",
     stdout: "ignore",
@@ -146,13 +145,15 @@ export function createBashFailureJournalAdapter(options: AdapterOptions = {}) {
     const toolCallId = nonEmptyString(event.toolCallId);
     const code = parseExitCode(event.details);
     if (!toolCallId || !asRecord(event.input) || code === undefined || code === 0) return;
+    const captureBin = Bun.which("zestgraph-ee-capture", { PATH: process.env.PATH ?? "" });
+    if (captureBin === null) return;
 
     const key = `bash:${toolCallId}`;
     if (seen.has(key)) return;
     seen.add(key);
     const payload = capturePayload(event, code, ctx?.cwd || process.cwd());
     try {
-      if (!(await invokeCapture(payload, spawn))) {
+      if (!(await invokeCapture(payload, spawn, captureBin))) {
         seen.delete(key);
         console.error("EE_CAPTURE_UNKNOWN: OMP capture did not complete");
       }

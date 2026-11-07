@@ -1,2 +1,3 @@
 - Exercise the current failure-capture stdin/stderr contract so successful journal writes retain duplicate suppression in extension tests.
 - Discover the optional DCG adapter on the caller's PATH instead of requiring a machine-local executable path; retain fail-closed decisions when the adapter is present.
+- Discover the optional failure-capture adapter on PATH and keep command details on stdin, without requiring a particular user's home directory.
