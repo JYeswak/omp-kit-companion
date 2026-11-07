@@ -541,6 +541,20 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--apply", description: "Request owner-bound save and publication" },
 		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
 	], example: "omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
+	{ name: "ovnfs-land", description: "Serialize committed worker-checkout landing into shared main without stash, rebase or ovnfs apply", usage: "ovnfs-land --repo PATH --checkout PATH --base SHA --apply --yes", flags: [
+		{ name: "--repo", value: "PATH", description: "Shared Git checkout root, with main checked out" },
+		{ name: "--checkout", value: "PATH", description: "Committed worker root (Worktrunk linked worktree, ovnfs checkout or independent Git copy)" },
+		{ name: "--base", value: "SHA", description: "Worker's original base commit; touched paths must be untouched on main since this base" },
+		{ name: "--apply", description: "Replay each admitted worker commit and push through normal hooks" },
+		{ name: "--yes", description: "Confirm mutation and publication in noninteractive mode" },
+	], example: "omp-kit ovnfs-land --repo . --checkout /path/to/worker --base BASE --apply --yes --json", runnable: false, mutation: true, dataSchema: {
+		type: "object", required: ["overall", "text"], properties: {
+			overall: { enum: ["PUSHED", "REFUSED"] }, text: { type: "string" }, paths: { type: "array", items: { type: "string" } },
+			base: { type: ["string", "null"] }, commit: { type: ["string", "null"] }, applied: { type: "boolean" },
+			commits: { type: "array", items: { type: "string" } },
+			published: { type: "boolean" }, reason: { type: "string" },
+		},
+	} },
 	{ name: "save", description: "Commit your reserved paths and publish them in one step (land with one-line output)", usage: "save -m MSG -- PATH...", flags: [
 		{ name: "--message", value: "MSG", aliases: ["-m"], description: "Commit message for the shared-main commit" },
 	], example: "omp-kit save -m 'fix: publish reserved path' -- src/owned.ts", runnable: false, mutation: true, dataSchema: landData },

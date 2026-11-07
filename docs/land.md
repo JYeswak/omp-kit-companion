@@ -31,6 +31,50 @@ not be verified. `SKIP` does not prove that a full suite passed.
 | `REFUSED` | 1 | Nothing was published: a hook or check failed, or origin moved after the check. |
 | `UNRUN` | 77 | Admission or publication could not be verified. |
 
+## `omp-kit ovnfs-land`
+
+Commit changes inside the isolated worker checkout first, then run:
+
+```sh
+omp-kit ovnfs-land --repo /path/to/shared --checkout /path/to/worker --base BASE --apply --yes --json
+```
+
+`BASE` is the commit used to create the worker checkout, not its latest commit.
+The existing `ovnfs-land` verb accepts both a Worktrunk builder's linked worktree
+of the same repository (shared object store) and an independent committed Git
+checkout, including ovnfs. No daemon or Worktrunk executable is needed to land.
+The worker must have no staged, unstaged or untracked changes.
+
+The linear commits in `BASE..worker-HEAD` are replayed in order, one normal
+commit per worker commit, preserving each message, author and author date.
+Their parent and committer change; the worker branch is never rebased or moved.
+Merge commits and empty commits are refused before applying any changes.
+An explicit base prevents unrelated main history from being replayed.
+
+One Git-common-directory-keyed exclusive lock covers admission, application,
+every commit, push and readback. Every touched path across all worker commits
+(both endpoints of a rename, even edits later reverted) must be clean in shared
+main, including ignored/untracked obstructions, and untouched on main since
+`BASE`. A main edit followed by a revert still refuses. Dirty or diverged paths
+are named and refused before any patch, index update or commit. Disjoint main
+advances and unrelated staged/worktree changes are preserved byte-for-byte.
+Submodule changes are not supported.
+
+Application uses Git's checked binary patches, not `ovnfs apply` or a shared
+cherry-pick sequencer. Native `git commit --only` runs configured commit hooks
+for each landed commit, and ordinary non-force push runs publication hooks.
+No stash, rebase, restore or automatic conflict resolution runs. A hook/push
+failure after application retains the applied changes and any earlier landed
+commits on main for inspection; `applied`, `commit`, `commits` and `published`
+describe that partial state. It never discards bytes to roll back. The worker
+branch and worktree remain intact on both refusal and success; the lead removes
+them only after verifying landing.
+
+`PUSHED` requires origin main, local main, and the landed paths' index and
+working tree to agree with the captured worker tip. The lock serializes
+this verb, not arbitrary Git clients or editors: existing main custody and
+publication protections remain required. No reservation guard is retired.
+
 ## `omp-kit save`
 
 `omp-kit save -m MSG -- PATH...` is `land --paths PATH... --message MSG` with
