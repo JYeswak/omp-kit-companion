@@ -21,11 +21,16 @@ function resultEvent(overrides: Record<string, unknown>): Record<string, unknown
 function recordingSpawn(exitCode: number, calls: string[][]): SpawnProcess {
   return (argv) => {
     calls.push(argv);
-    return { exited: Promise.resolve(exitCode), kill() {} };
+    return {
+      stdin: { write() {}, end() {} },
+      stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+      exited: Promise.resolve(exitCode),
+      kill() {},
+    };
   };
 }
 
-test("non-zero Bash result invokes ee with minimal argv", async () => {
+test("non-zero Bash result invokes the capture adapter with command bytes only on stdin", async () => {
   const calls: string[][] = [];
   const adapter = createBashFailureJournalAdapter({
     spawn: recordingSpawn(0, calls),
@@ -39,19 +44,7 @@ test("non-zero Bash result invokes ee with minimal argv", async () => {
     }),
   );
 
-  assert.deepEqual(calls, [[
-    "/Users/josh/.local/bin/ee",
-    "journal",
-    "append",
-    "OMP observed a non-zero Bash result.",
-    "--source",
-    "hook",
-    "--kind",
-    "command_failure",
-    "--exit-code",
-    "7",
-    "--json",
-  ]]);
+  assert.deepEqual(calls, [["/Users/josh/.local/bin/zestgraph-ee-capture"]]);
   assert.equal(calls[0].includes("SECRET=do-not-copy; exit 7"), false);
 });
 

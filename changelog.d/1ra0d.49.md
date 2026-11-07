@@ -1,0 +1,1 @@
+- Exercise the current failure-capture stdin/stderr contract so successful journal writes retain duplicate suppression in extension tests.
