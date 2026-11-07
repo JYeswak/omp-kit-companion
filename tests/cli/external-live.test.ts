@@ -152,7 +152,7 @@ test("custom G4 is data-only, selected G1-G3 gated once, and proves native marke
 	expect(existsSync(fixturePath)).toBe(true);
 }, 120_000);
 
-test("external live executes a non-JavaScript launcher without Bun's interpreter override", async () => {
+test.each(["native", "shell", "Bun-shebang"] as const)("external live executes a %s launcher with interpreter mode scoped to Bun", async (launcherKind) => {
 	const workspace = ownedTmp("external-live-launcher", { root: runtimeTempRoot() }).path;
 	const identity = resolveOmpIdentity();
 	const privateRoot = ownedTmp("omp-kit-runtime", { root: runtimeTempRoot() }).path;
@@ -161,10 +161,30 @@ test("external live executes a non-JavaScript launcher without Bun's interpreter
 		mkdirSync(env[key]!, { recursive: true, mode: 0o700 });
 	}
 	const launcher = join(workspace, "omp-launcher");
-	// A real shell launcher rejects Bun's override, then delegates every native turn to OMP.
-	writeFileSync(launcher, '#!/bin/sh\nif [ "${BUN_BE_BUN+x}" = x ]; then exit 73; fi\nexec "$0.real" "$@"\n', { mode: 0o700 });
-	symlinkSync(identity.launcher, `${launcher}.real`);
-	const pack = makePack("launcher-pack");
+	// Every variant delegates to actual OMP. The shell variant deliberately reaches it
+	// through a Bun-shebang script, as Linux npm launchers do, even on a native-OMP host.
+	const delegate = `import { runFixtureAsync } from ${JSON.stringify(join(REPO_ROOT, "tests/cli/fixture-process.ts"))};
+const env = { ...process.env, PYTHONPYCACHEPREFIX: process.env.TMPDIR };
+delete env.BUN_BE_BUN;
+const result = await runFixtureAsync([${JSON.stringify(identity.launcher)}, ...process.argv.slice(2)], { cwd: process.cwd(), env, floor_s: 30 });
+process.stdout.write(result.stdout);
+process.stderr.write(result.stderr);
+process.exit(result.rc ?? 1);
+`;
+	if (launcherKind === "native") {
+		const source = join(workspace, "launcher.ts");
+		writeFileSync(source, `if (Object.hasOwn(process.env, "BUN_BE_BUN")) process.exit(73);\n${delegate}`, { mode: 0o600 });
+		const compiled = runFixture([process.execPath, "build", source, "--compile",
+			"--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", "--no-compile-autoload-tsconfig",
+			`--outfile=${launcher}`], { cwd: workspace, floor_s: 30 });
+		expect(compiled.rc, new TextDecoder().decode(compiled.stderr)).toBe(0);
+	} else if (launcherKind === "shell") {
+		writeFileSync(launcher, '#!/bin/sh\nif [ "${BUN_BE_BUN+x}" = x ]; then exit 73; fi\nexec "$0.real" "$@"\n', { mode: 0o700 });
+		writeFileSync(`${launcher}.real`, `#!/usr/bin/env bun\n${delegate}`, { mode: 0o700 });
+	} else {
+		writeFileSync(launcher, `#!/usr/bin/env bun\n${delegate}`, { mode: 0o700 });
+	}
+	const pack = makePack(`launcher-pack-${launcherKind}`);
 	const ruleBytes = readFileSync(pack.rules[0]!.path);
 	writeFileSync(join(workspace, "selected-rule.md"), ruleBytes, { mode: 0o600 });
 	writeFileSync(join(workspace, "run.json"), JSON.stringify({

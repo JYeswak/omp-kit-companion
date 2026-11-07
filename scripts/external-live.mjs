@@ -2,7 +2,7 @@
 // The existing P09 mock server, config/model helpers, runtime adapter, and bounded runner
 // own protocol and process isolation; caller data never supplies an action or a path.
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
@@ -200,7 +200,10 @@ async function main() {
 	if (!home || !isAbsolute(home)) fail("PRIVATE_HOME_UNAVAILABLE");
 	const runtimeBin = join(workspace, "runtime-bin");
 	mkdirSync(runtimeBin, { mode: 0o700 });
-	symlinkSync(realpathSync(process.execPath), join(runtimeBin, "bun"));
+	// This PATH entry must act as Bun even when this script runs inside the compiled kit.
+	// Scope interpreter mode to this executable, never to native or shell OMP launchers.
+	const runtime = realpathSync(process.execPath).replaceAll("'", "'\\''");
+	writeFileSync(join(runtimeBin, "bun"), `#!/bin/sh\nBUN_BE_BUN=1 exec '${runtime}' "$@"\n`, { flag: "wx", mode: 0o700 });
 	const rulesHome = join(home, ".agents", "rules");
 	const agentHome = join(home, ".omp", "agent");
 	mkdirSync(rulesHome, { recursive: true, mode: 0o700 });
