@@ -22,3 +22,4 @@
 - Preserve exact hook-member permissions on rollback on Linux as well as macOS, without mixing failed BSD-stat stdout into the saved mode.
 - Preserve early focused-gate refusal codes and record zero executed tests by initializing the fixture's counters exactly like the production gate.
 - Keep the actual Bun executable available in the package fixture's private HOME so pinned runtime identity works on Linux without relying on a system-wide Bun.
+- Include the blocked-service child's typed stdout, stderr and signal identity when its unchanged exit-code assertion fails in CI, without treating diagnostics as a fix.

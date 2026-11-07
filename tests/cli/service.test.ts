@@ -1482,8 +1482,11 @@ test("REAP1 concurrent actual service invocation cannot enter a blocked scratch 
     } finally {
       first.kill("SIGCONT");
     }
-    expect(await first.exited).toBe(1);
-    const terminal = JSON.parse(await firstOutput);
+    const firstExit = await first.exited;
+    const firstStdout = await firstOutput;
+    const firstStderr = await firstErrors;
+    expect(firstExit, `first service pid=${first.pid} signal=${first.signalCode}\nstdout=${firstStdout}\nstderr=${firstStderr}`).toBe(1);
+    const terminal = JSON.parse(firstStdout);
     expect(terminal.data).toMatchObject({ status: "TIMEOUT", receipt: { status: "TIMEOUT" } });
     expect(existsSync(lock)).toBe(false);
     expect(existsSync(join(blocked, ".owner"))).toBe(true);
