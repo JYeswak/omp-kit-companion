@@ -10,6 +10,7 @@ import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { run, runSync } from "../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "../tests/cli/fixture-process.ts";
 import { briefContract, briefTargets, checkTaskBrief, renderBrief } from "../src/brief.ts";
+import { nativeAcDigest, recordNativePregrade } from "../src/native-pregrade.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -359,7 +360,7 @@ test("CLONEGUARD1 remote normalization: scp, ssh and https forms of one reposito
 
 // --- SELF_CLOSE_REFUSED --------------------------------------------------
 
-test("SELF_CLOSE_REFUSED planted: a seat's non-author background verifier cannot close that seat's bead", async () => {
+test("SELF_CLOSE_REFUSED planted: an unbound child cannot borrow either its parent or a distinct seat", async () => {
 	const project = freshDir(base, "subagent-close-");
 	for (const seat of ["PeachLeopard", "IndependentSeat"]) {
 		const h = await createFlywheelHost(base, { env: { AGENT_NAME: seat },
@@ -368,11 +369,9 @@ test("SELF_CLOSE_REFUSED planted: a seat's non-author background verifier cannot
 			input: { command: "br close kit-parent --actor SpawnVerifier --reason 'verified export abcdef123456'" } },
 		{ ...h.ctx(project), agent: { kind: "sub" } });
 		const result = raw as FlywheelToolCallResult | undefined;
-		if (seat === "PeachLeopard") {
-			expect(result?.block).toBe(true);
-			expect(result?.reason).toContain("SELF_CLOSE_REFUSED");
-			expect(result?.reason).toContain("PeachLeopard");
-		} else expect(result?.block).not.toBe(true);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("SELF_CLOSE_REFUSED");
+		expect(result?.reason).toContain("native child identity is unbound");
 	}
 });
 
@@ -1753,4 +1752,75 @@ test("RETIREGUARD1 restored wait veto kills the owned-job PASS control", async (
 		expect(output).toContain("restored main-seat wait veto");
 		expect(output).toContain("1 fail");
 	} finally { allocation.cleanup(); }
+});
+
+/** Native host-boundary harness: real git, fixture tracker responses; not the live task acceptance. */
+async function nativeCloseFixture() {
+	const cwd = stockRepo();
+	const env = { ...process.env, HOME: base, XDG_STATE_HOME: join(cwd, "state"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CEILING_DIRECTORIES: base };
+	const git = async (...args: string[]) => {
+		const result = await runFixtureAsync(["git", ...args], { cwd, env });
+		if (result.rc !== 0) throw new Error(new TextDecoder().decode(result.stderr));
+		return new TextDecoder().decode(result.stdout).trim();
+	};
+	await git("config", "user.name", "Lead");
+	await git("config", "user.email", "lead@example.invalid");
+	writeFileSync(join(cwd, "implementation.ts"), "export const implemented = true;\n");
+	await git("add", "--", "implementation.ts");
+	await git("-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "implementation fixture\n\nBead: kit-native-close");
+	const sha = await git("rev-parse", "HEAD");
+	const acceptance = "- [x] [a] [build] control and planted negative `bun test fixture.ts` -> 0 fail";
+	const row = { id: "kit-native-close", status: "in_review", assignee: "Lead", created_by: "Lead", acceptance_criteria: acceptance, comments: [] as { author: string; text: string; created_at: string }[] };
+	const exec = async (command: string, args: string[], options?: { cwd?: string }) => {
+		if (command === "br") {
+			if (args[0] === "comments") row.comments.push({ author: args[4]!, text: args[6]!, created_at: new Date().toISOString() });
+			return { code: 0, stdout: JSON.stringify(args[0] === "info" ? { database_path: join(cwd, "tracker.db") } : [row]), stderr: "" };
+		}
+		if (command === "sqlite3") return { code: 0, stdout: "", stderr: "" };
+		if (command === "env") return { code: 0, stdout: "", stderr: "" };
+		if (command === "omp-kit") return { code: 0, stdout: JSON.stringify({ data: { dirs: [] } }), stderr: "" };
+		const result = await runFixtureAsync([command, ...args], { cwd: options?.cwd ?? cwd, env });
+		return { code: result.rc ?? -1, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr), killed: result.killed };
+	};
+	type Handler = (event: Record<string, unknown>, ctx: FlywheelContext) => Promise<FlywheelToolCallResult | undefined>;
+	const handlers = new Map<string, Handler>();
+	await kitFlywheelGuard({
+		on: ((event: string, handler: Handler) => { handlers.set(event, handler); }) as never,
+		getAllTools: () => [],
+		sendMessage: () => undefined,
+		exec,
+	}, { env: { AGENT_NAME: "Lead" }, home: base });
+	const parentFile = join(cwd, "parent.jsonl");
+	const parent: FlywheelContext = { cwd, agent: { kind: "main", id: "Main" }, sessionManager: { getSessionId: () => `parent:${cwd}`, getSessionFile: () => parentFile } };
+	const child: FlywheelContext = { cwd, agent: { kind: "sub", id: "NativeVerifier", parentId: "Main" }, sessionManager: { getSessionId: () => `child:${cwd}`, getSessionFile: () => join(cwd, "parent", "NativeVerifier.jsonl") } };
+	await handlers.get("before_subagent_spawn")!({ type: "before_subagent_spawn", spawnKey: "NativeVerifier", agent: "task", invocationKind: "task", patterns: [] }, parent);
+	const call = (ctx: FlywheelContext, command: string) => handlers.get("tool_call")!({ toolName: "bash", toolCallId: `native-close-${Date.now()}`, input: { command } }, ctx);
+	const pregrade = () => recordNativePregrade(child, { bead: row.id, repo: cwd, export_sha: sha, ac_sha256: nativeAcDigest(acceptance), evidence: "[a] PASS control and planted negative, 2 pass 0 fail" }, exec, env);
+	const close = `br close ${row.id} --actor NativeVerifier --reason 'PASS by NativeVerifier family: fixture export ${sha} [a]'`;
+	return { cwd, row, child, parent, call, pregrade, close, handlers };
+}
+
+test("AGENTCLOSE1 native child closes a non-authored bead on its own export-bound verdict, not the inherited lead", async () => {
+	const f = await nativeCloseFixture();
+	await f.pregrade();
+	expect((await f.call(f.child, f.close))?.block).not.toBe(true);
+	// Same child is now a writer of the verified implementation; its old PASS does not authorize self-close.
+	await f.handlers.get("tool_call")!({ toolName: "write", toolCallId: "native-write", input: { path: "implementation.ts", content: "changed" } }, f.child);
+	const own = await f.call(f.child, f.close);
+	expect(own?.block).toBe(true);
+	expect(own?.reason).toContain("NATIVE_SELF_REFUSED");
+});
+
+test("AGENTCLOSE1 planted: parent self-close and a child without a native verdict stay refused", async () => {
+	const f = await nativeCloseFixture();
+	const missing = await f.call(f.child, f.close);
+	expect(missing?.block).toBe(true);
+	expect(missing?.reason).toContain("NATIVE_VERDICT_REQUIRED");
+	await f.pregrade();
+	const parent = await f.call(f.parent, f.close.replace("--actor NativeVerifier", "--actor Lead"));
+	expect(parent?.block).toBe(true);
+	expect(parent?.reason).toContain("SELF_CLOSE_REFUSED");
+	const borrowed = await f.call(f.child, f.close.replace("--actor NativeVerifier", "--actor Lead"));
+	expect(borrowed?.block).toBe(true);
+	expect(borrowed?.reason).toContain("--actor NativeVerifier");
 });

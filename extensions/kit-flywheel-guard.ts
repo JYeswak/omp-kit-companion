@@ -1,3 +1,4 @@
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -18,6 +19,8 @@ import { resolveCustodyScript } from "../src/custody.ts";
 import { classifyMineResult } from "../src/mine-cause.ts";
 import { briefHandbackRefusal, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
+import { mintNativeSpawn, nativeIdentity, observeNativeWrite, type NativeContext } from "./native-identity.ts";
+import { checkNativeClose, registerNativePregradeTool } from "../src/native-pregrade.ts";
 interface SpawnModelIdentity { provider: string; id: string }
 
 /**
@@ -90,8 +93,8 @@ export interface FlywheelContext {
 	cwd: string;
 	isIdle?(): boolean;
 	ui?: { notify(message: string, type?: "info" | "warning" | "error"): void };
-	sessionManager?: { getEntries?(): readonly unknown[]; getSessionId?(): string };
-	agent?: { kind: "main" | "sub" };
+	sessionManager?: { getEntries?(): readonly unknown[]; getSessionId?(): string; getSessionFile?(): string | undefined };
+	agent?: NativeContext["agent"];
 	model?: SpawnModelIdentity;
 	models?: { resolve(patterns: string): SpawnModelIdentity | undefined };
 }
@@ -139,6 +142,7 @@ export interface FlywheelBeforeSubagentSpawnEvent {
 	agent: string;
 	invocationKind: "task" | "eval";
 	patterns: string[];
+	spawnKey?: string;
 }
 
 /** The slice of omp's ExtensionAPI this guard touches. */
@@ -149,6 +153,8 @@ export interface FlywheelGuardApi {
 	on(event: "tool_execution_end", handler: (event: FlywheelToolExecutionEndEvent, ctx: FlywheelContext) => unknown): void;
 	on(event: "tool_result", handler: (event: FlywheelToolResultEvent, ctx: FlywheelContext) => unknown): void;
 	getAllTools?(): readonly { name: string }[];
+	registerTool?: ExtensionAPI["registerTool"];
+	zod?: ExtensionAPI["zod"];
 	sendMessage(message: FlywheelMessage, options?: { triggerTurn?: boolean; deliverAs?: "nextTurn" | "aside" }): void;
 	exec: FlywheelExec;
 }
@@ -1533,6 +1539,7 @@ export interface TrackerMutationDeps {
 	holderLiveness?: (holder: string, nowMs: number) => Promise<HolderVerdict>;
 	/** SCRATCHSIBLING1: the omp session of the agent whose tool call this is (a background agent's own), for SCRATCH_OWED. */
 	callerSession?: string;
+	nativeContext?: NativeContext;
 }
 
 /** Production liveness: the same seat, Agent Mail and reservation sources `drain stale-claims` reads. */
@@ -2418,8 +2425,11 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 	const requests = trackerRequests(command, callCwd, deps.home);
 	if (requests.length === 0) return undefined;
 	const hasClose = requests.some(request => request.operation === "close");
-	const envIdentities = hasClose ? IDENTITY_ENV.map(name => deps.env[name]?.trim()).filter((value): value is string => Boolean(value)) : [];
-	const pane = hasClose ? await paneIdentities(deps.exec, deps.env, deps.home, [deps.sessionCwd, callCwd, ...requests.map(r => r.cwd)]) : [];
+	const child = hasClose && deps.nativeContext?.agent?.kind === "sub";
+	const native = child ? nativeIdentity(deps.nativeContext!) : null;
+	if (child && !native) return { block: true, reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: native child identity is unbound; no parent identity or actor flag can authorize this close.` };
+	const envIdentities = native ? [native.id] : hasClose ? IDENTITY_ENV.map(name => deps.env[name]?.trim()).filter((value): value is string => Boolean(value)) : [];
+	const pane = hasClose && !native ? await paneIdentities(deps.exec, deps.env, deps.home, [deps.sessionCwd, callCwd, ...requests.map(r => r.cwd)]) : [];
 	const warnings: string[] = [];
 	const released = new Set(requests.filter(request => request.operation === "release").flatMap(request => request.ids));
 	const closeNotes: string[] = [];
@@ -2453,7 +2463,10 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 					+ "Replay every original acceptance case before closing; no close was executed.",
 			};
 		}
-		const identities = [...new Set([...request.identities, ...envIdentities, ...pane])];
+		const identities = native ? [native.id] : [...new Set([...request.identities, ...envIdentities, ...pane])];
+		if (native && (request.actor !== native.id || request.db !== undefined || request.ids.length === 0)) {
+			return { block: true, reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: native closes must name a bead and --actor ${native.id} in the pregraded tracker, without a database override.` };
+		}
 		if (request.ids.length === 0) {
 			warnings.push(`\`${request.bin} close\` without an id closes the last-touched bead; its assignee was not checked`);
 			continue;
@@ -2478,7 +2491,20 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 			const orphaned = await checkCloseOrphansDependents(request, id, released, deps);
 			if (orphaned !== undefined) return orphaned;
 			const assignee = found.assignee?.trim();
-			const authorRefusal = closeAuthorRefusal(found, identities, request.reason);
+			if (native) {
+				try {
+					if (!assignee || !found.authorship?.known || found.status === "rework") throw new Error("native close needs known implementation ownership and a non-rework bead");
+					await checkNativeClose(deps.nativeContext!, { id: found.id, assignee, acceptance: found.authorship.acceptance, comments: found.authorship.comments }, request.cwd, request.reason, deps.exec);
+					const verdict = verifierRecord(found.authorship, assignee, []);
+					if (!verdict.ok) throw new Error(verdict.why);
+					if (verdict.verifier !== native.id || verifierFamily(request.reason) === null) throw new Error("close must cite this child's PASS and disclose its verifier family");
+					const withdrawn = await reworkAfterRecord(found.id, verdict.at, request, deps);
+					if (withdrawn !== null) throw new Error(withdrawn);
+				} catch (error) {
+					return { block: true, reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: ${error instanceof Error ? error.message : String(error)}; no native close was executed.` };
+				}
+			}
+			const authorRefusal = native ? undefined : closeAuthorRefusal(found, identities, request.reason);
 			if (!assignee) {
 				if (authorRefusal?.block === true) {
 					attempts.push({ id: found.id, fromStatus: found.status, assignee: null, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
@@ -2538,6 +2564,7 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: FlywheelGuardDeps = {}): Promise<void> {
 	const env = deps.env ?? process.env;
 	const home = deps.home ?? homedir();
+	if (pi.registerTool && pi.zod) registerNativePregradeTool({ registerTool: pi.registerTool.bind(pi), zod: pi.zod }, pi.exec, env);
 	// Operator data is not part of a skill installation. An explicit roster
 	// override supports existing fleets; portable installs follow XDG config.
 	const configHome = env.XDG_CONFIG_HOME && isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : join(home, ".config");
@@ -2570,6 +2597,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		const on: unknown = pi.on;
 		if (typeof on !== "function") throw new Error("Native spawn event registration is unavailable");
 		on.call(pi, "before_subagent_spawn", async (event: FlywheelBeforeSubagentSpawnEvent, ctx: FlywheelContext) => {
+			mintNativeSpawn(event, ctx);
 			try {
 				const scope = await protectedSpawner(ctx);
 				if (scope === false) return undefined;
@@ -2737,6 +2765,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	// ledger never changes a verdict: a write failure is a warning.
 	const guardVerdict = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> => {
 		try {
+			nativeIdentity(ctx);
+			await observeNativeWrite(event, ctx, pi.exec);
 			if (event.toolName === "task") {
 				const reason = await checkTaskBrief(event.input, ctx.cwd, pi.exec);
 				if (reason) return { block: true, reason };
@@ -2774,7 +2804,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			const started = Date.now();
 			const attempts: CloseAttempt[] = [];
 			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd, holderLiveness: execHolderLiveness(pi.exec, env, home),
-				callerSession: ctx.sessionManager?.getSessionId?.() || undefined }, attempts);
+				callerSession: ctx.sessionManager?.getSessionId?.() || undefined, nativeContext: ctx }, attempts);
 			if (typeof event.toolCallId === "string" && attempts.length > 0) {
 				if (result?.block === true) {
 					if (typeof result.reason === "string" && result.reason.includes(SELF_CLOSE_REFUSED)) {

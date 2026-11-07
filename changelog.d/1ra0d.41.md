@@ -1,0 +1,1 @@
+- Native verifier children can record export-bound pregrades with `kit_record_pregrade`; authors, stale acceptance digests and missing export commits are refused. Child reservation calls cannot borrow the parent's identity and require their own registered Agent Mail name.

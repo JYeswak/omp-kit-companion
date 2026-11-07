@@ -6,6 +6,7 @@ import { fleetPolicyState } from "./fleet-policy";
 import {
 	paneIdentities,
 	readBeadState,
+	shellCommands,
 	type FlywheelContext,
 	type FlywheelExec,
 	type FlywheelToolCallEvent,
@@ -14,6 +15,7 @@ import {
 } from "./kit-flywheel-guard";
 import { createMailWake, type MailCaller, type MailToolResultEvent, type MailWake } from "./kit-mail-wake";
 import { checkPublishedCommits, extractCitedCommitReferences, type PublishedCommitStatus } from "./kit-published-commit.ts";
+import { nativeReservationIdentity } from "./native-identity.ts";
 
 /**
  * kit-agent-mail-guard (AMGUARD1, ompkit-774u.13.2): a seat's Agent Mail calls are checked at the act.
@@ -713,13 +715,35 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 	}
 
 	pi.on("tool_call", async (event, ctx) => {
+		if (ctx.agent?.kind === "sub" && event.toolName === "bash") {
+			const command = prop(event.input, "command");
+			if (typeof command === "string" && shellCommands(command).some(words => words.some((word, at) =>
+				word.split("/").at(-1) === "am" && ["file_reservations", "file-reservations", "reservations"].includes(words[at + 1] ?? "")))) {
+				return refuse("AM_NATIVE_TOOL_REQUIRED", "Native children must reserve, renew and release through the mounted Agent Mail tools under their authenticated child name; the shell inherits the parent's identity.");
+			}
+		}
 		const call = mailCall(event);
 		if (call === null) return undefined;
 		const bulk = BULK_READ_TOOLS[call.tool] === true || BULK_READ_PATTERN.test(call.tool);
 		const registration = Object.prototype.hasOwnProperty.call(REGISTRATION_KEYS, call.tool);
-		const guarded = bulk || registration || call.tool === "send_message" || call.tool === "reply_message" || call.tool === "fetch_inbox";
+		const reservation = call.tool === "file_reservation_paths" || call.tool === "release_file_reservations" || call.tool === "renew_file_reservations";
+		const guarded = reservation || bulk || registration || call.tool === "send_message" || call.tool === "reply_message" || call.tool === "fetch_inbox";
 		if (!guarded) return undefined;
 		try {
+			// NATIVEPREGRADE1: a child's inherited AGENT_NAME never owns reservations.
+			// This also runs in a stock repo: bypassing a fleet marker cannot release the parent's holds.
+			if (reservation && ctx.agent?.kind === "sub") {
+				if (!call.args.ok) return refuse("AM_ARGS_UNREADABLE", `${call.tool}: ${call.args.why}.`);
+				const name = nativeReservationIdentity(ctx, prop(call.args.value, "agent_name"));
+				const project = prop(call.args.value, "project_key");
+				if (typeof project !== "string" || !isAbsolute(project)) return refuse("AM_REGISTRATION_SCHEMA", "A child reservation requires an absolute project_key.");
+				const roster = await fetchRoster(project, AM_ROSTER_TIMEOUT_MS);
+				if (!roster.ok) return refuse("AM_ROSTER_UNAVAILABLE", roster.why);
+				if (!roster.rows.some(row => row.name.toLowerCase() === name.toLowerCase())) {
+					return refuse("IDENTITY_UNBOUND", `Native child ${name} is not registered in ${project}. Agent Mail requires a registered agent name; the kit cannot substitute the parent's registration.`);
+				}
+				return undefined;
+			}
 			// MAILWAKE1.2 (ompkit-uk9wn.2): a send names the RECIPIENT's repo in project_key. A seat whose own cwd
 			// carries no fleet opt-in (the chief tab runs in ~/Developer, 2026-10-25: every chief-tab send bypassed the
 			// wake and signaled nobody) is still a fleet sender when it addresses a fleet repo: read the policy there.
