@@ -1,0 +1,1 @@
+- Release measurements retain every reading with its load instead of voiding high-load pairs. Heavy-work admission now reports process owners, elapsed times, zombie parents and stale-session MCP candidates before deferring, and stops expired incarnation-checked kit jobs; load-watch retains the diagnosis.

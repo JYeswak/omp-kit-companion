@@ -2,23 +2,26 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync,
 import { cpus, loadavg } from "node:os";
 import process from "node:process";
 import { join } from "node:path";
+import { RUN_TIME_CAPS_MS } from "./service-run.ts";
+import { runSync } from "./kitlib/run.ts";
 
 export type LoadVerdict = "OK" | "CONTENDED";
 export type MemoryPressureLevel = "normal" | "warn" | "critical" | "unknown";
 export interface MemoryPressure { level: MemoryPressureLevel; free_pct: number | null }
-export interface LoadProcess { pid: number; ppid: number; cpu_pct: number; rss_bytes: number; command: string; cwd?: string; start_time?: string }
+export interface LoadProcess { pid: number; ppid: number; cpu_pct: number; rss_bytes: number; command: string; cwd?: string; start_time?: string; stat?: string }
 export interface LoadPane { session: string; pane: string; pid: number; cwd?: string }
-export interface LoadJob { id: string; pid: number; process_start?: string; label: string; repo: string; cwd: string; agent: string; tmux_pane: string; state: "queued" | "running"; queued_at?: string; started_at?: string }
+export interface LoadJob { id: string; pid: number; process_start?: string; label: string; repo: string; cwd: string; agent: string; tmux_pane: string; state: "queued" | "running"; queued_at?: string; started_at?: string; max_runtime_s?: number }
 export interface LoadMachine { load1: number; load5: number; load15: number; ncpu: number; cpu_user_pct: number | null; cpu_sys_pct: number | null; cpu_idle_pct: number | null; memory_pressure: MemoryPressure; disk_iops: number | null }
 export interface LoadConsumer { session: string; pane: string; agent: string; repo: string; cpu_pct: number; rss_bytes: number; pids: number[] }
 export interface LoadSystemGroup { group: string; cpu_pct: number; rss_bytes: number; pids: number[] }
-export interface LoadCensus { schema_version: 1; sampled_at: string; verdict: LoadVerdict; reason: string; machine: LoadMachine; consumers: LoadConsumer[]; system_groups: LoadSystemGroup[]; lsp_counts: { total: number; by_session: Record<string, number> }; heavy_jobs: LoadJob[]; stale_jobs_reaped: string[]; contention_streak: number; sample_cost_ms: number; text: string }
+export interface LoadProcessFinding extends LoadProcess { owner: string; elapsed_s: number | null; cause_class: "active" | "over-budget" | "suspended-work" | "orphaned-work" | "aged-session-mcp" | "zombie" | "unreaped-children"; zombie_children: number; job_id?: string }
+export interface LoadCensus { schema_version: 1; sampled_at: string; verdict: LoadVerdict; reason: string; machine: LoadMachine; consumers: LoadConsumer[]; system_groups: LoadSystemGroup[]; processes: LoadProcessFinding[]; cause_classes: string[]; lsp_counts: { total: number; by_session: Record<string, number> }; heavy_jobs: LoadJob[]; stale_jobs_reaped: string[]; contention_streak: number; sample_cost_ms: number; text: string }
 export interface LoadDoctorInput { processes?: readonly LoadProcess[]; panes?: readonly LoadPane[]; jobs?: readonly LoadJob[]; stateRoot?: string; machine?: Partial<LoadMachine>; now?: Date }
 
 function runText(args: readonly string[]): string {
 	try {
-		const child = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
-		return child.stdout.toString();
+		const child = runSync(args, { deadline_s: 10, max_output_bytes: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
+		return child.rc === 0 && !child.truncated ? new TextDecoder().decode(child.stdout) : "";
 	} catch {
 		return "";
 	}
@@ -34,15 +37,23 @@ export function measureCpuMs(work: () => void): number {
 	work();
 	return cpuTimeMs(started);
 }
-export function parsePsSnapshot(output: string): LoadProcess[] {
+export function parsePsSnapshot(output: string, withState = false): LoadProcess[] {
 	const rows: LoadProcess[] = [];
 	for (const line of output.split("\n")) {
 		const match = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(.*)$/);
 		if (!match) continue;
 		const rest = match[5]!.trim();
 		const started = rest.match(/^(\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/);
+		let command = started?.[2] ?? rest;
+		let stat: string | undefined;
+		if (withState && started) {
+			const at = command.indexOf(" ");
+			if (at < 1) continue;
+			stat = command.slice(0, at);
+			command = command.slice(at + 1).trimStart();
+		}
 		rows.push({ pid: Number(match[1]), ppid: Number(match[2]), cpu_pct: Number(match[3]), rss_bytes: Number(match[4]) * 1024,
-			command: started?.[2] ?? rest, ...(started ? { start_time: started[1] } : {}) });
+			command, ...(started ? { start_time: started[1] } : {}), ...(stat ? { stat } : {}) });
 	}
 	return rows;
 }
@@ -173,9 +184,63 @@ function readJobs(stateRoot: string, processes: readonly LoadProcess[]): { jobs:
 	return { jobs, stale };
 }
 
+/** Read-only lifetime diagnosis. Age alone is not authority to signal a process. */
+function processFindings(processes: readonly LoadProcess[], panes: readonly LoadPane[], jobs: readonly LoadJob[], now: Date): LoadProcessFinding[] {
+	const byPid = new Map(processes.map(item => [item.pid, item]));
+	const zombieCounts = new Map<number, number>();
+	for (const item of processes) if (item.stat?.startsWith("Z")) zombieCounts.set(item.ppid, (zombieCounts.get(item.ppid) ?? 0) + 1);
+	const age = (item: LoadProcess): number | null => {
+		const start = item.start_time ? Date.parse(item.start_time) : NaN;
+		return Number.isFinite(start) ? Math.max(0, (now.getTime() - start) / 1000) : null;
+	};
+	return processes.map(item => {
+		let cursor: LoadProcess | undefined = item;
+		let pane: LoadPane | undefined;
+		let job: LoadJob | undefined;
+		let service: string | undefined;
+		let session: string | undefined;
+		let serviceAge: number | null = null;
+		const seen = new Set<number>();
+		while (cursor && !seen.has(cursor.pid)) {
+			seen.add(cursor.pid);
+			pane ??= panes.find(entry => entry.pid === cursor!.pid);
+			job ??= jobs.find(entry => entry.pid === cursor!.pid);
+			const words = cursor.command.split(" ");
+			for (const flag of ["--resume", "--session"]) {
+				const at = words.indexOf(flag);
+				if (at >= 0 && words[at + 1]?.endsWith(".jsonl")) session ??= `session=${words[at + 1]}`;
+			}
+			const runAt = words.indexOf("service");
+			if (runAt >= 0 && words[runAt + 1] === "run" && words[runAt + 2] && service === undefined) {
+				service = `com.omp-kit.${words[runAt + 2]}`;
+				serviceAge = age(cursor);
+			}
+			if (cursor.command.includes("loop_sentinel.py")) service ??= "com.omp-kit.loop-sentinel";
+			if (words.some(word => word.endsWith("/cron") || word === "cron")) service ??= `cron: ${item.command}`;
+			cursor = byPid.get(cursor.ppid);
+		}
+		const elapsed_s = age(item);
+		const jobAge = job?.started_at ? (now.getTime() - Date.parse(job.started_at)) / 1000 : null;
+		const serviceCap = service?.startsWith("com.omp-kit.") ? RUN_TIME_CAPS_MS[service.slice("com.omp-kit.".length)] : undefined;
+		const zombie_children = zombieCounts.get(item.pid) ?? 0;
+		const workload = ["bun test", "full-suite-verdict", "grader", "worker", "mcp", "verdict"].some(word => item.command.includes(word));
+		const mcp = ["sympy-mcp", "mcp-z3-prover", "mathlas-mcp"].some(word => item.command.includes(word));
+		let cause_class: LoadProcessFinding["cause_class"] = "active";
+		if (item.stat?.startsWith("Z")) cause_class = "zombie";
+		else if (zombie_children) cause_class = "unreaped-children";
+		else if (job?.max_runtime_s !== undefined && jobAge !== null && jobAge > job.max_runtime_s) cause_class = "over-budget";
+		else if (serviceCap !== undefined && serviceAge !== null && serviceAge * 1000 > serviceCap) cause_class = "over-budget";
+		else if (item.stat?.includes("T") && workload) cause_class = "suspended-work";
+		else if (item.ppid === 1 && workload) cause_class = "orphaned-work";
+		else if (mcp && elapsed_s !== null && elapsed_s >= 86400 && (age(byPid.get(item.ppid) ?? item) ?? 0) >= 86400) cause_class = "aged-session-mcp";
+		const owner = job ? `${job.agent}; pane=${job.tmux_pane || "none"}; job=${job.label}` : pane?.pane ?? service ?? session ?? "unattributed";
+		return { ...item, owner, elapsed_s, cause_class, zombie_children, ...(job ? { job_id: job.id } : {}) };
+	}).sort((a, b) => Number(b.cause_class !== "active") - Number(a.cause_class !== "active") || b.cpu_pct - a.cpu_pct);
+}
+
 export function censusLoad(input: LoadDoctorInput = {}): LoadCensus {
 	const startedCpu = process.cpuUsage();
-	const processes = [...(input.processes ?? parsePsSnapshot(runText(["ps", "-axo", "pid=,ppid=,%cpu=,rss=,lstart=,command="])))];
+	const processes = [...(input.processes ?? parsePsSnapshot(runText(["ps", "-axo", "pid=,ppid=,%cpu=,rss=,lstart=,stat=,command="]), true))];
 	const panes = [...(input.panes ?? parseTmuxSnapshot(runText(["tmux", "list-panes", "-a", "-F", "#{session_name}|#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}"])))];
 	const ledger = input.jobs ? { jobs: [...input.jobs], stale: [] as string[] } : readJobs(input.stateRoot ?? defaultStateRoot(), processes);
 	const parent = new Map(processes.map(item => [item.pid, item.ppid]));
@@ -230,9 +295,13 @@ export function censusLoad(input: LoadDoctorInput = {}): LoadCensus {
 	const verdict: LoadVerdict = loadPerCore > 2.5 ? "CONTENDED" : "OK";
 	const heavyJobs = ledger.jobs.filter(job => job.state === "running" || job.state === "queued");
 	const heavyText = heavyJobs.length === 0 ? "heavy jobs: none registered (LOAD1 not installed)" : `heavy jobs: ${heavyJobs.length}`;
+	const findings = processFindings(processes, panes, ledger.jobs, input.now ?? new Date());
+	const causeClasses: string[] = [...new Set(findings.filter(item => item.cause_class !== "active").map(item => item.cause_class))];
+	if (causeClasses.length) causeClasses.unshift("leftover-process");
+	else causeClasses.push(findings.length ? "active-work" : "unknown");
+	const causes = findings.slice(0, 5).map(item => `pid=${item.pid} ${item.owner} ${item.cpu_pct.toFixed(1)}% age=${item.elapsed_s ?? "unknown"}s ${item.cause_class} ${item.command}`).join(", ");
 	const sampleCostMs = cpuTimeMs(startedCpu);
-	const causes = [...ordered.map(item => `${item.pane} ${item.cpu_pct.toFixed(1)}%`), ...systemGroups.map(item => `${item.group} ${item.cpu_pct.toFixed(1)}%`)].slice(0, 3).join(", ");
-	return { schema_version: 1, sampled_at: (input.now ?? new Date()).toISOString(), verdict, reason, machine, consumers: ordered, system_groups: systemGroups, lsp_counts: { total: Object.values(lsp).reduce((a, b) => a + b, 0), by_session: lsp }, heavy_jobs: heavyJobs, stale_jobs_reaped: ledger.stale, contention_streak: verdict === "CONTENDED" ? 1 : 0, sample_cost_ms: sampleCostMs, text: `${verdict}: ${reason}; ${heavyText}; top=${causes}` };
+	return { schema_version: 1, sampled_at: (input.now ?? new Date()).toISOString(), verdict, reason, machine, consumers: ordered, system_groups: systemGroups, processes: findings, cause_classes: causeClasses, lsp_counts: { total: Object.values(lsp).reduce((a, b) => a + b, 0), by_session: lsp }, heavy_jobs: heavyJobs, stale_jobs_reaped: ledger.stale, contention_streak: verdict === "CONTENDED" ? 1 : 0, sample_cost_ms: sampleCostMs, text: `${verdict}: ${reason}; ${heavyText}; top=${causes}` };
 }
 
 export function writeCensus(stateRoot: string, census: LoadCensus): void {

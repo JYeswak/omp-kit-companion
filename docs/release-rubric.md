@@ -157,10 +157,11 @@ the next `### ` or `## ` heading, and a repeated block is refused.
   `sigma_d` is 0 (a deterministic count). `n_pairs` below it refuses `RELEASE_UNDERPOWERED`. From v0.2.95, n = 1 and
   `sigma_d: 0` classify the result as MECHANISM, never a powered field-effect estimate.
 - `### Result <id>`: an `ncpu: N` line and a pipe table with `before`, `after`, `load1_before` and `load1_after`
-  columns, one row per pair. A pair is VOID when |load1_before − load1_after| > 2.0 or either load1 > 0.75 × ncpu;
-  VOID pairs are dropped and may be replaced up to `n_pairs` times (more refuses `RELEASE_INCONCLUSIVE`). Fewer valid
-  pairs than `n_pairs` (or no Result block) refuses `RELEASE_UNDERPOWERED`; more refuses `RELEASE_INCONCLUSIVE`
-  (fixed-n stopping).
+  columns, one row per pair. Retain every reading, including high or changing load, with a `cause` column naming
+  the observed consumer(s), owner and diagnosis (or explicitly `unknown`). No reading is VOID or replaced for load.
+  Fewer pairs than `n_pairs` (or no Result block) refuses `RELEASE_UNDERPOWERED`; more refuses
+  `RELEASE_INCONCLUSIVE` (fixed-n stopping). Load does not waive power, effect or evidence-class requirements.
+
 - d = before − after (`lower`) or after − before (`higher`), so a positive d is an improvement. The CI is
   d̄ ± t₁₋α′/₂,ₙ₋₁ · s_d/√n with α′ = alpha / (number of credited ideas) (Bonferroni). The t quantile is computed with
   the standard library (regularized incomplete beta) and matches the published table to 4 dp.
@@ -178,3 +179,24 @@ the next `### ` or `## ` heading, and a repeated block is refused.
 - The pending v0.2.95 card's DIRECTORREACH1 is MECHANISM: one deterministic fixture/mutant pair, failed paths 2 → 0.
   Its former `applied` Decision is refused `RELEASE_EVIDENCE_CLASS`; its corrected MECHANISM VERIFIED reading is
   n=1, mean d 2 paths, s_d 0 paths, mde 1 path. The live field effect remains unmeasured until the post-install canary.
+
+### Load admission and diagnosis (LOADADMIT1, J-2026-11-06-12/13)
+
+Run measurements and release work through `omp-kit heavy --label <measurement-or-release> -- <producer>`.
+The existing admission limit is load1 > 2.5 × logical cores. Above it, heavy reports `LOAD_DIAGNOSIS` and
+`LOAD_CONSUMER` records before deferring or retrying; it does not start the producer. `omp-kit load watch --json`
+exposes the same process census. Each record names pid, command, owner seat/session or service/cron ancestry,
+elapsed seconds (null when unreadable), state and cause class. Unattributed owners stay explicit.
+
+Inspect leftovers first: expired registered kit work, suspended/orphaned builders or verdicts, zombie parents
+(including loop-sentinel's unreaped children), and day-old per-session sympy-mcp, mcp-z3-prover and mathlas-mcp
+candidates. Age alone is not proof that a session or MCP server is abandoned. The census records cause classes,
+so high-load samples with leftover candidates can be counted without claiming that age establishes causation.
+
+New kit work stays queued. Expired registered kit children are sent SIGTERM only after rechecking their ledger
+custody and process start identity; running heavy jobs retain their existing runtime cap and escalation.
+Foreign or unbudgeted work is reported for its named owner, never killed by a command-name match.
+Do not restart loop-sentinel or terminate another seat's MCP server merely because it is old.
+Resolve the diagnosed load, then let heavy admit the producer. `--no-wait` diagnoses and returns 75 instead
+of silently running above the threshold. Admission snapshots, including every process and its load/cause,
+are kept in the existing load-watch census files; carry their named causes into the card alongside the readings.

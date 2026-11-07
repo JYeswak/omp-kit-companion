@@ -5,10 +5,12 @@ import { basename, delimiter, join, resolve } from "node:path";
 import process from "node:process";
 import { inspectStateRoot } from "./state-root.ts";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
-import { incarnation, incarnationSync, isDead, normalizeStart, probeIncarnation } from "./kitlib/proc.ts";
-import { run, type RunTimings } from "./kitlib/run.ts";
+import { incarnation, incarnationSync, isDead, normalizeStart, probeIncarnation, safePid } from "./kitlib/proc.ts";
+import { run } from "./kitlib/run.ts";
+import type { RunTimings } from "./kitlib/run.ts";
 import { appendJsonl } from "./kitlib/jsonl.ts";
 import { admitDiskWork } from "./disk-stage.ts";
+import { censusLoad, writeCensus } from "./load-doctor.ts";
 import type { LoadJob } from "./load-doctor.ts";
 import labelBudgets from "../config/heavy-labels.json";
 
@@ -413,6 +415,37 @@ function statusLine(jobs: readonly HeavyJob[], id: string, reason: string): stri
 }
 
 
+/** Diagnose before any retry or --no-wait refusal. Only expired, incarnation-bound kit children may be stopped. */
+async function diagnoseLoadAdmission(stateRoot: string, jobs: readonly HeavyJob[], load: MachineLoad): Promise<void> {
+	const census = censusLoad({ stateRoot, jobs, machine: load });
+	process.stderr.write(`LOAD_DIAGNOSIS load1=${load.load1} ncpu=${load.ncpu} cause_classes=${census.cause_classes.join(",")}\n`);
+	// Leftovers first, then every material CPU consumer; the full snapshot is retained by load-watch.
+	for (const item of census.processes.filter((item, index) => index < 10 || item.cause_class !== "active" || item.cpu_pct >= 1)) {
+		process.stderr.write(`LOAD_CONSUMER ${JSON.stringify(item)}\n`);
+	}
+	writeCensus(stateRoot, census);
+	for (const job of jobs) {
+		if (job.state !== "running" || job.pid === process.pid || !job.started_at ||
+			!Number.isSafeInteger(job.max_runtime_s) || job.max_runtime_s! <= 0) continue;
+		const elapsed = (Date.now() - Date.parse(job.started_at)) / 1000;
+		if (!Number.isFinite(elapsed) || elapsed <= job.max_runtime_s!) continue;
+		// Ledger custody plus start identity, never an age, command-name or bare-pid kill.
+		const path = join(stateRoot, "jobs", `${job.id}.json`);
+		let current: HeavyJob;
+		try { current = JSON.parse(readFileSync(path, "utf8")); } catch { continue; }
+		if (current.pid !== job.pid || current.process_start !== job.process_start || current.state !== "running" ||
+			current.started_at !== job.started_at || current.max_runtime_s !== job.max_runtime_s) continue;
+		if ((await probeIncarnation({ pid: job.pid, start: job.process_start })).state !== "live") continue;
+		try {
+			process.kill(safePid(job.pid), "SIGTERM");
+			process.stderr.write(`LOAD_ACTION stopped-expired-kit-job pid=${job.pid} owner=${job.agent} label=${job.label} budget_s=${job.max_runtime_s}\n`);
+		} catch (error) {
+			process.stderr.write(`LOAD_ACTION stop-failed pid=${job.pid}: ${String(error)}\n`);
+		}
+	}
+	process.stderr.write("LOAD_ACTION new kit work remains queued; foreign and unbudgeted processes require their named owner; no command runs above the load limit\n");
+}
+
 export async function runHeavy(command: readonly string[], options: { label?: string; lane?: string; noWait: boolean; diskObserver?: string; maxRuntime?: string }): Promise<number> {
 	if (command.length === 0 || !command[0]) {
 		process.stderr.write("heavy: expected `omp-kit heavy [--label LABEL] [--lane NAME] [--no-wait] [--max-runtime SECONDS] [--disk-observer statfs|sbh|auto] -- <command...>`\n");
@@ -513,6 +546,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 
 	const deadline = Date.now() + (waitCapS === null ? config.max_wait_s : Math.min(config.max_wait_s, waitCapS)) * 1000;
 	let nextStatus = 0;
+	let nextDiagnosis = 0;
 	let signal: HeavySignal | null = null;
 	let child: HeavyChild | undefined;
 	let childStartedAt = 0;
@@ -556,6 +590,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 			let waitingJobs: HeavyJob[] = [];
 			let reason: string | null = null;
 			let observerFailure: Extract<DiskVerdict, { kind: "unavailable" | "timeout" }> | null = null;
+			let load: MachineLoad;
 			try {
 				waitingJobs = await readJobs(storage.jobs);
 				if (!waitingJobs.some((entry) => entry.id === id)) {
@@ -563,7 +598,8 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 					rowCreated = true;
 					waitingJobs = [...waitingJobs, job];
 				}
-				reason = admissionReason(waitingJobs, id, config, { load1: testFakeLoad() ?? loadavg()[0] ?? Number.NaN, ncpu: cpus().length });
+				load = { load1: testFakeLoad() ?? loadavg()[0] ?? Number.NaN, ncpu: cpus().length };
+				reason = admissionReason(waitingJobs, id, config, load);
 				if (!reason) {
 					const disk = await diskVerdict({ config, cwd: job.cwd });
 					if (disk.kind !== "ok") await recordObserverRefusal(stateRoot, job, "admission", disk);
@@ -578,7 +614,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 					reason = "admission deadline expired before child start";
 				}
 				if (!reason && observerFailure === null) {
-					const running: HeavyJob = { ...job, state: "running", started_at: new Date().toISOString() };
+					const running: HeavyJob = { ...job, state: "running", started_at: new Date().toISOString(), ...(runtimeSeconds === undefined ? {} : { max_runtime_s: runtimeSeconds }) };
 					writeJob(storage.jobs, running);
 					rowCreated = true;
 					childStartedAt = Date.now();
@@ -599,6 +635,10 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 				releaseLock(storage.lock, owner);
 			}
 			if (observerFailure !== null) return refuseObserver(observerFailure);
+			if (!child && process.env.GITHUB_ACTIONS !== "true" && machineLoadBlockReason(load.load1, load.ncpu) && Date.now() >= nextDiagnosis) {
+				await diagnoseLoadAdmission(stateRoot, waitingJobs, load);
+				nextDiagnosis = Date.now() + STATUS_INTERVAL_MS;
+			}
 			if (child) {
 				let timer: NodeJS.Timeout | undefined;
 				const timeout = Promise.withResolvers<"deadline">();

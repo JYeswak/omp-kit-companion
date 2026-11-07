@@ -8,7 +8,7 @@ at least one applied and measured. The card is docs/releases/v<version>.md, read
 
 ompkit-fp72.120.16.258, Joshua J-2026-11-05-05 (RELRUBRIC2): from card version 0.2.94 on, every applied idea needs a
 ``### Prereg <id>`` block and a ``### Result <id>`` block of paired readings in section 2; the checker recomputes the
-required n, drops VOID pairs, computes the paired-t CI and accepts only a SHIPPED verdict. Cards before 0.2.94 were
+required n, retains every pair with its load, computes the paired-t CI and accepts only a SHIPPED verdict. Cards before 0.2.94 were
 cut under RELCARD1 alone and are judged by it unchanged.
 
 ompkit-fp72.120.16.301 (RELRUBRIC3): from card version 0.2.95, a deterministic single pair or an explicit fixture
@@ -66,10 +66,6 @@ FIELD = re.compile(r"([a-z][a-z0-9_]{0,31}):(?: +(.*))?")
 COMMENT = re.compile(r"\s+#\s.*$")
 NUMBER = re.compile(r"[~≈]? ?([-+−]?[0-9][0-9,]{0,24}(?:\.[0-9]{1,24})?)")
 IDEA_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-# A pair is VOID when its two runs saw different machine load (|load1_before - load1_after| > VOID_LOAD_DELTA) or an
-# overloaded machine (either load1 > VOID_LOAD_SHARE * ncpu). Voids are replaced up to n_pairs times.
-VOID_LOAD_DELTA = 2.0
-VOID_LOAD_SHARE = 0.75
 
 
 class Refusal(Exception):
@@ -277,23 +273,15 @@ def prereg_verdict(idea: str, found: Dict[Tuple[str, str], List[str]], applied_c
         raise incomplete(2, f"'### Result {idea}' needs an 'ncpu: N' line and a table with before, after, "
                          "load1_before and load1_after columns")
     differences: List[float] = []
-    voids = 0
     for index, row in enumerate(rows, 1):
         readings = [number(row[at]) if at is not None and len(row) > at else None for at in columns]
         if None in readings:
             raise incomplete(2, f"'### Result {idea}' row {index} has a non-numeric reading")
         before, after, load_before, load_after = (float(value) for value in readings)  # type: ignore[arg-type]
-        if abs(load_before - load_after) > VOID_LOAD_DELTA or max(load_before, load_after) > VOID_LOAD_SHARE * ncpu:
-            voids += 1
-            continue
         differences.append(before - after if direction == "lower" else after - before)
     valid = len(differences)
-    if voids > n_pairs:
-        raise Refusal(f"RELEASE_INCONCLUSIVE: {where}: {voids} VOID pairs (load1 delta > {VOID_LOAD_DELTA:g} or load1 > "
-                      f"{VOID_LOAD_SHARE:g} x ncpu {ncpu:g}) exceed the {n_pairs} replacements allowed (load)")
     if valid < n_pairs:
-        raise Refusal(f"RELEASE_UNDERPOWERED: {where} has {valid} valid pairs ({voids} VOID) of the {n_pairs} "
-                      "preregistered")
+        raise Refusal(f"RELEASE_UNDERPOWERED: {where} has {valid} pairs of the {n_pairs} preregistered")
     if valid > n_pairs:
         raise Refusal(f"RELEASE_INCONCLUSIVE: {where} has {valid} valid pairs, more than the {n_pairs} preregistered; "
                       "fixed-n stopping admits no extra runs")

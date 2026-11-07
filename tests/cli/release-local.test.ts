@@ -1274,7 +1274,7 @@ ${stage}`);
 }, fixtureDeadlineS(60) * 1_000);
 
 // RELPREREG1 (ompkit-fp72.120.16.258, Joshua J-2026-11-05-05): from card version 0.2.94 an applied idea needs a
-// `### Prereg <id>` block and a `### Result <id>` block of paired readings; the checker recomputes n, drops VOID pairs,
+// `### Prereg <id>` block and a `### Result <id>` block of paired readings; the checker recomputes n, retains all pairs,
 // computes the paired-t CI and accepts only SHIPPED. v0.2.92 and v0.2.93 were cut before it and keep their verdicts.
 type Pair = [before: number, after: number, loadBefore?: number, loadAfter?: number];
 const shippedDiffs = [2, 18, 10, 0, 20, 4, 16]; // mean 10, s_d 8.16: 95% CI 2.45..17.55 > 0 and mean >= mde/2
@@ -1284,7 +1284,7 @@ function preregBlock(fields: Partial<Record<string, string>> = {}): string {
 		endpoint: "cpu_s_per_run", direction: "lower", producer: "scripts/bench-pair.sh --target tests/cli/br-shim.test.ts --metric cpu_s",
 		unit: "s (user+sys CPU of one targeted test-file run)", mde: "10 s", mde_source: "profile var/sitrep/perf-shimchain1",
 		sigma_d: "8 s", sigma_source: "pilot 2026-11-05 4 pairs", alpha: "0.05 (two-sided)", power: "0.80", n_pairs: "7",
-		stopping: "fixed-n; no peeking", control: "paired ABBA order, same host;\n            a pair is VOID if |load1 delta| > 2.0 or load1 > 0.75*ncpu",
+		stopping: "fixed-n; no peeking", control: "paired ABBA order, same host; retain every load reading",
 		...fields,
 	};
 	const lines = Object.entries(values).filter(([, value]) => value !== "").map(([key, value]) => `${key}: ${value}`);
@@ -1333,13 +1333,13 @@ test("RELPREREG1 prereg: a 7-pair card ships; underpowered, inconclusive, no-eff
 	const at = (blocks: string) => ({ version: "0.2.94", text: preregCard("0.2.94", blocks) });
 	const { work, env, repo, shas } = preregRepo("relprereg-verdicts", {
 		shipped: at(preregBlock() + resultBlock(pairsOf(shippedDiffs))),
-		// One VOID pair (load1 delta 3.0) is replaced by an eighth pair: the 7 valid pairs still ship.
-		voidReplaced: at(preregBlock() + resultBlock([[90, 60, 3.0, 6.0], ...pairsOf(shippedDiffs)])),
+		// A high-load extra pair is retained, so the eighth reading violates fixed-n stopping.
+		extraPair: at(preregBlock() + resultBlock([[90, 60, 3.0, 100.0], ...pairsOf(shippedDiffs)])),
 		// The pyc-writes endpoint: deterministic (sigma_d 0), one pair, 62 → 0 against mde 10.
 		deterministic: at(preregBlock({ endpoint: "pyc_writes_per_create", unit: "writes", mde: "10 writes", sigma_d: "0", sigma_source: "deterministic count", n_pairs: "1" }) + resultBlock([[62, 0]])),
 		fivePairs: at(preregBlock() + resultBlock(pairsOf(shippedDiffs.slice(0, 5)))),
 		fiveDeclared: at(preregBlock({ n_pairs: "5" }) + resultBlock(pairsOf(shippedDiffs.slice(0, 5)))),
-		voidUnreplaced: at(preregBlock() + resultBlock([[90, 60, 3.0, 6.0], ...pairsOf(shippedDiffs.slice(1))])),
+		highLoad: at(preregBlock() + resultBlock(pairsOf(shippedDiffs).map(([before, after]) => [before, after, 100, 200]))),
 		noResult: at(preregBlock()),
 		inconclusive: at(preregBlock() + resultBlock(pairsOf([-20, 25, 2, -15, 20, 5, -3]))),
 		noEffect: at(preregBlock() + resultBlock(pairsOf([1, -1, 0, 2, -2, 1, -1]))),
@@ -1348,7 +1348,7 @@ test("RELPREREG1 prereg: a 7-pair card ships; underpowered, inconclusive, no-eff
 		noMde: at(preregBlock({ mde: "" }) + resultBlock(pairsOf(shippedDiffs))),
 	});
 	try {
-		for (const name of ["shipped", "voidReplaced"]) {
+		for (const name of ["shipped", "highLoad"]) {
 			const result = checkCardAt(repo, shas[name]!, "0.2.94", env);
 			expect([name, result.rc], result.out).toEqual([name, 0]);
 			expect(result.out).toContain("PREREGFIX1 SHIPPED (n=7, mean d 10 s, 95% CI 2.449..17.55 s, mde 10 s)");
@@ -1357,9 +1357,9 @@ test("RELPREREG1 prereg: a 7-pair card ships; underpowered, inconclusive, no-eff
 		expect(deterministic.rc, deterministic.out).toBe(0);
 		expect(deterministic.out).toContain("PREREGFIX1 SHIPPED (n=1, mean d 62 writes");
 		for (const [name, refusal] of [
-			["fivePairs", "RELEASE_UNDERPOWERED: applied idea PREREGFIX1 has 5 valid pairs (0 VOID) of the 7 preregistered"],
+			["fivePairs", "RELEASE_UNDERPOWERED: applied idea PREREGFIX1 has 5 pairs of the 7 preregistered"],
 			["fiveDeclared", "RELEASE_UNDERPOWERED: '### Prereg PREREGFIX1' preregisters n_pairs 5, but mde 10, sigma_d 8, alpha 0.05 and power 0.8 require 7"],
-			["voidUnreplaced", "RELEASE_UNDERPOWERED: applied idea PREREGFIX1 has 6 valid pairs (1 VOID) of the 7 preregistered"],
+			["extraPair", "RELEASE_INCONCLUSIVE: applied idea PREREGFIX1 has 8 valid pairs, more than the 7 preregistered"],
 			["noResult", "RELEASE_UNDERPOWERED: applied idea PREREGFIX1 has no '### Result PREREGFIX1' block"],
 			["inconclusive", "RELEASE_INCONCLUSIVE: applied idea PREREGFIX1: the CI straddles"],
 			["noEffect", "RELEASE_NO_EFFECT: applied idea PREREGFIX1: the CI lies within ±mde"],
