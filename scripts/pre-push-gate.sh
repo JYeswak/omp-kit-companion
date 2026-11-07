@@ -476,9 +476,9 @@ else
 	fi
 fi
 if [ -n "${base_ref:-}" ]; then
-	python3.11 "$gate_scripts/scripts/regexploit-gate.py" --base "$base_ref" --head "$local_sha"
+	PYTHONPATH="$gate_scripts/scripts" python3 -B -m regexploit-gate --base "$base_ref" --head "$local_sha"
 else
-	python3.11 "$gate_scripts/scripts/regexploit-gate.py" --head "$local_sha"
+	PYTHONPATH="$gate_scripts/scripts" python3 -B -m regexploit-gate --head "$local_sha"
 fi
 # Base owns policy and the bounded bootstrap; its required contracts must remain present.
 # Candidate PASS is mandatory, so GATE2's extra base execution cannot change admission.
