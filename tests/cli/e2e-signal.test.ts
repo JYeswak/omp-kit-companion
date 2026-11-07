@@ -202,7 +202,7 @@ test("lingering scenario child is reaped and the tree removes cleanly", async ()
 }, 300_000);
 
 test("parallel live cases retain ordered reports, private models and read-only native bytes", async () => {
-	const fixture = ownedTmp("e2e-pool");
+	const fixture = workRoot("e2e-pool");
 	const reportPath = join(fixture.path, "cases.jsonl");
 	// Ordered as in tests/live/scenarios.json; the standing-law and canary scenarios retired in 906ebd0746.
 	const names = ["unsafe-router-fire", "unsafe-router-near", "glob-silenced-fire", "glob-silenced-near", "pipe-exit-fire"];

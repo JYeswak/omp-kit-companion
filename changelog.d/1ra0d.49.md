@@ -7,3 +7,4 @@
 - Give history-transform fixture repositories their own Git author identity so commit-tree controls cannot inherit or require operator configuration.
 - Verify restored hook permissions with the portable filesystem API rather than mixing incompatible BSD and GNU stat output.
 - Preserve the stock OS Python in the isolated extension-test PATH so portable process cleanup works while fleet tools remain absent.
+- Run parallel live-test cases from a caller-owned workspace scratch root instead of the runner's system temporary directory.
