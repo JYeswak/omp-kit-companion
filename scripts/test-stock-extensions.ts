@@ -22,7 +22,8 @@ if (plantAssertion || restoreUnconditionalFlags || defaultFleetOn) {
 
 // Resolve real executables before replacing PATH. No package install or fleet tool is needed.
 const executables = new Map<string, string>([["bun", realpathSync(process.execPath)]]);
-for (const name of ["git", "sh", "bash", "env"]) {
+// The portable kitlib process reaper needs the OS Python even when every fleet adapter is absent.
+for (const name of ["git", "sh", "bash", "env", "python3"]) {
 	const executable = Bun.which(name);
 	if (!executable) throw new Error(`Required stock executable is unavailable: ${name}`);
 	executables.set(name, realpathSync(executable));

@@ -6,3 +6,4 @@
 - Give concurrent gate-load fixtures their own real Bun executable under the synthetic HOME so fixed environment reconstruction works on Linux.
 - Give history-transform fixture repositories their own Git author identity so commit-tree controls cannot inherit or require operator configuration.
 - Verify restored hook permissions with the portable filesystem API rather than mixing incompatible BSD and GNU stat output.
+- Preserve the stock OS Python in the isolated extension-test PATH so portable process cleanup works while fleet tools remain absent.
