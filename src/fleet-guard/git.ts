@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface FleetGuardEvent {
@@ -24,9 +24,11 @@ export interface FleetGuardBlock {
 }
 
 const MAIN_ONLY_REASON =
-	"fleet-guard main-only: branch/worktree creation is blocked. Work on main and publish only through the private-index landing route (`omp-kit land --paths <reserved> --message <msg> --apply` with an active exclusive reservation); see AGENTS.md Working on main.";
+	"fleet-guard main-only (WORKTREEGUARD1): branch switching/creation is blocked outside a builder's linked non-main worktree. Keep the canonical checkout on main; create your builder worktree with `wt switch --create <branch> --no-cd` (J-2026-11-07-01).";
+const WORKTREE_ADD_REASON =
+	"fleet-guard main-only (WORKTREEGUARD1): raw `git worktree add` is refused everywhere. Use `wt switch --create <branch> --no-cd` for a builder worktree (J-2026-11-07-01); no files were changed.";
 const PUSH_REASON =
-	"fleet-guard publication: raw `git push` is refused (BRANCHGUARD1: no new branches, no direct publication; see AGENTS.md Working on main). Publish only through the private-index landing route (`omp-kit land --paths <reserved> --message <msg> --apply` with an active exclusive reservation); naming a candidate ref or a prior feasibility proof is not a permit; no files were changed.";
+	"fleet-guard publication: raw `git push` is refused (BRANCHGUARD1): only the lead lands builder commits onto main (ompkit-1ra0d.12). Builders commit in their own worktree and never push; no files were changed.";
 const BRANCH_OPT_OUT = ".omp/fleet-guard.json";
 
 function asString(value: unknown): string | undefined {
@@ -779,17 +781,44 @@ function isMessageBundle(word: string): boolean {
 	return true;
 }
 
+/** A linked worktree has a private git-dir, a different common-dir, and its own HEAD. */
+function builderWorktree(root: string): boolean {
+	try {
+		const pointer = readFileSync(join(root, ".git"), "utf8").trim();
+		if (!pointer.startsWith("gitdir: ")) return false;
+		const gitDir = realpathSync(resolve(root, pointer.slice("gitdir: ".length)));
+		const commonDir = realpathSync(resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim()));
+		const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+		return gitDir !== commonDir && head.startsWith("ref: refs/heads/") && head !== "ref: refs/heads/main";
+	} catch {
+		return false;
+	}
+}
+
 function branchCreation(words: readonly string[]): boolean {
 	const subcommand = words[1];
-	if (subcommand === "worktree") return words.slice(2).includes("add");
+	if (subcommand === "switch") return true;
 	if (subcommand === "checkout") return words.includes("-b") || words.includes("-B") || words.includes("--orphan");
-	if (subcommand === "switch") return words.includes("-c") || words.includes("-C") || words.includes("--create") || words.includes("--orphan");
+	// Worktree creation is checked separately, including repositories that opt out of branch restrictions.
 	if (subcommand !== "branch") return false;
 	for (const word of words.slice(2)) {
 		if (!word.startsWith("-")) return true;
 		if (["-d", "-D", "-m", "-M", "--delete", "--move", "--rename", "--list", "-l", "-a", "-r", "--all", "--remotes", "--contains", "--no-contains", "--merged", "--no-merged", "--show-current", "--verbose"].includes(word)) return false;
 	}
 	return false;
+}
+
+function gitSubcommandIndex(words: readonly string[]): number {
+	let index = 1;
+	while (index < words.length) {
+		const word = words[index]!;
+		if (word === "--") { index++; break; }
+		if (!word.startsWith("-") || word === "-") break;
+		if (word === "-C" || word === "-c" || word === "--git-dir" || word === "--work-tree" || word === "--namespace") { index += 2; continue; }
+		if (word.startsWith("--git-dir=") || word.startsWith("--work-tree=") || word.startsWith("--namespace=")) { index++; continue; }
+		index++;
+	}
+	return index;
 }
 
 // BRANCHGUARD1 (ompkit-xa5s.11): every raw `git push` from a tool call is a
@@ -801,15 +830,7 @@ function branchCreation(words: readonly string[]): boolean {
 // candidate or a prior proof admits nothing. Dry runs and help output publish
 // nothing and stay quiet; `git stash push` is a stash subcommand, not a push.
 function rawPush(words: readonly string[]): boolean {
-	let index = 1;
-	while (index < words.length) {
-		const word = words[index]!;
-		if (word === "--") { index++; break; }
-		if (!word.startsWith("-") || word === "-") break;
-		if (word === "-C" || word === "-c" || word === "--git-dir" || word === "--work-tree" || word === "--namespace") { index += 2; continue; }
-		if (word.startsWith("--git-dir=") || word.startsWith("--work-tree=") || word.startsWith("--namespace=")) { index++; continue; }
-		index++;
-	}
+	const index = gitSubcommandIndex(words);
 	if (index >= words.length || words[index] !== "push") return false;
 	for (const word of words.slice(index + 1)) {
 		if (word === "-n" || word === "--dry-run" || word === "--help" || word === "-h") return false;
@@ -855,7 +876,10 @@ export function check(event: FleetGuardEvent, context: FleetGuardContext): Fleet
 		const pathBase = commandCwd ? resolve(callBase ?? session, commandCwd) : callBase ?? context.repoRoot ?? context.projectRoot ?? session;
 		const root = repositoryRoot(pathBase);
 		if (!root) continue;
-		if (branchCreation(effective) && !branchesOptedOut(root)) return { block: true, reason: MAIN_ONLY_REASON };
+		const subcommand = gitSubcommandIndex(effective);
+		const gitWords = [effective[0]!, ...effective.slice(subcommand)];
+		if (gitWords[1] === "worktree" && gitWords.slice(2).includes("add")) return { block: true, reason: WORKTREE_ADD_REASON };
+		if (branchCreation(gitWords) && !branchesOptedOut(root) && !builderWorktree(root)) return { block: true, reason: MAIN_ONLY_REASON };
 		if (rawPush(effective)) return { block: true, reason: PUSH_REASON };
 		const scope = analyzeCommit(effective);
 		if (scope && scope.amend) return { block: true, reason: AMEND_REASON };

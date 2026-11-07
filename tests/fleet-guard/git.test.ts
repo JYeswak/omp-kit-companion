@@ -5,6 +5,7 @@ import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writ
 import { join } from "node:path";
 import { check, executedShellCommands } from "../../src/fleet-guard/git.ts";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
+import { runFixture } from "../cli/fixture-process.ts";
 
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
 const scratch = ownedTmp("fleet-guard-git", { root: scratchRoot }).path;
@@ -82,13 +83,14 @@ const event = (command: string) => ({ toolName: "bash", arguments: { command } }
 const context = { cwd: repo };
 
 describe("fleet guard main-only git checks", () => {
-	test("blocks every branch/worktree creation form in a repository", () => {
+	test("blocks branch/worktree creation and switch forms in the canonical repository", () => {
 		for (const command of [
 			"git worktree add ../new-worktree",
 			"git worktree --force add ../new-worktree",
 			"git checkout -b topic",
 			"git checkout -B topic",
 			"git checkout --orphan topic",
+			"git switch main",
 			"git switch -c topic",
 			"git switch -C topic",
 			"git switch --orphan topic",
@@ -96,12 +98,12 @@ describe("fleet guard main-only git checks", () => {
 		]) {
 			const result = check(event(command), context);
 			expect(result?.block).toBe(true);
-			expect(result?.reason).toContain("main-only");
+			expect(result?.reason).toContain("WORKTREEGUARD1");
 		}
 	});
 
-	test("allows ordinary checkout, switch, listing, and non-repository commands", () => {
-		for (const command of ["git switch main", "git checkout main", "git worktree list", "printf 'git switch -c fake'"]) {
+	test("allows ordinary checkout, listing, and non-repository commands", () => {
+		for (const command of ["git checkout main", "git worktree list", "printf 'git switch -c fake'"]) {
 			expect(check(event(command), context)).toBeUndefined();
 		}
 		expect(check(event("git switch -c topic"), { cwd: "/" })).toBeUndefined();
@@ -381,6 +383,101 @@ describe("fleet guard main-only git checks", () => {
 	});
 });
 
+describe("WORKTREEGUARD1 builder worktrees (ompkit-1ra0d.34.1)", () => {
+	const canonical = join(scratch, "canonical");
+	const builder = join(scratch, "builder");
+	const detached = join(scratch, "detached");
+	mkdirSync(canonical);
+	const fixtureGit = (cwd: string, ...args: string[]): string => {
+		const result = runFixture(["git", ...args], {
+			cwd,
+			env: { ...gitEnv, GIT_CEILING_DIRECTORIES: scratch },
+		});
+		expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(0);
+		return new TextDecoder().decode(result.stdout).trim();
+	};
+	fixtureGit(canonical, "init", "-b", "main");
+	fixtureGit(canonical, "config", "user.email", "builder@example.invalid");
+	fixtureGit(canonical, "config", "user.name", "Builder");
+	fixtureGit(canonical, "config", "commit.gpgsign", "false");
+	fixtureGit(canonical, "config", "core.hooksPath", "/dev/null");
+	fixtureGit(canonical, "commit", "--allow-empty", "-m", "initial");
+	// Fixture setup alone uses Git directly: these are real linked worktrees, not fabricated .git pointers.
+	fixtureGit(canonical, "worktree", "add", "-b", "b1", builder);
+	fixtureGit(canonical, "worktree", "add", "--detach", detached);
+
+	test("admits and executes ordinary add, status and commit on builder branch b1", () => {
+		expect(fixtureGit(builder, "branch", "--show-current")).toBe("b1");
+		const before = fixtureGit(builder, "rev-parse", "HEAD");
+		writeFileSync(join(builder, "builder.txt"), "builder change\n");
+		for (const args of [["add", "builder.txt"], ["status", "--short"], ["commit", "-m", "builder change"]]) {
+			expect(check(event(`git ${args.map(arg => `'${arg}'`).join(" ")}`), { cwd: builder })).toBeUndefined();
+			fixtureGit(builder, ...args);
+		}
+		expect(fixtureGit(builder, "rev-parse", "HEAD")).not.toBe(before);
+		expect(fixtureGit(canonical, "rev-parse", "HEAD")).toBe(before);
+	});
+
+	test("only a linked non-main worktree admits branch commands; canonical and detached refuse", () => {
+		for (const command of ["git switch b1", "git switch -c b2", "git checkout -b b2", "git checkout -B b2", "git branch b2"]) {
+			expect(check(event(command), { cwd: builder }), command).toBeUndefined();
+			for (const cwd of [canonical, detached]) {
+				const refused = check(event(command), { cwd });
+				expect(refused?.block, `${cwd}: ${command}`).toBe(true);
+				expect(refused?.reason).toContain("WORKTREEGUARD1");
+			}
+		}
+		// A non-main branch alone is not a builder worktree.
+		fixtureGit(canonical, "switch", "-c", "canonical-topic");
+		try {
+			expect(check(event("git switch main"), { cwd: canonical })?.reason).toContain("WORKTREEGUARD1");
+		} finally {
+			fixtureGit(canonical, "switch", "main");
+		}
+	});
+
+	test("refuses raw worktree add everywhere and names the approved Worktrunk route", () => {
+		for (const cwd of [canonical, builder, detached]) {
+			expect(check(event("git worktree list"), { cwd })).toBeUndefined();
+			for (const command of ["git worktree add ../unsafe", "git worktree --force add ../unsafe"]) {
+				const refused = check(event(command), { cwd });
+				expect(refused?.block, command).toBe(true);
+				expect(refused?.reason).toContain("WORKTREEGUARD1");
+				expect(refused?.reason).toContain("wt switch --create <branch> --no-cd");
+			}
+		}
+	});
+
+	test("refuses builder pushes and non-main ref publication: only the lead lands", () => {
+		for (const cwd of [canonical, builder, detached]) {
+			expect(check(event("git status"), { cwd })).toBeUndefined();
+			for (const command of ["git push", "git push origin main", "git push origin refs/heads/b1", "git push origin b1:refs/heads/main"]) {
+				const refused = check(event(command), { cwd });
+				expect(refused?.block, command).toBe(true);
+				expect(refused?.reason).toContain("BRANCHGUARD1");
+				expect(refused?.reason).toContain("only the lead lands");
+			}
+		}
+	});
+
+	test("uses the command's target worktree, not the session checkout", () => {
+		expect(check(event(`git -C '${builder}' switch -c b2`), { cwd: canonical })).toBeUndefined();
+		const refused = check(event(`git -C '${canonical}' switch -c b2`), { cwd: builder });
+		expect(refused?.reason).toContain("WORKTREEGUARD1");
+		expect(check({ input: { command: "git switch -c b2", cwd: builder } }, { cwd: canonical })).toBeUndefined();
+		expect(check({ input: { command: "git switch -c b2", cwd: canonical } }, { cwd: builder })?.reason).toContain("WORKTREEGUARD1");
+	});
+
+	test("builder permission does not bypass amend or reservation refusals", () => {
+		expect(check(event("git status"), { cwd: builder })).toBeUndefined();
+		expect(check(event("git commit --amend"), { cwd: builder })?.reason).toContain("amend");
+		withOnlyFixture(onlyHolds("builder.txt"), "ok", "FixtureAgent", () => {
+			expect(check(event("git commit --only -m m -- builder.txt"), { cwd: builder })).toBeUndefined();
+			expect(check(event("git commit --only -m m -- foreign.txt"), { cwd: builder })?.reason).toContain("reservation");
+		});
+	});
+});
+
 describe("fleet guard BRANCHGUARD1 raw-publication refusal (ompkit-xa5s.11)", () => {
 	const SHA = "97081b70d4a355844ad0f6c0bbd0c0a0f6c0bbd0";
 	const fire = [
@@ -440,12 +537,12 @@ describe("fleet guard BRANCHGUARD1 raw-publication refusal (ompkit-xa5s.11)", ()
 		expect(entry?.reason).toContain("publication");
 	});
 
-	test("branch creation refusal names the landing route (AC1 switch -c row)", () => {
+	test("branch creation refusal names the approved builder worktree route", () => {
 		rmSync(join(repo, ".omp", "fleet-guard.json"), { force: true });
 		rmSync(join(repo, ".omp-fleet-guard.json"), { force: true });
 		const result = check(event("git switch -c topic"), context);
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain("land");
+		expect(result?.reason).toContain("wt switch --create <branch> --no-cd");
 	});
 
 	test("the branch opt-out never admits a raw push", () => {
@@ -454,6 +551,7 @@ describe("fleet guard BRANCHGUARD1 raw-publication refusal (ompkit-xa5s.11)", ()
 		try {
 			const result = check(event("git push origin main"), context);
 			expect(result?.block, "opt-out admitted a raw push").toBe(true);
+			expect(check(event("git worktree add ../unsafe"), context)?.reason).toContain("WORKTREEGUARD1");
 		} finally {
 			rmSync(join(repo, ".omp", "fleet-guard.json"), { force: true });
 			rmSync(join(repo, ".omp-fleet-guard.json"), { force: true });
@@ -466,7 +564,6 @@ describe("fleet guard BRANCHGUARD1 raw-publication refusal (ompkit-xa5s.11)", ()
 			"git push -n origin main",
 			"git push --dry-run origin HEAD:refs/heads/side",
 			"git stash push -m wip",
-			"git switch main",
 			"git checkout main",
 			"git status",
 			"git log --oneline",
