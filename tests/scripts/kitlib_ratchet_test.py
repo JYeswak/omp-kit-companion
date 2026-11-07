@@ -629,10 +629,10 @@ class Allowlist(unittest.TestCase):
     def test_pidguard_preserves_installed_schema_one_baseline_bytes(self) -> None:
         """New rules must not widen the file parsed by already-installed checkers."""
         raw = (ROOT / checker.BASELINE).read_bytes()
-        # Pin the pre-PIDGUARD1 schema-1 bytes, independent of Git history or
-        # checkout shape: commit-gate archives intentionally have no HEAD.
+        # Pin the schema-1 bytes after the raw-spawn removals in ompkit-1ra0d.37,
+        # independent of Git history: commit-gate archives have no HEAD.
         self.assertEqual(hashlib.sha256(raw).hexdigest(),
-                         "ff273b3d83e2151c26092f91418e5774cfc1229880ea043edc0f25e6c6299f9f")
+                         "94d1804a5b84c787ac9a632e9ebd672ec8aa249e69e047a523a47be9968e0217")
         self.assertEqual(set(json.loads(raw)["counts"]), {"raw-spawn"})
 
 
