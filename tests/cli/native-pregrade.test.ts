@@ -1,37 +1,18 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { runFixtureAsync } from "./fixture-process.ts";
-import { mintNativeSpawn, nativeIdentity, nativeReservationIdentity, observeNativeWrite, type NativeContext, type NativeExec } from "../../extensions/native-identity.ts";
-import { checkNativeClose, nativeAcDigest, recordNativePregrade, registerNativePregradeTool, type NativePregradeInput } from "../../src/native-pregrade.ts";
+import { mintNativeSpawn, nativeReservationIdentity, type NativeContext } from "../../extensions/native-identity.ts";
 import kitAgentMailGuard from "../../extensions/kit-agent-mail-guard.ts";
+import { checkNativeClose } from "../../src/native-pregrade.ts";
+import { type NativeExec } from "../../extensions/native-identity.ts";
+import { runFixtureAsync } from "./fixture-process.ts";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 
-// Contract harness, NOT live child/server evidence: host contexts and tracker rows are fixtures;
-// git history and the unchanged Python in_review admission are real. Live acceptance belongs to the lead.
-const scratch = ownedTmp("native-pregrade-test");
-const base = scratch.path;
+// Contract harness: host contexts and Agent Mail responses are fixtures, not live server proof.
+const scratch = ownedTmp("native-reservation-test");
+const base = realpathSync(scratch.path);
 const repo = join(base, "repo");
-const state = join(base, "state");
-const acceptance = "- [x] [a] [build] control plus planted negative `bun test test.ts` -> 0 fail";
-const env = { ...process.env, HOME: base, XDG_STATE_HOME: state, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CEILING_DIRECTORIES: base };
-let sha: string;
-const git = async (...args: string[]) => {
-	const result = await runFixtureAsync(["git", ...args], { cwd: repo, env });
-	if (result.rc !== 0) throw new Error(new TextDecoder().decode(result.stderr));
-	return new TextDecoder().decode(result.stdout).trim();
-};
-beforeAll(async () => {
-	mkdirSync(repo);
-	await git("init", "--quiet", "--template=");
-	await git("config", "user.name", "Builder");
-	await git("config", "user.email", "builder@example.invalid");
-	writeFileSync(join(repo, "feature.ts"), "export const value = 1;\n");
-	await git("add", "--", "feature.ts");
-	await git("-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "fixture implementation\n\nBead: kit-native");
-	sha = await git("rev-parse", "HEAD");
-});
 afterAll(() => scratch.cleanup());
 
 function contexts(id = `Verifier-${randomUUID()}`) {
@@ -43,104 +24,6 @@ function contexts(id = `Verifier-${randomUUID()}`) {
 	mintNativeSpawn({ spawnKey: id }, parent);
 	return { parent, child };
 }
-function tracker() {
-	const bead = { id: "kit-native", assignee: "Builder", status: "in_progress", created_at: "2026-11-01T00:00:00Z", acceptance_criteria: acceptance, comments: [] as { author: string; text: string }[] };
-	const exec: NativeExec = async (command, args, options) => {
-		if (command === "br") {
-			if (args[0] === "comments") bead.comments.push({ author: args[4]!, text: args[6]! });
-			return { code: 0, stdout: JSON.stringify([bead]), stderr: "" };
-		}
-		const result = await runFixtureAsync([command, ...args], { cwd: options?.cwd ?? repo, env });
-		return { code: result.rc ?? -1, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr), killed: result.killed };
-	};
-	return { bead, exec };
-}
-function input(): NativePregradeInput { return { bead: "kit-native", repo, export_sha: sha, ac_sha256: nativeAcDigest(acceptance), evidence: "[a] PASS control and planted negative, 2 pass 0 fail; mutant killed" }; }
-
-test("native non-author PASS writes unchanged schema and admits in_review through real ac_phase", async () => {
-	const { child } = contexts();
-	const { bead, exec } = tracker();
-	const result = await recordNativePregrade(child, input(), exec, env);
-	expect(result.record).toMatchObject({ schema: "omp-kit.pregrade.v1", grader: child.agent!.id, author: "Builder", candidate_commit: sha, verdict: "PASS" });
-	expect(JSON.parse(readFileSync(result.path, "utf8"))).toEqual(result.record);
-	mkdirSync(join(repo, ".omp"));
-	writeFileSync(join(repo, ".omp", "pregrade.json"), '{"required":true}');
-	const admission = await runFixtureAsync(["python3", "-c", "import json,sys; from ac_phase import in_review_admission; b=json.loads(sys.stdin.read(65537)); print(json.dumps(in_review_admission(b,repo=sys.argv[1])))", repo], { cwd: resolve(import.meta.dir, "../../scripts"), env, stdin: JSON.stringify(bead) });
-	expect(admission.rc).toBe(0);
-	expect(JSON.parse(new TextDecoder().decode(admission.stdout)).refusals).toEqual([]);
-});
-
-test("planted author child and a lead seat cannot produce independent pregrades", async () => {
-	const { child, parent } = contexts("Builder");
-	const { exec } = tracker();
-	await expect(recordNativePregrade(child, input(), exec, env)).rejects.toThrow("NATIVE_SELF_REFUSED");
-	await expect(recordNativePregrade(parent, input(), exec, env)).rejects.toThrow("NATIVE_IDENTITY_UNBOUND");
-});
-
-test("planted commit author is refused even when a different implementer is assigned", async () => {
-	const { child } = contexts("Builder");
-	const { bead, exec } = tracker();
-	bead.assignee = "AnotherBuilder";
-	await expect(recordNativePregrade(child, input(), exec, env)).rejects.toThrow("NATIVE_SELF_REFUSED");
-});
-
-test("planted absent/abbreviated export and stale AC digest are refused", async () => {
-	const { child } = contexts();
-	const { exec } = tracker();
-	for (const export_sha of ["", sha.slice(0, 12), "f".repeat(40)]) await expect(recordNativePregrade(child, { ...input(), export_sha }, exec, env)).rejects.toThrow();
-	await expect(recordNativePregrade(child, { ...input(), ac_sha256: "stale" }, exec, env)).rejects.toThrow("PREGRADE_AC_CHANGED");
-});
-
-test("a parent-written fake identity file cannot mint a native child", async () => {
-	const { child, parent } = contexts();
-	const fake = join(base, "forged-identity.json");
-	writeFileSync(fake, JSON.stringify({ ...nativeIdentity(child), kind: "sub" }));
-	const forged = { ...parent, sessionManager: { getSessionId: () => child.sessionManager!.getSessionId!(), getSessionFile: () => fake } };
-	expect(nativeIdentity(forged)).toBeNull();
-	expect(nativeIdentity({ ...child, agent: { kind: "sub", id: "Unminted", parentId: "Main" } })).toBeNull();
-	await expect(recordNativePregrade(forged, input(), tracker().exec, env)).rejects.toThrow("NATIVE_IDENTITY_UNBOUND");
-});
-
-test("own-session implementation writes cannot become independent by renaming or lead commits", async () => {
-	const { child } = contexts();
-	const { exec } = tracker();
-	await observeNativeWrite({ toolName: "edit", input: { patch: "*** Begin Patch\n[feature.ts#ABCD]\nPUT 1.=1:\n+changed\n*** End Patch" } }, child, exec);
-	await expect(recordNativePregrade(child, input(), exec, env)).rejects.toThrow("NATIVE_SELF_REFUSED");
-	const renamed = { ...child, agent: { ...child.agent!, id: "RenamedVerifier" } };
-	expect(nativeIdentity(renamed)).toBeNull();
-	await expect(recordNativePregrade(renamed, input(), exec, env)).rejects.toThrow("NATIVE_IDENTITY_UNBOUND");
-});
-
-test("a changed acceptance during the authorship read never writes PASS", async () => {
-	const { child } = contexts();
-	const { bead, exec } = tracker();
-	let shows = 0;
-	const racing: NativeExec = async (command, args, opts) => {
-		if (command === "br" && args[0] === "show" && ++shows === 2) bead.acceptance_criteria += " changed";
-		return exec(command, args, opts);
-	};
-	await expect(recordNativePregrade(child, input(), racing, env)).rejects.toThrow("PREGRADE_AC_CHANGED");
-	expect(bead.comments).toHaveLength(0);
-});
-
-test("AGENTCLOSE1 native non-author closes only on its current authenticated verdict", async () => {
-	const { child } = contexts();
-	const { bead, exec } = tracker();
-	await recordNativePregrade(child, input(), exec, env);
-	await expect(checkNativeClose(child, { ...bead, acceptance }, repo, `PASS export ${sha}`, exec)).resolves.toBeUndefined();
-	await expect(checkNativeClose(child, { ...bead, acceptance }, repo, "PASS without exact export", exec)).rejects.toThrow("NATIVE_VERDICT_REQUIRED");
-	const another = contexts().child;
-	await expect(checkNativeClose(another, { ...bead, acceptance }, repo, `PASS export ${sha}`, exec)).rejects.toThrow("NATIVE_VERDICT_REQUIRED");
-});
-
-test("AGENTCLOSE1 planted: a verifier that writes implementation after PASS cannot close", async () => {
-	const { child } = contexts();
-	const { bead, exec } = tracker();
-	await recordNativePregrade(child, input(), exec, env);
-	await observeNativeWrite({ toolName: "write", input: { path: "feature.ts" } }, child, exec);
-	await expect(checkNativeClose(child, { ...bead, acceptance }, repo, `PASS export ${sha}`, exec)).rejects.toThrow("NATIVE_SELF_REFUSED");
-});
-
 test("reservations: different spawn-minted children retain distinct server names", () => {
 	const one = contexts().child;
 	const two = contexts().child;
@@ -185,102 +68,34 @@ test("reservations guard: registered child names pass unchanged, never rewritten
 	}
 });
 
-test("AC digest keeps ticks but not contract changes invariant", () => {
-	expect(nativeAcDigest(acceptance)).toBe(nativeAcDigest(acceptance.replace("[x]", "[ ]")));
-	expect(nativeAcDigest(acceptance)).not.toBe(nativeAcDigest(`${acceptance}\nchanged`));
-	expect(() => nativeAcDigest(" ".repeat(65_537))).toThrow("NATIVE_AC_UNREADABLE");
-});
-
-test("native kit command takes identity from host context, never caller parameters", async () => {
+test("native close refuses claimed builders and parent seats but admits verifier export work", async () => {
+	mkdirSync(repo);
+	const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CEILING_DIRECTORIES: base };
+	const exec: NativeExec = async (command, args, options) => {
+		const result = await runFixtureAsync([command, ...args], { cwd: options?.cwd ?? repo, env });
+		return { code: result.rc ?? -1, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr), killed: result.killed };
+	};
+	for (const args of [
+		["init", "--quiet", "--template="],
+		["config", "user.name", "Builder"],
+		["config", "user.email", "builder@example.invalid"],
+	]) expect((await exec("git", args)).code).toBe(0);
+	writeFileSync(join(repo, "feature.ts"), "export const value = 1;\n");
+	expect((await exec("git", ["add", "--", "feature.ts"])).code).toBe(0);
+	expect((await exec("git", ["-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "implementation\n\nBead: kit-native"])).code).toBe(0);
+	const bead = { id: "kit-native", assignee: "Implementer", acceptance: null, comments: [] };
 	const { child, parent } = contexts();
-	const { exec } = tracker();
-	let execute: (id: string, input: NativePregradeInput, signal: undefined, update: undefined, ctx: NativeContext) => Promise<unknown>;
-	const stringSchema = { describe() { return this; }, optional() { return this; } };
-	registerNativePregradeTool({
-		zod: { string: () => stringSchema, object: (shape: unknown) => shape },
-		registerTool: (tool: { execute: typeof execute }) => { execute = tool.execute; },
-	} as never, exec, env);
-	const result = await execute!("record-native", input(), undefined, undefined, child) as { details: { record: { grader: string } } };
-	expect(result.details.record.grader).toBe(child.agent!.id);
-	await expect(execute!("forged-parent", { ...input(), ...{ actor: child.agent!.id, principal: nativeIdentity(child)!.principal } }, undefined, undefined, parent)).rejects.toThrow("NATIVE_IDENTITY_UNBOUND");
-});
-
-test("ownership follows absolute writes from a repo-less parent cwd without blocking ordinary editing", async () => {
-	const { child, parent } = contexts();
-	const { exec } = tracker();
-	await expect(observeNativeWrite({ toolName: "write", input: { path: join(base, "outside-repo.txt") } }, { ...parent, cwd: base }, exec)).resolves.toBeUndefined();
-	const rootChild = { ...child, cwd: base };
-	await observeNativeWrite({ toolName: "write", input: { path: join(repo, "feature.ts") } }, rootChild, exec);
-	await expect(recordNativePregrade(rootChild, input(), exec, env)).rejects.toThrow("NATIVE_SELF_REFUSED");
-});
-
-test("pregrade binds a separate tracker to the implementation export and cannot authorize another tracker", async () => {
-	const { child } = contexts();
-	const { bead, exec } = tracker();
-	await recordNativePregrade(child, { ...input(), tracker: base }, exec, env);
-	await expect(checkNativeClose(child, { ...bead, acceptance }, base, `PASS export ${sha}`, exec)).resolves.toBeUndefined();
-	await expect(checkNativeClose(child, { ...bead, acceptance }, repo, `PASS export ${sha}`, exec)).rejects.toThrow("NATIVE_VERDICT_REQUIRED");
-});
-
-test("untracked bash implementation edit with a lead-authored commit cannot self-pregrade", async () => {
-	const { child } = contexts();
-	const { exec } = tracker();
-	const command = "printf '%s\\n' 'export const value = 2;' > feature.ts";
-	await observeNativeWrite({ toolName: "bash", input: { cwd: "repo", command } }, { ...child, cwd: base }, exec);
-	const edit = await runFixtureAsync(["sh", "-c", command], { cwd: repo, env });
-	expect(edit.rc).toBe(0);
-	await git("add", "--", "feature.ts");
-	await git("-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "lead commits child shell edit\n\nBead: kit-native");
-	const candidate = await git("rev-parse", "HEAD");
-	expect(await git("show", "-s", "--format=%an", candidate)).toBe("Builder");
-	await expect(recordNativePregrade(child, { ...input(), export_sha: candidate }, exec, env)).rejects.toThrow("NATIVE_UNTRACKED_EXEC");
-});
-
-test("untracked execution control: independent git export and repo-less cwd do not taint implementation", async () => {
-	const { child } = contexts();
-	const { exec } = tracker();
-	const exported = join(base, `export-${randomUUID()}`);
+	await expect(checkNativeClose(child, bead, repo, null, exec)).resolves.toBeUndefined();
+	await expect(checkNativeClose(child, { ...bead, assignee: child.agent!.id! }, repo, null, exec)).rejects.toThrow("NATIVE_SELF_REFUSED");
+	await expect(checkNativeClose(parent, { ...bead, assignee: "Main" }, repo, null, exec)).rejects.toThrow("NATIVE_IDENTITY_UNBOUND");
+	await expect(checkNativeClose(child, { ...bead, comments: [{ author: child.agent!.id!, text: "DONE implementation" }] }, repo, null, exec)).rejects.toThrow("NATIVE_SELF_REFUSED");
+	const exported = join(base, "export");
 	mkdirSync(exported);
-	const initialized = await runFixtureAsync(["git", "init", "--quiet", "--template="], { cwd: exported, env });
-	expect(initialized.rc).toBe(0);
-	await observeNativeWrite({ toolName: "bash", input: { cwd: exported, command: "python3 -c 'print(1)'" } }, child, exec);
-	await observeNativeWrite({ toolName: "bash", input: { cwd: base, command: "printf control" } }, child, exec);
-	await expect(recordNativePregrade(child, input(), exec, env)).resolves.toBeDefined();
+	expect((await exec("git", ["init", "--quiet", "--template="], { cwd: exported })).code).toBe(0);
+	const exportedChild = { ...child, cwd: exported };
+	writeFileSync(join(exported, "mutant.ts"), "export const mutant = true;\n");
+	expect((await exec("git", ["status", "--short"], { cwd: exported })).code).toBe(0);
+	expect((await exec("bun", ["-e", "if (1 + 1 !== 2) throw new Error('failed')"], { cwd: exported })).code).toBe(0);
+	await expect(checkNativeClose(exportedChild, bead, repo, null, exec)).resolves.toBeUndefined();
 });
 
-test("untracked execution control: fixed single-invocation reads and scratch export setup stay independent", async () => {
-	const { child } = contexts();
-	const { exec } = tracker();
-	for (const command of [
-		"omp-kit scratch new --export abcdef123456 --json",
-		"git fetch origin main", "git rev-parse HEAD", "git show HEAD",
-		"git log --oneline", "git diff --stat", "git status --short",
-		"br show kit-native", "br comments list kit-native", "br search native", "br ready --json",
-	]) await observeNativeWrite({ toolName: "bash", input: { cwd: repo, command } }, child, exec);
-	await expect(recordNativePregrade(child, input(), exec, env)).resolves.toBeDefined();
-});
-
-test("untracked execution planted: an allowlisted read chained with sed is not an independent verifier", async () => {
-	const { child } = contexts();
-	const { exec } = tracker();
-	await observeNativeWrite({ toolName: "bash", input: { cwd: repo, command: "git status --short; sed -i.bak s/1/2/ feature.ts" } }, child, exec);
-	await expect(recordNativePregrade(child, input(), exec, env)).rejects.toThrow("NATIVE_UNTRACKED_EXEC");
-});
-
-test("untracked execution planted: every eval taints verification, even from outside the implementation repo", async () => {
-	for (const cwd of [repo, base]) {
-		const { child } = contexts();
-		const { exec } = tracker();
-		await observeNativeWrite({ toolName: "eval", input: { cwd, language: "py", code: "print(1)" } }, child, exec);
-		await expect(recordNativePregrade(child, input(), exec, env)).rejects.toThrow("NATIVE_UNTRACKED_EXEC");
-	}
-});
-
-test("untracked execution planted: archive, redirection, substitutions and multiline reads are not allowlisted", async () => {
-	for (const command of ["git archive HEAD", "git show HEAD > feature.ts", "git show $(printf HEAD)", "git status\nprintf changed", "git status && printf changed"]) {
-		const { child } = contexts();
-		const { exec } = tracker();
-		await observeNativeWrite({ toolName: "bash", input: { cwd: repo, command } }, child, exec);
-		await expect(recordNativePregrade(child, input(), exec, env)).rejects.toThrow("NATIVE_UNTRACKED_EXEC");
-	}
-});

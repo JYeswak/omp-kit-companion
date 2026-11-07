@@ -10,7 +10,6 @@ import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { run, runSync } from "../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "../tests/cli/fixture-process.ts";
 import { briefContract, briefTargets, checkTaskBrief, renderBrief } from "../src/brief.ts";
-import { nativeAcDigest, recordNativePregrade } from "../src/native-pregrade.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -1780,28 +1779,18 @@ async function nativeCloseFixture() {
 	await handlers.get("before_subagent_spawn")!({ type: "before_subagent_spawn", spawnKey: "NativeVerifier", agent: "task", invocationKind: "task", patterns: [] }, parent);
 	// Tracker acts run outside the implementation repo, just as an export-based verifier must.
 	const call = (ctx: FlywheelContext, command: string) => handlers.get("tool_call")!({ toolName: "bash", toolCallId: `native-close-${Date.now()}`, input: { cwd: base, command } }, ctx);
-	const pregrade = () => recordNativePregrade(child, { bead: row.id, repo: cwd, tracker: base, export_sha: sha, ac_sha256: nativeAcDigest(acceptance), evidence: "[a] PASS control and planted negative, 2 pass 0 fail" }, exec, env);
 	const close = `br close ${row.id} --actor NativeVerifier --reason 'PASS by NativeVerifier family: fixture export ${sha} [a]'`;
-	return { cwd, row, child, parent, call, pregrade, close, handlers };
+	row.comments.push({ author: "NativeVerifier", text: `PASS by NativeVerifier export ${sha} [a]`, created_at: new Date().toISOString() });
+	return { cwd, row, child, parent, call, close, handlers };
 }
 
-test("AGENTCLOSE1 native child closes a non-authored bead on its own export-bound verdict, not the inherited lead", async () => {
+test("AGENTCLOSE1 native child closes a non-authored bead, not the inherited lead", async () => {
 	const f = await nativeCloseFixture();
-	await f.pregrade();
 	expect((await f.call(f.child, f.close))?.block).not.toBe(true);
-	// Same child is now a writer of the verified implementation; its old PASS does not authorize self-close.
-	await f.handlers.get("tool_call")!({ toolName: "write", toolCallId: "native-write", input: { path: "implementation.ts", content: "changed" } }, f.child);
-	const own = await f.call(f.child, f.close);
-	expect(own?.block).toBe(true);
-	expect(own?.reason).toContain("NATIVE_SELF_REFUSED");
 });
 
-test("AGENTCLOSE1 planted: parent self-close and a child without a native verdict stay refused", async () => {
+test("AGENTCLOSE1 planted: parent self-close and borrowed actors stay refused", async () => {
 	const f = await nativeCloseFixture();
-	const missing = await f.call(f.child, f.close);
-	expect(missing?.block).toBe(true);
-	expect(missing?.reason).toContain("NATIVE_VERDICT_REQUIRED");
-	await f.pregrade();
 	const parent = await f.call(f.parent, f.close.replace("--actor NativeVerifier", "--actor Lead"));
 	expect(parent?.block).toBe(true);
 	expect(parent?.reason).toContain("SELF_CLOSE_REFUSED");
@@ -1810,11 +1799,16 @@ test("AGENTCLOSE1 planted: parent self-close and a child without a native verdic
 	expect(borrowed?.reason).toContain("--actor NativeVerifier");
 });
 
-test("AGENTCLOSE1 untracked source execution withdraws a child's previous native pregrade", async () => {
+test("AGENTCLOSE1 lifecycle: builder keeps claim through review; unclaimed verifier closes", async () => {
 	const f = await nativeCloseFixture();
-	await f.pregrade();
-	await f.handlers.get("tool_call")!({ toolName: "bash", toolCallId: "untracked-source-write", input: { cwd: f.cwd, command: "printf changed > implementation.ts" } }, f.child);
-	const refused = await f.call(f.child, f.close);
+	const builder = { ...f.child, agent: { kind: "sub" as const, id: "NativeBuilder", parentId: "Main" }, sessionManager: { getSessionId: () => `builder:${f.cwd}`, getSessionFile: () => join(f.cwd, "parent", "NativeBuilder.jsonl") } };
+	await f.handlers.get("before_subagent_spawn")!({ type: "before_subagent_spawn", spawnKey: "NativeBuilder", agent: "task", invocationKind: "task", patterns: [] }, f.parent);
+	f.row.assignee = "NativeBuilder";
+	f.row.status = "in_progress";
+	f.row.status = "in_review";
+	expect((await f.call(f.child, f.close))?.block).not.toBe(true);
+	const refused = await f.call(builder, f.close.replaceAll("NativeVerifier", "NativeBuilder"));
 	expect(refused?.block).toBe(true);
-	expect(refused?.reason).toContain("NATIVE_UNTRACKED_EXEC");
+	expect(refused?.reason).toContain("NATIVE_SELF_REFUSED");
+	expect(f.row.assignee).toBe("NativeBuilder");
 });

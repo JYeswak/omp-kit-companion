@@ -19,8 +19,8 @@ import { resolveCustodyScript } from "../src/custody.ts";
 import { classifyMineResult } from "../src/mine-cause.ts";
 import { briefHandbackRefusal, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
-import { mintNativeSpawn, nativeIdentity, observeNativeWrite, type NativeContext } from "./native-identity.ts";
-import { checkNativeClose, registerNativePregradeTool } from "../src/native-pregrade.ts";
+import { mintNativeSpawn, nativeIdentity, type NativeContext } from "./native-identity.ts";
+import { checkNativeClose } from "../src/native-pregrade.ts";
 interface SpawnModelIdentity { provider: string; id: string }
 
 /**
@@ -2548,7 +2548,6 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: FlywheelGuardDeps = {}): Promise<void> {
 	const env = deps.env ?? process.env;
 	const home = deps.home ?? homedir();
-	if (pi.registerTool && pi.zod) registerNativePregradeTool({ registerTool: pi.registerTool.bind(pi), zod: pi.zod }, pi.exec, env);
 	// Operator data is not part of a skill installation. An explicit roster
 	// override supports existing fleets; portable installs follow XDG config.
 	const configHome = env.XDG_CONFIG_HOME && isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : join(home, ".config");
@@ -2750,7 +2749,6 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	const guardVerdict = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> => {
 		try {
 			nativeIdentity(ctx);
-			await observeNativeWrite(event, ctx, pi.exec);
 			if (event.toolName === "task") {
 				const reason = await checkTaskBrief(event.input, ctx.cwd, pi.exec);
 				if (reason) return { block: true, reason };

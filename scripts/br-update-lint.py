@@ -27,23 +27,12 @@ nothing), so a description repair is not frozen behind a failure only a
 different fix can clear. It never applies when the same command carries
 --claim or --status: those moves are judged exactly as before.
 
-`--status in_review` (ACPHASE1 ompkit-9e9w6 + PREGRADE1 ompkit-3s6d2): for
-a bead created at or after ac_phase.AC_PHASE_CUTOVER the move is also
-refused (exit 4) unless every [build]/[landed] item is ticked
-(ac_phase.in_review_admission). When the tracker repo opts in with
-`.omp/pregrade.json` = {"required": true}, it also needs a non-author
-pregrade record matching the bead, its current AC digest, verdict PASS or
-WAITING, within 24 h; an invalid opt-in file fails closed. The tracker repo
-is the directory holding the `.beads` of the `--db` in use (BR_UPDATE_DB,
-else BEADS_DB), else the nearest ancestor of the project dir holding a
-`.beads` directory, else the project dir. The refusal codes
-(AC_PHASE_UNTAGGED, AC_PHASE_MULTI, AC_UNTICKED_BUILD_LANDED,
-PREGRADE_CONFIG_INVALID, PREGRADE_MISSING, PREGRADE_STALE,
-PREGRADE_AC_CHANGED, PREGRADE_NOT_PASSING, PREGRADE_SELF) ride the
-LINT_REFUSED line, each detailed on its own line; after any PREGRADE_*
-refusal the opt-in file's optional "hint" (control characters stripped,
-500 chars max) follows on a `PREGRADE_HINT` line. Legacy beads are admitted
-with a one-line AC_PHASE_LEGACY notice.
+`--status in_review` (ACPHASE1 ompkit-9e9w6): for a bead created at or
+after ac_phase.AC_PHASE_CUTOVER the move is refused (exit 4) unless every
+[build]/[landed] item is ticked (ac_phase.in_review_admission). The refusal
+codes AC_PHASE_UNTAGGED, AC_PHASE_MULTI and AC_UNTICKED_BUILD_LANDED ride
+the LINT_REFUSED line, each detailed on its own line. Legacy beads are
+admitted with a one-line AC_PHASE_LEGACY notice.
 
 REPLAYABLE1 (ompkit-fp72.135.3.71): on an edit carrying --acceptance-criteria
 or --add-acceptance, a non-[v] box the edit adds or changes that `omp-kit
@@ -72,10 +61,7 @@ is already decoded here; no eval or recovery is performed. Review entry needs
 a source claim; positional, flag, file and stdin DONE comments are gated too.
 Repositories that declare fresh-gate.sh keep the bounded ledger requirement:
 the latest matching version-2 observation needs integer rc=0 and complete
-evidence. Other repositories may use their declared exact-source non-author
-pregrade, bound to the authoritative tracker, prospective acceptance and
-passing build outcomes. Missing or invalid proof fails closed. No configured
-pregrade hint is executed by this gate; it is rendered only as guidance.
+evidence. Missing or invalid proof fails closed.
 
 Reads are live (`br show`, `br list`); no JSONL flush is involved, so a
 fixed bead passes immediately (LINTGATE1 acceptance 2).
@@ -442,64 +428,6 @@ def _fresh_green(repo: str, commit: str) -> bool:
     return False
 
 
-def _requires_fresh_gate(repo: str, commit: str) -> bool:
-    """Deleting a companion's working-tree script cannot select a weaker authority."""
-    if (Path(repo) / "scripts/fresh-gate.sh").is_file():
-        return True
-    for revision in (commit, "HEAD"):
-        if run(["git", "-C", repo, "cat-file", "-e", f"{revision}:scripts/fresh-gate.sh"], repo, 10)[0] == 0:
-            return True
-    return False
-
-
-def _build_pregrade_green(bead: dict, proofs: object) -> bool:
-    import ac_phase
-
-    if not isinstance(proofs, list) or any(not isinstance(item, dict) for item in proofs):
-        return False
-    by_item = {item.get("ac"): item for item in proofs if isinstance(item.get("ac"), str)}
-    if len(by_item) != len(proofs):
-        return False
-    build = [item for item in ac_phase.parse(bead.get("acceptance_criteria")) if item["phase"] == "build"]
-    if not build:
-        return False
-    for item in build:
-        proof = by_item.get(f"AC{item['index'] + 1}", {})
-        if proof.get("phase") != "build" or proof.get("status") != "PASS":
-            return False
-    return True
-
-
-def _pregrade_green(repo: str, commit: str, request: list[str]) -> bool:
-    import ac_phase
-
-    bead_id = os.environ.get("BR_HANDOFF_BEAD", "")
-    real = os.environ.get("BR_HANDOFF_REAL", "")
-    tracker = os.environ.get("BR_HANDOFF_TRACKER", "")
-    database = os.environ.get("BR_HANDOFF_DB", "")
-    if not bead_id or not real or not tracker:
-        return False
-    try:
-        path = ac_phase.pregrade_path(bead_id)
-        record = json.loads(path.read_text(encoding="utf-8"))
-        _, invalid, _ = ac_phase.pregrade_config(tracker)
-        if invalid:
-            return False
-        bead = show_bead(real, tracker, database, bead_id)
-        if os.environ.get("BR_HANDOFF_SUBCOMMAND") == "update":
-            bead = prospective(bead, parse_update(request), os.environ.get("BR_HANDOFF_PROJECT") or tracker)
-        if ac_phase.pregrade_record_refusals(bead, record, datetime.now(timezone.utc), path):
-            return False
-        if not isinstance(record.get("repo"), str) or os.path.realpath(record["repo"]) != os.path.realpath(tracker):
-            return False
-        if not _build_pregrade_green(bead, record.get("items")):
-            return False
-        rc, observed, _ = run(["git", "-C", repo, "rev-parse", "--verify", f"{record['candidate_commit']}^{{commit}}"], repo, 10)
-        return rc == 0 and observed.strip() == commit
-    except (OSError, ValueError, RuntimeError):
-        return False
-
-
 def handoff_gate(argv: list[str]) -> int:
     if len(argv) < 3 or argv[0] not in ("0", "1"):
         print("br-shim: HANDOFF_UNGATED incomplete admission request; "
@@ -508,21 +436,8 @@ def handoff_gate(argv: list[str]) -> int:
     return _handoff_check(argv[0] == "1", argv[1:3], argv[3:])
 
 
-def _handoff_remedy(repo: str, target: str, fresh_required: bool) -> str:
-    if fresh_required:
-        return f"cd {shlex.quote(repo)} && sh scripts/fresh-gate.sh --commit {target}"
-    import ac_phase
-
-    tracker = os.environ.get("BR_HANDOFF_TRACKER") or repo
-    bead_id = os.environ.get("BR_HANDOFF_BEAD") or "<id>"
-    actor = os.environ.get("AGENT_NAME") or "<actor>"
-    _, _, hint = ac_phase.pregrade_config(tracker)
-    if not hint:
-        return (f"omp-kit preflight in-review {shlex.quote(bead_id)} "
-                f"--project {shlex.quote(tracker)} --actor {shlex.quote(actor)}")
-    for key, value in (("<repo>", tracker), ("<id>", bead_id), ("<you>", actor)):
-        hint = hint.replace(key, shlex.quote(value))
-    return f"cd {shlex.quote(tracker)} && {hint}"
+def _handoff_remedy(repo: str, target: str) -> str:
+    return f"cd {shlex.quote(repo)} && sh scripts/fresh-gate.sh --commit {target}"
 
 
 def _handoff_claim(repo: str, subject: str, request: list[str]) -> int:
@@ -534,14 +449,10 @@ def _handoff_claim(repo: str, subject: str, request: list[str]) -> int:
             commit = out.strip()
     if commit and _fresh_green(repo, commit):
         return 0
-    fresh_required = _requires_fresh_gate(repo, commit) if commit else (Path(repo) / "scripts/fresh-gate.sh").is_file()
-    if commit and not fresh_required and _pregrade_green(repo, commit, request):
-        return 0
     target = commit or subject or "<sha>"
-    remedy = _handoff_remedy(repo, target, fresh_required)
+    remedy = _handoff_remedy(repo, target)
     print("br-shim: HANDOFF_UNGATED requires a complete GREEN observation for the exact DONE source "
-          f"{repo}@{target}; obtain the repository's declared non-author pregrade/check "
-          f"(diagnose with preflight if no hint is configured); run: {remedy}", file=sys.stderr)
+          f"{repo}@{target}; run: {remedy}", file=sys.stderr)
     return 4
 
 
@@ -731,8 +642,7 @@ def main(argv: list[str]) -> int:
             # baseline a repair is measured against (content edits only).
             repair_base = (lint_bead_failures(prospective(live, parse_update([]), project), byid)
                            if failures and args.status is None and not args.claim else None)
-            admission = (ac_phase.in_review_admission(
-                bead, repo=tracker_repo(project, db or os.environ.get("BEADS_DB", "")))
+            admission = (ac_phase.in_review_admission(bead)
                 if args.status == "in_review" else None)
     except Exception as exc:  # fail OPEN on probe failure, never refuse blind
         print(f"br-shim: LINT_GATE_UNVERIFIED {exc}", file=sys.stderr)
@@ -758,9 +668,6 @@ def main(argv: list[str]) -> int:
                 continue
             failures.append(code)
             details.append(f"br-shim: {code} {detail}")
-        if admission["hint"]:
-            # The repo's own instructions for producing a pregrade (.omp/pregrade.json "hint").
-            details.append(f"br-shim: PREGRADE_HINT {admission['hint']}")
     if failures and repair_base is not None:
         after = {f.split(":", 1)[0] for f in failures}
         before = {f.split(":", 1)[0] for f in repair_base}

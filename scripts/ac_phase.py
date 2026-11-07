@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ac_phase.py -- acceptance-item evidence phases and in_review admission.
 
-ACPHASE1 (ompkit-9e9w6) and PREGRADE1 (ompkit-3s6d2). One home for the
+ACPHASE1 (ompkit-9e9w6). One home for the
 shared contract that bead_lint.py (check l), br_create_guard_core.py (create
 admission) and br-update-lint.py (`--status in_review` admission) apply.
 
@@ -22,39 +22,19 @@ created_at is ENFORCED: the gate never guesses a bead into the exemption.
 Digest. ac_sha256 is the sha256 of the UTF-8 acceptance text with every
 item's ``[x]``/``[X]`` checkbox replaced by ``[ ]``, so ticking keeps it.
 
-Pregrade record. ``$XDG_STATE_HOME/omp-kit/pregrade/<bead>.json`` (else
-``$HOME/.local/state``; nothing else is consulted), schema
-``omp-kit.pregrade.v1``, written by the grader. in_review admission of an
-ENFORCED bead requires every build/landed item ticked. The pregrade record
-is required only when the tracker repo opts in with ``<repo>/.omp/pregrade.json``
-holding ``{"required": true}``: then a record for the same bead and digest,
-verdict PASS or WAITING, ``at`` within 24 h, graded by someone other than the
-author. An absent file or ``required: false`` leaves the record optional, so
-a user with no fleet tooling is never asked for one; an unreadable or invalid
-file fails closed (PREGRADE_CONFIG_INVALID, and the record is required).
+in_review admission of an ENFORCED bead requires every build/landed item ticked.
 
-Python 3.9 stdlib only; no I/O except reading the opt-in file and the record.
+Python 3.9 stdlib only; no I/O.
 """
 from __future__ import annotations
 
 import hashlib
-import json
-import os
 import re
-import unicodedata
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 AC_PHASE_CUTOVER = "2026-10-24T00:00:00Z"
 PHASES = ("build", "landed", "live", "after")
 TAG_HELP = "[build] | [landed] | [live] | [after <window>]"
-PREGRADE_SCHEMA = "omp-kit.pregrade.v1"
-PREGRADE_MAX_AGE = timedelta(hours=24)
-# A record stamped later than this past `now` is not trusted as fresh.
-PREGRADE_MAX_SKEW = timedelta(minutes=5)
-ADMITTING_VERDICTS = ("PASS", "WAITING")
-PREGRADE_CONFIG = os.path.join(".omp", "pregrade.json")
-PREGRADE_HINT_MAX = 500
 
 ITEM_RE = re.compile(r"^\s*-\s*\[( |x|X)\]")
 # One token of the leading run of bracketed tokens after the checkbox.
@@ -66,7 +46,6 @@ PHASE_TAG_RE = re.compile(
     r"(?:(build|landed|live)|after (\d+[mhd]|>=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z))"
 )
 BOX_RE = re.compile(r"^(\s*-\s*\[)[xX](\])")
-BEAD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 TS_RE = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?"
     r"(Z|[+-]\d{2}:?\d{2})?$"
@@ -189,142 +168,18 @@ def overall_verdict(items: list[dict]) -> str:
     return "UNVERIFIED"
 
 
-def pregrade_dir(env: dict | None = None) -> Path:
-    """Record directory from XDG_STATE_HOME, else HOME only (never ~/.claude, never a passwd lookup)."""
-    env = os.environ if env is None else env
-    base = env.get("XDG_STATE_HOME")
-    if not base:
-        home = env.get("HOME")
-        if not home:
-            raise ValueError("neither XDG_STATE_HOME nor HOME is set; no pregrade record directory")
-        base = os.path.join(home, ".local", "state")
-    return Path(base) / "omp-kit" / "pregrade"
-
-
-def pregrade_config(repo: str | None) -> tuple[bool, str | None, str | None]:
-    """(required, invalid_detail, hint) from ``<repo>/.omp/pregrade.json``.
-
-    No repo or no file: not required. ``{"required": <bool>}`` (extra keys
-    allowed): that bool, plus an optional string ``hint`` the repo uses to
-    tell the worker how to produce a pregrade (control characters dropped,
-    capped at PREGRADE_HINT_MAX chars). Anything else, a non-string hint
-    included: required, with the reason it is invalid (fail closed).
-    """
-    if not repo:
-        return False, None, None
-    path = Path(repo) / PREGRADE_CONFIG
-    try:
-        config = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return False, None, None
-    except (OSError, UnicodeError, ValueError) as exc:
-        return True, f"{path} unreadable: {exc}", None
-    if not isinstance(config, dict) or not isinstance(config.get("required"), bool):
-        return True, f'{path} must be a JSON object with a boolean "required"', None
-    hint = config.get("hint")
-    if hint is not None and not isinstance(hint, str):
-        return True, f'{path} "hint" must be a string', None
-    if hint is not None:
-        hint = "".join(ch for ch in hint if unicodedata.category(ch) != "Cc")[:PREGRADE_HINT_MAX].strip() or None
-    return config["required"], None, hint
-
-
-def pregrade_path(bead_id: str, env: dict | None = None) -> Path:
-    if not BEAD_ID_RE.match(bead_id or ""):
-        raise ValueError(f"bead id unusable as a pregrade file name: {bead_id!r}")
-    return pregrade_dir(env) / f"{bead_id}.json"
-
-
 def _item_names(items: list[dict]) -> str:
     return " | ".join(f"item {item['index'] + 1}: {item['line'].strip()[:120]}"
                       for item in items)
 
 
-def pregrade_refusals(
-    bead: dict, now: datetime, env: dict | None = None
-) -> list[tuple[str, str]]:
-    """Section 6 pregrade conditions, as (code, detail) refusals."""
-    bead_id = bead.get("id") or ""
-    try:
-        path = pregrade_path(bead_id, env)
-    except ValueError as exc:
-        return [("PREGRADE_MISSING", str(exc))]
-    try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return [("PREGRADE_MISSING", f"no pregrade record at {path}; run the "
-                 "non-author pregrade for this bead first")]
-    except (OSError, UnicodeError, ValueError) as exc:
-        return [("PREGRADE_MISSING", f"pregrade record {path} unreadable: {exc}")]
-    return pregrade_record_refusals(bead, record, now, path)
-
-
-def pregrade_record_refusals(
-    bead: dict, record: object, now: datetime, path: Path,
-) -> list[tuple[str, str]]:
-    """Validate one already-read record; callers never join two mutable snapshots."""
-    bead_id = bead.get("id") or ""
-    if not isinstance(record, dict) or record.get("schema") != PREGRADE_SCHEMA:
-        return [("PREGRADE_MISSING", f"pregrade record {path} is not {PREGRADE_SCHEMA}")]
-    if record.get("bead") != bead_id:
-        return [("PREGRADE_MISSING",
-                 f"pregrade record {path} is for {record.get('bead')!r}, not {bead_id}")]
-    out: list[tuple[str, str]] = []
-    digest = ac_sha256(bead.get("acceptance_criteria"))
-    if record.get("ac_sha256") != digest:
-        out.append(("PREGRADE_AC_CHANGED",
-                    f"acceptance text changed since the pregrade "
-                    f"(record {str(record.get('ac_sha256'))[:12]}, now {digest[:12]})"))
-    verdict = record.get("verdict")
-    if verdict not in ADMITTING_VERDICTS:
-        out.append(("PREGRADE_NOT_PASSING",
-                    f"pregrade verdict {verdict!r}; in_review needs PASS or WAITING"))
-
-    candidate_commit = record.get("candidate_commit")
-    if verdict in ADMITTING_VERDICTS and (
-        not isinstance(candidate_commit, str)
-        or not 7 <= len(candidate_commit) <= 40
-        or any(char not in "0123456789abcdefABCDEF" for char in candidate_commit)
-    ):
-        out.append(("PREGRADE_CANDIDATE_UNBOUND",
-                    f"pregrade record {path} has no valid 7-40 character "
-                    "hexadecimal candidate commit"))
-    at = parse_ts(record.get("at"))
-    if at is None or now - at > PREGRADE_MAX_AGE or at - now > PREGRADE_MAX_SKEW:
-        out.append(("PREGRADE_STALE",
-                    f"pregrade at {record.get('at')!r} is not within 24 h of "
-                    f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')}"))
-    grader = record.get("grader")
-    grader = grader.strip() if isinstance(grader, str) else None
-    authors = {a.strip() for a in (record.get("author"), bead.get("assignee")) if isinstance(a, str) and a.strip()}
-    # An empty author set would make any grader a non-author (GateReview finding 1): the author must be known.
-    if not grader or not authors or grader in authors:
-        out.append(("PREGRADE_SELF",
-                    f"grader {grader!r} is the author or the author is unknown "
-                    f"({', '.join(sorted(authors)) or 'no author on the record or bead'}); "
-                    "a non-author must pregrade a bead with a known author"))
-    return out
-
-
-def in_review_admission(
-    bead: dict, now: datetime | None = None, env: dict | None = None,
-    repo: str | None = None,
-) -> dict:
-    """Section 6: {enforced, pregrade_required, refusals: [(code, detail)], notice, hint}.
-
-    `hint` is the repo's sanitized pregrade hint, set only when a PREGRADE_*
-    code is among the refusals.
-
-    `bead` carries id, created_at, assignee and the acceptance_criteria
-    the bead will hold after the transition; `repo` is the tracker repo
-    whose ``.omp/pregrade.json`` opts in to the pregrade requirement.
-    """
-    now = now or datetime.now(timezone.utc)
+def in_review_admission(bead: dict) -> dict:
+    """Return phase and build/landed acceptance-tick refusals."""
     if not is_enforced(bead.get("created_at")):
-        return {"enforced": False, "pregrade_required": False, "refusals": [], "hint": None,
+        return {"enforced": False, "refusals": [],
                 "notice": f"AC_PHASE_LEGACY {bead.get('id')} created "
                           f"{bead.get('created_at')} before {AC_PHASE_CUTOVER}: "
-                          "phase and pregrade gates not enforced"}
+                          "phase gates not enforced"}
     items = parse(bead.get("acceptance_criteria"))
     refusals = tag_refusals(bead.get("acceptance_criteria"))
     unticked = [item for item in items
@@ -332,13 +187,4 @@ def in_review_admission(
     if unticked:
         refusals.append(("AC_UNTICKED_BUILD_LANDED",
                          f"{_item_names(unticked)}; tick build/landed items once proven"))
-    required, invalid, hint = pregrade_config(repo)
-    if invalid:
-        refusals.append(("PREGRADE_CONFIG_INVALID",
-                         f'{invalid}; fix it or remove it ({{"required": true}} opts in)'))
-    if required:
-        refusals.extend(pregrade_refusals(bead, now, env))
-    pregrade_refused = any(code.startswith("PREGRADE_") for code, _ in refusals)
-    return {"enforced": True, "pregrade_required": required,
-            "refusals": refusals, "notice": None,
-            "hint": hint if pregrade_refused else None}
+    return {"enforced": True, "refusals": refusals, "notice": None}
