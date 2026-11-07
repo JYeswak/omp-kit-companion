@@ -12,11 +12,6 @@
 #       records need no suite lease. A missing verdict takes the machine-wide suite lease.
 #   3. export the exact commit and run only its missing qualification with that commit's own runner
 #      (never the working tree: editing the runner mid-run killed a 25-minute suite on 2026-10-31);
-#   4. CULPRIT1 (ompkit-6xxhu): when the runner fails, run that export's scripts/verdict-culprit.py,
-#      which bisects the failing test files over the commits since the last main-role PASS and logs
-#      `release-verdict: CULPRIT <sha> <author> <bead>` or `release-verdict: CULPRIT none (<reason>)`,
-#      plus a `PROPOSE: git revert ...` line (never run) when the head stayed red for a wave. The
-#      culprit step never changes this script's exit status.
 #   5. CIONLY1 (J-2026-11-03-34): beside the full suite, the export's own full-suite-verdict-store.py
 #      `run-ci-only` judges the two files gate-ci-only.tsv keeps out of it (package-release.test.ts and
 #      kit-update.test.ts) on a second export of the same commit, git-initialized with that commit as
@@ -24,8 +19,6 @@
 #      reuses a PASS instead of running them (up to 900/2400 s) after build, sign and notarize. Its
 #      output (every failing file's, in one run) is printed after the suite's. Exports without
 #      run-ci-only (commits before it) skip this step silently; release-local then runs the files.
-#      CIFLAKE1: a failed CI-only verdict reruns its failing files once in fresh exact-head exports;
-#      its validated culprit marks flakes or leaves reproducing files red without bisection.
 #
 # A tree that already has a verdict is a cache hit and returns at once. Called with no arguments by
 # the publisher after a successful push, or by hand before release-local.
@@ -107,7 +100,7 @@ ci_pid=''
 kitlib_tmp_atexit '[ -z "$ci_pid" ] || kill -TERM "$ci_pid" 2>/dev/null || :'
 # SUITESERIAL1 (ompkit-fp72.120.16.264): one full suite at a time machine-wide, whatever launched it. Each
 # commit is judged under the suite lease (scripts/suite-lease.sh), held around its runner, the CI-only judge
-# beside it and the culprit step, so none of them overlaps another launcher's suite. The runner finds the lease
+# beside it, so neither overlaps another launcher's suite. The runner finds the lease
 # held by this enclosing run and takes none. release-verdict requests go first in the lease queue, so the
 # release-local stage waiting on this run is never starved. A checkout whose JUDGING_FILES predate the lease
 # runs without it (SUITE_LEASE_ABSENT); one whose closure lists scripts/suite-lease.sh refuses when it is missing.
@@ -130,23 +123,6 @@ else
 	fi
 	printf 'release-verdict: SUITE_LEASE_ABSENT: %s predates scripts/suite-lease.sh, so this run takes no suite lease\n' "$ROOT"
 fi
-# culprit_step [--ci-only]: attribute a failed verdict at $sha. Output and status never decide ours.
-culprit_step() {
-	if [ ! -f "$tree/scripts/verdict-culprit.py" ]; then
-		printf 'release-verdict: CULPRIT none (no culprit tool in %s)\n' "$sha"
-		return 0
-	fi
-	culprit_out="$WORK/culprit.$sha.out"
-	culprit_rc=0
-	(cd "$tree" && env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB -u BEADS_DIR TMPDIR="$WORK" \
-		python3 -B scripts/verdict-culprit.py --repo "$ROOT" --commit "$sha" "$@") >"$culprit_out" </dev/null || culprit_rc=$?
-	if grep -q '^CULPRIT ' "$culprit_out"; then
-		grep -E '^(CULPRIT |PROPOSE: )' "$culprit_out" | sed 's/^/release-verdict: /'
-	else
-		printf 'release-verdict: CULPRIT none (culprit step failed rc=%s)\n' "$culprit_rc"
-	fi
-	return 0
-}
 # RELFAST1: wall-clock runner intervals, matching release-local's substep format.
 # Keep CI's timestamp separate: its existing background judge overlaps main.
 # CI ends when the parent observes completion at wait, not necessarily at process exit.
@@ -231,7 +207,6 @@ while :; do
 	fi
 	producer_rc=$rc
 	printf 'release-verdict: %s producer_rc=%s\n' "$sha" "$rc"
-	[ "$rc" = 0 ] || culprit_step || :
 	if [ -n "$ci_pid" ]; then
 		ci_rc=0
 		wait "$ci_pid" || ci_rc=$?
@@ -239,7 +214,6 @@ while :; do
 		ci_pid=''
 		cat "$WORK/ci-only.$sha.out"
 		printf 'release-verdict: %s ci_only_rc=%s\n' "$sha" "$ci_rc"
-		[ "$ci_rc" = 0 ] || culprit_step --ci-only || :
 		[ "$rc" != 0 ] || rc=$ci_rc
 	elif [ "$ci_supported" = 1 ]; then
 		ci_rc=0

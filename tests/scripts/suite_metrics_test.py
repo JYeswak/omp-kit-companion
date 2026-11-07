@@ -68,7 +68,6 @@ class SuiteMetricsTests(unittest.TestCase):
             "tests/cli/fresh-gate.helpers.ts", "tests/cli/ci-only-verdict-fixtures.sh",
             "tests/cli/package-release.test.ts", "tests/cli/portable-paths.test.ts",
             "tests/cli/savefirst-pre-push.test.sh", "tests/cli/tag-after-green.test.sh",
-            "tests/cli/verdict-culprit.test.sh",
         ]
         paths = [ROOT / name for name in fixtures]
         self.assertEqual(metrics.judging_file_copies(paths), [])
