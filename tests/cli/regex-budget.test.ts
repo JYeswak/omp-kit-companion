@@ -409,13 +409,22 @@ test("REGEXREF1 planted slow rule: ten copies of kit-no-gh-poll#1 (2x over budge
 	} finally { cleanup(dir); }
 }, fixtureDeadlineS(120) * 1000);
 
-// A 1.14x-over plant sits inside the measured reference/rule divergence (up to 1.385x): at ratio 1 it must FAIL, but on
-// a slow host the scaled budget can cover it and the tracking guard then reads INCONCLUSIVE (never PASS), so only the
-// quiet run is asserted here.
-test("REGEXREF1 planted slow rule: five copies of kit-no-gh-poll#1 (1.14x over budget) FAIL on a quiet host", async () => {
+// A 1.14x-over plant sits inside the measured reference/rule divergence (up to 1.385x): at reference ratio 1 (a quiet
+// host) it must FAIL; on a slower host the scaled budget can cover it and the tracking guard reads INCONCLUSIVE. It must
+// never PASS on any host. The suite runs on loaded hosts too (6d7575c212's verdict ran at ratio 2.69 and the gate
+// correctly said INCONCLUSIVE rc 75), so the FAIL is required only when the run's own reference ratio is 1.
+test("REGEXREF1 planted slow rule: five copies of kit-no-gh-poll#1 (1.14x over budget) FAIL on a quiet host and never PASS on a loaded one", async () => {
 	const dir = plantedSlowRules(NEAR_BUDGET_SLOW_RULE_COPIES);
 	try {
-		expectSlowRuleFails(await runGateCli(["--rules", dir], "near-budget-slow-rule-quiet"));
+		const run = await runGateCli(["--rules", dir], "near-budget-slow-rule-quiet");
+		expect(run.ratio).not.toBeNull();
+		if (run.ratio! <= 1) {
+			expectSlowRuleFails(run);
+		} else {
+			expect([1, INCONCLUSIVE_EXIT_CODE]).toContain(run.rc);
+			expect(run.verdict.startsWith("REGEX-BUDGET: FAIL") || run.verdict.startsWith("REGEX-BUDGET: INCONCLUSIVE")).toBe(true);
+			expect(run.liveStatus).not.toBe("PASS");
+		}
 	} finally { cleanup(dir); }
 }, fixtureDeadlineS(120) * 1000);
 
