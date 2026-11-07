@@ -95,7 +95,10 @@ SH
 	chmod +x "$notes_repo/.git/hooks/pre-commit"
 	# Explicit GIT_DIR matches the installed hook chain; Git itself supplies
 	# the alternate GIT_INDEX_FILE for --only (never a fabricated index).
-	(cd "$notes_repo" && GIT_DIR=.git git commit --only -qm '[test] notes hook control' -m 'Bead: fixture-313' -- \
+	printf '[test] notes hook control\n\nBead: fixture-313\n' >"$TMP/notes-message"
+	(cd "$notes_repo" && GIT_DIR=.git sh "$KITREPO/scripts/check-commit-gate.sh" --prepare "$TMP/notes-message" --files \
+		scripts/fresh-gate.sh scripts/full-suite-verdict.sh changelog.d/313.md &&
+		GIT_DIR=.git git commit --only -qF "$TMP/notes-message" -- \
 		scripts/fresh-gate.sh scripts/full-suite-verdict.sh changelog.d/313.md) >"$TMP/notes-hook.out" 2>&1
 	notes_rc=$?
 	cat "$TMP/notes-hook.out"
@@ -107,7 +110,10 @@ SH
 	# Both roles must still reject a later shipped change without its own
 	# fragment. The adapter stops on base RED, so replay candidate separately.
 	printf '# missing fragment\n' >>"$notes_repo/scripts/full-suite-verdict.sh"
-	(cd "$notes_repo" && GIT_DIR=.git git commit --only -qm '[test] notes missing fragment' -m 'Bead: fixture-314' -- \
+	printf '[test] notes missing fragment\n\nBead: fixture-314\n' >"$TMP/notes-message"
+	(cd "$notes_repo" && GIT_DIR=.git sh "$KITREPO/scripts/check-commit-gate.sh" --prepare "$TMP/notes-message" --files \
+		scripts/full-suite-verdict.sh &&
+		GIT_DIR=.git git commit --only -qF "$TMP/notes-message" -- \
 		scripts/full-suite-verdict.sh) >"$TMP/notes-negative-base.out" 2>&1
 	notes_rc=$?
 	cat "$TMP/notes-negative-base.out"

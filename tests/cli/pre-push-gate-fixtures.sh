@@ -1548,8 +1548,8 @@ else
 fi
 unset FULL_SUITE_VERDICT_CACHE_DIR
 
-# COMMITPARITY1 (ompkit-9d9fx): check-commit-gate.sh runs this gate at commit time and records the
-# pass; the push of that same commit reuses it instead of judging it again. Any changed input misses.
+# COMMITPARITY1: prepare the same gate outside the commit lock and record its
+# pass; the push of that same commit reuses it. Any changed input misses.
 reuse_count="$TMP/commit-reuse-count"
 : > "$reuse_count"
 reuse=$(mkrepo commit-reuse 'exit 0' "printf 'x\n' >> '$reuse_count'")
@@ -1563,7 +1563,7 @@ chmod +x "$reuse_member"
 printf 'new\n' > "$reuse/new.txt"
 git -C "$reuse" add new.txt
 printf '[test] add new\n\nBead: x-1\n' > "$TMP/reuse-msg"
-(cd -- "$reuse" && PRE_PUSH_FULL_SUITE=release sh "$KITREPO/scripts/check-commit-gate.sh" "$TMP/reuse-msg") > "$TMP/reuse-commit-out" 2>&1
+(cd -- "$reuse" && PRE_PUSH_FULL_SUITE=release sh "$KITREPO/scripts/check-commit-gate.sh" --prepare "$TMP/reuse-msg") > "$TMP/reuse-commit-out" 2>&1
 reuse_commit_rc=$?
 git -C "$reuse" commit -q -F "$TMP/reuse-msg"
 reuse_tip=$(git -C "$reuse" rev-parse HEAD)

@@ -50,7 +50,7 @@ printf 'change\n\nBead: x-1\n' > "$msg"
 #    tree and whose parent is HEAD, against origin/main; the release verdict is opted out.
 printf 'more\n' >> "$repo/a.txt"
 git -C "$repo" add a.txt
-if (cd "$repo" && sh "$CHECK" "$msg" > "$TMP/out" 2>&1); then ok; else bad "green: rc!=0 $(cat "$TMP/out")"; fi
+if (cd "$repo" && sh "$CHECK" --prepare "$msg" > "$TMP/out" 2>&1); then ok; else bad "green: rc!=0 $(cat "$TMP/out")"; fi
 same() { if [ "$1" = "$2" ]; then ok; else bad "$3: got '$1' want '$2'"; fi; }
 refs=$(cut -d'|' -f1 "$GATE_LOG")
 IFS=' ' read -r lref cand rref rsha <<EOF
@@ -65,7 +65,7 @@ same "$(git -C "$repo" rev-parse HEAD)" "$(git -C "$repo" rev-parse origin/main)
 # 2. RED: a staged file the push gate refuses makes the commit refuse with the gate's status.
 printf 'x\n' > "$repo/BROKEN"
 git -C "$repo" add BROKEN
-if (cd "$repo" && sh "$CHECK" "$msg" > "$TMP/out" 2>&1); then bad "red: rc=0"; else
+if (cd "$repo" && sh "$CHECK" --prepare "$msg" > "$TMP/out" 2>&1); then bad "red: rc=0"; else
 	rc=$?
 	if [ "$rc" = 7 ] && grep -q 'commit-gate: REFUSED' "$TMP/out"; then ok; else bad "red: rc=$rc $(cat "$TMP/out")"; fi
 fi
@@ -74,14 +74,14 @@ fi
 #    the shared index stages it.
 idx="$TMP/only.index"
 GIT_INDEX_FILE="$idx" git -C "$repo" read-tree HEAD
-if (cd "$repo" && GIT_INDEX_FILE="$idx" sh "$CHECK" "$msg" > "$TMP/out" 2>&1); then ok; else bad "only-index: rc!=0 $(cat "$TMP/out")"; fi
+if (cd "$repo" && GIT_INDEX_FILE="$idx" sh "$CHECK" --prepare "$msg" > "$TMP/out" 2>&1); then ok; else bad "only-index: rc!=0 $(cat "$TMP/out")"; fi
 
 # 4. Nothing to mirror: no installed fresh-gate member, or a branch other than main -> admitted.
 mv "$gate" "$gate.off"
-if (cd "$repo" && sh "$CHECK" "$msg" > "$TMP/out" 2>&1); then ok; else bad "no-gate: rc!=0"; fi
+if (cd "$repo" && sh "$CHECK" --prepare "$msg" > "$TMP/out" 2>&1); then ok; else bad "no-gate: rc!=0"; fi
 mv "$gate.off" "$gate"
 git -C "$repo" checkout -q -b side
-if (cd "$repo" && sh "$CHECK" "$msg" > "$TMP/out" 2>&1); then ok; else bad "side-branch: rc!=0"; fi
+if (cd "$repo" && sh "$CHECK" --prepare "$msg" > "$TMP/out" 2>&1); then ok; else bad "side-branch: rc!=0"; fi
 
 
 # COMMITONCE1: exercise the real phase dispatcher, not a second selection table.

@@ -1,15 +1,18 @@
 import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { ownedTmp } from "./kitlib/tmp.ts";
-import { run as kitlibRun, runSync as kitlibRunSync, type RunResult } from "./kitlib/run.ts";
+import { run as kitlibRun, runSync as kitlibRunSync } from "./kitlib/run.ts";
+import type { RunResult } from "./kitlib/run.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { availableParallelism, homedir, loadavg } from "node:os";
 import type { CliResult, ParsedCommand } from "./cli.ts";
 import { authorizeSourceAct } from "./source-authority.ts";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
-import { convergeRepository, type ConvergeResult } from "./converge.ts";
+import { convergeRepository } from "./converge.ts";
+import type { ConvergeResult } from "./converge.ts";
 import { defaultLiveness, defaultRunner, disposalGate } from "./scratch.ts";
-import { parseReservationRead, type AttestedReservation } from "./fleet-guard/git.ts";
+import { parseReservationRead } from "./fleet-guard/git.ts";
+import type { AttestedReservation } from "./fleet-guard/git.ts";
 
 
 type GitResult = { code: number; out: string; err: string; interrupted: boolean };
@@ -1171,6 +1174,35 @@ export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 	// and the qualified base, never against a dispatch seed or shared HEAD.
 	const qualifiedBlobs: Record<string, WorktreeBlob> = {};
 	for (const path of paths) qualifiedBlobs[path] = hashWorktreeBlob(repo, path);
+	// GATELOCK1: the installed member judges HEAD plus these exact owned
+	// worktree paths before git commit takes index.lock. The commit hook
+	// admits only the same tree, parent, message, remote base and gate.
+	const hookPath = git(repo, ["rev-parse", "--path-format=absolute", "--git-path", "hooks"]);
+	if (hookPath.code !== 0)
+		return refused("COMMIT_GATE_UNAVAILABLE", "Git's hook location could not be resolved", "Repair the repository before saving; nothing was committed.");
+	const commitGate = join(hookPath.out.trim(), "hooks.d/commit-msg/55-omp-kit-commit-gate");
+	let gatePresent = false;
+	try { gatePresent = lstatSync(commitGate).isFile(); }
+	catch (error) {
+		if (!(error instanceof Error && "code" in error && error.code === "ENOENT"))
+			return refused("COMMIT_GATE_UNAVAILABLE", `Cannot inspect installed gate: ${String(error)}`, "Restore hook access before saving; nothing was committed.");
+	}
+	try {
+		if (gatePresent) {
+			const preparation = ownedTmp("land-commit-gate");
+			try {
+				const messageFile = join(preparation.path, "message");
+				writeFileSync(messageFile, message + "\n");
+				const result = await kitlibRun(["sh", commitGate, "--prepare", messageFile, "--files", ...paths], {
+					cwd: repo, env: gitEnvironment(), deadline_s: landPushDeadlineSeconds(), max_output_bytes: 8 * 1024 * 1024,
+				});
+				if (result.rc !== 0 || result.timed_out || result.killed || result.truncated)
+					return refused("COMMIT_GATE_REFUSED", new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr), "Fix the gate finding and prepare the current tree again; nothing was committed.");
+			} finally { preparation.cleanup(); }
+		}
+	} catch (error) {
+		return refused("COMMIT_GATE_UNAVAILABLE", `Commit preparation failed: ${String(error)}`, "Restore the installed gate and retry; nothing was committed.");
+	}
 	// A peer may advance HEAD from a post-commit hook before Git returns. Attribute
 	// our save through a per-call native reflog action, never through the later tip.
 	const action = `omp-kit-land-${randomUUID()}`;

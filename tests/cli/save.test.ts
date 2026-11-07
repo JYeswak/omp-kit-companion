@@ -3,7 +3,7 @@
 // that still publishes or commits, a save that leaves no save-log row for the p50 measure, and `--` leaking
 // to commands that never take child arguments.
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 import { cliPath, commandEnvironment, fixture, git, remoteHead, repoRoot, scratch, stringEnvironment } from "./private-index-land.helpers.ts";
@@ -142,3 +142,30 @@ test("save grammar refuses a missing message or missing paths, and `--` stays re
 		expect(body.errors[0]?.code, args.join(" ")).toBe(code);
 	}
 }, { timeout: 120_000 });
+
+test("GATELOCK1 save prepares the installed gate before commit and preserves its RED judgment", () => {
+	const { work, fakeBin } = fixture();
+	const hooks = join(work, ".git/hooks");
+	const members = join(hooks, "hooks.d/commit-msg");
+	mkdirSync(members, { recursive: true });
+	copyFileSync(join(repoRoot, "scripts/check-commit-gate.sh"), join(members, "55-omp-kit-commit-gate"));
+	copyFileSync(join(repoRoot, "scripts/kitlib-tmp.sh"), join(members, "kitlib-tmp.sh"));
+	writeFileSync(join(hooks, "commit-msg"), '#!/bin/sh\nexec sh "$(dirname "$0")/hooks.d/commit-msg/55-omp-kit-commit-gate" "$@"\n');
+	chmodSync(join(hooks, "commit-msg"), 0o755);
+	const gate = join(hooks, "hooks.d/pre-push/40-omp-kit-fresh-gate");
+	mkdirSync(join(hooks, "hooks.d/pre-push"), { recursive: true });
+	writeFileSync(gate, '#!/bin/sh\nread -r lref candidate rref base\nif [ "$(git show "$candidate:owned.txt")" = broken ]; then echo "planted RED owned.txt" >&2; exit 7; fi\n');
+	chmodSync(gate, 0o755);
+	writeFileSync(join(work, "owned.txt"), "saved through prepared admission\n");
+	const green = save(work, fakeBin, ["-m", "[test] prepared save", "--", "owned.txt"]);
+	expect(green.status, green.stdout + green.stderr).toBe(0);
+	expect(git(work, ["show", `${remoteHead(work)}:owned.txt`])).toBe("saved through prepared admission\n");
+	const before = git(work, ["rev-parse", "HEAD"]).trim();
+	writeFileSync(join(work, "owned.txt"), "broken\n");
+	const red = save(work, fakeBin, ["--json", "-m", "[test] red save", "--", "owned.txt"]);
+	expect(red.status, red.stdout + red.stderr).toBe(1);
+	expect(red.stdout).toContain("COMMIT_GATE_REFUSED");
+	expect(red.stdout).toContain("planted RED owned.txt");
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(before);
+	expect(remoteHead(work)).toBe(before);
+}, { timeout: fixtureDeadlineS(180) * 1000 });
