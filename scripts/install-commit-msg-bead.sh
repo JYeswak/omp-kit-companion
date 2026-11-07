@@ -277,11 +277,9 @@ staged_portable_paths pre-commit portable_paths_check.py scripts/portable_paths_
 staged_portable_paths pre-commit 54-omp-kit-staged-portable-paths scripts/check-portable-paths.sh +x
 staged_wallclock pre-commit wallclock_check.py scripts/wallclock_check.py -x
 staged_wallclock pre-commit 55-omp-kit-staged-wallclock scripts/check-staged-wallclock.sh +x
-staged_sources pre-commit sources.py scripts/sources.py -x
-staged_sources pre-commit kitlib_run.py scripts/kitlib_run.py -x
-staged_sources pre-commit kitlib_io.py scripts/kitlib_io.py -x
-staged_sources pre-commit kitlib_tmp.py scripts/kitlib_tmp.py -x
-staged_sources pre-commit 52-omp-kit-staged-sources scripts/check-staged-sources.sh +x
+staged_runtime pre-commit kitlib_run.py scripts/kitlib_run.py -x
+staged_runtime pre-commit kitlib_io.py scripts/kitlib_io.py -x
+staged_runtime pre-commit kitlib_tmp.py scripts/kitlib_tmp.py -x
 kitlib_tmp pre-commit kitlib-tmp.sh scripts/kitlib-tmp.sh -x
 kitlib_tmp pre-commit kitlib-findings.sh scripts/kitlib-findings.sh -x
 kitlib_tmp commit-msg kitlib-tmp.sh scripts/kitlib-tmp.sh -x
@@ -305,7 +303,6 @@ commit_notes commit-msg release-notes.ts scripts/release-notes.ts -x
 commit_notes commit-msg limit-process-tree.sh scripts/limit-process-tree.sh -x
 commit_notes commit-msg 46-omp-kit-commit-notes scripts/check-commit-notes.sh +x
 deploy_step commit-msg 48-omp-kit-deploy-step scripts/check-deploy-step.sh +x
-gap_mention commit-msg 47-omp-kit-gap-mention scripts/check-gap-mention.sh +x
 stale_worktree commit-msg 49-omp-kit-stale-worktree scripts/check-stale-worktree.sh +x
 kitlib_reversal commit-msg 50-omp-kit-staged-kitlib-reversal scripts/check-commit-kitlib-reversal.sh +x
 commit_gate commit-msg 55-omp-kit-commit-gate scripts/check-commit-gate.sh +x
@@ -412,6 +409,44 @@ write_exclude_block() {
 
 chain_dir() {
 	printf '%s/hooks.d/%s' "$HOOKS" "$1"
+}
+
+# Only byte-identical kit copies are retired; an owner-adapted member must be
+# reviewed by its owner rather than silently removed. Numeric prefixes varied
+# between install sites, so match the managed basename, not its ordering slot.
+retired_hook_members() {
+	for retired in "$HOOKS/hooks.d/commit-msg/"[0-9][0-9]-omp-kit-gap-mention \
+		"$HOOKS/hooks.d/pre-commit/"[0-9][0-9]-omp-kit-staged-sources; do
+		[ -e "$retired" ] || [ -L "$retired" ] || continue
+		printf '%s\n' "$retired"
+	done
+}
+
+retire_hook_members() {
+	# Validate the complete set before removing any member.
+	while IFS= read -r retired; do
+		[ -n "$retired" ] || continue
+		case "$retired" in
+			*-omp-kit-gap-mention) expected=8aa0bc9c7404110f27a5b9fdd84efdb028d8d3a84e0cb996dd9661bf6b008762 ;;
+			*-omp-kit-staged-sources) expected=0d971b18f6a686b7993d3eb6a6445d100802e9a53e032f763a67e184856b2d30 ;;
+		esac
+		if [ -L "$HOOKS/hooks.d" ] || [ -L "$(dirname -- "$retired")" ] ||
+			[ -L "$retired" ] || [ ! -f "$retired" ] ||
+			[ "$(shasum -a 256 "$retired" | cut -d' ' -f1)" != "$expected" ]; then
+			printf 'install-commit-msg-bead: REFUSED owner-modified retired member: %s; owner review required\n' "$retired" >&2
+			exit 2
+		fi
+	done <<EOF
+$(retired_hook_members)
+EOF
+	while IFS= read -r retired; do
+		[ -n "$retired" ] || continue
+		backup "$retired"
+		rm -f -- "$retired" || rollback "cannot retire $retired"
+		printf 'retired kit hook member: %s\n' "$retired"
+	done <<EOF
+$(retired_hook_members)
+EOF
 }
 
 # Use the same interpreter contract while probing a pre-existing bespoke hook.
@@ -703,6 +738,13 @@ EOF
 # member matches, 3 naming each missing or stale member.
 if [ "$MODE" = "check" ]; then
 	stale=0
+	while IFS= read -r retired; do
+		[ -n "$retired" ] || continue
+		printf 'install-commit-msg-bead: RETIRED installed member: %s; rerun %s\n' "$retired" "$0" >&2
+		stale=1
+	done <<EOF
+$(retired_hook_members)
+EOF
 	while IFS=' ' read -r file_group file_chain file_dest file_source file_mode; do
 		case "$file_group" in
 			pre_push) [ "$PUSHED_BEADS" = 1 ] || continue ;;
@@ -883,7 +925,7 @@ install_staged_portable_paths() {
 	printf 'installed staged-portable-paths member: %s\n' "$member"
 }
 # install_staged_wallclock: WALLCLOCK1 (ompkit-qf9fk) refuses new test lines that pass only within a small fixed
-# wall-clock bound; it runs the checker beside it under pysafe.py, with kitlib_run.py from install_staged_sources.
+# wall-clock bound; it runs the checker beside it under pysafe.py, with kitlib_run.py from staged_runtime.
 install_staged_wallclock() {
 	dir=$(chain_dir pre-commit)
 	member="$dir/55-omp-kit-staged-wallclock"
@@ -891,12 +933,6 @@ install_staged_wallclock() {
 	printf 'installed staged-wallclock member: %s\n' "$member"
 }
 
-
-install_staged_sources() {
-	dir=$(chain_dir pre-commit)
-	install_manifest_group staged_sources
-	printf 'installed staged-sources member: %s\n' "$dir/52-omp-kit-staged-sources"
-}
 
 # install_kitlib_tmp: all four hook chains source "<own dir>/kitlib-tmp.sh"
 # for owned temp dirs (KITLIB-TMP v1). Each gets a non-executable helper
@@ -950,14 +986,6 @@ install_deploy_step() {
 	printf 'installed deploy-step member: %s\n' "$member"
 }
 
-
-# install_gap_mention: the commit-msg member that refuses, once, a body naming a gap without a bead id
-# (GAPFADE1, ompkit-3waa2); it runs after the notes member and reads kitlib-findings.sh beside it.
-install_gap_mention() {
-	member="$(chain_dir commit-msg)/47-omp-kit-gap-mention"
-	install_manifest_group gap_mention
-	printf 'installed gap-mention member: %s\n' "$member"
-}
 
 # install_stale_worktree: the commit-msg member refuses commits that would
 # revert lines landed in HEAD (STALEWT1, ompkit-fp72.120.10); it runs after
@@ -1024,10 +1052,10 @@ if [ "$PUSHED_BEADS" = 1 ] && git -C "$TARGET" rev-parse -q --verify HEAD > /dev
 	fi
 fi
 
+retire_hook_members
 ensure_chain commit-msg
 install_commit_msg
 install_commit_notes
-install_gap_mention
 install_stale_worktree
 install_deploy_step
 install_kitlib_reversal
@@ -1048,7 +1076,7 @@ install_staged_regexploit
 install_staged_pysafe
 install_staged_tempsafe
 install_staged_kitlib
-install_staged_sources
+install_manifest_group staged_runtime
 install_staged_br_init
 install_staged_portable_paths
 install_staged_wallclock

@@ -26,12 +26,18 @@ Only exact normalized `UNREGISTERED_LINK` URL identities can be grandfathered, p
 
 `verify` re-fetches every row (or `--ids ID ...`) and reports `OK`, `QUOTE_MISSING` or `FETCH_FAILED`; any failure exits 1. Unsupported PDF content on `add` exits 2.
 
-## Staged gate
+## Explicit staged review
 
-Opt in by creating `.omp/sources.toml` containing one key:
+Source review is an explicit acceptance step, not a universal commit hook. To
+review staged Markdown using `.omp/sources.toml`, configure the document set:
 
 ```toml
 globs = ["*.md", "docs/**/*.md"]
 ```
 
-The hook installer installs `52-omp-kit-staged-sources` with its Python helpers. It checks staged matching Markdown blobs, using the staged registry, application table and baseline, so unstaged corrections do not pass a commit. A baseline already in HEAD may only shrink by URL identity. Without the config the member is a no-op. No network request runs during commit.
+Run `python3 scripts/sources.py staged --repo .` when source-backed claims are part
+of the change's acceptance. It checks matching index blobs against the staged
+registry, application table and baseline; no network request runs. A baseline in
+HEAD may only shrink by URL identity. The hook installer no longer installs a
+citation-registry blocker. Fetch-backed quote validation and non-author review
+remain unchanged.

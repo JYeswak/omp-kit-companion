@@ -13,8 +13,8 @@ import {
 	inspectHooks,
 	pullEnabledRepos,
 	refreshFleetHooks,
-	type HookFreshnessIo,
 } from "../../src/hook-refresh.ts";
+import type { HookFreshnessIo } from "../../src/hook-refresh.ts";
 import { diagnose } from "../../src/diagnostics.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { runFixture } from "./fixture-process.ts";

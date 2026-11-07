@@ -218,7 +218,7 @@ def main():
             raise RuntimeError('unreadable --message file')
         checks, failures = installed_checks(root, env)
         checks.extend((name, ['sh', str(HERE / ('check-staged-' + name + '.sh'))]) for name in
-                      ('imports', 'readme', 'fragments', 'regexploit', 'pysafe', 'tempsafe', 'kitlib', 'sources', 'br-init', 'wallclock', 'embed'))
+                      ('imports', 'readme', 'fragments', 'regexploit', 'pysafe', 'tempsafe', 'kitlib', 'br-init', 'wallclock', 'embed'))
         checks.append(('portable-paths', ['python3', '-B', str(HERE / 'portable_paths_check.py'), '--staged', '--repo', str(root)]))
         checks.append(('deploy-step', ['bash', str(HERE / 'check-deploy-step.sh'), str(message)]))
         message_checks = [
