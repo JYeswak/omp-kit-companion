@@ -1,0 +1,1 @@
+- Native br owns dependency-type and template validation, and bv owns ranking; bead lint no longer duplicates these checks. Retired the unsupported-br-flag and todo-phase reminder rules in favor of native tool validation. Usage statistics remain available through `omp stats`.

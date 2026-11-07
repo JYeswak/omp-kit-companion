@@ -79,7 +79,7 @@ ls rules/*.md | wc -l
 bun scripts/rule-class.ts rules/*.md
 ```
 
-The pack has 28 rules: 14 `reminder`, 13 `tripwire`, and one `router`
+The pack has 26 rules: 12 `reminder`, 13 `tripwire`, and one `router`
 (`rs-unsafe-added-router`, for Rust unsafe-code skills).
 Use `omp-kit doctor --scope rules` to check discovery.
 Tripwires cover unverified completion, unevidenced closes, `--no-verify`,

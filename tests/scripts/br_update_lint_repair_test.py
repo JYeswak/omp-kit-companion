@@ -106,7 +106,7 @@ class RepairAdmission(unittest.TestCase):
         lines = [line for line in err.splitlines() if "LINT_REFUSED " in line]
         self.assertEqual(len(lines), 1, err)
         listed = lines[0].split("LINT_REFUSED ", 1)[1].split(": this edit ", 1)[0]
-        known = (*bead_lint.GATE_CHECKS, "br-lint-template")
+        known = bead_lint.GATE_CHECKS
         return sorted(name for name in known if listed.startswith(name) or f",{name}" in listed)
 
     def test_fixture_failure_sets_are_what_the_cases_assume(self) -> None:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bead_lint.py -- upstream home of the bead-lint north-star checks + pagerank-cert block.
+"""bead_lint.py -- upstream home of the bead-lint north-star checks.
 
 Provenance: ported verbatim from
 skill-library-growth/scripts/bead-lint.py at d621765876faafb542d19f397e5b0e3d3e6dbc39
@@ -15,7 +15,7 @@ growth gate fires identically here: same code objects, proven by both
 --selftest suites.
 
 Check catalog (all trace to the beads-north-star standard):
-  b-what-why-acc  d-negative-specimen  e-typed-edges  h-placeholders
+  b-what-why-acc  d-negative-specimen  h-placeholders
   j-stale-blocked (warning)  k-close-receipt
   l-ac-phase  l-ac-phase-legacy (warning)  r-verify-replayable (admission only)
   p-pitfalls (admission; pre-cutover beads get PITFALLS_LEGACY warnings)
@@ -43,9 +43,6 @@ here. Unchanged legacy boxes are reported by read-only lint and listing
 (replayable_report, --replayable-report); a claim or in_review move of a bead
 verify cannot replay is refused REFUSED_NOT_REPLAYABLE
 (replayable_claim_refusal, J-2026-10-29-22).
-Pagerank block: build_pagerank_fixture + run_pagerank_cert (replay via
-bv-readiness-probe.sh pagerank-cert; bv --robot-next is a composite
-scheduler score and is never the centrality sink).
 """
 from __future__ import annotations
 
@@ -66,20 +63,6 @@ import kitlib_run  # noqa: E402  (bounded child runs; sibling in every release)
 import ac_phase  # noqa: E402  (ACPHASE1 phase grammar and cutover; sibling in every release)
 
 KIT_BEAD_LINT_VERSION = "bead-lint.kit/v1"
-DAMPING = 0.85
-TOLERANCE = 1e-9
-def _default_probe() -> str:
-    env = os.environ.get("BV_READINESS_PROBE", "")
-    if env:
-        return env
-    return os.path.join(
-        os.environ.get("HOME", ""),
-        "Developer/flywheel/.flywheel/scripts/bv-readiness-probe.sh",
-    )
-
-
-PROBE_DEFAULT = _default_probe()
-ALLOWED_DEP_TYPES = {"blocks", "parent-child", "related", "discovered-from"}
 STALE_DAYS = 14
 
 CHECKBOX_RE = re.compile(r"^\s*-\s*\[[ xX]\]", re.M)
@@ -106,7 +89,7 @@ def run(cmd: list[str], cwd: str, timeout: int = 180) -> tuple[int, str, str]:
     try:
         p = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
-            stdin=subprocess.DEVNULL,  # pysafe(subprocess-orphan): callers pass only single-process leaf binaries (`br` tracker reads/writes, pagerank-cert probe) with no descendants; the timeout bounds each call
+            stdin=subprocess.DEVNULL,  # pysafe(subprocess-orphan): callers pass single-process leaf binaries; the timeout bounds each call
         )
         return p.returncode, p.stdout, p.stderr
     except FileNotFoundError as e:
@@ -160,15 +143,6 @@ def check_d(beads: list[dict]) -> list[str]:
         if not NEGATIVE_RE.search(b.get("acceptance_criteria") or "")
     ]
 
-
-def check_e(beads: list[dict]) -> list[str]:
-    bad = []
-    for b in beads:
-        for dep in b.get("dependencies") or []:
-            if dep.get("type") not in ALLOWED_DEP_TYPES:
-                bad.append(b["id"])
-                break
-    return bad
 
 def check_h(beads: list[dict]) -> list[str]:
     bad = []
@@ -349,78 +323,6 @@ def replayable_report(beads: list[dict]) -> list[dict]:
         })
     return sorted(report, key=lambda r: r["id"])
 
-EDGE_EVIDENCE = (
-    "br dep add --help states '<issue> depends on <depends-on>'; "
-    "bv --robot-graph adjacency emits {from: dependent, to: dependency}, "
-    "matching issues.jsonl {issue_id, depends_on_id}; rank mass flows "
-    "dependent -> dependency and accumulates at dependencies "
-    "(pagerank-bead-triage skill fixture convention; replication-proven: "
-    "blocks-only power iteration over the bv-map node set reproduces "
-    "bv --robot-insights full_stats.pagerank top 3 exactly)."
-)
-
-
-def build_pagerank_fixture(
-    all_beads: list[dict], map_nodes: list[str], expected_top: str | None
-) -> dict:
-    # Replication gate (Main ruling 2026-10-09): the node set is bv's own
-    # PageRank-map set, edges are blocks dependent->dependency from the
-    # JSONL records. bv --robot-next is a composite scheduler score, the
-    # wrong sink for a centrality cert; expected_top pins the map top.
-    node_set = set(map_nodes)
-    byid = {b["id"]: b for b in all_beads}
-    nodes = sorted(node_set)
-    edges = []
-    for bid in nodes:
-        b = byid.get(bid)
-        if b is None:
-            continue
-        for d in b.get("dependencies") or []:
-            t = d.get("depends_on_id")
-            if t in node_set and d.get("type") == "blocks":
-                edges.append({"from": bid, "to": t, "type": "blocks"})
-    return {
-        "nodes": nodes,
-        "edges": edges,
-        "damping": DAMPING,
-        "tolerance": TOLERANCE,
-        "expected_top_id": expected_top,
-        "metadata": {
-            "edge_direction": "dependent -> dependency (bv --robot-graph "
-            "from/to; br dep add ISSUE DEPENDS_ON)",
-            "edge_evidence": EDGE_EVIDENCE,
-            "edge_types_included": ["blocks"],
-            "node_scope": "bv --robot-insights PageRank-map node set "
-            "(replication gate; next-top reported ungated in meta)",
-        },
-    }
-
-
-def run_pagerank_cert(fixture: dict, probe: str) -> dict:
-    work = kitlib_tmp.owned_tmp("bead-lint-pagerank")
-    path = os.path.join(work.path, "fixture.json")
-    try:
-        with open(path, "w") as f:
-            json.dump(fixture, f)
-        rc, out, err = run(
-            [probe, "pagerank-cert", "--pagerank-graph-fixture", path,
-             "--json"],
-            os.getcwd(),
-        )
-        try:
-            receipt = json.loads(out)
-        except Exception:
-            receipt = {
-                "schema_version": "bv-readiness-probe.pagerank-cert/v1",
-                "status": "fail",
-                "failure_class": ["probe_unparsable"],
-                "raw_stderr": err[:500],
-            }
-        receipt["_probe_rc"] = rc
-        return receipt
-    finally:
-        work.cleanup()
-
 
 def mkcheck(
     check_id: str, klass: str, offending: list[str], note: str = ""
@@ -538,9 +440,6 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
         "- [ ] [b] [build] docs render, again no adversarial specimen.\n",
     ))
     expected["d-negative-specimen"] = ["st-v-d"]
-    beads.append(clean_bead(
-        "st-v-e", deps=[dep_to("st-v-e", "st-base", "mystery")]))
-    expected["e-typed-edges"] = ["st-v-e"]
     beads.append(clean_bead(
         "st-v-h",
         desc=CLEAN_DESC + " Still TODO: finish later.",
@@ -674,7 +573,7 @@ def _load_jsonl(path: str) -> list[dict]:
 
 
 LETTERED_IDS = [
-    "b-what-why-acc", "d-negative-specimen", "e-typed-edges",
+    "b-what-why-acc", "d-negative-specimen",
     "h-placeholders", "j-stale-blocked", "k-close-receipt",
     "l-ac-phase", "l-ac-phase-legacy",
 ]
@@ -823,7 +722,6 @@ def run_lettered(
     return {
         "b-what-why-acc": check_b(scoped),
         "d-negative-specimen": check_d(scoped),
-        "e-typed-edges": check_e(scoped),
         "h-placeholders": check_h(scoped),
         "j-stale-blocked": check_j(scoped, now),
         # ADV-4: closes live outside scope_beads — check_k sees ALL beads.
@@ -839,8 +737,7 @@ def run_lettered(
 # br-update-lint.py at content edits) refuses via lint_bead_failures with a
 # LINT_REFUSED verdict naming each failing check.
 
-# Per-bead subset enforced at admission: graph/global checks (e, j, k)
-# need tracker-wide context or lifecycle state and stay in the runner.
+# Per-bead subset enforced at admission; lifecycle checks stay in the runner.
 GATE_CHECKS = (
     "b-what-why-acc",
     "d-negative-specimen",
@@ -976,38 +873,6 @@ def elapsed_time_mix_failure(bead: dict) -> list[str]:
     detail = str(elapsed_items[0].get("text", ""))[:160]
     return [f"elapsed-time-mix:{detail}"]
 
-# br-lint-template section map, read off `br lint --json` behavior
-# (tests/test_bead_lint_gate.sh template-agreement re-verifies it against
-# the live tracker): exact `## <Section>` header lines per issue type,
-# plus the acceptance disjunction (section line OR non-empty field).
-TEMPLATE_SECTIONS = {
-    "bug": ("## Steps to Reproduce",),
-    "epic": ("## Success Criteria",),
-}
-TEMPLATE_ACCEPTANCE_TYPES = ("bug", "task", "feature")
-ACCEPTANCE_HEADER = "## Acceptance Criteria"
-
-
-def template_missing(
-    issue_type: str | None,
-    description: str | None,
-    acceptance_criteria: str | None,
-) -> list[str]:
-    """Sections `br lint` would flag missing (br-lint-template)."""
-    missing: list[str] = []
-    heads = {
-        line.strip()
-        for line in (description or "").splitlines()
-        if line.strip().startswith("##")
-    }
-    for section in TEMPLATE_SECTIONS.get(issue_type or "", ()):
-        if section not in heads:
-            missing.append(section)
-    if (issue_type or "") in TEMPLATE_ACCEPTANCE_TYPES:
-        if (ACCEPTANCE_HEADER not in heads
-                and not (acceptance_criteria or "").strip()):
-            missing.append(ACCEPTANCE_HEADER)
-    return missing
 
 _RELEASE_CLOSURE_RE = re.compile(
     r"^(?:(?:all|every|each)\s+(?:(?:pinned|child|release)\s+)?"
@@ -1193,11 +1058,7 @@ def lint_bead_failures(
     bead: dict, byid: set[str] | None = None,
     graph: list[dict] | None = None, dependents=None,
 ) -> list[str]:
-    """Failing check names for one bead, including br-lint-template.
-
-    Tombstones (deleted records) are exempt: `br lint` never flags
-    them, and the gate must agree with `br lint` bead for bead.
-    """
+    """Failing kit-specific checks for one bead; native br owns templates."""
     if (bead.get("status") or "") == "tombstone":
         return []
     failures = [
@@ -1209,12 +1070,6 @@ def lint_bead_failures(
     failures.extend(ac_phase_failure(bead))
     failures.extend(release_goal_failures(bead))
     failures.extend(pitfalls_failure(bead))
-    if template_missing(
-        bead.get("issue_type") or bead.get("type"),
-        bead.get("description"),
-        bead.get("acceptance_criteria"),
-    ):
-        failures.append("br-lint-template")
     return sorted(failures)
 
 
@@ -1283,7 +1138,7 @@ def backlog_report(beads: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda row: row["id"])
 
 
-def run_selftest(probe: str) -> tuple[bool, dict]:
+def run_selftest() -> tuple[bool, dict]:
     fails: list[str] = []
     log: dict = {"mutation": [], "clean": {}}
     work = kitlib_tmp.owned_tmp("bead-lint-kit-selftest")
@@ -1504,79 +1359,6 @@ def run_selftest(probe: str) -> tuple[bool, dict]:
             if got_gate:
                 fails.append(f"gate: control {cid} flagged {got_gate}")
         log["gate"] = {"checks": list(GATE_CHECKS)}
-        # LINTGATE1: template_missing probes (agreement with live `br
-        # lint` is proved by tests/test_bead_lint_gate.sh, not here).
-        probes = [
-            (("task", "WHAT: x. WHY: y.", "- [ ] done; planted RED."),
-             []),
-            (("task", "WHAT: x. WHY: y.", ""), ["## Acceptance Criteria"]),
-            (("task", "WHAT: x. WHY: y.\n## Acceptance Criteria\ntext", ""),
-             []),
-            (("bug", "WHAT: x. WHY: y.\n## Steps to Reproduce\nt", ""),
-             ["## Acceptance Criteria"]),
-            (("bug", "WHAT: x. WHY: y.\n## Steps to Reproduce\nt",
-              "- [ ] x; planted RED."), []),
-            (("bug", "text\n## steps to reproduce", "- [ ] x; RED."),
-             ["## Steps to Reproduce"]),
-            (("epic", "text", "- [ ] x"), ["## Success Criteria"]),
-            (("epic", "text\n## Success Criteria\nt", ""), []),
-            (("feature", "WHAT: x. WHY: y.", ""), ["## Acceptance Criteria"]),
-            (("chore", "text", ""), []),
-        ]
-        for (itype, desc, acc), want in probes:
-            got = template_missing(itype, desc, acc)
-            if sorted(got) != sorted(want):
-                fails.append(f"template: {(itype, desc[:20], acc[:10])} "
-                             f"want {want} got {got}")
-        log["template_probes"] = {"count": len(probes)}
-        green = {
-            "nodes": ["st-top", "st-mid", "st-leaf"],
-            "edges": [{"from": "st-leaf", "to": "st-mid"},
-                      {"from": "st-mid", "to": "st-top"}],
-            "damping": DAMPING,
-            "tolerance": TOLERANCE,
-            "expected_top_id": "st-top",
-            "bv_top_id": "st-top",
-        }
-        gr = run_pagerank_cert(green, probe)
-        if not (gr.get("status") == "pass"
-                and gr.get("residual_l1", 1) < TOLERANCE
-                and gr.get("predicted_top_id") == "st-top"
-                and gr.get("node_order_invariant") is True):
-            fails.append(f"pagerank green failed: {gr}")
-        red = dict(green)
-        red["bv_top_id"] = "st-leaf"
-        rr = run_pagerank_cert(red, probe)
-        if not (rr.get("status") == "fail"
-                and "bv_top_mismatch" in rr.get("failure_class", [])):
-            fails.append(f"pagerank red failed: {rr}")
-        log["pagerank_green"] = {k: gr.get(k) for k in
-                                 ("status", "residual_l1",
-                                  "predicted_top_id",
-                                  "node_order_invariant")}
-        log["pagerank_red_failure_class"] = rr.get("failure_class")
-        chain = [
-            mkbead("sx-a", desc="WHAT: a. WHY: b.",
-                   acc="- [ ] done; planted negative RED.\n",
-                   deps=[dep_to("sx-a", "sx-b")]),
-            mkbead("sx-b", desc="WHAT: a. WHY: b.",
-                   acc="- [ ] done; planted negative RED.\n",
-                   deps=[dep_to("sx-b", "sx-c")]),
-            mkbead("sx-c", desc="WHAT: a. WHY: b.",
-                   acc="- [ ] done; planted negative RED.\n"),
-        ]
-        cnodes = ["sx-a", "sx-b", "sx-c"]
-        rp = run_pagerank_cert(
-            build_pagerank_fixture(chain, cnodes, "sx-c"), probe)
-        if rp.get("status") != "pass":
-            fails.append(f"sink agree must pass: {rp}")
-        rf = run_pagerank_cert(
-            build_pagerank_fixture(chain, cnodes, "sx-a"), probe)
-        if not (rf.get("status") == "fail"
-                and "expected_top_mismatch" in rf.get("failure_class", [])):
-            fails.append(f"sink disagree must fail expected_top_mismatch: {rf}")
-        log["sink_flip"] = {"agree": rp.get("status"),
-                            "disagree": rf.get("status")}
     finally:
         work.cleanup()
     return (not fails), {"failures": fails, "log": log}
@@ -1662,14 +1444,12 @@ def admission_stdin() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Upstream home: bead-lint north-star checks (a)-(j) + "
-        "pagerank-cert block; --selftest proves each check bites.",
+        description="Upstream home: bead-lint north-star checks; "
+        "--selftest proves each check bites.",
     )
-    ap.add_argument("--probe", default=PROBE_DEFAULT,
-                    help="bv-readiness-probe.sh path")
     ap.add_argument("--selftest", action="store_true",
-                    help="planted violator per (a)-(j), clean pass, "
-                    "per-check mutation proof, pagerank green/red + sink")
+                    help="planted violator per check, clean pass, "
+                    "per-check mutation proof")
     ap.add_argument("--pretty", action="store_true",
                     help="indent the JSON")
     ap.add_argument("--out", default="", help="also write JSON to PATH")
@@ -1713,7 +1493,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.selftest:
         ap.print_help()
         return 2
-    ok, report = run_selftest(args.probe)
+    ok, report = run_selftest()
     payload = {"schema_version": KIT_BEAD_LINT_VERSION,
                "mode": "selftest",
                "generated_at": utcnow_iso(),

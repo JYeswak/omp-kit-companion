@@ -124,18 +124,6 @@
 				"ms": 9.627
 			},
 			{
-				"rule": "kit-br-readonly-unsupported",
-				"condition_index": 0,
-				"pattern_sha256": "f556e27b988175ec5fca032c22176490e45de409c4289d009a0de6d942c0f046",
-				"ms": 29.496
-			},
-			{
-				"rule": "kit-br-readonly-unsupported",
-				"condition_index": 1,
-				"pattern_sha256": "5d4005f59bfc85176fbe9ecee4e3ade86f76a7d8fd5545cbb9585a7e4ca04b31",
-				"ms": 13.736
-			},
-			{
 				"rule": "kit-close-needs-evidence",
 				"condition_index": 0,
 				"pattern_sha256": "0773b753d396a878ef2041ab5f3da1ab029cae9ad54d459843f57a03eb5db2f6",

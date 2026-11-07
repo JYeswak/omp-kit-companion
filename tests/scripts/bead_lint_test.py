@@ -9,6 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import bead_lint
 import br_create_guard_core
+import kitlib_run
 
 
 DRY_RUN = (
@@ -28,6 +29,30 @@ def release_goal(acceptance: str, labels=None) -> dict:
         "acceptance_criteria": acceptance,
         "dependencies": [],
     }
+
+
+class NativeToolsRetirementTests(unittest.TestCase):
+    def test_native_checks_do_not_return(self):
+        retired = {"e-typed-edges", "br-lint-template", "pagerank-cert"}
+        report = bead_lint.run_lettered([], datetime.now(timezone.utc))
+        self.assertFalse(retired.intersection(bead_lint.LETTERED_IDS))
+        self.assertFalse(retired.intersection(report))
+        self.assertFalse(retired.intersection(bead_lint.lint_bead_failures(release_goal(DRY_RUN))))
+        source = Path(bead_lint.__file__).read_text(encoding="utf-8")
+        for name in retired:
+            self.assertNotIn(name, source)
+
+    def test_native_rules_are_not_shipped_or_referenced(self):
+        root = Path(__file__).resolve().parents[2]
+        manifest = kitlib_run.run(["sh", str(root / "scripts/build-manifest.sh"), "--stdout"],
+                                  cwd=str(root), deadline_s=60)
+        self.assertEqual(manifest.rc, 0, manifest.stderr.decode())
+        for name in ("kit-br-readonly-unsupported", "kit-todo-append-phase"):
+            self.assertFalse((root / "rules" / (name + ".md")).exists())
+            self.assertNotIn(name, manifest.stdout.decode())
+            for path in ("cases/cases.tsv", "tests/live/scenarios.json",
+                         "scripts/fixtures/rx-reference-conditions.json"):
+                self.assertNotIn(name, (root / path).read_text(encoding="utf-8"), path)
 
 
 class ReleaseGoalLintTests(unittest.TestCase):
