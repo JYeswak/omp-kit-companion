@@ -5,3 +5,4 @@
 - Keep capability contracts hermetic by exposing only explicitly supplied fixture tools, without assuming every fleet binary is installed on the host.
 - Give concurrent gate-load fixtures their own real Bun executable under the synthetic HOME so fixed environment reconstruction works on Linux.
 - Give history-transform fixture repositories their own Git author identity so commit-tree controls cannot inherit or require operator configuration.
+- Verify restored hook permissions with the portable filesystem API rather than mixing incompatible BSD and GNU stat output.

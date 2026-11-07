@@ -407,7 +407,7 @@ for leftover in "$F/.git/hooks/hooks.d/commit-msg"/.undo.*; do [ -e "$leftover" 
 ok "$rc" "0" "restore-no-backup-left"
 # The backup is made non-executable (other chain runners run every executable file in the directory);
 # rollback still restores the member's exact original mode.
-mode=$(stat -f %Lp "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" 2>/dev/null || stat -c %a "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead")
+mode=$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o7777, "o"))' "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead")
 [ "$mode" = 711 ]
 ok "$?" "0" "restore-member-mode-exact: $mode"
 }
