@@ -10,3 +10,4 @@
 - Run parallel live-test cases from a caller-owned workspace scratch root instead of the runner's system temporary directory.
 - Include native low-filesystem refusal output in failing CI assertions without changing their required exit codes or disk-floor checks.
 - Make the live Git lock-holder fixture preserve Git's exact PID across Linux shell execution.
+- Use a job-control-capable shell for detached seat fixtures on Linux while keeping scratch ownership and capability checks intact.

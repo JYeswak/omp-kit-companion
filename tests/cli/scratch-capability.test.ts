@@ -10,6 +10,7 @@ import { pollUntil } from "../../src/kitlib/poll.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { parseOwnerFile } from "../../src/scratch.ts";
+import { runFixtureAsync } from "./fixture-process.ts";
 
 const companion = resolve(import.meta.dir, "../..");
 const cliPath = join(companion, "src", "cli.ts");
@@ -71,7 +72,10 @@ async function seatCli(w: World, agent: string, session: string, args: string[],
 		'  "$BUN" "$CLI" "$@" --json >"$OUT" 2>/dev/null </dev/null',
 		'  echo $? >"$DONE.tmp"; mv "$DONE.tmp" "$DONE" ) </dev/null >/dev/null 2>&1 &',
 	].join("\n");
-	const launched = await run(["/bin/sh", "-c", script, "seat", ...args], { cwd: w.repo, deadline_s: 30,
+	// Bash honors monitor mode without a TTY; Linux /bin/sh (dash) does not create the detached job group.
+	const scriptPath = join(w.io, `${id}.bash`);
+	writeFileSync(scriptPath, script, { mode: 0o600 });
+	const launched = await runFixtureAsync(["/bin/bash", scriptPath, ...args], { cwd: w.repo, floor_s: 30,
 		env: envFor(w, { ...extra, AGENT_NAME: agent, LOCK: join(w.owners, `${session}.lock`), BUN: process.execPath, CLI: cliPath, OUT: out, DONE: done }) });
 	expect(launched.rc).toBe(0);
 	const finished = await pollUntil(() => existsSync(done), { deadline_s: 120, interval_s: 0.05, classify: ready => ready ? "success" : "retry" });
