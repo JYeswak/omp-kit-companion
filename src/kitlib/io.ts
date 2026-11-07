@@ -10,9 +10,10 @@
  * own directory) with O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600; it must be a regular file with one link,
  * owned by this user. It is fchmod'ed to `mode` (so the umask never decides the result), every byte is
  * written, and its size is checked. Durability "file" or "full" fsyncs it. The caller's `validate`
- * runs on the complete temp. Just before rename the temp name must still be the same inode with one
- * link and the target must still be absent or a regular file. Then rename; "full" then fsyncs the
- * target's directory (`fsyncDirectory` from src/mutations.ts, reused, not copied).
+ * runs on the complete temp while its fd pins the inode (even if its name is unlinked). Just before
+ * rename the temp name must still be that inode with one link and the target must still be absent
+ * or a regular file. Then close and rename; "full" then fsyncs the target's directory (`fsyncDirectory`
+ * from src/mutations.ts, reused, not copied).
  *
  * Fixed unsafe-path policy, every refusal an `AtomicReplaceError` with a `code`:
  * - the path must be absolute and normalized, the target absent or a regular file (a symlink,
@@ -66,7 +67,7 @@ export interface AtomicReplaceOptions {
 	stageDir?: string;
 	/** A public deployment tree the stage must lie outside of. */
 	publicRoot?: string;
-	/** Runs on the complete, closed temp before rename; a throw refuses publication. */
+	/** Runs on the complete temp with its inode pinned open before rename; a throw refuses publication. */
 	validate?: (tempPath: string) => void;
 	/** Honoured until the rename; after it the publication stands and is reported. */
 	signal?: AbortSignal;
@@ -241,9 +242,6 @@ export function atomicReplaceBytesWith(ops: IoOps, bypass: ReadonlySet<string>, 
 			fileSynced = true;
 			options.onBoundary?.("file-synced", temp);
 		}
-		const closing = fd;
-		fd = null;
-		try { ops.close(closing); } catch (error) { refuse("WRITE_FAILED", "temp close failed", error); }
 		if (options.validate && !bypass.has("validate")) {
 			try { options.validate(temp); } catch (error) { refuse("VALIDATION_FAILED", "validate refused the staged bytes", error); }
 		}
@@ -254,14 +252,18 @@ export function atomicReplaceBytesWith(ops: IoOps, bypass: ReadonlySet<string>, 
 			refuse("TEMP_REPLACED", "temp name no longer names the staged inode");
 		if (now && now.nlink !== 1 && !bypass.has("temp-nlink")) refuse("TEMP_HARDLINKED", `temp has ${now.nlink} links before rename`);
 		targetSafe();
+		const closing = fd;
+		fd = null;
+		try { ops.close(closing); } catch (error) { refuse("WRITE_FAILED", "temp close failed", error); }
 		try { ops.rename(temp, path); } catch (error) {
 			if (errnoOf(error) === "EXDEV") refuse("EXDEV", "rename crossed filesystems; refusing rather than copying", error, published);
 			refuse("RENAME_FAILED", "rename failed", error, published);
 		}
 		published = true;
 	} catch (error) {
-		if (fd !== null) { try { ops.close(fd); } catch { /* the original failure wins */ } }
+		// Keep the inode pinned during cleanup too: a swapped name must not be unlinked as ours.
 		const left = cleanup(ops, temp, identity);
+		if (fd !== null) { try { ops.close(fd); } catch { /* the original failure wins */ } }
 		if (error instanceof AtomicReplaceError) { error.tempLeft = left; throw error; }
 		const wrapped = new AtomicReplaceError("WRITE_FAILED", path, published, "unexpected failure before publication", error);
 		wrapped.tempLeft = left;

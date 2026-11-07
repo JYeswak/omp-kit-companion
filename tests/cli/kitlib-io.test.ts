@@ -10,6 +10,7 @@ import {
 import { dirname, join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { run } from "../../src/kitlib/run";
+import { fixtureDeadlineS, runFixture } from "./fixture-process";
 import {
 	AtomicReplaceError, atomicReplaceBytes, atomicReplaceBytesWith, defaultIoOps, type AtomicReplaceOptions,
 	type AtomicReplaceResult, type IoOps,
@@ -248,6 +249,114 @@ describe("kitlib io conformance corpus", () => {
 			expect(py.includes(`"${name}" in bypass`) || py.includes(`"${name}" not in bypass`)).toBe(true);
 		}
 	});
+});
+
+describe("kitlib io inode lifetime", () => {
+	for (const refuseValidation of [false, true]) {
+		test(`a swapped inode cannot be recycled during ${refuseValidation ? "refusal cleanup" : "validation"}`, () => {
+			const dir = caseDir({ id: "inode-reuse", setup: [{ file: "target", text: "old" }], call: { mode: 0o600, durability: "none" }, expect: {} });
+			const target = join(dir, "target");
+			let identity: Stats, closed = false, swapped = false, tempPath = "", closes = 0;
+			const ops: IoOps = {
+				...defaultIoOps,
+				open(path, flags, mode) {
+					const fd = defaultIoOps.open(path, flags, mode);
+					identity = defaultIoOps.fstat(fd);
+					return fd;
+				},
+				close(fd) { defaultIoOps.close(fd); closed = true; closes++; },
+				lstat(path) {
+					const now = defaultIoOps.lstat(path);
+					if (path !== tempPath || !swapped || !now) return now;
+					// Model an allocator that immediately recycles a freed inode. An open fd pins it.
+					return Object.assign(Object.create(Object.getPrototypeOf(now)), now, {
+						dev: identity.dev, ino: closed ? identity.ino : identity.ino + 1,
+					});
+				},
+			};
+			expect(() => atomicReplaceBytesWith(ops, new Set(), target, Buffer.from("new"), {
+				mode: 0o600, durability: "none",
+				validate(temp) {
+					tempPath = temp;
+					unlinkSync(temp);
+					writeFileSync(temp, "attacker", { flag: "wx", mode: 0o600 });
+					swapped = true;
+					if (refuseValidation) throw new Error("validator refused after the swap");
+				},
+			})).toThrow(expect.objectContaining({
+				code: refuseValidation ? "VALIDATION_FAILED" : "TEMP_REPLACED", published: false,
+			}));
+			expect(readFileSync(target, "utf8")).toBe("old");
+			expect(readFileSync(tempPath, "utf8")).toBe("attacker");
+			expect(closed).toBe(true);
+			expect(closes).toBe(1);
+		});
+	}
+
+	test("Python pins the inode through validation and refusal cleanup", () => {
+		const dir = caseDir({ id: "python-inode-reuse", setup: [], call: { mode: 0o600, durability: "none" }, expect: {} });
+		const probe = `
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from kitlib_io import IoOps, AtomicReplaceError, atomic_replace_bytes_with
+
+class RecyclingOps(IoOps):
+    def __init__(self):
+        self.closed = False
+        self.swapped = False
+        self.closes = 0
+        self.temp = None
+
+    def open(self, path, flags, mode):
+        fd = os.open(path, flags, mode)
+        self.identity = os.fstat(fd)
+        return fd
+
+    def close(self, fd):
+        os.close(fd)
+        self.closed = True
+        self.closes += 1
+
+    def lstat(self, path):
+        now = super().lstat(path)
+        if path != self.temp or not self.swapped or now is None:
+            return now
+        fields = list(now)
+        fields[1] = self.identity.st_ino if self.closed else self.identity.st_ino + 1
+        fields[2] = self.identity.st_dev
+        return os.stat_result(fields)
+
+for refuse_validation in (False, True):
+    ops = RecyclingOps()
+    target = os.path.join(sys.argv[2], str(refuse_validation))
+    with open(target, "xb") as stream:
+        stream.write(b"old")
+
+    def validate(temp):
+        ops.temp = temp
+        os.unlink(temp)
+        with open(temp, "xb") as stream:
+            stream.write(b"attacker")
+        ops.swapped = True
+        if refuse_validation:
+            raise ValueError("validator refused after the swap")
+
+    try:
+        atomic_replace_bytes_with(ops, frozenset(), target, b"new", mode=0o600, durability="none", validate=validate)
+    except AtomicReplaceError as error:
+        assert error.code == ("VALIDATION_FAILED" if refuse_validation else "TEMP_REPLACED"), error
+        assert not error.published
+    else:
+        raise AssertionError("recycled attacker inode was published")
+    with open(target, "rb") as stream:
+        assert stream.read(4) == b"old"
+    with open(ops.temp, "rb") as stream:
+        assert stream.read(9) == b"attacker"
+    assert ops.closed and ops.closes == 1
+`;
+		const result = runFixture(["python3", "-B", "-c", probe, join(import.meta.dir, "../../scripts"), dir], { cwd: dir });
+		expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(0);
+	}, fixtureDeadlineS() * 1_000);
 });
 
 describe("kitlib io TypeScript-only surface", () => {

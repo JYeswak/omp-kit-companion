@@ -12,10 +12,10 @@ Steps: a fresh temp ``.<name>.<pid>.<12 hex>.tmp`` is created in the stage dir
 0600; it must be a regular file with one link, owned by this user. It is
 fchmod'ed to ``mode`` (the umask never decides the result), every byte is
 written, and its size is checked. Durability "file" or "full" fsyncs it. The
-caller's ``validate`` runs on the complete temp. Just before rename the temp
-name must still be the same inode with one link and the target must still be
-absent or a regular file. Then rename (``os.replace``); "full" then fsyncs the
-target's directory.
+caller's ``validate`` runs on the complete temp while its fd pins the inode,
+even if its name is unlinked. Just before rename the temp name must still be
+that inode with one link and the target must still be absent or a regular
+file. Then close and rename (``os.replace``); "full" then fsyncs the target's directory.
 
 Fixed unsafe-path policy, every refusal an ``AtomicReplaceError`` with a ``code``:
 
@@ -290,11 +290,6 @@ def atomic_replace_bytes_with(ops: IoOps, bypass: FrozenSet[str], path: str, dat
             file_synced = True
             if on_boundary:
                 on_boundary("file-synced", temp)
-        closing, fd = fd, None
-        try:
-            ops.close(closing)
-        except OSError as error:
-            refuse("WRITE_FAILED", "temp close failed", error)
         if validate is not None and "validate" not in bypass:
             try:
                 validate(temp)
@@ -311,6 +306,11 @@ def atomic_replace_bytes_with(ops: IoOps, bypass: FrozenSet[str], path: str, dat
         if now is not None and now.st_nlink != 1 and "temp-nlink" not in bypass:
             refuse("TEMP_HARDLINKED", f"temp has {now.st_nlink} links before rename")
         target_safe()
+        closing, fd = fd, None
+        try:
+            ops.close(closing)
+        except OSError as error:
+            refuse("WRITE_FAILED", "temp close failed", error)
         try:
             ops.rename(temp, path)
         except OSError as error:
@@ -319,12 +319,13 @@ def atomic_replace_bytes_with(ops: IoOps, bypass: FrozenSet[str], path: str, dat
             refuse("RENAME_FAILED", "rename failed", error, published)
         published = True
     except BaseException as error:
+        # Keep the inode pinned until cleanup has decided whether this name is ours.
+        left = _cleanup(ops, temp, identity)
         if fd is not None:
             try:
                 ops.close(fd)
             except OSError:
                 pass  # the original failure wins
-        left = _cleanup(ops, temp, identity)
         if isinstance(error, AtomicReplaceError):
             error.temp_left = left
             raise
