@@ -39,6 +39,7 @@ import { censusLoad } from "./load-doctor.ts";
 import { inspectSecrets, secretsScanInputFromEnv } from "./secrets-doctor.ts";
 import { inspectStaleWorktree } from "./stale-worktree-doctor.ts";
 import { inspectPushLatency } from "./push-latency.ts";
+import { releaseReadyFinding } from "./release-ready.ts";
 import { loadFleetWatchConfig, paneTarget, runFleetWatchOnce, STRANDED_ESCALATION_LIMIT_MINUTES } from "./fleet-watch.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
@@ -638,6 +639,18 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	if (request.command.name === "doctor" && request.flags.get("--scope") === "push-latency") {
 		const report = inspectPushLatency();
 		return { code: report.overall === "PARTIAL" ? 1 : 0, data: { ...report }, verification: "PERFORMED" };
+	}
+	if (request.command.name === "doctor" && request.flags.get("--scope") === "release") {
+		const kit = kitIdentity(), root = kit.release.root;
+		if (!root) return refusal("INVENTORY_UNAVAILABLE", "Kit release root is unavailable", "Run an installed omp-kit executable or the source CLI from its checkout.");
+		const project = request.flags.get("--project");
+		const finding = releaseReadyFinding(typeof project === "string" ? resolve(project) : process.cwd(), root);
+		const overall = health([finding]);
+		return { code: 0, data: { overall, kit,
+			omp: { status: "UNVERIFIED", location: null, version: null, reason: "OMP identity is not needed for release readiness" },
+			findings: [finding], evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
+			recommended_actions: finding.status === "OK" ? [] : [finding.recommended_action] },
+			verification: overall === "OK" ? "PERFORMED" : "UNVERIFIED" };
 	}
 	if (request.command.name === "doctor" && request.flags.get("--scope") === "browsers") {
 		const collected = collectBrowserProcesses();
@@ -4903,8 +4916,8 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	}
 	if (command.name === "doctor" && (flags.has("--project") || flags.has("--file"))) {
 		const scope = flags.get("--scope");
-		const allowed = scope === "lsp" || scope === "project-loading" || (scope === "beads" && flags.has("--project") && !flags.has("--file")) || (scope === "reservations" && flags.has("--project") && !flags.has("--file")) || (scope === "identity" && flags.has("--project") && !flags.has("--file")) || (scope === "flywheel" && flags.has("--project") && !flags.has("--file")) || (scope === "derived" && flags.has("--project") && !flags.has("--file")) || (scope === "layout" && flags.has("--project") && !flags.has("--file")) || (scope === "public-files" && flags.has("--project") && !flags.has("--file"));
-		if (!allowed) return refusal("INVALID_FLAG", "--project and --file require doctor --scope lsp or project-loading; beads, reservations, identity, flywheel, derived, layout and public-files accept only --project", "Use doctor --scope beads --project PATH for a tracker export, doctor --scope reservations --project PATH for another repo's holds, doctor --scope identity --project PATH for pane identities, doctor --scope flywheel --project PATH for fleet practice grades, doctor --scope derived --project PATH for literal facts in config files, doctor --scope layout --project PATH for repo layout deviations, or doctor --scope public-files --project PATH for missing standard public files.");
+		const allowed = scope === "lsp" || scope === "project-loading" || (scope === "beads" && flags.has("--project") && !flags.has("--file")) || (scope === "reservations" && flags.has("--project") && !flags.has("--file")) || (scope === "identity" && flags.has("--project") && !flags.has("--file")) || (scope === "flywheel" && flags.has("--project") && !flags.has("--file")) || (scope === "derived" && flags.has("--project") && !flags.has("--file")) || (scope === "layout" && flags.has("--project") && !flags.has("--file")) || (scope === "public-files" && flags.has("--project") && !flags.has("--file")) || (scope === "release" && flags.has("--project") && !flags.has("--file"));
+		if (!allowed) return refusal("INVALID_FLAG", "--project and --file require doctor --scope lsp or project-loading; beads, reservations, identity, flywheel, derived, layout, public-files and release accept only --project", "Use doctor --scope beads --project PATH for a tracker export, doctor --scope reservations --project PATH for another repo's holds, doctor --scope identity --project PATH for pane identities, doctor --scope flywheel --project PATH for fleet practice grades, doctor --scope derived --project PATH for literal facts in config files, doctor --scope layout --project PATH for repo layout deviations, doctor --scope public-files --project PATH for missing standard public files, or doctor --scope release --project PATH for cut readiness.");
 	}
 	if (parent?.name === "memory" && command.name === "audit") return privateMemoryAudit(request);
 	if (parent?.name === "lsp" && command.name === "setup") {

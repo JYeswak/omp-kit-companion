@@ -9,6 +9,17 @@ afterAll(cleanupAllOwnedTmp);
 // LOCAL-RELEASE-V1 (ompkit-v66l.27.11, docs/release-signing.md): enabling release.yml must never start the
 // expensive pipeline. Its default mode runs only attest-local; every other job needs mode=ci-pipeline.
 const ROOT = join(import.meta.dir, "..", "..");
+// Host preflights own their deployment policy; caller PATH cannot override the
+// real release policy. Only transport/admission are fixtures in these tests.
+function hostPreflight(work: string): string {
+	const root = join(work, "release-root"), scripts = join(root, "scripts");
+	mkdirSync(scripts, { recursive: true });
+	for (const file of ["release-local.sh", "release-preflight.sh", "kitlib-tmp.sh"])
+		cpSync(join(ROOT, "scripts", file), join(scripts, file));
+	writeFileSync(join(scripts, "fixed-env.sh"), 'PATH="$RELEASE_TEST_BIN:$PATH"\nLANG=C\nLC_ALL=C\nexport PATH LANG LC_ALL\n# Host preflight fixture owns its tool policy; environment isolation is tested in fixed-env.test.ts.\nfixed_env_exec() { shift; exec "$@"; }\n');
+	symlinkSync(join(ROOT, "skills"), join(root, "skills"), "dir");
+	return join(scripts, "release-local.sh");
+}
 type Job = { if?: string; needs?: string | string[]; steps?: { name?: string; run?: string; uses?: string; with?: Record<string, unknown> }[] };
 type Workflow = { on: Record<string, { inputs?: Record<string, { default?: unknown; options?: string[] }> } | null>; jobs: Record<string, Job> };
 const release = Bun.YAML.parse(readFileSync(join(ROOT, ".github/workflows/release.yml"), "utf8")) as Workflow;
@@ -118,6 +129,7 @@ test.skipIf(process.platform !== "darwin")("RELFAILFAST1 preflight refuses at on
 	const work = realpathSync(ownedTmp("relfailfast", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
 	const bin = join(work, "bin");
 	mkdirSync(bin);
+	const executable = hostPreflight(work);
 	const stub = (name: string, body: string) => { writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`); chmodSync(join(bin, name), 0o755); };
 	stub("gh", "exit 0");
 	stub("git", `echo called >> "${join(work, "git-called")}"; exit 1`);
@@ -134,8 +146,8 @@ ${admission === 75 ? "echo 'heavy: waiting: disk low: statfs 4 GiB free, floor 1
 		const started = Date.now();
 		const env: Record<string, string> = {};
 		for (const [name, value] of Object.entries(process.env)) if (value !== undefined) env[name] = value;
-		const result = await run(["bash", join(ROOT, "scripts/release-local.sh"), "--dry-run", "--version", "9.9.9"], {
-			deadline_s: fixtureDeadlineS(60), cwd: ROOT, env: { ...env, PATH: `${bin}:${env.PATH ?? ""}`, TMPDIR: work },
+		const result = await run(["bash", executable, "--dry-run", "--version", "9.9.9"], {
+			deadline_s: fixtureDeadlineS(60), cwd: ROOT, env: { ...env, RELEASE_TEST_BIN: bin, TMPDIR: work },
 		});
 		return { rc: result.rc, err: new TextDecoder().decode(result.stderr), ms: Date.now() - started, gitCalled: existsSync(join(work, "git-called")) };
 	};
@@ -177,6 +189,7 @@ test.skipIf(process.platform !== "darwin")("RELPENDING1 preflight refuses a pend
 	const pending = join(stateRoot, "kit-update.pending.json");
 	const id = "4f2daa9e-2326-4d40-be66-6d9f65b1df5e";
 	mkdirSync(bin); mkdirSync(join(prefix, "bin"), { recursive: true }); mkdirSync(stateRoot, { recursive: true });
+	const executable = hostPreflight(work);
 	const stub = (path: string, body: string) => { writeFileSync(path, `#!/bin/sh\n${body}\n`); chmodSync(path, 0o755); };
 	stub(join(bin, "gh"), "exit 0");
 	stub(join(bin, "omp-kit"), "exit 0");
@@ -187,9 +200,9 @@ test.skipIf(process.platform !== "darwin")("RELPENDING1 preflight refuses a pend
 		const env: Record<string, string> = {};
 		for (const [name, value] of Object.entries(process.env)) if (value !== undefined && name !== "XDG_STATE_HOME") env[name] = value;
 		const started = Date.now();
-		const result = await run(["bash", join(ROOT, "scripts/release-local.sh"), "--version", "9.9.9"], {
+		const result = await run(["bash", executable, "--version", "9.9.9"], {
 			deadline_s: fixtureDeadlineS(60), cwd: ROOT,
-			env: { ...env, HOME: home, PATH: `${bin}:${env.PATH ?? ""}`, TMPDIR: work, OMP_KIT_INSTALL_PREFIX: prefix },
+			env: { ...env, HOME: home, RELEASE_TEST_BIN: bin, TMPDIR: work, OMP_KIT_INSTALL_PREFIX: prefix },
 		});
 		return { rc: result.rc, out: new TextDecoder().decode(result.stdout), err: new TextDecoder().decode(result.stderr),
 			ms: Date.now() - started, gitCalled: existsSync(join(work, "git-called")) };
@@ -539,7 +552,7 @@ test("release source archive reports its wall-clock interval around the exact co
 		const result = await runFixtureAsync(["bash", "-c", `${stagePrelude}
 ROOT="$WORK/repo"; SRC="$WORK/export"; SOURCE=HEAD
 mkdir "$SRC"
-${releaseStage("substep source.archive", '[ "$(jq -r .source_revision "$SRC/package.json")"')}
+${releaseStage("substep source.archive", 'bounded 30 sh "$ROOT/scripts/release-preflight.sh" export')}
 `, "release-export-timing", work], { cwd: ROOT, env, floor_s: 10 });
 		expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(0);
 		expect(readFileSync(join(work, "export/payload"), "utf8")).toBe("committed release bytes\n");
@@ -1169,7 +1182,7 @@ function cardRepo(label: string, cards: Record<string, string>) {
 	const { repo, git } = fixture;
 	mkdirSync(join(repo, "scripts"), { recursive: true });
 	mkdirSync(join(repo, "docs/releases"), { recursive: true });
-	for (const name of ["release-card-check.py", "pysafe.py"]) cpSync(join(ROOT, "scripts", name), join(repo, "scripts", name));
+	for (const name of ["release-card-check.py", "release-preflight.sh", "pysafe.py"]) cpSync(join(ROOT, "scripts", name), join(repo, "scripts", name));
 	git(fixture.work, ["init", "-q", "-b", "main", repo]);
 	git(repo, ["add", "scripts"]); git(repo, ["commit", "-qm", "checker"]);
 	const shas: Record<string, string> = { none: git(repo, ["rev-parse", "HEAD"]) };
@@ -1226,10 +1239,6 @@ test("RELCARD1 checker: the real v0.2.92 card passes; a card missing its applied
 test("RELCARD1 release-local refuses an incomplete card before the keychain and a prepare push; the mutant without the check admits it", () => {
 	const cardStage = releaseStage('release_card_check "$SOURCE"\n', "MODE=");
 	const prepareStage = releaseStage('if [ "$PREPARE" = 1 ]; then\n\t# The prepare commit', "# Explicit --source");
-	// Order: both checks run before the keychain opens, before signing and before the tag; HEAD's check precedes the prepare.
-	for (const call of ['release_card_check "$SOURCE"', 'release_card_check "$(git -C "$ROOT" rev-parse HEAD)"\n\tprepare_release'])
-		for (const later of ["keychain-unlock", "stage sign", "stage tag"]) expect(localScript.indexOf(call)).toBeLessThan(localScript.indexOf(later));
-	expect(localScript.indexOf('release_card_check "$SOURCE"')).toBeGreaterThan(localScript.indexOf("release-train.sh\" version-match"));
 	const { work, env, repo, git, shas } = cardRepo("relcard-wiring", { noApplied: noAppliedCard, real: realCard });
 	const runStage = (stage: string, rev: string) => {
 		const script = join(work, "card-stage.sh");

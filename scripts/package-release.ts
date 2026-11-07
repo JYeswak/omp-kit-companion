@@ -32,7 +32,7 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 	"scripts/br-fixture-scope.py",
 	"scripts/br-create-guard.py",
 	"scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py", "scripts/fresh-gate.sh",
-	"scripts/fixed-env.sh",
+	"scripts/release-preflight.sh", "scripts/fixed-env.sh",
 	"scripts/suite-metrics.py", "scripts/suite-hermetic-env.sh", "scripts/suite-lease.sh",
 	"scripts/kitlib-findings.sh",
 	"scripts/kitlib_tmp.py", "scripts/kitlib-tmp.sh", "scripts/kitlib-proc.sh", "scripts/kitlib-shimpath.sh", "scripts/kitlib_lock.py", "scripts/kitlib_io.py", "scripts/kitlib_proc.py", "scripts/kitlib_jsonl.py", "scripts/kitlib_poll.py", "scripts/kitlib_artifact.py", "scripts/tempsafe_check.py", "scripts/check-staged-tempsafe.sh",

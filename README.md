@@ -122,10 +122,9 @@ Receipts live under the private state root (`$XDG_STATE_HOME/omp-kit`, else
 update is pending, refuses an already-undone receipt, and refuses when a
 postimage changed after the apply.
 
-### Doctor: 41 scopes
+### Doctor
 
-Read-only findings report `OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or
-`NOT_RUN`, with a next step. See the [scope table](#doctor-scopes).
+Read-only findings: `OK|DEGRADED|DRIFT|UNVERIFIED|FAIL|NOT_RUN`; next steps in the [scope table](#doctor-scopes).
 
 ### Secrets scan
 
@@ -566,7 +565,7 @@ it does not certify those IDs exist in an apply tracker.
 
 | Scope | What it reports | Example |
 |---|---|---|
-| `--scope kit` | Release rule inventory, manifest, and packaged planning skill; an unscoped `doctor` judges the planning skill only when you keep a copy under `~/.agents/skills/jeff-planning-enhanced`, while this scope reports a missing copy as drift | `omp-kit doctor --scope kit` |
+| `--scope kit` | Rules, manifest and packaged planning skill (missing = drift; unscoped checks existing `~/.agents/skills/jeff-planning-enhanced` only) | `omp-kit doctor --scope kit` |
 | `--scope omp` | OMP launcher identity and its source package | `omp-kit doctor --scope omp` |
 | `--scope rules` | Installed, effective, project, and retired rules against the manifest | `omp-kit doctor --scope rules` |
 | `--scope policy` | Per-profile TTSR keys through native `omp config get` | `omp-kit doctor --scope policy` |
@@ -607,7 +606,7 @@ it does not certify those IDs exist in an apply tracker.
 | `--scope rch` | Worker gc roots and health | `omp-kit doctor --scope rch` |
 | `--scope land` | Land guard identity: pane identity and reservations qualified against the publication parent | `omp-kit doctor --scope land --project PATH` |
 | `--scope activation` | ON, OFF-WITH-REASON, or OFF-NO-REASON for rule packs, extensions, profile links, kit services, and hook members; OFF-NO-REASON exits nonzero | `omp-kit doctor --scope activation` |
-| `--scope test-scope` | Test-only diagnostic scope used to verify scoped doctor dispatch | `omp-kit doctor --scope test-scope` |
+| `--scope release` | Exact origin/main cut readiness; no suites or signing | `omp-kit doctor --scope release --project PATH` |
 `doctor` also takes rules-calibration flags (`--corpus-report`, `--labels`,
 `--seed`, `--sample-size`, `--noisy-lower-bound`) for reading an F2 corpus
 report without writing.

@@ -155,13 +155,24 @@ esac
 # kills once the push returns, and nohup alone died with it (48c5513b5f, 2026-10-31: the log stopped
 # at the runner's header, the lock left naming a gone pid). macOS ships no setsid(1), so python3 forks,
 # calls setsid in the child and execs the verdict.
+# RELREADY1: once qualification finishes, inspect actual origin/main (not an
+# unpublished local candidate). The existing log is the command-center surface.
+# Readiness never changes the push or qualification verdict.
 start_release_verdict() {
 	if [ "${OMP_KIT_RELEASE_VERDICT:-1}" != 0 ] \
 		&& [ -n "$log_git" ] && [ -n "${local_sha:-}" ] && [ -f "$ROOT/scripts/release-verdict.sh" ]; then
+		# shellcheck disable=SC2016 # The qualification child expands its own positional parameters.
 		python3 -c 'import os, sys
 if os.fork(): os._exit(0)
 os.setsid()
-os.execvp(sys.argv[1], sys.argv[1:])' nice -n 10 sh "$ROOT/scripts/release-verdict.sh" --commit "$local_sha" --no-fetch \
+os.execvp(sys.argv[1], sys.argv[1:])' nice -n 10 sh -c '
+	status=0
+	sh "$1/scripts/release-verdict.sh" --commit "$2" --no-fetch || status=$?
+	if [ "$3" = refs/heads/main ]; then
+		bun "$1/src/release-ready.ts" --repo "$1" || :
+	fi
+	exit "$status"
+' release-qualification "$ROOT" "$local_sha" "${remote_ref:-}" \
 			</dev/null >>"$log_git/omp-kit/release-verdict.log" 2>&1
 		printf 'release verdict: started for %s in the background in its own session (log %s)\n' "$local_sha" "$log_git/omp-kit/release-verdict.log"
 	fi

@@ -202,7 +202,8 @@ test("AC1 planted failure: a run refused at the tag stage commits nothing and le
 
 const preflight = () => segment('PREPARE=0\nif [ -z "$SOURCE" ]; then PREPARE=1', 'say "source $SOURCE (origin/main $MAIN) version $VERSION base $BASE_TAG mode $MODE"');
 function runPreflight(f: Fixture, version: string, source: string) {
-	const body = `${prelude}${helpers()}\nREPO=fixture/release; NEXT=0; VERSION='${version}'; SOURCE='${source}'\nMAIN="$(git -C "$ROOT" rev-parse refs/remotes/origin/main)"\n${preflight()}\n`;
+	copyFileSync(join(ROOT, "scripts/release-preflight.sh"), join(f.repo, "scripts/release-preflight.sh"));
+	const body = `${prelude}${helpers()}\nREPO=fixture/release; NEXT=0; DRY_RUN=0; VERSION='${version}'; SOURCE='${source}'\nMAIN="$(git -C "$ROOT" rev-parse refs/remotes/origin/main)"\n${preflight()}\n`;
 	writeFileSync(join(f.work, "preflight.sh"), body);
 	return runFixture(["bash", join(f.work, "preflight.sh"), f.repo, f.work], { cwd: f.repo, env: f.env, floor_s: 60 });
 }

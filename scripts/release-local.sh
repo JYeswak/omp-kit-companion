@@ -170,7 +170,7 @@ substep() {
 # and refuses before a prepare push or the keychain: RELEASE_CARD_MISSING, RELEASE_CARD_INCOMPLETE section N, RELEASE_WAVE.
 release_card_check() {
 	local verdict
-	verdict="$(bounded 60 python3 "$ROOT/scripts/release-card-check.py" --repo "$ROOT" --rev "$1" --version "$VERSION" 2>&1)" ||
+	verdict="$(bounded 60 sh "$ROOT/scripts/release-preflight.sh" card "$ROOT" "$1" "$VERSION" "$ROOT" 2>&1)" ||
 		die "$verdict"
 	say "$verdict"
 }
@@ -532,10 +532,8 @@ if [ -z "$VERSION" ]; then
 		# NEXTVERSION1: origin/main states the version it ships as; add one only when that version is already
 		# tagged (the bootstrap from the bump-before-tag order, which then needs its own prepare commit).
 		main_version="$(git -C "$ROOT" show "$MAIN:package.json" | jq -er .version)" || die "cannot read origin/main package.json version"
-		if grep -q "refs/tags/v$main_version\$" <<<"$remote_tags"; then
-			VERSION="$(python3 -c 'import sys; a, b, c = map(int, sys.argv[1].split(".")); print(f"{a}.{b}.{c + 1}")' "$main_version")" ||
-				die "cannot derive next patch version"
-		else VERSION="$main_version"; fi
+		VERSION="$(bounded 30 sh "$ROOT/scripts/release-preflight.sh" next_version "$main_version" "$remote_tags")" ||
+			die "cannot derive next patch version"
 	else
 		VERSION="$(printf '%s\n' "$remote_tags" | (cd "$ROOT" && sh scripts/release-train.sh next-version --changelog-ref "$SOURCE"))" ||
 			die "release-train.sh next-version failed"
@@ -543,13 +541,8 @@ if [ -z "$VERSION" ]; then
 fi
 grep -q "refs/tags/v$VERSION\$" <<<"$remote_tags" && die "tag v$VERSION already exists on origin; never re-tag a version"
 bounded 120 gh api --paginate --slurp "repos/$REPO/releases?per_page=100" >"$WORK/releases.json" || die "listing releases failed"
-[ "$(jq --arg t "v$VERSION" '[.[][] | select(.tag_name == $t)] | length' "$WORK/releases.json")" = 0 ] ||
-	die "a release or draft for v$VERSION already exists"
-BASE_TAG="$(jq -r '[.[][] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))]
-	| sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last // ""' "$WORK/releases.json")"
-[ -n "$BASE_TAG" ] || die "no published base release"
-python3 -c 'import sys; a, b = (tuple(map(int, v.split("."))) for v in sys.argv[1:]); sys.exit(0 if a > b else 1)' "$VERSION" "${BASE_TAG#v}" ||
-	die "v$VERSION is not newer than the latest published $BASE_TAG"
+BASE_TAG="$(bounded 30 sh "$ROOT/scripts/release-preflight.sh" releases "$VERSION" "$WORK/releases.json")" ||
+	die "release availability preflight failed"
 # NEXTVERSION1: when origin/main already states this unpublished version, tag it as is; no prepare commit.
 if [ "$PREPARE" = 1 ] && git -C "$ROOT" show "$MAIN:package.json" | jq -e --arg v "$VERSION" '.version == $v' >/dev/null; then
 	PREPARE=0; SOURCE="$MAIN"
@@ -561,16 +554,12 @@ if [ "$PREPARE" = 1 ]; then
 	prepare_release
 fi
 # Explicit --source remains the immutable resume/preview path.
-sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$SOURCE" --repo "$ROOT" ||
+sh "$ROOT/scripts/release-preflight.sh" version "$ROOT" "$SOURCE" "$VERSION" "$ROOT" ||
 	die "package.json version does not match v$VERSION at $SOURCE"
 release_card_check "$SOURCE"
-MODE="$(git -C "$ROOT" show "$SOURCE:scripts/release-signing.json" | jq -er 'select(.schema_version == 1) | .darwin_signing')" ||
-	die "source has no valid scripts/release-signing.json"
-if [ "$MODE" != developer-id ]; then
-	[ "$DRY_RUN" = 1 ] || die "source darwin_signing is '$MODE'; a local release requires developer-id"
-	echo "release-local: dry-run continues although source darwin_signing is '$MODE'" >&2
-fi
-git -C "$ROOT" show "$SOURCE:.github/workflows/release.yml" | grep -q '^  attest-local:$' ||
+MODE="$(bounded 30 sh "$ROOT/scripts/release-preflight.sh" signing "$ROOT" "$SOURCE" "$VERSION" "$ROOT" "$DRY_RUN")" ||
+	die "source has no valid local release signing mode"
+bounded 30 sh "$ROOT/scripts/release-preflight.sh" attestation "$ROOT" "$SOURCE" "$VERSION" "$ROOT" ||
 	die "source release.yml has no attest-local job (LOCAL-RELEASE-V1)"
 say "source $SOURCE (origin/main $MAIN) version $VERSION base $BASE_TAG mode $MODE"
 
@@ -583,8 +572,11 @@ git -C "$ROOT" archive --format=tar "$SOURCE" >"$WORK/source.tar"
 tar -xf "$WORK/source.tar" -C "$SRC"
 rm -f "$WORK/source.tar"
 substep ''
-[ "$(jq -r .source_revision "$SRC/package.json")" = "$SOURCE" ] || die "export did not stamp source_revision"
-[ "$(bun --version)" = "$(tr -d '[:space:]' <"$SRC/.bun-version")" ] || die "bun $(bun --version) differs from the source's pinned .bun-version"
+bounded 30 sh "$ROOT/scripts/release-preflight.sh" export "$SRC" "$SOURCE" ||
+	die "source export preflight failed"
+substep source.spawn-smoke
+bounded 180 bun "$SRC/scripts/spawn-smoke.ts" || die "fresh non-kit native build spawn smoke failed"
+substep ''
 source_tree="$(git -C "$ROOT" rev-parse "$SOURCE^{tree}")" || die "cannot resolve exact source tree"
 # The verdict producer may return 0 when a different run holds its lock. Never
 # confuse that queue acknowledgement with PASS: wait on both exact-tree records.
