@@ -38,6 +38,8 @@ export BR_BIN BEADS_DB KNOWN_IDS
 : > "$BEADS_DB"
 BUILD=$(fx build "$TMP") || { fail=$((fail + 1)); printf 'FAIL witness-fixture-build\n'; return 1; }
 H=$(printf '%s\n' "$BUILD" | sed -n 's/^repo //p')
+git -C "$H" config user.name "Witness fixture"
+git -C "$H" config user.email "witness@example.invalid"
 ROOT=$(printf '%s\n' "$BUILD" | sed -n 's/^root //p')
 L1=$(printf '%s\n' "$BUILD" | sed -n 's/^l1 //p')
 L2=$(printf '%s\n' "$BUILD" | sed -n 's/^l2 //p')
