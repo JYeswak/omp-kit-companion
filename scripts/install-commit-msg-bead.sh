@@ -467,7 +467,7 @@ execute_hook() (
 backup() {
 	undo="$(dirname -- "$1")/.undo.$$.$(basename -- "$1")"
 	cp -p "$1" "$undo"
-	mode=$(stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1")
+	mode=$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o7777, "o"))' "$1")
 	printf '%s\n' "$mode" > "$undo.mode"
 	chmod a-x "$undo"
 	UNDO_RESTORE="$UNDO_RESTORE $1"

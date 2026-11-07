@@ -388,7 +388,21 @@ group_restore() {
 
 # 6. rollback restores a member it overwrote, byte-for-byte, and leaves no
 #    backup behind (planted: the old installer deleted it, localbench 2026-10-16)
-F=$(new_repo restore) || exit 1
+# GNU stat can print filesystem information before rejecting BSD -f %Lp.
+# Exercise that mixed-protocol fallback even on a BSD-stat development host.
+gnu_stat_bin="$TMP/gnu-stat-bin"
+mkdir -p "$gnu_stat_bin"
+cat > "$gnu_stat_bin/stat" <<'STAT'
+#!/bin/sh
+case "$1" in
+	-f) printf 'GNU stat filesystem information\n'; exit 1 ;;
+	-c) exec python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o7777, "o"))' "$3" ;;
+	*) exit 2 ;;
+esac
+STAT
+chmod +x "$gnu_stat_bin/stat"
+for stat_flavor in native gnu; do
+F=$(new_repo "restore-$stat_flavor") || exit 1
 mkdir -p "$F/.git/hooks/hooks.d/commit-msg"
 printf '#!/bin/sh\n# older member\nexit 0\n' > "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
 # 711 is not a plain 755, so a sloppy restore (a+x, 755) is caught.
@@ -398,7 +412,9 @@ cat > "$F/.git/hooks/commit-msg" <<'HOOK'
 case "$0" in */hooks/commit-msg) exit 0;; *) exit 1;; esac
 HOOK
 chmod +x "$F/.git/hooks/commit-msg"
-sh "$INSTALLER" "$F" > /dev/null 2>&1
+restore_path=$PATH
+[ "$stat_flavor" != gnu ] || restore_path="$gnu_stat_bin:$PATH"
+PATH="$restore_path" sh "$INSTALLER" "$F" > /dev/null 2>&1
 ok "$?" "1" "restore-rollback-rc"
 grep -q "older member" "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
 ok "$?" "0" "restore-member-restored"
@@ -409,7 +425,8 @@ ok "$rc" "0" "restore-no-backup-left"
 # rollback still restores the member's exact original mode.
 mode=$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o7777, "o"))' "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead")
 [ "$mode" = 711 ]
-ok "$?" "0" "restore-member-mode-exact: $mode"
+ok "$?" "0" "restore-member-mode-exact ($stat_flavor): $mode"
+done
 }
 
 group_idless() {
