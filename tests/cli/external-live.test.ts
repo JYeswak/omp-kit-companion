@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
-import { chmodSync, cpSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
-import { runtimeTempRoot } from "../../src/runtime.ts";
+import { runtimeTempRoot, sanitizedEnv } from "../../src/runtime.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
+import { fixtureDeadlineS, runFixture, runFixtureAsync } from "./fixture-process.ts";
 import { evaluateExternalLiveEvidence, runExternalLive, validateExternalLiveSchema } from "../../src/external-live.ts";
 import { readExternalPackSnapshot, type ExternalPackSnapshot } from "../../src/external-pack.ts";
 import { reduceCandidate } from "../../src/reducer.ts";
@@ -19,11 +21,15 @@ function copyResources(destination: string): void {
 	for (const directory of ["rules", "cases", "policy"]) {
 		cpSync(join(REPO_ROOT, directory), join(destination, directory), { recursive: true });
 	}
-	for (const file of ["rule-class.ts", "external-live.mjs", "limit-process-tree.sh", "runtime-adapter.sh"]) {
+	for (const file of ["rule-class.ts", "limit-process-tree.sh", "runtime-adapter.sh"]) {
 		mkdirSync(join(destination, "scripts"), { recursive: true });
 		cpSync(join(REPO_ROOT, "scripts", file), join(destination, "scripts", file));
 		if (file.endsWith(".sh")) chmodSync(join(destination, "scripts", file), 0o755);
 	}
+	const externalLive = runFixture([process.execPath, "build", join(REPO_ROOT, "scripts", "external-live.mjs"),
+		"--target=bun", "--format=esm"], { cwd: REPO_ROOT, floor_s: 30 });
+	if (externalLive.rc !== 0) throw new Error(`external-live fixture bundle failed (${externalLive.rc}): ${new TextDecoder().decode(externalLive.stderr)}`);
+	writeFileSync(join(destination, "scripts", "external-live.mjs"), externalLive.stdout);
 	for (const file of ["lib.mjs", "mock-model.mjs", "scenarios.json"]) {
 		mkdirSync(join(destination, "tests", "live"), { recursive: true });
 		cpSync(join(REPO_ROOT, "tests", "live", file), join(destination, "tests", "live", file));
@@ -76,13 +82,13 @@ function writeFixture(name: string, value: unknown): string {
 	return file;
 }
 
-function makePack(): ExternalPackSnapshot {
-	const rules = join(scratch, "external-pack", "rules");
+function makePack(name = "external-pack"): ExternalPackSnapshot {
+	const rules = join(scratch, name, "rules");
 	mkdirSync(rules, { recursive: true });
 	writeFileSync(join(rules, "public-live-marker.md"),
 		'---\ndescription: "Public synthetic live marker test"\ncondition: "PUBLIC_BLOCK_SAMPLE"\nscope: "tool:write"\ninterruptMode: always\n---\nBlock the public synthetic write.\n',
 		{ flag: "wx", mode: 0o600 });
-	const cases = join(scratch, "external-pack", "cases.tsv");
+	const cases = join(scratch, name, "cases.tsv");
 	const rows = [
 		CASE_HEADER,
 		"public-live-marker\tfire\ttool\twrite\t.marker\tPUBLIC_BLOCK_SAMPLE\tblock witness\t",
@@ -145,6 +151,45 @@ test("custom G4 is data-only, selected G1-G3 gated once, and proves native marke
 	expect(JSON.stringify(report)).not.toContain("sk-mock");
 	expect(existsSync(fixturePath)).toBe(true);
 }, 120_000);
+
+test("external live executes a non-JavaScript launcher without Bun's interpreter override", async () => {
+	const workspace = ownedTmp("external-live-launcher", { root: runtimeTempRoot() }).path;
+	const identity = resolveOmpIdentity();
+	const privateRoot = ownedTmp("omp-kit-runtime", { root: runtimeTempRoot() }).path;
+	const env = sanitizedEnv(identity, process.env, privateRoot);
+	for (const key of ["HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "BUN_INSTALL"]) {
+		mkdirSync(env[key]!, { recursive: true, mode: 0o700 });
+	}
+	const launcher = join(workspace, "omp-launcher");
+	// A real shell launcher rejects Bun's override, then delegates every native turn to OMP.
+	writeFileSync(launcher, '#!/bin/sh\nif [ "${BUN_BE_BUN+x}" = x ]; then exit 73; fi\nexec "$0.real" "$@"\n', { mode: 0o700 });
+	symlinkSync(identity.launcher, `${launcher}.real`);
+	const pack = makePack("launcher-pack");
+	const ruleBytes = readFileSync(pack.rules[0]!.path);
+	writeFileSync(join(workspace, "selected-rule.md"), ruleBytes, { mode: 0o600 });
+	writeFileSync(join(workspace, "run.json"), JSON.stringify({
+		rule: fixture.rule,
+		ruleSha256: createHash("sha256").update(ruleBytes).digest("hex"),
+		scenarios: fixture.scenarios.map(scenario => ({
+			...scenario, contentSha256: createHash("sha256").update(scenario.content).digest("hex"),
+		})),
+	}), { mode: 0o600 });
+	const result = await runFixtureAsync([stableExecutable, join(releaseRoot, "scripts", "external-live.mjs"), workspace], {
+		cwd: releaseRoot, floor_s: 120,
+		env: { ...env, BUN_BE_BUN: "1", OMP: launcher, OMP_BIN: launcher, OMP_PATH: launcher },
+	});
+	const diagnostic = new TextDecoder().decode(result.stderr);
+	expect(result.rc, diagnostic).toBe(0);
+	const report = JSON.parse(new TextDecoder().decode(result.stdout));
+	expect(report, diagnostic).toMatchObject({ status: "PASS" });
+	expect(report.scenarios).toHaveLength(3);
+	for (const scenario of report.scenarios) {
+		expect(scenario.omp_exit_code).toBe(0);
+		expect(scenario.model_main_requests).toBeGreaterThan(0);
+		expect(scenario.marker.present).toBe(scenario.expected_marker_effect === "present");
+		expect(scenario.native_system_interrupt).toBe(scenario.role === "block");
+	}
+}, fixtureDeadlineS(120) * 1_000);
 
 test("external live refuses unowned, escaped, aliased and nonprivate caller workspaces", () => {
 	const caller = join(scratch, "caller-admission");

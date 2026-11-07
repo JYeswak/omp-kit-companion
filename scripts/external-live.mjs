@@ -1,11 +1,12 @@
 // One selected external rule, three data-only native WRITE scenarios, and private markers.
-// The existing P09 mock server, config/model helpers, runtime adapter, and process limiter
+// The existing P09 mock server, config/model helpers, runtime adapter, and bounded runner
 // own protocol and process isolation; caller data never supplies an action or a path.
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
+import { run } from "../src/kitlib/run.ts";
 
 const [workspaceArg] = process.argv.slice(2);
 const fail = (reason) => { throw new Error(reason); };
@@ -101,13 +102,12 @@ async function waitForPort(child, portFile, stdout, stderr) {
 	}
 	fail("MOCK_SERVER_START_TIMEOUT");
 }
-async function runOmp(limiter, identity, project, workspace) {
-	const child = Bun.spawn([limiter, "30", process.execPath, identity, "-p", "--no-session", "--model", "mock/mock",
+async function runOmp(identity, project, workspace) {
+	const result = await run([identity, "-p", "--no-session", "--model", "mock/mock",
 		"--approval-mode", "yolo", "--tools", "write", "go"], {
-		cwd: project, env: { ...safeEnv(workspace), BUN_BE_BUN: "1" },
-		stdin: "ignore", stdout: "ignore", stderr: "ignore",
+		cwd: project, env: safeEnv(workspace), deadline_s: 30, max_output_bytes: 64 * 1024,
 	});
-	const code = await child.exited;
+	const code = result.timed_out ? 124 : result.rc !== null && result.rc < 0 ? 128 - result.rc : result.rc;
 	const diagnostic = code === 0 ? "EXIT_ZERO" : code === 124 ? "TIMEOUT" : code === 137 ? "KILLED" : "NONZERO";
 	return { code, diagnostic };
 }
@@ -142,7 +142,7 @@ function initializeProject(root, workspace) {
 		stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 	if (result.exitCode !== 0) fail("PROJECT_REPOSITORY_SETUP_FAILED");
 }
-async function runScenario({ root, workspace, manifest, scenario, index, adapter, mock, limiter, identity, lib, modelsPath }) {
+async function runScenario({ root, workspace, manifest, scenario, index, adapter, mock, identity, lib, modelsPath }) {
 	const project = join(workspace, `project-${index}-${scenario.id}`);
 	mkdirSync(project, { mode: 0o700 });
 	initializeProject(project, workspace);
@@ -165,7 +165,7 @@ async function runScenario({ root, workspace, manifest, scenario, index, adapter
 	try {
 		const port = await waitForPort(server, portFile, serverStdout, serverStderr);
 		runHelper(root, lib, ["models", String(port), modelsPath], workspace);
-		omp = await runOmp(limiter, identity, project, workspace);
+		omp = await runOmp(identity, project, workspace);
 		request = readRequests(logFile, manifest.rule);
 		marker = markerEvidence(markerPath, scenario);
 	} finally {
@@ -212,12 +212,11 @@ async function main() {
 	const policy = join(root, "policy", "ttsr.json");
 	const mock = join(root, "tests", "live", "mock-model.mjs");
 	const adapter = join(root, "scripts", "runtime-adapter.sh");
-	const limiter = join(root, "scripts", "limit-process-tree.sh");
 	runHelper(root, lib, ["config", policy, configPath], workspace);
 	const scenarios = [];
 	for (let index = 0; index < manifest.scenarios.length; index++) {
 		scenarios.push(await runScenario({ root, workspace, manifest, scenario: manifest.scenarios[index], index,
-			adapter, mock, limiter, identity, lib, modelsPath }));
+			adapter, mock, identity, lib, modelsPath }));
 	}
 	const failed = scenarios.some((scenario, index) => {
 		const expected = manifest.scenarios[index];

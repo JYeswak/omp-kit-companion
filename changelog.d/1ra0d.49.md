@@ -18,3 +18,4 @@
 - Scope fleet-guard scratch-write quiet controls to their own owned TMPDIR rather than the runner's ambient temporary directory.
 - Configure task/smol model roles through OMP's supported fixture configuration so the native spawn smoke reaches its real child without unsupported per-call model arguments.
 - Allow the matching advisory commit-preflight reminder in the no-verify live scenario while still requiring its blocking rule and the absence of the forbidden marker.
+- Execute the selected OMP launcher directly through the bounded 30-second runner in custom live checks, supporting compiled Tern releases without treating their binary bytes as JavaScript or inheriting Bun's interpreter override.

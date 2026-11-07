@@ -67,6 +67,7 @@ const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/kit-inbox-wake.ts": "INBOX_WAKE_BUNDLE_FAILED",
 	"extensions/kit-composer-state.ts": "COMPOSER_STATE_BUNDLE_FAILED",
 	"scripts/ttsr-harness.ts": "HARNESS_BUNDLE_FAILED",
+	"scripts/external-live.mjs": "EXTERNAL_LIVE_BUNDLE_FAILED",
 	// REPLAYABLE1: bead_lint's box grammar is src/verify.ts's own; bundled, the installed lint needs no checkout src/.
 	"scripts/box-lint.ts": "BOX_LINT_BUNDLE_FAILED",
 	"tests/live/admission-extension.mjs": "ADMISSION_FIXTURE_BUNDLE_FAILED",
