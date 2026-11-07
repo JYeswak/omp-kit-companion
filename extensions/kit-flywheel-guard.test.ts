@@ -10,8 +10,6 @@ import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { run, runSync } from "../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "../tests/cli/fixture-process.ts";
 import { briefContract, briefTargets, checkTaskBrief, renderBrief } from "../src/brief.ts";
-import { loadSpawnModelRuntime } from "../src/spawn-model.ts";
-import type { SpawnModelIdentity } from "../src/spawn-model.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -1602,186 +1600,71 @@ test("BRIEFCONTRACT1 direct parent DONE message after file edits needs the same 
 	expect((admitted as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
 });
 
-describe("AGENTMODEL1 registered task-call guard", () => {
-	const SOL = "openai-codex/gpt-6.1-sol";
-	const OPUS = "anthropic/claude-opus-5-5";
-	const MUSE = "muse-code/muse-spark-1.3-contributor";
-	async function spawnSeat(options: { role?: "chief" | "director" | "builder"; overrides?: Record<string, unknown>; agent?: string; requestModel?: string; query?: boolean; rosterLocation?: "override" | "xdg"; rosterState?: "missing" | "malformed" | "dangling" } = {}) {
-		const runtime = await loadSpawnModelRuntime();
-		// The catalog belongs to the PATH-selected OMP, not a kit dependency.
-		const { getBundledModels } = await import(import.meta.resolve("@oh-my-pi/pi-catalog/models", join(runtime.source, "index.ts")));
-		const models: SpawnModelIdentity[] = ["anthropic", "openai-codex", "muse-code"].flatMap(provider => getBundledModels(provider));
-		const home = freshDir(base, "spawn-home-"), project = freshDir(base, "spawn-project-");
-		const configHome = join(home, options.rosterLocation === "xdg" ? "xdg" : ".config");
-		const rosterDir = join(configHome, "omp-kit");
-		const rosterPath = options.rosterLocation === "override" ? join(home, "operator-roster.json") : join(rosterDir, "fleet-roster.json");
-		const agentDir = join(home, ".omp", "agent");
-		mkdirSync(rosterDir, { recursive: true });
-		mkdirSync(agentDir, { recursive: true });
-		mkdirSync(join(project, ".omp", "agents"), { recursive: true });
-		const role = options.role ?? "chief", name = "SpawnSeat";
-		if (options.rosterState === "dangling") symlinkSync(join(home, "missing-roster.json"), rosterPath);
-		else if (options.rosterState !== "missing") writeFileSync(rosterPath, options.rosterState === "malformed" ? "{broken" : JSON.stringify({
-			chiefs: { lead: role === "chief" ? name : "OtherChief", peers: [] },
-			sessions: { test: { seats: { [name]: { role } } } },
-		}));
-		writeFileSync(join(agentDir, "config.yml"), JSON.stringify({ task: { agentModelOverrides: options.overrides ?? {} } }));
-		writeFileSync(join(project, ".omp", "agents", "muse-worker.md"), `---\nname: muse-worker\ndescription: Read-only Muse worker\nmodel: ${MUSE}\n---\nRead the requested source.\n`);
-		const settings = await runtime.Settings.loadReadOnly({ cwd: project, agentDir });
-		const h = await createFlywheelHost(base, { env: { AGENT_NAME: name,
-			...(options.rosterLocation === "override" ? { OMP_KIT_FLEET_ROSTER: rosterPath } : {}),
-			...(options.rosterLocation === "xdg" ? { XDG_CONFIG_HOME: configHome } : {}) }, home });
-		const input = { context: "Read-only analysis", tasks: [{ task: "Read-only: analyze the model choice", ...(options.agent ? { agent: options.agent } : {}), ...(options.requestModel ? { model: options.requestModel } : {}) }] };
-		const ctx = { ...h.ctx(project), model: { provider: "anthropic", id: "claude-opus-5-5" },
-			...(options.query === false ? {} : { models: { resolve: (patterns: string) => runtime.resolveModelRoleValue(patterns, models, { settings }).model } }) };
-		const [raw] = await h.emit("tool_call", { toolCallId: `spawn-${freshSeq++}`, toolName: "task", input }, ctx);
-		return raw as FlywheelToolCallResult | undefined;
-	}
-
-	for (const role of ["chief", "director"] as const) {
-		test(`planted: ${role} without an override cannot spawn from an Opus parent`, async () => {
-			const result = await spawnSeat({ role });
-			expect(result?.block).toBe(true);
-			expect(result?.reason).toContain("SPAWN_MODEL_REFUSED");
-			expect(result?.reason).toContain("OPUS_CLASS");
-			expect(result?.reason).toContain("J-2026-10-18-33");
-		});
-	}
-	test("planted: an Opus settings override is refused", async () => {
-		const result = await spawnSeat({ overrides: { task: OPUS } });
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain("OPUS_CLASS");
-	});
-	test("control: a persisted Sol override is admitted", async () => {
-		expect((await spawnSeat({ overrides: { task: SOL } }))?.block).not.toBe(true);
-	});
-	for (const rosterLocation of ["override", "xdg"] as const) {
-		test(`control: ${rosterLocation} operator roster path is honored`, async () => {
-			expect((await spawnSeat({ overrides: { task: SOL }, rosterLocation }))?.block).not.toBe(true);
-		});
-	}
-	test("stock-home control: an identified non-fleet seat with no roster admits an Opus-parent task", async () => {
-		expect((await spawnSeat({ rosterState: "missing", overrides: { task: OPUS }, query: false }))?.block).not.toBe(true);
-	});
-	for (const rosterState of ["missing", "malformed"] as const) {
-		test(`planted: configured ${rosterState} roster refuses an Opus spawn with a named reason`, async () => {
-			for (const role of ["chief", "director"] as const) {
-				const result = await spawnSeat({ role, overrides: { task: OPUS }, rosterState, rosterLocation: "override" });
-				expect(result?.block).toBe(true);
-				expect(result?.reason).toContain("SPAWN_ROSTER_UNREADABLE");
-			}
-		});
-	}
-	for (const rosterState of ["malformed", "dangling"] as const) {
-		test(`planted: an existing ${rosterState} default roster remains fail-closed`, async () => {
-			const result = await spawnSeat({ overrides: { task: OPUS }, rosterState });
-			expect(result?.block).toBe(true);
-			expect(result?.reason).toContain("SPAWN_ROSTER_UNREADABLE");
-		});
-	}
-	test("control: a project agent explicitly selecting Muse is admitted", async () => {
-		expect((await spawnSeat({ agent: "muse-worker" }))?.block).not.toBe(true);
-	});
-	test("control: a non-lead builder is unaffected even without model-query support", async () => {
-		expect((await spawnSeat({ role: "builder", overrides: { task: OPUS }, query: false }))?.block).not.toBe(true);
-	});
-	test("unknown model and unavailable query fail closed with named reasons", async () => {
-		const unavailable = await spawnSeat({ overrides: { task: "unreachable-provider/no-model" } });
-		expect(unavailable?.block).toBe(true);
-		expect(unavailable?.reason).toContain("MODEL_UNAVAILABLE");
-		const query = await spawnSeat({ overrides: { task: SOL }, query: false });
-		expect(query?.block).toBe(true);
-		expect(query?.reason).toContain("MODEL_QUERY_UNAVAILABLE");
-	});
-	test("SPAWNNATIVE1: on a native host the task call no longer runs the settings-import check; its spawn event still refuses Opus and admits Sol", async () => {
-		const home = freshDir(base, "native-task-home-"), project = freshDir(base, "native-task-project-");
-		const rosterPath = join(home, "roster.json");
-		writeFileSync(rosterPath, JSON.stringify({ chiefs: { lead: "SpawnSeat", peers: [] }, sessions: {} }));
-		const handlers = new Map<string, unknown>();
-		await kitFlywheelGuard({
-			on: (event: string, handler: unknown) => { handlers.set(event, handler); },
-			getAllTools: () => [],
-			sendMessage: () => {},
-			exec: async () => ({ code: 127, stdout: "", stderr: "not needed" }),
-		}, { home, env: { AGENT_NAME: "SpawnSeat" }, rosterPath });
-		const opusModel = { provider: "anthropic", id: "claude-opus-5-5" }, solModel = { provider: "openai-codex", id: "gpt-6.1-sol" };
-		// An Opus parent with no override: the legacy task-call path refuses this child (OPUS inheritance).
-		const ctx: FlywheelContext = { cwd: project, model: opusModel,
-			models: { resolve: (p: string) => p.includes("sol") ? solModel : opusModel } };
-		const call = handlers.get("tool_call") as (e: unknown, c: FlywheelContext) => Promise<FlywheelToolCallResult | undefined>;
-		const taskResult = await call({ toolName: "task", toolCallId: "native-task", input: { context: "Read-only analysis", tasks: [{ task: "Read-only: analyze the model choice" }] } }, ctx);
-		expect(taskResult?.reason ?? "").not.toContain("SPAWN_MODEL_REFUSED");
-		const spawn = handlers.get("before_subagent_spawn") as (e: FlywheelBeforeSubagentSpawnEvent, c: FlywheelContext) => Promise<FlywheelToolCallResult | undefined>;
-		const opus = await spawn({ type: "before_subagent_spawn", agent: "task", invocationKind: "task", patterns: [OPUS] }, ctx);
-		expect(opus?.block).toBe(true);
-		expect(opus?.reason).toContain("SPAWN_MODEL_REFUSED");
-		const sol = await spawn({ type: "before_subagent_spawn", agent: "task", invocationKind: "task", patterns: [SOL] }, ctx);
-		expect(sol?.block ?? false).toBe(false);
-	});
-});
-
-describe("AGENTMODEL1 native final-policy boundary", () => {
+describe("NATIVESPAWN1 native-only child model policy", () => {
 	const SOL = "openai-codex/gpt-6.1-sol", OPUS = "anthropic/claude-opus-5-5";
 	async function finalPolicy(model: string, options: { role?: "chief" | "builder"; query?: boolean; subagent?: boolean; rosterState?: "missing" | "malformed"; configured?: boolean } = {}) {
-		const runtime = await loadSpawnModelRuntime();
-		// Resolve against the real installed catalog and native session settings.
-		const { getBundledModels } = await import(import.meta.resolve("@oh-my-pi/pi-catalog/models", join(runtime.source, "index.ts")));
-		const models: SpawnModelIdentity[] = ["anthropic", "openai-codex", "muse-code"].flatMap(provider => getBundledModels(provider));
-		const home = freshDir(base, "final-policy-"), project = freshDir(base, "final-project-");
-		const rosterDir = join(home, ".config", "omp-kit"), agentDir = join(home, ".omp", "agent");
-		mkdirSync(rosterDir, { recursive: true });
-		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(join(agentDir, "config.yml"), JSON.stringify({ task: { agentModelOverrides: { task: SOL } } }));
-		if (options.rosterState !== "missing") writeFileSync(join(rosterDir, "fleet-roster.json"), options.rosterState === "malformed" ? "{broken" : JSON.stringify({
+		const home = freshDir(base, "native-policy-"), project = freshDir(base, "native-project-");
+		const rosterPath = join(home, "roster.json");
+		if (options.rosterState !== "missing") writeFileSync(rosterPath, options.rosterState === "malformed" ? "{broken" : JSON.stringify({
 			chiefs: { lead: options.role === "builder" ? "OtherChief" : "NativeSeat", peers: [] },
 			sessions: { test: { seats: { NativeSeat: { role: options.role ?? "chief" } } } },
 		}));
-		// Disk remains Sol while the effective in-memory session may select Opus.
-		const settings = runtime.Settings.isolated({ "task.agentModelOverrides": { task: model } });
-		const patterns = runtime.resolveAgentModelSelection({ settings,
-			settingsOverride: model, agentModel: "@task", activeModelPattern: OPUS }).patterns;
 		const handlers = new Map<string, unknown>();
 		await kitFlywheelGuard({
 			on: (event: string, handler: unknown) => { handlers.set(event, handler); },
-			// Native registration happens before the tool registry is populated.
 			getAllTools: () => [],
 			sendMessage: () => {},
 			exec: async () => ({ stdout: "", stderr: "not needed", code: 127 }),
-		}, { home, env: { AGENT_NAME: "NativeSeat", ...(options.configured ? { OMP_KIT_FLEET_ROSTER: join(rosterDir, "fleet-roster.json") } : {}) } });
-		const handler = handlers.get("before_subagent_spawn");
-		if (typeof handler !== "function") throw new Error("Native spawn event was not registered");
+		}, { home, env: { AGENT_NAME: "NativeSeat" },
+			...(options.configured || options.rosterState !== "missing" ? { rosterPath } : {}) });
 		const ctx: FlywheelContext = { cwd: project, agent: { kind: options.subagent ? "sub" : "main" },
 			model: { provider: "anthropic", id: "claude-opus-5-5" },
-			...(options.query === false ? {} : { models: { resolve: (value: string) => runtime.resolveModelRoleValue(value, models, { settings }).model } }) };
-		const event: FlywheelBeforeSubagentSpawnEvent = { type: "before_subagent_spawn", agent: "task", invocationKind: "task", patterns };
-		return await handler(event, ctx) as FlywheelToolCallResult | undefined;
+			...(options.query === false ? {} : { models: { resolve: () => {
+				if (model === "unreachable-provider/no-model") return undefined;
+				const [provider, id] = model.split("/");
+				return { provider: provider!, id: id! };
+			} } }) };
+		const call = handlers.get("tool_call") as (e: unknown, c: FlywheelContext) => Promise<FlywheelToolCallResult | undefined>;
+		const task = await call({ toolName: "task", toolCallId: "native-task", input: {
+			context: "Read-only analysis", tasks: [{ task: "Read-only: analyze the model choice" }],
+		} }, ctx);
+		expect(task?.block ?? false).toBe(false);
+		const spawn = handlers.get("before_subagent_spawn") as (e: FlywheelBeforeSubagentSpawnEvent, c: FlywheelContext) => Promise<FlywheelToolCallResult | undefined>;
+		const result = await spawn({ type: "before_subagent_spawn", agent: "task", invocationKind: "task", patterns: [model] }, ctx);
+		const retired = ["AGENT_DEFINITION_UNOBSERVABLE", "EMPTY_TASK_BATCH", "HISTORICAL_MODEL_UNOBSERVABLE",
+			"INVALID_MODEL_OVERRIDE", "INVALID_REQUEST_MODEL", "INVALID_TASK_INPUT", "INVALID_TASK_ITEM",
+			"MODEL_QUERY_UNAVAILABLE", "MODEL_RESOLUTION_FAILED", "MODEL_SELECTOR_UNRESOLVED", "MODEL_UNAVAILABLE",
+			"OPUS_CLASS_CANDIDATE", "OPUS_CLASS_RESOLVED", "SPAWN_INPUTS_UNOBSERVABLE", "SPAWN_MODEL_REFUSED", "SPAWN_ROSTER_UNREADABLE"];
+		for (const id of retired) expect(result?.reason ?? "").not.toContain(id);
+		return result;
 	}
-	test("planted: core's session-only Opus override is refused even when disk says Sol", async () => {
-		const result = await finalPolicy(OPUS);
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain("SPAWN_MODEL_REFUSED");
-		expect(result?.reason).toContain("OPUS_CLASS_CANDIDATE");
+	test("planted: Opus child is denied at the native pre-provider boundary", async () => {
+		expect(await finalPolicy(OPUS)).toMatchObject({ block: true, reason: expect.stringContaining("NATIVESPAWN1") });
 	});
-	test("control: core's final Sol model is admitted", async () => {
-		expect((await finalPolicy(SOL))?.block).not.toBe(true);
+	test("control: Sol child is admitted", async () => {
+		expect(await finalPolicy(SOL)).toBeUndefined();
 	});
-	test("stock-home native control: an identified non-fleet seat with no roster admits an Opus spawn", async () => {
-		expect((await finalPolicy(OPUS, { rosterState: "missing", query: false }))?.block).not.toBe(true);
+	test("private-source settings import and resolver are absent", () => {
+		const source = readFileSync(join(import.meta.dir, "kit-flywheel-guard.ts"), "utf8");
+		expect(source).not.toContain("spawn-model");
+		expect(source).not.toContain("readSpawnModelInputs");
+		expect(existsSync(join(import.meta.dir, "../src/spawn-model.ts"))).toBe(false);
+	});
+	test("stock-home non-fleet control admits Opus", async () => {
+		expect(await finalPolicy(OPUS, { rosterState: "missing", query: false })).toBeUndefined();
 	});
 	for (const rosterState of ["missing", "malformed"] as const) {
-		test(`planted: final ${rosterState} roster refuses an Opus spawn by name`, async () => {
-			const result = await finalPolicy(OPUS, { rosterState, configured: true });
-			expect(result?.block).toBe(true);
-			expect(result?.reason).toContain("SPAWN_ROSTER_UNREADABLE");
+		test(`configured ${rosterState} roster remains fail-closed`, async () => {
+			expect((await finalPolicy(OPUS, { rosterState, configured: true }))?.block).toBe(true);
 		});
 	}
-	test("final unresolvable model or unavailable model query fails closed", async () => {
-		expect((await finalPolicy("unreachable-provider/no-model"))?.reason).toContain("MODEL_UNAVAILABLE");
-		expect((await finalPolicy(SOL, { query: false }))?.reason).toContain("MODEL_QUERY_UNAVAILABLE");
+	test("unresolvable model and unavailable query remain fail-closed", async () => {
+		expect((await finalPolicy("unreachable-provider/no-model"))?.block).toBe(true);
+		expect((await finalPolicy(SOL, { query: false }))?.block).toBe(true);
 	});
-	test("non-lead workers and child sessions with inherited chief environment are unaffected", async () => {
-		expect((await finalPolicy(OPUS, { role: "builder" }))?.block).not.toBe(true);
-		expect((await finalPolicy(OPUS, { subagent: true }))?.block).not.toBe(true);
+	test("non-lead workers and inherited chief environment in children remain unaffected", async () => {
+		expect(await finalPolicy(OPUS, { role: "builder" })).toBeUndefined();
+		expect(await finalPolicy(OPUS, { subagent: true })).toBeUndefined();
 	});
 });
 

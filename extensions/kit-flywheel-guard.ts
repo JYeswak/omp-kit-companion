@@ -18,8 +18,7 @@ import { resolveCustodyScript } from "../src/custody.ts";
 import { classifyMineResult } from "../src/mine-cause.ts";
 import { briefHandbackRefusal, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
-import { readSpawnModelInputs, resolveSpawnPatterns, resolveTaskModels, taskModelRefusal } from "../src/spawn-model.ts";
-import type { SpawnModelIdentity } from "../src/spawn-model.ts";
+interface SpawnModelIdentity { provider: string; id: string }
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -1368,7 +1367,7 @@ export function admissionOwner(env: Record<string, string | undefined>): string 
 	return null;
 }
 
-/** Operator roster membership for the retained spawn-model policy. */
+/** Operator roster membership for the native child policy. */
 function rosterRoles(parsed: unknown): { sessions: Record<string, unknown>; chiefs: string[] } {
 	const rows = field(parsed, "sessions");
 	if (rows === null || typeof rows !== "object" || Array.isArray(rows)) throw new Error("sessions is not an object");
@@ -2544,7 +2543,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	const configHome = env.XDG_CONFIG_HOME && isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : join(home, ".config");
 	const configuredRoster = deps.rosterPath !== undefined || env.OMP_KIT_FLEET_ROSTER !== undefined;
 	const rosterPath = deps.rosterPath ?? env.OMP_KIT_FLEET_ROSTER?.trim() ?? join(configHome, "omp-kit", "fleet-roster.json");
-	const protectedSpawner = async (ctx: FlywheelContext): Promise<boolean | "SPAWN_ROSTER_UNREADABLE"> => {
+	const protectedSpawner = async (ctx: FlywheelContext): Promise<boolean | "unreadable fleet roster"> => {
 		// Child sessions inherit launcher variables, not the chief's seat role.
 		if (ctx.agent?.kind === "sub") return false;
 		const name = env.AGENT_NAME?.trim() || (await paneIdentities(pi.exec, env, home, [ctx.cwd]))[0];
@@ -2556,19 +2555,17 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 				lstatSync(rosterPath);
 			} catch (error) {
 				if (field(error, "code") === "ENOENT") return false;
-				return "SPAWN_ROSTER_UNREADABLE";
+				return "unreadable fleet roster";
 			}
 		}
 		try {
 			const { sessions, chiefs } = rosterRoles(JSON.parse(readFileSync(rosterPath, "utf8")));
 			return orchestrationSeat(name, sessions, chiefs);
 		} catch {
-			return "SPAWN_ROSTER_UNREADABLE";
+			return "unreadable fleet roster";
 		}
 	};
-	// Native hosts expose the tool registry even before tools are initialized.
-	// Their spawn event includes final session-local policy; minimal legacy
-	// hosts still receive the task-call check. Auth fallback remains upstream.
+	// NATIVESPAWN1: only the native pre-provider boundary owns child model policy.
 	if (pi.getAllTools) {
 		const on: unknown = pi.on;
 		if (typeof on !== "function") throw new Error("Native spawn event registration is unavailable");
@@ -2576,15 +2573,21 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			try {
 				const scope = await protectedSpawner(ctx);
 				if (scope === false) return undefined;
-				if (typeof scope === "string") return { block: true, reason: taskModelRefusal([{ index: 0, agent: event.agent, patterns: [], reason: scope }]) };
-				const models = ctx.models;
-				const resolution = models
-					? resolveSpawnPatterns(0, event.agent, event.patterns, patterns => models.resolve(patterns))
-					: { index: 0, agent: event.agent, patterns: event.patterns, reason: "MODEL_QUERY_UNAVAILABLE" };
-				const reason = taskModelRefusal([resolution]);
-				if (reason) return { block: true, reason };
+				const refuse = (detail: string) => ({ block: true, reason: `NATIVESPAWN1: ${detail}; fleet children must not use Opus-class models (J-2026-10-18-33).` });
+				if (typeof scope === "string") return refuse(scope);
+				const selected = ctx.models?.resolve(event.patterns.join(","));
+				if (!selected) return refuse("native child model could not be resolved");
+				const opus = (model: string) => {
+					const value = model.toLowerCase();
+					for (let at = value.indexOf("opus"); at !== -1; at = value.indexOf("opus", at + 4)) {
+						if ((at === 0 || "/_-".includes(value[at - 1]!))
+							&& (at + 4 === value.length || "/_:@-".includes(value[at + 4]!))) return true;
+					}
+					return false;
+				};
+				if (opus(`${selected.provider}/${selected.id}`) || event.patterns.some(opus)) return refuse("Opus-class child denied before provider request");
 			} catch {
-				return { block: true, reason: taskModelRefusal([{ index: 0, agent: event.agent, patterns: [], reason: "SPAWN_INPUTS_UNOBSERVABLE" }]) };
+				return { block: true, reason: "NATIVESPAWN1: native child policy could not be evaluated" };
 			}
 			return undefined;
 		});
@@ -2735,25 +2738,6 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	const guardVerdict = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> => {
 		try {
 			if (event.toolName === "task") {
-				// SPAWNNATIVE1: native hosts enforce the spawn-model policy in before_subagent_spawn (above), from the
-				// resolved patterns the host supplies. The task-call path re-imported OMP's settings source, which the
-				// compiled 18.17 host cannot resolve, and refused every spawn; it runs only on legacy hosts now.
-				if (!pi.getAllTools) try {
-					const scope = await protectedSpawner(ctx);
-					if (typeof scope === "string") return { block: true, reason: taskModelRefusal([{ index: 0, agent: "task", patterns: [], reason: scope }]) };
-					if (scope) {
-						const models = ctx.models;
-						if (!models) return { block: true, reason: taskModelRefusal([{ index: 0, agent: "task", patterns: [], reason: "MODEL_QUERY_UNAVAILABLE" }]) };
-						const inputs = await readSpawnModelInputs(ctx.cwd, patterns => models.resolve(patterns), home);
-						const parent = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-						const reason = taskModelRefusal(resolveTaskModels(event.input, inputs.agents, inputs.settings, parent));
-						if (reason) return { block: true, reason };
-					}
-				} catch (error) {
-					// ompkit-fp72.120.16.45: the swallowed cause hid an unresolvable OMP import; name it.
-					const cause = String((error as Error)?.message ?? error).slice(0, 600).replace(/\s+/g, " ").slice(0, 300);
-					return { block: true, reason: `${taskModelRefusal([{ index: 0, agent: "task", patterns: [], reason: "SPAWN_INPUTS_UNOBSERVABLE" }])}\ncause: ${cause}` };
-				}
 				const reason = await checkTaskBrief(event.input, ctx.cwd, pi.exec);
 				if (reason) return { block: true, reason };
 			}
