@@ -141,10 +141,10 @@ fixture policies measure transport/adapter overhead, not production fresh-gate d
 The complete declared suite is every bun test under `tests/cli` and `tests/fleet-guard`, every
 shell suite `tests/cli/*.test.sh`, and every python suite under `tests/cli` and `tests/scripts`
 (`*_test.py`, `*.test.py`), run against the exact-commit archive. Rows of
-`scripts/gate-ci-only.tsv` name tests that cannot be hermetic on a dev Mac; they are excluded by
-declaration, printed, and recorded in the entry, and CI stays their judge of record. Nothing else
-is excluded: no focus selection, no wall-budget deferral, no SKIP, no CI deferral, no unrelated
-success.
+`scripts/gate-ci-only.tsv` defer those files only in base-role local checks. The one main-role
+qualification runs every declared file, including the manifest rows, from a Git-initialized
+exact-commit export. Its main-role PASS is the release qualification; no second CI-only
+judgment is required. No focus selection, wall-budget deferral or unrelated success substitutes for it.
 
 Each reusable verdict is keyed by a four-part identity:
 

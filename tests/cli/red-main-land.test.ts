@@ -68,7 +68,7 @@ async function fixture(): Promise<Fixture> {
 
 // Plant complete structured records using the same schema/validation functions
 // the producer uses. Every case owns its store; no machine verdict is read/written.
-async function record(f: Fixture, mode: string, options: { ci?: boolean; culprit?: boolean; flakes?: string[]; extraFailure?: string; stamp?: number; commit?: string } = {}) {
+async function record(f: Fixture, mode: string, options: { culprit?: boolean; flakes?: string[]; extraFailure?: string; stamp?: number; commit?: string } = {}) {
 	const program = `
 import hashlib, importlib.util, json, pathlib, sys
 root, repo, directory, mode, options = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4], json.loads(sys.argv[5])
@@ -76,31 +76,22 @@ spec = importlib.util.spec_from_file_location("store", root / "scripts/full-suit
 s = importlib.util.module_from_spec(spec); spec.loader.exec_module(s)
 sha = options.get("commit") or s.checked_run(["git", "-C", str(repo), "rev-parse", "refs/remotes/origin/main"]).decode().strip()
 tree = s.checked_run(["git", "-C", str(repo), "rev-parse", sha + "^{tree}"]).decode().strip()
-# FIXEDENV1: a ci-only record binds the environment its runtime id hashes.
 environment = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 checks, runtime, stamp = "a" * 64, "Darwin/arm64/fixture/env-" + s.load_metrics(root).environment_digest(environment), options.get("stamp", 1)
-if options.get("ci"):
-    directory = directory / "ci-only"; directory.mkdir(exist_ok=True)
-    files = [{"path": p, "timeout_s": limit, "rc": int(mode == "FAIL" and i == 0), "timed_out": False, "duration_ms": 1} for i, (p, limit) in enumerate(s.CI_ONLY_FILES)]
-    log = ("\\n".join(s.ci_only_header(row) for row in files) + "\\n").encode()
-    path = directory / (s.ci_only_key(tree, checks, runtime) + ".json")
-    entry = {"version": 1, "kind": "ci-only", "tree": tree, "commit": sha, "checks": checks, "runtime": runtime, "spec": s.ci_only_spec(), "verdict": mode, "files": files, "environment": environment, "log_sha256": hashlib.sha256(log).hexdigest(), "finished_ms": stamp}
-else:
-    metrics = s.load_metrics(root)
-    names = ["tests/cli/broken.test.sh"] + ([options["extraFailure"]] if options.get("extraFailure") else [])
-    judge = {"sha256": metrics.JUDGE_SHA256, "python": sys.version.split()[0]}
-    files = [{"path": name, "runner": "sh", "elapsed_ms": 1, "started_ms": 1, "finished_ms": 2, "wait_ms": 0, "setup_ms": 0, "run_ms": 1, "phase_basis": "stage-queue+exec-marker", "cpu_user_ms": 0, "cpu_system_ms": 0, "rc": int(mode == "FAIL"), "command": ["sh", name], "complete": True, "judge": judge, "output_sha256": hashlib.sha256(b"fixture").hexdigest(), "closure": {"kind": "whole-source-tree", "tree": tree}} for name in names]
-    log = b"planted full-suite release verdict\\n"
-    path = directory / (s.record_key(tree, "main", checks, runtime) + ".json")
-    policy = {"max_count_drop": {"bun": 0, "shell": 0, "python": 0}, "wall_floor_ms": 1, "wall_floor_percent": 25}
-    entry = {"version": 3, "tree": tree, "judge_role": "main", "checks": checks, "runtime": runtime, "judge": {"role": "main", "checks_sha256": checks, "runtime": runtime}, "verdict": mode, "exit_code": int(mode == "FAIL"), "timing": {"started_ms": stamp, "wall_ms": 1}, "minimum_run": {"version": 1, "status": "PASS", "policy": policy, "baseline": None, "counts": s.measured_counts(files), "wall_ms": s.measured_wall(files, 1), "shortfalls": []}, "evidence": {"complete": True, "files": files, "declared_files": names, "bun_files": 0, "bun_ran": 0, "bun_fail": 0, "shell_suites": len(files), "shell_fail": len(files) if mode == "FAIL" else 0, "py_suites": 0, "py_fail": 0, "log_sha256": hashlib.sha256(log).hexdigest()}}
-    if options.get("culprit"):
-        entry["culprit"] = {"sha": sha, "author": "red@example.invalid", "bead": "ompkit-x", "failing_files": names, "method": "bisect", "reason": ""}
-    if "flakes" in options:
-        entry["culprit"] = {"sha": None, "author": None, "bead": None, "failing_files": options["flakes"], "method": "flake-rerun", "reason": "flake: passes on rerun at head"}
+metrics = s.load_metrics(root)
+names = ["tests/cli/broken.test.sh"] + ([options["extraFailure"]] if options.get("extraFailure") else [])
+judge = {"sha256": metrics.JUDGE_SHA256, "python": sys.version.split()[0]}
+files = [{"path": name, "runner": "sh", "elapsed_ms": 1, "started_ms": 1, "finished_ms": 2, "wait_ms": 0, "setup_ms": 0, "run_ms": 1, "phase_basis": "stage-queue+exec-marker", "cpu_user_ms": 0, "cpu_system_ms": 0, "rc": int(mode == "FAIL"), "command": ["sh", name], "complete": True, "judge": judge, "output_sha256": hashlib.sha256(b"fixture").hexdigest(), "closure": {"kind": "whole-source-tree", "tree": tree}} for name in names]
+log = b"planted full-suite release verdict\\n"
+path = directory / (s.record_key(tree, "main", checks, runtime) + ".json")
+entry = {"version": 3, "tree": tree, "judge_role": "main", "checks": checks, "runtime": runtime, "judge": {"role": "main", "checks_sha256": checks, "runtime": runtime}, "verdict": mode, "exit_code": int(mode == "FAIL"), "timing": {"started_ms": stamp, "wall_ms": 1}, "evidence": {"complete": True, "files": files, "declared_files": names, "bun_files": 0, "bun_ran": 0, "bun_fail": 0, "shell_suites": len(files), "shell_fail": len(files) if mode == "FAIL" else 0, "py_suites": 0, "py_fail": 0, "log_sha256": hashlib.sha256(log).hexdigest()}}
+if options.get("culprit"):
+    entry["culprit"] = {"sha": sha, "author": "red@example.invalid", "bead": "ompkit-x", "failing_files": names, "method": "bisect", "reason": ""}
+if "flakes" in options:
+    entry["culprit"] = {"sha": None, "author": None, "bead": None, "failing_files": options["flakes"], "method": "flake-rerun", "reason": "flake: passes on rerun at head"}
 path.with_suffix(".log").write_bytes(log); path.write_text(json.dumps(entry))
 if mode in ("PASS", "FAIL"):
-    valid, reason = s.validate_ci_only_record(path, tree=tree, checks=checks, runtime=runtime) if options.get("ci") else s.validate_record(path, judge_root=root, historical=True)
+    valid, reason = s.validate_record(path, judge_root=root, historical=True)
     assert valid is not None, reason
 print(path)
 `;
@@ -137,9 +128,9 @@ for (const repair of ["trailer", "failing-file"]) test(`REDMAINLAND1 admits ${re
 	expect(output(result)).toContain("RED FIX admitted");
 }, fixtureDeadlineS(60) * 1000);
 
-test("REDMAINLAND1 green full-suite and CI-only records admit without UNKNOWN", async () => {
+test("REDMAINLAND1 green full-suite record admits without UNKNOWN", async () => {
 	const f = await fixture();
-	await record(f, "PASS"); await record(f, "PASS", { ci: true });
+	await record(f, "PASS");
 	const result = await commit(f);
 	expect(result.rc, output(result)).toBe(0);
 	expect(output(result)).not.toContain("UNKNOWN");
@@ -164,13 +155,6 @@ test("REDMAINLAND1 existing flake-rerun clearance admits without weakening uncle
 	refused(await commit(f, "[test] still unrelated"), f.sha, "tests/cli/still-red.test.sh");
 }, fixtureDeadlineS(60) * 1000);
 
-test("REDMAINLAND1 CI-only FAIL refuses even when full suite passed or was cleared as flakes", async () => {
-	const f = await fixture();
-	await record(f, "FAIL", { flakes: ["tests/cli/broken.test.sh"] });
-	await record(f, "FAIL", { ci: true });
-	refused(await commit(f), f.sha, "tests/cli/package-release.test.ts");
-}, fixtureDeadlineS(60) * 1000);
-
 test("REDMAINLAND1 unstaged failing-file edits and malformed Fixes-Red do not bypass refusal", async () => {
 	const f = await fixture();
 	await record(f, "FAIL");
@@ -188,7 +172,7 @@ test("REDMAINLAND1 latest stored PASS supersedes an older FAIL for the same tree
 	const oldName = await checked(["python3", "-B", "-c", script, root, JSON.stringify(old)], f.repo, f.overrides);
 	writeFileSync(join(f.store, oldName), JSON.stringify(old));
 	copyFileSync(path.slice(0, -5) + ".log", join(f.store, oldName.slice(0, -5) + ".log"));
-	await record(f, "PASS", { stamp: 2 }); await record(f, "PASS", { ci: true });
+	await record(f, "PASS", { stamp: 2 });
 	const result = await commit(f);
 	expect(result.rc, output(result)).toBe(0);
 	expect(output(result)).not.toContain("UNKNOWN");
@@ -211,12 +195,6 @@ test("REDMAINLAND1 first red lookup crosses unjudged heads but stops at a record
 	refused(await commit(f), first);
 }, fixtureDeadlineS(60) * 1000);
 
-test("REDMAINLAND1 cleared flaky files cannot bypass an independent CI-only failure", async () => {
-	const f = await fixture();
-	await record(f, "FAIL", { flakes: ["tests/cli/broken.test.sh"] });
-	await record(f, "FAIL", { ci: true });
-	refused(await commit(f, "[test] edits only cleared flake", "tests/cli/broken.test.sh"), f.sha, "tests/cli/package-release.test.ts");
-}, fixtureDeadlineS(60) * 1000);
 
 test("REDMAINLAND1 another branch is not held by main's release verdict", async () => {
 	const f = await fixture();

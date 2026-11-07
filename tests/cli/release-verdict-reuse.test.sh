@@ -8,8 +8,6 @@ KITREPO=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
 # shellcheck source=scripts/kitlib-shimpath.sh
 . "$KITREPO/scripts/kitlib-shimpath.sh"
 kitlib_drop_agent_bin release-verdict-reuse-test
-# shellcheck source=tests/cli/ci-only-verdict-fixtures.sh
-. "$KITREPO/tests/cli/ci-only-verdict-fixtures.sh"
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$KITREPO/scripts/kitlib-tmp.sh"
 kitlib_tmp TMP release-verdict-reuse-test || exit 1
@@ -17,8 +15,7 @@ pass=0
 fail=0
 ok() { if [ "$1" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL %s\n' "$2"; fi; }
 
-# Runner intervals are output contracts, not exact-duration goldens. Judge intervals
-# cover dispatch through parent-observed completion; CI may finish before main joins it.
+# Runner intervals are output contracts, not exact-duration goldens.
 timings() {
 	python3 - "$@" <<'PY'
 import sys
@@ -55,9 +52,6 @@ for path in scripts/release-verdict.sh scripts/release-local.sh scripts/release-
 	cp "$KITREPO/$path" "$seed/$path" || exit 1
 done
 cp "$KITREPO/scripts/gate-ci-only.tsv" "$seed/scripts/gate-ci-only.tsv"
-for file in package-release kit-update kit-update-nplus-two kit-update-compiled kit-update-relink package-release-live; do
-	printf '// CI-only fixture, executed by cio_stub_bin\\n' >"$seed/tests/cli/$file.test.ts"
-done
 cat >"$seed/scripts/fresh-gate.sh" <<'EOF'
 #!/bin/sh
 case "${1:-}" in --test-workers) printf "1\n" ;; *) exit 0 ;; esac
@@ -115,10 +109,6 @@ cat >"$TMP/fake-bin/gh" <<'EOF'
 case "${1:-}" in auth) exit 0 ;; api) printf '[[{"tag_name":"v0.2.82","draft":false,"prerelease":false}]]\n' ;; *) exit 2 ;; esac
 EOF
 chmod +x "$TMP/fake-bin/uname" "$TMP/fake-bin/timeout" "$TMP/fake-bin/gh"
-cio_stub_bin "$TMP/fake-bin" || exit 1
-# FIXEDENV1: the stub writes its fixed log beside its bin dir (tests/cli/ci-only-verdict-fixtures.sh).
-CIO_LOG="$TMP/bun.log"
-export CIO_LOG
 
 if env PATH="$TMP/fake-bin:$PATH" HOME="$TMP/home" TMPDIR="$TMP" \
 	FULL_SUITE_TIMEOUT_SECS=120 FULL_SUITE_SHELL_JOBS=1 FULL_SUITE_VERDICT_CACHE_DIR="$store" \
@@ -132,8 +122,7 @@ if [ "$watchdog_rc" = 0 ] && grep -Fq "FULL-SUITE: VERDICT PASS tree=$source_tre
 else
 	ok 1 "watchdog-second-checkout: rc=$watchdog_rc output=$(cat "$TMP/watchdog.out")"
 fi
-timings "$TMP/watchdog.out" verdict.archive-export verdict.store-lookup verdict.suite-lease-wait \
-	verdict.ci-only-archive-export verdict.main-judge verdict.ci-only-judge
+timings "$TMP/watchdog.out" verdict.archive-export verdict.store-lookup verdict.suite-lease-wait verdict.main-judge
 ok $? "cold-run-emits-each-runner-interval"
 
 # RELFAST1: a fully qualified exact tree must not queue behind an unrelated suite.
@@ -155,54 +144,10 @@ ok $? "qualified-tree-bypasses-suite-lease: rc=$warm_rc output=$(cat "$TMP/warm.
 timings "$TMP/warm.out" verdict.archive-export verdict.store-lookup
 ok $? "warm-run-emits-export-and-store-intervals"
 ! grep -Fq '== substep verdict.suite-lease-wait ' "$TMP/warm.out" \
-	&& ! grep -Fq '== substep verdict.main-judge ' "$TMP/warm.out" \
-	&& ! grep -Fq '== substep verdict.ci-only-judge ' "$TMP/warm.out"
+	&& ! grep -Fq '== substep verdict.main-judge ' "$TMP/warm.out"
 ok $? "warm-run-does-not-invent-skipped-intervals"
 
-# Main PASS alone is reusable: run the missing CI files without invoking main again.
-main_only="$TMP/main-only"
-mkdir -p "$main_only"
-cp "$store/"*.json "$store/"*.log "$main_only/"
-if env PATH="$TMP/fake-bin:$PATH" HOME="$TMP/home" TMPDIR="$TMP" \
-	FULL_SUITE_TIMEOUT_SECS=120 FULL_SUITE_SHELL_JOBS=1 FULL_SUITE_VERDICT_CACHE_DIR="$main_only" \
-	sh "$second/scripts/release-verdict.sh" --commit "$source_sha" --no-fetch >"$TMP/missing-ci-lease.out" 2>&1; then
-	missing_ci_rc=0
-else
-	missing_ci_rc=$?
-fi
-[ "$missing_ci_rc" = 75 ] && grep -Fq 'fixture lease refused' "$TMP/missing-ci-lease.out"
-ok $? "missing-ci-still-requires-suite-lease: rc=$missing_ci_rc"
-timings "$TMP/missing-ci-lease.out" verdict.suite-lease-wait
-ok $? "refused-lease-emits-completed-wait-interval"
 cp "$TMP/original-lease.sh" "$second/scripts/suite-lease.sh"
-: >"$CIO_LOG"
-if env PATH="$TMP/fake-bin:$PATH" HOME="$TMP/home" TMPDIR="$TMP" \
-	FULL_SUITE_TIMEOUT_SECS=120 FULL_SUITE_SHELL_JOBS=1 FULL_SUITE_VERDICT_CACHE_DIR="$main_only" \
-	sh "$second/scripts/release-verdict.sh" --commit "$source_sha" --no-fetch >"$TMP/main-only.out" 2>&1; then
-	main_only_rc=0
-else
-	main_only_rc=$?
-fi
-[ "$main_only_rc" = 0 ] && [ "$(wc -l <"$CIO_LOG" | tr -d ' ')" = 6 ] \
-	&& grep -Fq 'reusing exact-tree main PASS' "$TMP/main-only.out" \
-	&& ! grep -Fq 'with its own runner' "$TMP/main-only.out"
-ok $? "main-pass-runs-only-missing-ci: rc=$main_only_rc output=$(cat "$TMP/main-only.out")"
-# CI-only PASS alone must not suppress main qualification or repeat the CI ladder.
-ci_only="$TMP/ci-only"
-mkdir -p "$ci_only"
-cp -R "$store/ci-only" "$ci_only/"
-: >"$CIO_LOG"
-if env PATH="$TMP/fake-bin:$PATH" HOME="$TMP/home" TMPDIR="$TMP" \
-	FULL_SUITE_TIMEOUT_SECS=120 FULL_SUITE_SHELL_JOBS=1 FULL_SUITE_VERDICT_CACHE_DIR="$ci_only" \
-	sh "$second/scripts/release-verdict.sh" --commit "$source_sha" --no-fetch >"$TMP/ci-only.out" 2>&1; then
-	ci_only_rc=0
-else
-	ci_only_rc=$?
-fi
-[ "$ci_only_rc" = 0 ] && [ ! -s "$CIO_LOG" ] \
-	&& grep -Fq "FULL-SUITE: VERDICT PASS tree=$source_tree role=main" "$TMP/ci-only.out"
-ok $? "ci-pass-runs-only-missing-main: rc=$ci_only_rc output=$(cat "$TMP/ci-only.out")"
-
 
 # Planted invalidations cannot turn stored evidence into a PASS for different inputs.
 for plant in checks fail runtime tree; do
@@ -236,7 +181,7 @@ PY
 	ok $? "$plant-record-runs-suite: rc=$plant_rc output=$(cat "$TMP/plant-$plant.out")"
 done
 
-# A real different tree cannot inherit either PASS. A genuine cached FAIL must
+# A real different tree cannot inherit PASS. A genuine cached FAIL must
 # retain the runner's refusal rather than being promoted to the warm PASS path.
 printf '#!/bin/sh\nexit 1\n' >"$second/tests/cli/shared.test.sh"
 git -C "$second" add -- tests/cli/shared.test.sh

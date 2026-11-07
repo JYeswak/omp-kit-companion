@@ -23,8 +23,7 @@ async function fixture() {
 	symlinkSync(join(ROOT, "src"), join(repo, "src"));
 	symlinkSync(join(ROOT, "scripts/release-verdict-mail.ts"), join(repo, "scripts/release-verdict-mail.ts"));
 	writeFileSync(join(repo, "scripts/full-suite-verdict.sh"), '#!/bin/sh\nprintf "fixture verdict recorded\\n"\nexit "${RV_RC:-0}"\n');
-	writeFileSync(join(repo, "scripts/full-suite-verdict-store.py"), '# "run-ci-only"\nimport os\nprint("fixture ci-only verdict recorded")\nraise SystemExit(int(os.environ.get("RV_CI_RC", "0")))\n');
-	for (const args of [["init", "-q", "--template=", "-b", "main"], ["add", "--", "scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py"], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]]) {
+	for (const args of [["init", "-q", "--template=", "-b", "main"], ["add", "--", "scripts/full-suite-verdict.sh"], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]]) {
 		const result = await run(["git", ...args], { cwd: repo, deadline_s: fixtureDeadlineS(15) });
 		expect(result.rc).toBe(0);
 	}
@@ -50,16 +49,16 @@ async function fixture() {
 		handlers.get("agent_end")?.({ messages: [] } as never, ctx);
 		return () => handlers.get("session_stop")?.(undefined as never, ctx);
 	};
-	const judge = (producer = 0, ciOnly = 0) => run(["sh", "scripts/release-verdict.sh", "--commit", sha, "--no-fetch"], {
+	const judge = (producer = 0) => run(["sh", "scripts/release-verdict.sh", "--commit", sha, "--no-fetch"], {
 		cwd: repo, deadline_s: fixtureDeadlineS(45),
 		env: { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined && entry[0] !== "BEADS_DIR" && entry[0] !== "BEADS_DB")),
 			TMPDIR: base, AGENT_NAME: "FixtureWriter", AGENTMAIL_HTTP_BEARER_TOKEN: "fixture-only", AGENT_MAIL_SENDER_TOKEN: "fixture-only",
-			AGENTMAIL_HTTP_URL: `http://127.0.0.1:${server.port}/api`, RV_RC: String(producer), RV_CI_RC: String(ciOnly) },
+			AGENTMAIL_HTTP_URL: `http://127.0.0.1:${server.port}/api`, RV_RC: String(producer) },
 	});
 	return { sha, calls, subscribe, judge, fail: () => { failMail = true; }, close: () => server.stop(true) };
 }
 
-test("recording both verdicts sends exactly one message per subscribed seat, not another head; repeat settle and rerun do not duplicate", async () => {
+test("recording the verdict sends exactly one message per subscribed seat, not another head; repeat settle and rerun do not duplicate", async () => {
 	const f = await fixture();
 	try {
 		await f.subscribe("FixtureOne", [f.sha, f.sha.slice(0, 10)]);
@@ -72,7 +71,7 @@ test("recording both verdicts sends exactly one message per subscribed seat, not
 		for (const call of f.calls) {
 			expect(call.name).toBe("send_message");
 			expect(call.arguments.subject).toBe(`PROGRESS release verdict ${f.sha} PASS`);
-			expect(call.arguments.body_md).toContain("producer_rc=0 ci_only_rc=0");
+			expect(call.arguments.body_md).toContain("producer_rc=0");
 			expect(call.arguments.ack_required).toBe(false);
 		}
 		expect((await f.judge()).rc).toBe(0);
@@ -92,14 +91,14 @@ test("no subscriber or an ended wait sends nothing", async () => {
 	} finally { f.close(); }
 });
 
-test("ci-only FAIL is mailed after both statuses; failed mail never changes PASS or FAIL", async () => {
+test("main FAIL is mailed; failed mail never changes PASS or FAIL", async () => {
 	const f = await fixture();
 	try {
 		await f.subscribe("FixtureOne", [f.sha]);
-		const failedVerdict = await f.judge(0, 7);
+		const failedVerdict = await f.judge(7);
 		expect(failedVerdict.rc).toBe(7);
 		expect(f.calls[0]?.arguments.subject).toBe(`PROGRESS release verdict ${f.sha} FAIL`);
-		expect(f.calls[0]?.arguments.body_md).toContain("producer_rc=0 ci_only_rc=7");
+		expect(f.calls[0]?.arguments.body_md).toContain("producer_rc=7");
 		f.fail();
 		for (const rc of [0, 3]) {
 			await f.subscribe("FixtureOne", [f.sha]);

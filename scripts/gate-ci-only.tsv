@@ -1,9 +1,9 @@
 path	kind	bead	expires	reason
-tests/cli/kit-update.test.ts	ci-only	ompkit-v66l.27.1	-	updater contract suite; push-time CI-only verdict also runs every split live journey
-tests/cli/kit-update-nplus-two.test.ts	ci-only	ompkit-v66l.27.1	-	push-time CI-only verdict runs the complete live N+2 journey and manifest-bound corpus denominator
-tests/cli/kit-update-compiled.test.ts	ci-only	ompkit-v66l.27.1	-	push-time CI-only verdict runs compiled authenticated update and manifest/profile activation
-tests/cli/kit-update-relink.test.ts	ci-only	ompkit-v66l.27.1	-	push-time CI-only verdict runs the independent compiled live postcheck and duplicate-profile relink refusal
-tests/cli/external-live.test.ts	ci-only	ompkit-v66l.27.1	-	drives a relocated release through real OMP native marker effects; the dev-Mac export reports a fast-tier diff where CI passes
-tests/fleet-guard/reservations.live.test.ts	ci-only	ompkit-oq1h.19	-	owner=SilverCondor; live Agent Mail probe on 127.0.0.1:8765 is excluded from hermetic runs and runs only in the explicit CI live suite
-tests/cli/package-release.test.ts	ci-only	ompkit-v66l.27.8	-	push-time CI-only verdict prepares exact-commit Git history for package and installer contracts
-tests/cli/package-release-live.test.ts	ci-only	ompkit-v66l.27.8	-	push-time CI-only verdict runs the complete installed-package ladder with the source-revision fixture
+tests/cli/kit-update.test.ts	ci-only	ompkit-v66l.27.1	-	main-role qualification runs the updater contract suite and split live journeys; base-role checks defer them
+tests/cli/kit-update-nplus-two.test.ts	ci-only	ompkit-v66l.27.1	-	main-role qualification runs the complete live N+2 journey and manifest-bound corpus denominator
+tests/cli/kit-update-compiled.test.ts	ci-only	ompkit-v66l.27.1	-	main-role qualification runs compiled authenticated update and manifest/profile activation
+tests/cli/kit-update-relink.test.ts	ci-only	ompkit-v66l.27.1	-	main-role qualification runs the independent compiled live postcheck and duplicate-profile relink refusal
+tests/cli/external-live.test.ts	ci-only	ompkit-v66l.27.1	-	main-role qualification drives a relocated release through real OMP native marker effects; base-role checks defer it
+tests/fleet-guard/reservations.live.test.ts	ci-only	ompkit-oq1h.19	-	owner=SilverCondor; main-role qualification and explicit CI live suite run the Agent Mail probe on 127.0.0.1:8765; base-role checks defer it
+tests/cli/package-release.test.ts	ci-only	ompkit-v66l.27.8	-	main-role qualification prepares exact-commit Git history for package and installer contracts
+tests/cli/package-release-live.test.ts	ci-only	ompkit-v66l.27.8	-	main-role qualification runs the complete installed-package ladder with the source-revision fixture

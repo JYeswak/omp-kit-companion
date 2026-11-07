@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""CI-only exclusions cannot lose their execution owner or reuse a two-file PASS."""
+"""Manifest exclusions run in the one main qualification, never a second judgment."""
 from __future__ import annotations
 
-import concurrent.futures
 import importlib.util
 import json
 import os
@@ -10,257 +9,81 @@ import shutil
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
-from kitlib_tmp import owned_tmp  # noqa: E402
-from kitlib_run import run  # noqa: E402
+from kitlib_tmp import owned_tmp
+from kitlib_run import run
 
-spec = importlib.util.spec_from_file_location("ci_only_store", ROOT / "scripts/full-suite-verdict-store.py")
-if spec is None or spec.loader is None:
-    raise ImportError("cannot load full-suite-verdict-store.py")
+spec = importlib.util.spec_from_file_location("folded_store", ROOT / "scripts/full-suite-verdict-store.py")
 store = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(store)
 
-SPLIT_FILES = (
-    "tests/cli/kit-update-nplus-two.test.ts",
-    "tests/cli/kit-update-compiled.test.ts",
-    "tests/cli/kit-update-relink.test.ts",
-    "tests/cli/package-release-live.test.ts",
-)
-LEGACY_FILES = (("tests/cli/package-release.test.ts", 900), ("tests/cli/kit-update.test.ts", 2400))
 
-
-class CiOnlyCoverage(unittest.TestCase):
-    def test_every_excluded_ci_only_file_has_an_execution_owner(self) -> None:
-        local = {path for path, _limit in store.CI_ONLY_FILES}
-        github = store.CI_ONLY_GITHUB_ONLY
-        self.assertEqual(set(github), {
-            "tests/cli/external-live.test.ts", "tests/fleet-guard/reservations.live.test.ts",
-        })
-        self.assertTrue(all(reason.strip() for reason in github.values()))
-        self.assertFalse(local & set(github))
-        self.assertTrue(set(SPLIT_FILES) <= local, f"missing split execution owner: {sorted(set(SPLIT_FILES) - local)}")
-        rows = (ROOT / "scripts/gate-ci-only.tsv").read_text().splitlines()[1:]
-        excluded = {parts[0] for line in rows if (parts := line.split("\t"))[1] == "ci-only"}
-        self.assertEqual(excluded, local | set(github))
-        store.validate_ci_only_coverage(ROOT)
-
-    def test_planted_missing_split_refuses_before_cache_lookup(self) -> None:
-        for missing in SPLIT_FILES:
-            with self.subTest(missing=missing):
-                planted = tuple(row for row in store.CI_ONLY_FILES if row[0] != missing)
-                with patch.object(store, "CI_ONLY_FILES", planted):
-                    with self.assertRaises(ValueError) as caught:
-                        store.ci_only_checks(ROOT, ROOT)
-                self.assertIn("missing execution owner", str(caught.exception))
-                self.assertIn(missing, str(caught.exception))
-
-    def test_selection_changes_spec_checks_and_record_key(self) -> None:
-        with owned_tmp("ci-only-selection") as tmp:
-            suite = Path(tmp)
-            manifest = suite / "scripts/gate-ci-only.tsv"
-            manifest.parent.mkdir()
-            lines = (ROOT / "scripts/gate-ci-only.tsv").read_text().splitlines()
-            manifest.write_text("\n".join(lines) + "\n")
-            for name, _limit in store.CI_ONLY_FILES:
-                target = suite / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes((ROOT / name).read_bytes())
-            current_spec = store.ci_only_spec()
-            current_checks = store.ci_only_checks(ROOT, suite)
-            legacy_paths = {name for name, _limit in LEGACY_FILES} | set(store.CI_ONLY_GITHUB_ONLY)
-            manifest.write_text("\n".join([lines[0], *[
-                line for line in lines[1:] if line.split("\t", 1)[0] in legacy_paths
-            ]]) + "\n")
-            with patch.object(store, "CI_ONLY_FILES", LEGACY_FILES):
-                legacy_spec = store.ci_only_spec()
-                legacy_checks = store.ci_only_checks(ROOT, suite)
-            self.assertNotEqual(current_spec, legacy_spec)
-            self.assertNotEqual(current_checks, legacy_checks)
-            self.assertNotEqual(store.ci_only_key("a" * 40, current_checks, "fixture/runtime"),
-                                store.ci_only_key("a" * 40, legacy_checks, "fixture/runtime"))
-            print(f"CI_ONLY_CHECKS current={current_checks} legacy_selection={legacy_checks}")
-
-    def test_ci_only_children_use_statfs_without_losing_the_physical_floor(self) -> None:
-        with owned_tmp("ci-only-disk") as tmp:
+class FoldedCoverage(unittest.TestCase):
+    def test_main_runs_every_manifest_row_and_base_keeps_its_exclusions(self) -> None:
+        with owned_tmp("folded-qualification") as tmp:
             source = Path(tmp) / "source"
-            suite = Path(tmp) / "export"
-            source.mkdir()
-            (source / "scripts").mkdir()
-            shutil.copy2(ROOT / "scripts/gate-ci-only.tsv", source / "scripts/gate-ci-only.tsv")
-            fixture = (
-                'import { expect, test } from "bun:test";\n'
-                f'import {{ decideDiskPressure }} from {json.dumps(str(ROOT / "src/heavy.ts"))};\n'
-                'test("CIONLYDISK1 child uses statfs despite inherited sbh", () => {\n'
-                '  expect(process.env.OMP_KIT_DISK_OBSERVER).toBe("statfs");\n'
-                '});\n'
-                'test("CIONLYDISK1 statfs still refuses below 10 GiB", () => {\n'
-                '  const floor = 10 * 1024 ** 3;\n'
-                '  expect(decideDiskPressure({ freeBytes: floor - 1, freePct: 14 }, null))\n'
-                '    .toMatchObject({ kind: "pressure", observer: "statfs" });\n'
-                '  expect(decideDiskPressure({ freeBytes: floor, freePct: 14 }, null))\n'
-                '    .toMatchObject({ kind: "ok", observer: "statfs" });\n'
-                '  expect(decideDiskPressure(null, null)).toMatchObject({ kind: "unavailable" });\n'
-                '});\n'
-            )
-            for name, _limit in store.CI_ONLY_FILES:
-                target = source / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(fixture)
-            env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-            env.update({
-                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_CEILING_DIRECTORIES": tmp, "TMPDIR": tmp,
-                "GIT_AUTHOR_NAME": "CIONLYDISK1", "GIT_AUTHOR_EMAIL": "ci-only@example.invalid",
-                "GIT_COMMITTER_NAME": "CIONLYDISK1", "GIT_COMMITTER_EMAIL": "ci-only@example.invalid",
-                "OMP_KIT_DISK_OBSERVER": "sbh",
-            })
-            for args in (["init", "-q"], ["add", "--", "scripts", "tests"],
-                         ["commit", "-qm", "CIONLYDISK1 child environment fixture"]):
-                result = run(["git", *args], cwd=source, env=env, deadline_s=30)
-                self.assertEqual(result.rc, 0, result.stderr.decode())
-                self.assertFalse(result.timed_out)
-            revision = run(["git", "rev-parse", "HEAD"], cwd=source, env=env, deadline_s=30)
-            self.assertEqual(revision.rc, 0, revision.stderr.decode())
-            commit = revision.stdout.decode().strip()
-            shutil.copytree(source, suite, ignore=shutil.ignore_patterns(".git"))
-            cache = Path(tmp) / "verdicts"
-            judged = run([
-                sys.executable, "-B", str(ROOT / "scripts/full-suite-verdict-store.py"), "run-ci-only",
-                "--repo", str(source), "--commit", commit, "--judge-root", str(ROOT),
-                "--suite-root", str(suite), "--cache-dir", str(cache),
-            ], cwd=suite, env=env, deadline_s=120)
-            evidence = (judged.stdout + judged.stderr).decode()
-            self.assertFalse(judged.timed_out, evidence)
-            self.assertEqual(judged.rc, 0, evidence)
-            records = list((cache / "ci-only").glob("*.json"))
-            self.assertEqual(len(records), 1)
-            record = store.json_file(records[0])
-            self.assertEqual(record["verdict"], "PASS")
-            self.assertEqual(record["spec"]["env"]["OMP_KIT_DISK_OBSERVER"], "statfs")
-            self.assertTrue(all(row["rc"] == 0 for row in record["files"]))
-            self.assertFalse(records[0].with_suffix(".evidence").exists(), "a PASS keeps no evidence directory")
-            self.assertEqual(sorted(path.name for path in (cache / "ci-only").iterdir()),
-                             sorted([records[0].name, records[0].with_suffix(".log").name]))
-
-    def test_failing_live_transcript_is_kept_beside_the_record(self) -> None:
-        """LIVEEVAL1: e2e-live copies a failing scenario's transcript into OMP_KIT_E2E_EVIDENCE_DIR, kept as <record>.evidence."""
-        fixture = (
-            'import { expect, test } from "bun:test";\n'
-            'import { mkdirSync, writeFileSync } from "node:fs";\n'
-            'import { join } from "node:path";\n'
-            'test("LIVEEVAL1 the judge names an existing evidence directory", () => {\n'
-            '  const evidence = process.env.OMP_KIT_E2E_EVIDENCE_DIR!;\n'
-            '  mkdirSync(join(evidence, `e2e-live.${process.pid}`));\n'
-            '  if (import.meta.path.endsWith("package-release-live.test.ts")) {\n'
-            '    writeFileSync(join(evidence, `e2e-live.${process.pid}`, "log-planted.jsonl"), "LIVEEVAL1 planted transcript\\n");\n'
-            '    expect("planted live scenario").toBe("passing");\n'
-            '  }\n'
-            '});\n'
-        )
-        with owned_tmp("ci-only-evidence") as tmp:
-            source = Path(tmp) / "source"
-            suite = Path(tmp) / "export"
             (source / "scripts").mkdir(parents=True)
+            shutil.copy2(ROOT / "scripts/kitlib-tmp.sh", source / "scripts/kitlib-tmp.sh")
             shutil.copy2(ROOT / "scripts/gate-ci-only.tsv", source / "scripts/gate-ci-only.tsv")
-            for name, _limit in store.CI_ONLY_FILES:
-                target = source / name
+            excluded = store.excluded_paths(source)
+            self.assertTrue(excluded)
+            for path in excluded | {"tests/cli/local.test.ts"}:
+                target = source / path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(fixture)
-            env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-            env.update({
-                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_CEILING_DIRECTORIES": tmp, "TMPDIR": tmp,
-                "GIT_AUTHOR_NAME": "LIVEEVAL1", "GIT_AUTHOR_EMAIL": "ci-only@example.invalid",
-                "GIT_COMMITTER_NAME": "LIVEEVAL1", "GIT_COMMITTER_EMAIL": "ci-only@example.invalid",
-            })
-            for args in (["init", "-q"], ["add", "--", "scripts", "tests"], ["commit", "-qm", "LIVEEVAL1 evidence fixture"]):
-                result = run(["git", *args], cwd=source, env=env, deadline_s=30)
-                self.assertEqual(result.rc, 0, result.stderr.decode())
-            revision = run(["git", "rev-parse", "HEAD"], cwd=source, env=env, deadline_s=30)
-            self.assertEqual(revision.rc, 0, revision.stderr.decode())
-            shutil.copytree(source, suite, ignore=shutil.ignore_patterns(".git"))
-            cache = Path(tmp) / "verdicts"
-            judged = run([
-                sys.executable, "-B", str(ROOT / "scripts/full-suite-verdict-store.py"), "run-ci-only",
-                "--repo", str(source), "--commit", revision.stdout.decode().strip(), "--judge-root", str(ROOT),
-                "--suite-root", str(suite), "--cache-dir", str(cache),
-            ], cwd=suite, env=env, deadline_s=120)
-            evidence = (judged.stdout + judged.stderr).decode()
-            self.assertFalse(judged.timed_out, evidence)
-            self.assertEqual(judged.rc, 1, evidence)
-            records = list((cache / "ci-only").glob("*.json"))
-            self.assertEqual(len(records), 1)
-            self.assertEqual(store.json_file(records[0])["verdict"], "FAIL")
-            kept = records[0].with_suffix(".evidence")
-            copies = sorted(kept.glob("e2e-live.*/log-planted.jsonl"))
-            self.assertEqual(len(copies), 1, evidence)
-            self.assertEqual(copies[0].read_text(), "LIVEEVAL1 planted transcript\n")
-            self.assertIn(f"CI-ONLY: failing live scenario transcripts kept beside the record: {kept.resolve()}", evidence)
-            self.assertEqual([path.name for path in (cache / "ci-only").iterdir() if path.name.endswith(".tmp")], [])
+                target.write_text('import { expect, test } from "bun:test";\n'
+                                  'test("declared suite executes", () => expect(2 + 2).toBe(4));\n')
+            env = store.load_metrics(ROOT).suite_environment()
+            env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                        "GIT_CEILING_DIRECTORIES": tmp, "TMPDIR": tmp,
+                        "GIT_AUTHOR_NAME": "ReleaseDiet", "GIT_AUTHOR_EMAIL": "diet@example.invalid",
+                        "GIT_COMMITTER_NAME": "ReleaseDiet", "GIT_COMMITTER_EMAIL": "diet@example.invalid"})
 
-    def test_ladder_running_files_run_one_at_a_time(self) -> None:
-        """KITUPDATELOAD1: each CI-only file holds an exclusive marker for 1.5 s; a second concurrent file fails."""
-        fixture = (
-            'import { expect, test } from "bun:test";\n'
-            'import { mkdirSync, rmdirSync } from "node:fs";\n'
-            'test("KITUPDATELOAD1 no other CI-only file is running", async () => {\n'
-            '  const marker = MARKER_PATH;\n'
-            '  expect(() => mkdirSync(marker)).not.toThrow();\n'
-            '  await Bun.sleep(1500);\n'
-            '  rmdirSync(marker);\n'
-            '});\n'
-        )
-        with owned_tmp("ci-only-serial") as tmp:
-            source = Path(tmp) / "source"
-            suite = Path(tmp) / "export"
-            (source / "scripts").mkdir(parents=True)
-            shutil.copy2(ROOT / "scripts/gate-ci-only.tsv", source / "scripts/gate-ci-only.tsv")
-            for name, _limit in store.CI_ONLY_FILES:
-                target = source / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(fixture.replace("MARKER_PATH", json.dumps(str(Path(tmp) / "running"))))  # FIXEDENV1: a literal path; ci-only children get the constructed env
-            env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-            env.update({
-                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_CEILING_DIRECTORIES": tmp, "TMPDIR": tmp,
-                "GIT_AUTHOR_NAME": "KITUPDATELOAD1", "GIT_AUTHOR_EMAIL": "ci-only@example.invalid",
-                "GIT_COMMITTER_NAME": "KITUPDATELOAD1", "GIT_COMMITTER_EMAIL": "ci-only@example.invalid",
-                "KITUPDATELOAD1_MARKER": str(Path(tmp) / "running"),
-            })
-            for args in (["init", "-q"], ["add", "--", "scripts", "tests"],
-                         ["commit", "-qm", "KITUPDATELOAD1 serial fixture"]):
-                result = run(["git", *args], cwd=source, env=env, deadline_s=30)
+            def git(*args: str) -> str:
+                result = run(["git", "-C", str(source), *args], env=env, deadline_s=30)
                 self.assertEqual(result.rc, 0, result.stderr.decode())
-            revision = run(["git", "rev-parse", "HEAD"], cwd=source, env=env, deadline_s=30)
-            self.assertEqual(revision.rc, 0, revision.stderr.decode())
-            shutil.copytree(source, suite, ignore=shutil.ignore_patterns(".git"))
-            # Planted fire: the same files started side by side (the old schedule) collide on the marker.
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(store.CI_ONLY_FILES)) as pool:
-                parallel = list(pool.map(lambda row: run(["bun", *store.CI_ONLY_BUN_ARGS, row[0]], cwd=suite, env=env,
-                                                         deadline_s=120), store.CI_ONLY_FILES))
-            self.assertTrue(any(result.rc != 0 for result in parallel), "side-by-side files never overlapped")
-            marker = Path(tmp) / "running"
-            if marker.exists():
-                marker.rmdir()
-            cache = Path(tmp) / "verdicts"
-            judged = run([
-                sys.executable, "-B", str(ROOT / "scripts/full-suite-verdict-store.py"), "run-ci-only",
-                "--repo", str(source), "--commit", revision.stdout.decode().strip(), "--judge-root", str(ROOT),
-                "--suite-root", str(suite), "--cache-dir", str(cache),
-            ], cwd=suite, env=env, deadline_s=120)
-            evidence = (judged.stdout + judged.stderr).decode()
-            self.assertFalse(judged.timed_out, evidence)
-            self.assertEqual(judged.rc, 0, evidence)
-            records = list((cache / "ci-only").glob("*.json"))
-            self.assertEqual(len(records), 1)
-            record = store.json_file(records[0])
-            self.assertEqual(record["verdict"], "PASS", evidence)
-            self.assertEqual(record["spec"]["schedule"], "serial")
-            self.assertEqual([row["path"] for row in record["files"]], [name for name, _limit in store.CI_ONLY_FILES])
+                return result.stdout.decode().strip()
+
+            git("init", "-q", "-b", "main")
+            git("add", "scripts", "tests")
+            git("commit", "-qm", "folded qualification fixture")
+            self.assertEqual(store.declared_suite_files(source, "main"), excluded | {"tests/cli/local.test.ts"})
+            self.assertEqual(store.declared_suite_files(source, "base"), {"tests/cli/local.test.ts"})
+            self.assertEqual(store.declared_suite_files_from_git(source, "HEAD", "main"), excluded | {"tests/cli/local.test.ts"})
+            self.assertEqual(store.declared_suite_files_from_git(source, "HEAD", "base"), {"tests/cli/local.test.ts"})
+
+            def judge(role: str, label: str, expected_rc: int) -> dict:
+                cache = Path(tmp) / label
+                result = run(["sh", str(ROOT / "scripts/full-suite-verdict.sh"), "--repo", str(source),
+                              "--commit", "HEAD", "--judge-role", role, "--cache-dir", str(cache)],
+                             cwd=source, env=env, deadline_s=120)
+                output = (result.stdout + result.stderr).decode()
+                self.assertFalse(result.timed_out, output)
+                self.assertEqual(result.rc, expected_rc, output)
+                records = list(cache.glob("*.json"))
+                self.assertEqual(len(records), 1, output)
+                self.assertFalse((cache / "ci-only").exists())
+                record = json.loads(records[0].read_text())
+                valid, reason = store.validate_record(records[0], judge_root=ROOT, repo=source, commit="HEAD")
+                self.assertIsNotNone(valid, reason)
+                return record
+
+            main = judge("main", "main-pass", 0)
+            self.assertEqual(set(main["evidence"]["declared_files"]), excluded | {"tests/cli/local.test.ts"})
+            self.assertEqual({row["path"] for row in main["evidence"]["files"]}, excluded | {"tests/cli/local.test.ts"})
+            base = judge("base", "base-pass", 0)
+            self.assertEqual(base["evidence"]["declared_files"], ["tests/cli/local.test.ts"])
+            planted = sorted(excluded)[0]
+            (source / planted).write_text('import { expect, test } from "bun:test";\n'
+                                          'test("planted excluded failure", () => expect(2 + 2).toBe(5));\n')
+            git("add", "tests")
+            git("commit", "-qm", "plant failure in formerly deferred suite")
+            failed = judge("main", "main-fail", 1)
+            self.assertEqual(failed["verdict"], "FAIL")
+            self.assertTrue(any(row["path"] == planted and row["rc"] != 0 for row in failed["evidence"]["files"]))
+            self.assertEqual(judge("base", "base-after-failure", 0)["verdict"], "PASS")
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main()

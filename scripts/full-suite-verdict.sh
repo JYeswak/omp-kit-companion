@@ -13,9 +13,8 @@
 # tests/cli and tests/fleet-guard, every shell suite tests/cli/*.test.sh, and every python suite
 # tests/cli + tests/scripts (*_test.py, *.test.py). Focused selection, wall-budget deferral, SKIP
 # and CI deferral never substitute: only a finished run with every enumerated suite green is PASS.
-# Rows of scripts/gate-ci-only.tsv (read beside this script, like every gate script) name tests
-# that cannot be hermetic on a dev Mac; they are excluded by declaration, printed, and recorded in
-# the entry. A changed manifest changes the check identity below, so its verdicts never reuse.
+# Rows of scripts/gate-ci-only.tsv stay excluded from base-role local checks.
+# Main-role qualification runs every declared file, including those rows.
 #
 # The verdict store is shared by clones of the same repository and configured outside every
 # checkout. A record is keyed by exact candidate tree, judge role, complete judging-code identity,
@@ -307,6 +306,11 @@ if [ ! -d "$ARCHIVE_DIR/tests" ]; then
 	fail "candidate archive has no tests/ tree"
 	exit 1
 fi
+if [ "$JUDGE_ROLE" = main ]; then
+	# Packaging journeys archive the exact source commit from the qualification export.
+	git -C "$ARCHIVE_DIR" -c init.defaultBranch=main init -q
+	git -C "$ARCHIVE_DIR" fetch -q --depth 1 "$ROOT" "$COMMIT"
+fi
 
 # Enumerate the complete declared suite from the archive. No focus selection, no wall-budget
 # planner: everything runnable runs.
@@ -328,11 +332,10 @@ for pydir in tests/cli tests/scripts; do
 		py_suites="$py_suites $found"
 	fi
 done
-# Declared CI-only rows (hermeticity limits, never focus or budget deferral) are excluded by the
-# manifest, printed, and recorded. Every other enumerated file runs.
+# Only the base role defers manifest rows; main qualifies the whole declared suite.
 excluded=""
 kept_bun=""; kept_shell=""; kept_py=""
-if [ -f "$SCRIPT_DIR/gate-ci-only.tsv" ]; then
+if [ "$JUDGE_ROLE" != main ] && [ -f "$SCRIPT_DIR/gate-ci-only.tsv" ]; then
 	manifest="$SCRIPT_DIR/gate-ci-only.tsv"
 	for candidate in $bun_files $shell_suites $py_suites; do
 		[ -n "$candidate" ] || continue

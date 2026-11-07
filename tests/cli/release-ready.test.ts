@@ -27,7 +27,7 @@ function file(path: string, body: string) {
 	mkdirSync(dirname(join(repo, path)), { recursive: true });
 	writeFileSync(join(repo, path), body);
 }
-// Real, deliberately tiny repository: the actual suite/store produce both PASS records.
+// Real, deliberately tiny repository: the actual suite/store produce the main PASS.
 // GitHub release-list transport alone is a fixture; source, runtime and verdict checks are real.
 let source = "";
 function setup() {
@@ -61,7 +61,6 @@ function setup() {
 	source = git("rev-parse", "HEAD");
 	git("update-ref", "refs/remotes/origin/main", source);
 	ok(["sh", join(repo, "scripts/full-suite-verdict.sh"), "--repo", repo, "--commit", source, "--judge-role", "main"]);
-	ok(["sh", "-c", '. "$1/scripts/fixed-env.sh"; cd "$1/scripts" && exec python3 -B -m full-suite-verdict-store run-ci-only --repo "$1" --commit "$2" --judge-root "$1" --suite-root "$1"', "fixture", repo, source]);
 }
 function readiness(extra: Record<string, string> = {}) {
 	const result = run(["bun", join(ROOT, "src/release-ready.ts"), "--repo", repo, "--json"], extra);

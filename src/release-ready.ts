@@ -67,9 +67,9 @@ export function inspectReleaseReady(repo: string, kitRoot: string): ReleaseReady
 					const dirty = probe("metadata-clean", ["git", "status", "--porcelain", "--untracked-files=all", "--", "package.json", "README.md"]);
 					if (dirty.ok && dirty.stdout) checks[checks.length - 1] = { name: "metadata-clean", ok: false, detail: dirty.stdout };
 					const tree = probe("source-tree", ["git", "rev-parse", `${commit}^{tree}`]);
-					if (tree.ok) for (const role of ["main", "ci-only"]) {
-						const verdict = probe(`${role}-verdict`, ["sh", library, "verdict", role, repo, tree.stdout, temp.path]);
-						if (verdict.ok && verdict.stdout !== "PASS") checks[checks.length - 1] = { name: `${role}-verdict`, ok: false, detail: verdict.stdout || "empty verdict readback" };
+					if (tree.ok) {
+						const verdict = probe("main-verdict", ["sh", library, "verdict", repo, tree.stdout, temp.path]);
+						if (verdict.ok && verdict.stdout !== "PASS") checks[checks.length - 1] = { name: "main-verdict", ok: false, detail: verdict.stdout || "empty verdict readback" };
 					}
 					probe("ship-export", ["sh", library, "export", temp.path, commit]);
 				}

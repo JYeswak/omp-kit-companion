@@ -64,8 +64,8 @@ function subscription(path: string): Subscription | null {
 	} catch { return null; }
 }
 
-/** Called only after both judges finish. Mail is best effort; callers retain the judges' original rc. */
-export async function notifyReleaseVerdict(state: string, sha: string, producerRc: number, ciOnlyRc: number | null): Promise<void> {
+/** Called after the main judge finishes. Mail is best effort; callers retain its original rc. */
+export async function notifyReleaseVerdict(state: string, sha: string, producerRc: number): Promise<void> {
 	const directory = join(state, SUBSCRIBERS);
 	if (!existsSync(directory)) return;
 	const subscribers = readdirSync(directory).filter(name => name.endsWith(".json"))
@@ -75,13 +75,13 @@ export async function notifyReleaseVerdict(state: string, sha: string, producerR
 	const sender = process.env.AGENT_NAME;
 	const senderToken = process.env.AGENT_MAIL_SENDER_TOKEN;
 	if (!sender || !senderToken) throw new Error("verdict mail sender identity is unavailable");
-	const verdict = producerRc === 0 && (ciOnlyRc === null || ciOnlyRc === 0) ? "PASS" : "FAIL";
-	const body = `release-verdict: ${sha} producer_rc=${producerRc} ci_only_rc=${ciOnlyRc ?? "not-run"}`;
+	const verdict = producerRc === 0 ? "PASS" : "FAIL";
+	const body = `release-verdict: ${sha} producer_rc=${producerRc}`;
 	const sentDirectory = join(state, "release-verdict-mail-sent");
 	const deadline = AbortSignal.timeout(20_000); // one bounded batch; never delays the verdict indefinitely
 	let failed = false;
 	for (const row of subscribers) {
-		const key = createHash("sha256").update(JSON.stringify([row.project, row.agent.toLowerCase(), sha, producerRc, ciOnlyRc])).digest("hex");
+		const key = createHash("sha256").update(JSON.stringify([row.project, row.agent.toLowerCase(), sha, producerRc])).digest("hex");
 		const sent = join(sentDirectory, key);
 		if (existsSync(sent)) continue;
 		try {

@@ -8,23 +8,16 @@
 #   1. resolve the commit (default: the remote-tracking origin/main after a fetch);
 #   2. take a per-repo lock; when another run holds it, record the wanted commit and exit 0, and the
 #      holder runs again for the newest published head before it releases the lock;
-#   2b. read exact-tree main and CI-only records with the exported judge; complete matching PASS
-#       records need no suite lease. A missing verdict takes the machine-wide suite lease.
+#   2b. read the exact-tree main record with the exported judge; a matching PASS
+#       needs no suite lease. A missing verdict takes the machine-wide suite lease.
 #   3. export the exact commit and run only its missing qualification with that commit's own runner
 #      (never the working tree: editing the runner mid-run killed a 25-minute suite on 2026-10-31);
-#   5. CIONLY1 (J-2026-11-03-34): beside the full suite, the export's own full-suite-verdict-store.py
-#      `run-ci-only` judges the two files gate-ci-only.tsv keeps out of it (package-release.test.ts and
-#      kit-update.test.ts) on a second export of the same commit, git-initialized with that commit as
-#      release-local's ci-only-local stage prepares it, and records PASS/FAIL for the exact tree; a cut
-#      reuses a PASS instead of running them (up to 900/2400 s) after build, sign and notarize. Its
-#      output (every failing file's, in one run) is printed after the suite's. Exports without
-#      run-ci-only (commits before it) skip this step silently; release-local then runs the files.
 #
 # A tree that already has a verdict is a cache hit and returns at once. Called with no arguments by
 # the publisher after a successful push, or by hand before release-local.
 #
 # Usage: scripts/release-verdict.sh [--commit SHA] [--no-fetch]
-# Exit: the verdict runner's status (0 PASS), else the ci-only step's when the runner passed; 0 when
+# Exit: the verdict runner's status (0 PASS); 0 when
 # another run will cover the commit, 2 usage, 75 when the suite lease refuses (queue full, wait bound).
 set -eu
 # Pin before the first Git/Python/tool lookup, including the private-copy bootstrap.
@@ -94,14 +87,9 @@ printf '%s\n' "$$" >"$LOCK/pid"
 . "$ROOT/scripts/kitlib-tmp.sh"
 kitlib_tmp WORK release-verdict || exit 1
 kitlib_tmp_atexit "rm -rf \"$LOCK\""
-# A cancelled verdict cancels its ci-only judge too; run-ci-only kills its bun process groups on TERM.
-ci_pid=''
-# shellcheck disable=SC2016 # expanded at exit, when ci_pid names the live judge (or is empty)
-kitlib_tmp_atexit '[ -z "$ci_pid" ] || kill -TERM "$ci_pid" 2>/dev/null || :'
 # SUITESERIAL1 (ompkit-fp72.120.16.264): one full suite at a time machine-wide, whatever launched it. Each
-# commit is judged under the suite lease (scripts/suite-lease.sh), held around its runner, the CI-only judge
-# beside it, so neither overlaps another launcher's suite. The runner finds the lease
-# held by this enclosing run and takes none. release-verdict requests go first in the lease queue, so the
+# commit is judged under the suite lease (scripts/suite-lease.sh), held around its runner.
+# The runner sees this enclosing lease and takes none. Release-verdict requests go first in the lease queue, so the
 # release-local stage waiting on this run is never starved. A checkout whose JUDGING_FILES predate the lease
 # runs without it (SUITE_LEASE_ABSENT); one whose closure lists scripts/suite-lease.sh refuses when it is missing.
 rv_lease=0
@@ -124,8 +112,6 @@ else
 	printf 'release-verdict: SUITE_LEASE_ABSENT: %s predates scripts/suite-lease.sh, so this run takes no suite lease\n' "$ROOT"
 fi
 # RELFAST1: wall-clock runner intervals, matching release-local's substep format.
-# Keep CI's timestamp separate: its existing background judge overlaps main.
-# CI ends when the parent observes completion at wait, not necessarily at process exit.
 substep_start() {
 	rv_substep_t0=$(date +%s)
 	printf '== substep %s start=%s\n' "$1" "$rv_substep_t0"
@@ -148,24 +134,13 @@ while :; do
 	# checker bytes, runtime or tree keep the original producer/refusal path.
 	main_result=''
 	substep_start verdict.store-lookup
-	ci_result=''
-	ci_supported=0
 	if [ -f "$tree/scripts/full-suite-verdict-store.py" ]; then
 		main_result=$(env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB -u BEADS_DIR TMPDIR="$WORK" \
 			python3 -B "$tree/scripts/full-suite-verdict-store.py" require-pass --repo "$ROOT" \
 			--tree "$rv_tree" --role main --judge-root "$tree" --suite-root "$tree" 2>/dev/null) || main_result=''
 	fi
-	if grep -q '"run-ci-only"' "$tree/scripts/full-suite-verdict-store.py" 2>/dev/null; then
-		ci_supported=1
-		ci_result=$(env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB -u BEADS_DIR TMPDIR="$WORK" \
-			python3 -B "$tree/scripts/full-suite-verdict-store.py" require-ci-only-pass --repo "$ROOT" \
-			--tree "$rv_tree" --judge-root "$tree" --suite-root "$tree" 2>/dev/null) || ci_result=''
-	else
-		# Old commits without CI-only qualification retain their original main-only contract.
-		ci_result=PASS
-	fi
 	substep_end verdict.store-lookup "$rv_substep_t0"
-	if [ "$rv_lease" = 1 ] && { [ "$main_result" != PASS ] || [ "$ci_result" != PASS ]; }; then
+	if [ "$rv_lease" = 1 ] && [ "$main_result" != PASS ]; then
 		lease_rc=0
 		substep_start verdict.suite-lease-wait
 		suite_lease_take release-verdict "$rv_tree" main "$sha" "${FULL_SUITE_VERDICT_CACHE_DIR:-}" 0 '' || lease_rc=$?
@@ -177,27 +152,11 @@ while :; do
 		fi
 		printf 'release-verdict: suite lease %s for %s (%s)\n' "$SUITE_LEASE_STATE" "$sha" "$SUITE_LEASE_DETAIL"
 	fi
-	# Step 5 gets its own export: git-initializing the full suite's tree would change what its tests see.
-	ci_tree="$WORK/ci-only.$sha"
-	if [ "$ci_supported" = 1 ] && [ "$ci_result" != PASS ]; then
-		substep_start verdict.ci-only-archive-export
-		mkdir -p "$ci_tree"
-		git -C "$ROOT" archive "$sha" | tar -xf - -C "$ci_tree"
-		substep_end verdict.ci-only-archive-export "$rv_substep_t0"
-		substep_start verdict.ci-only-judge
-		rv_ci_t0=$rv_substep_t0
-		env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB -u BEADS_DIR TMPDIR="$WORK" \
-			python3 -B "$ci_tree/scripts/full-suite-verdict-store.py" run-ci-only --repo "$ROOT" --commit "$sha" \
-			</dev/null >"$WORK/ci-only.$sha.out" 2>&1 &
-		ci_pid=$!
-	fi
 	if [ "$main_result" = PASS ]; then
 		printf 'release-verdict: reusing exact-tree main PASS for %s\n' "$sha"
 	else
 		printf 'release-verdict: judging %s with its own runner\n' "$sha"
 	fi
-	producer_rc=0
-	ci_rc=''
 	rc=0
 	if [ "$main_result" != PASS ]; then
 		substep_start verdict.main-judge
@@ -205,27 +164,13 @@ while :; do
 			sh "$tree/scripts/full-suite-verdict.sh" --repo "$ROOT" --commit "$sha" --judge-role main </dev/null || rc=$?
 		substep_end verdict.main-judge "$rv_substep_t0"
 	fi
-	producer_rc=$rc
 	printf 'release-verdict: %s producer_rc=%s\n' "$sha" "$rc"
-	if [ -n "$ci_pid" ]; then
-		ci_rc=0
-		wait "$ci_pid" || ci_rc=$?
-		substep_end verdict.ci-only-judge "$rv_ci_t0"
-		ci_pid=''
-		cat "$WORK/ci-only.$sha.out"
-		printf 'release-verdict: %s ci_only_rc=%s\n' "$sha" "$ci_rc"
-		[ "$rc" != 0 ] || rc=$ci_rc
-	elif [ "$ci_supported" = 1 ]; then
-		ci_rc=0
-		printf 'release-verdict: reusing exact-tree ci-only PASS for %s\n' "$sha"
-	fi
-	# VERDICTMAIL1: only a completed pair wakes subscribers, never the first status line alone.
 	# Use the kit's MCP client, not am; missing mail infrastructure cannot change a verdict.
 	if [ -d "$STATE/release-verdict-subscribers" ]; then
-		bun "$ROOT/scripts/release-verdict-mail.ts" "$STATE" "$sha" "$producer_rc" "$ci_rc" </dev/null ||
+		bun "$ROOT/scripts/release-verdict-mail.ts" "$STATE" "$sha" "$rc" </dev/null ||
 			printf 'release-verdict: mail wake failed for %s (verdict unchanged)\n' "$sha" >&2
 	fi
-	rm -rf "$tree" "$ci_tree"
+	rm -rf "$tree"
 	if [ "$rv_lease" = 1 ]; then suite_lease_release || :; fi
 	[ -s "$WANTED" ] || break
 	next=$(cat "$WANTED")

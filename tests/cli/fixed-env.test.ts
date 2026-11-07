@@ -86,9 +86,6 @@ test("a real stored suite PASS is reused across caller shells and retains the ju
 		mkdirSync(dirname(join(repo, path)), { recursive: true });
 		copyFileSync(join(kit, path), join(repo, path));
 	}
-	const ciFiles: string[] = JSON.parse(command(["/usr/bin/python3", "-c",
-		"import json,runpy,sys; print(json.dumps([p for p,_ in runpy.run_path(sys.argv[1])['CI_ONLY_FILES']]))",
-		join(kit, "scripts/full-suite-verdict-store.py")]));
 	mkdirSync(join(repo, "src"), { recursive: true });
 	for (const file of ["paths.ts", "omp-source-cache.ts"]) copyFileSync(join(kit, "src", file), join(repo, "src", file));
 	const identitySuite = join(repo, "tests/cli/omp-identity.test.ts");
@@ -99,7 +96,6 @@ test("a real stored suite PASS is reused across caller shells and retains the ju
 		join(kit, "scripts/suite-metrics.py"),
 		`import { resolveOmpIdentity } from ${JSON.stringify(join(kit, "src/paths.ts"))}; console.log(JSON.stringify(resolveOmpIdentity()));`]));
 	const identityControl = `import { expect, test } from "bun:test";\nimport { resolveOmpIdentity } from "../../src/paths.ts";\ntest("qualification resolves the pinned OMP identity without caller state", () => { expect(resolveOmpIdentity()).toEqual(${JSON.stringify(expectedIdentity)}); for (const name of ${JSON.stringify(Object.keys(hostileParent))}) expect(process.env[name]).toBeUndefined(); });\n`;
-	for (const path of ciFiles) writeFileSync(join(repo, path), identityControl);
 	writeFileSync(identitySuite, identityControl);
 	writeFileSync(join(repo, "tests/cli/control.test.sh"), "#!/bin/sh\nprintf 'ACTUAL_SUITE_RAN\\n'\n");
 	const git = (...args: string[]) => command(["git", "-C", repo, ...args]);
@@ -142,26 +138,6 @@ test("a real stored suite PASS is reused across caller shells and retains the ju
 		env: { ...env(`${poison}:/usr/bin:/bin`), FULL_SUITE_VERDICT_CACHE_DIR: cache }, floor_s: 30 });
 	expect({ rc: postPush.rc, out: text(postPush.stdout), err: text(postPush.stderr) }).toMatchObject({ rc: 0 });
 	expect(text(postPush.stdout)).toContain("reusing exact-tree main PASS");
-	const ciRecords = readdirSync(join(cache, "ci-only")).filter(name => name.endsWith(".json"));
-	expect(ciRecords).toHaveLength(1);
-	const ciRecord = JSON.parse(readFileSync(join(cache, "ci-only", ciRecords[0]!), "utf8"));
-	expect(ciRecord.environment).toEqual(record.environment);
-	const ciLookup = ["/usr/bin/python3", join(kit, "scripts/full-suite-verdict-store.py"), "require-ci-only-pass",
-		"--repo", repo, "--tree", record.tree, "--judge-root", kit, "--suite-root", repo, "--cache-dir", cache];
-	expect(command(ciLookup, env(`${poison}:/usr/bin:/bin`))).toBe("PASS");
-	expect(command(ciLookup, { ...env(`${poison}:/usr/bin:/bin`), ...hostileParent })).toBe("PASS");
-	const directCi = await runFixtureAsync(["/usr/bin/python3", join(kit, "scripts/full-suite-verdict-store.py"),
-		"run-ci-only", "--repo", repo, "--commit", "HEAD", "--judge-root", kit, "--suite-root", repo,
-		"--cache-dir", join(scratch.path, "foreign-ci-cache")], {
-		cwd: kit, env: { ...env(process.env.PATH!), ...hostileParent }, floor_s: 30,
-	});
-	expect({ rc: directCi.rc, out: text(directCi.stdout), err: text(directCi.stderr) }).toMatchObject({ rc: 0 });
-	expect(text(directCi.stdout)).toContain("CI-ONLY: VERDICT PASS");
-	ciRecord.environment.PATH += ":/planted-unjudged-tool";
-	writeFileSync(join(cache, "ci-only", ciRecords[0]!), JSON.stringify(ciRecord));
-	const tampered = runFixture(ciLookup, { cwd: kit, env: env(process.env.PATH!), floor_s: 30 });
-	expect(tampered.rc).toBe(1);
-	expect(text(tampered.stdout)).not.toBe("PASS\n");
 	// Changing a real admitted input must still refuse reuse, not normalize a mismatch into PASS.
 	const tree = git("rev-parse", "HEAD^{tree}");
 	const lookup = ["/usr/bin/python3", join(kit, "scripts/full-suite-verdict-store.py"), "require-pass",

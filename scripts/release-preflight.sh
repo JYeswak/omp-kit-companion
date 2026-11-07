@@ -18,16 +18,11 @@ release_preflight_attestation() {
 	}
 }
 release_preflight_verdict() (
-	# KIND REPO TREE SOURCE_EXPORT; pin before selecting the Python interpreter.
-	kind=$1; shift
+	# REPO TREE SOURCE_EXPORT; pin before selecting the Python interpreter.
 	cd "$3/scripts" || exit 1
 	# shellcheck source=scripts/fixed-env.sh
 	. ./fixed-env.sh
-	if [ "$kind" = main ]; then
-		python3 -B -m full-suite-verdict-store require-pass --repo "$1" --tree "$2" --role main --judge-root "$3" --suite-root "$3"
-	else
-		python3 -B -m full-suite-verdict-store require-ci-only-pass --repo "$1" --tree "$2" --judge-root "$3" --suite-root "$3"
-	fi
+	python3 -B -m full-suite-verdict-store require-pass --repo "$1" --tree "$2" --role main --judge-root "$3" --suite-root "$3"
 )
 release_preflight_releases() {
 	# VERSION RELEASES_JSON (gh api --paginate --slurp output).

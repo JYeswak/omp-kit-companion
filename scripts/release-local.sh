@@ -6,8 +6,6 @@
 #                 already tagged (bootstrap): version metadata commit, publish main, then qualify its exact export.
 #      preflight  --source resumes an exact origin/main commit; version must be unused (no tag/release/draft).
 #                 Its exact tree must have a reusable main-role full-suite PASS before the signing keychain opens.
-#                 It must also have the push-time ci-only PASS (every local gate-ci-only.tsv file: package-release,
-#                 kit-update and their split live journeys, run by release-verdict.sh).
 #   2. build      after the verdict readback and signing-identity preflight, build every ship-set platform
 #                 (darwin-arm64-none, linux-arm64-gnu, linux-x64-gnu) from an exact-commit `git archive`
 #                 export with scripts/package-release.sh, exactly as ci.yml build-candidates does (bun
@@ -72,8 +70,7 @@ INSTALL_PREFIX="${OMP_KIT_INSTALL_PREFIX:-$HOME/.local/opt/omp-kit}"
 # main kept stating the published version and the next cut needed a bootstrap prepare commit plus its own verdict. A
 # refusal while ADVANCE_PENDING=1 (set after verify, cleared when the advance starts) still advances main, exactly as
 # --no-install does, then exits 4 naming the install command. Its own refusal (dirty paths, refused hooks) names the
-# advance-only retry command, and its die is a plain exit. die stays one line: stage fixtures (release-local-ci-only-reuse.test.sh)
-# cut it out by that shape, without ADVANCE_PENDING or this function.
+# advance-only retry command, and its die is a plain exit.
 ADVANCE_PENDING=0
 advance_after_refusal() {
 	ADVANCE_PENDING=0
@@ -263,7 +260,7 @@ PY
 	supersedes="$(release_version_supersedes ompkit-774u)" || die "cannot attribute release prepare version lines"
 	bounded 900 git -C "$ROOT" commit --only \
 		-m "chore(release): prepare $VERSION ompkit-774u [test]" \
-		-m "Release metadata only; release-local requires fresh main and CI-only PASS verdicts on this exact exported tree before signing." \
+		-m "Release metadata only; release-local requires a fresh main-role PASS on this exact exported tree before signing." \
 		-m "$supersedes" \
 		-m "Gap-Bead: none (release metadata)
 Bead: ompkit-774u
@@ -495,15 +492,12 @@ curl_capability="$(bounded 10 curl -fsS --parallel -o /dev/null --write-out '%{e
 	die "curl 7.75+ with parallel transfers and write-out exitcode is required"
 [ "$curl_capability" = 0 ] || die "curl 7.75+ with write-out exitcode is required"
 bounded 60 gh auth status --hostname github.com >/dev/null 2>&1 || die "gh is not authenticated to github.com"
-# RELFAILFAST1 (ompkit-fp72.120.16.104, Joshua J-2026-11-03-34: fail fast on big gates). The ci-only stage runs the
-# packaged ladder through `omp-kit heavy`; when heavy work cannot be admitted (disk, load, slots) it waits queued
-# until package-release.test.ts hits its 900 s budget (0.2.86 dry run, 2026-11-03). Ask the same gate now, in seconds.
-# The probe uses the observer that stage uses (statfs, keeping heavy's 10 GiB floor; ompkit-fp72.120.16.154/.155): an
-# sbh pressure reading the ci-only stage never consults must not refuse a release that stage would admit.
+# RELFAILFAST1: probe heavy admission before packaged qualification work queues.
+# The qualification runner uses statfs and keeps heavy's physical 10 GiB floor.
 if command -v omp-kit >/dev/null; then
 	admit_rc=0
 	admit_out="$(OMP_KIT_DISK_OBSERVER=statfs bounded 60 omp-kit heavy --no-wait --label release-preflight -- true 2>&1)" || admit_rc=$?
-	[ "$admit_rc" -ne 75 ] || die "heavy work cannot be admitted now, so the ci-only stage would time out queued; fix this first: $(printf '%s' "$admit_out" | tail -n 3)"
+	[ "$admit_rc" -ne 75 ] || die "heavy work cannot be admitted now, so qualification would time out queued; fix this first: $(printf '%s' "$admit_out" | tail -n 3)"
 	[ "$admit_rc" -eq 0 ] || die "heavy admission probe failed (rc $admit_rc): $(printf '%s' "$admit_out" | tail -n 3)"
 else
 	echo "release-local: no omp-kit on PATH; heavy admission probe skipped" >&2
@@ -566,29 +560,18 @@ bounded 180 bun "$SRC/scripts/spawn-smoke.ts" || die "fresh non-kit native build
 substep ''
 source_tree="$(git -C "$ROOT" rev-parse "$SOURCE^{tree}")" || die "cannot resolve exact source tree"
 # The verdict producer may return 0 when a different run holds its lock. Never
-# confuse that queue acknowledgement with PASS: wait on both exact-tree records.
+# confuse that queue acknowledgement with PASS: wait on the exact-tree main record.
 stage verdict
-# RUNTIMEMISS1 (ompkit-fp72.120.16.242): a PASS stored under another runtime id (PATH differs) reads RUNTIME_MISMATCH,
-# naming both env digests and the differing fields. A plain main MISS or FAIL needs a verdict run whatever ci-only
-# reads, so ci-only is read only after main reads PASS or RUNTIME_MISMATCH (one read on a miss, as before). When both
-# read PASS or RUNTIME_MISMATCH, release-local refuses with the mismatch and starts no verdict run.
+# A runtime mismatch is not a missing qualification; refuse without starting another run.
 substep verdict.store-lookup
 main_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \
 	--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" 2>/dev/null)" || true
-ci_result=''
-case "$main_result" in PASS | RUNTIME_MISMATCH*)
-	ci_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-ci-only-pass \
-		--repo "$ROOT" --tree "$source_tree" --judge-root "$SRC" --suite-root "$SRC" 2>/dev/null)" || true ;;
-esac
 verdict_mismatch() {
-	case "$1" in PASS | RUNTIME_MISMATCH*) ;; *) return 0 ;; esac
-	case "$2" in PASS | RUNTIME_MISMATCH*) ;; *) return 0 ;; esac
 	case "$1" in RUNTIME_MISMATCH*) die "$1 (main verdict of prepare $SOURCE; requalify with the pinned kit environment)" ;; esac
-	case "$2" in RUNTIME_MISMATCH*) die "$2 (ci-only verdict of prepare $SOURCE; requalify with the pinned kit environment)" ;; esac
 }
-verdict_mismatch "$main_result" "$ci_result"
+verdict_mismatch "$main_result"
 substep ''
-if [ "$main_result" != PASS ] || [ "$ci_result" != PASS ]; then
+if [ "$main_result" != PASS ]; then
 	substep verdict.producer
 	bounded 7200 sh "$ROOT/scripts/release-verdict.sh" --commit "$SOURCE" --no-fetch ||
 		die "release verdict failed for prepare $SOURCE"
@@ -596,11 +579,10 @@ if [ "$main_result" != PASS ] || [ "$ci_result" != PASS ]; then
 	# VERDICTSTARVE1 (ompkit-fp72.120.16.198): while another run holds its lock, release-verdict.sh writes SOURCE to its
 	# one-slot queue (release-verdict.wanted, latest wins) and returns 0. A push before the holder reaches SOURCE
 	# overwrites the slot and the holder never judges SOURCE (0.2.88: 13.6 min of polling until killed). Each poll reads
-	# the slot, then the commit the holder's runner children judge (--commit of full-suite-verdict.sh / run-ci-only),
-	# then the verdicts, so a verdict recorded before the holder moved on is always seen. SOURCE is starved once the
+	# the slot, then the commit the holder's full-suite runner judges (--commit),
+	# then the verdict, so a verdict recorded before the holder moved on is always seen. SOURCE is starved once the
 	# holder is gone, or judges another commit while the slot no longer holds SOURCE: it then judges only the slot.
-	# Bound: the next poll after that state appears stops the stage, i.e. within slot/pid reads + ps (10 s) + two
-	# verdict reads (30 s each) + sleep 3 <= 73 s; while SOURCE is queued or judged the 7200 s deadline still applies.
+	# Bound: the next poll after that state appears stops the stage; the 7200 s deadline still applies.
 	rv_state="$(git -C "$ROOT" rev-parse --absolute-git-dir)/omp-kit" || die "cannot resolve the release-verdict state of $ROOT"
 	verdict_fix="produce it with: sh scripts/release-verdict.sh --commit $SOURCE --no-fetch (it queues $SOURCE while another run holds the lock), then resume: scripts/release-local.sh --source $SOURCE --version $VERSION"
 	verdict_deadline=$(( $(date +%s) + 7200 ))
@@ -612,9 +594,9 @@ if [ "$main_result" != PASS ] || [ "$ci_result" != PASS ]; then
 		say "substep verdict.per-repo-holder took $((now - verdict_queue_t0))s start=$verdict_queue_t0 end=$now"
 		verdict_queue_t0=''
 	}
-	# The first --commit of a direct child of the holder that is its full-suite runner or its ci-only judge.
+	# The first --commit of a direct child of the holder that is its full-suite runner.
 	# shellcheck disable=SC2016 # an awk program, not shell expansions
-	rv_children_awk='$1 == holder && !found && /full-suite-verdict\.sh |full-suite-verdict-store\.py run-ci-only / { for (i = 2; i < NF; i++) { j = i + 1; if ($i == "--commit" && $j ~ /^[0-9a-f]+$/) { print $j; found = 1; break } } }'
+	rv_children_awk='$1 == holder && !found && index($0, "full-suite-verdict.sh ") { for (i = 2; i < NF; i++) { j = i + 1; if ($i == "--commit" && $j ~ /^[0-9a-f]+$/) { print $j; found = 1; break } } }'
 	while :; do
 		rv_wanted="$(cat "$rv_state/release-verdict.wanted" 2>/dev/null)" || rv_wanted=''
 		rv_holder="$(cat "$rv_state/release-verdict.lock/pid" 2>/dev/null)" || rv_holder=''
@@ -629,23 +611,20 @@ if [ "$main_result" != PASS ] || [ "$ci_result" != PASS ]; then
 		fi
 		main_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \
 			--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC")" || true
-		ci_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-ci-only-pass \
-			--repo "$ROOT" --tree "$source_tree" --judge-root "$SRC" --suite-root "$SRC")" || true
 		if [ "$rv_judging" = "$SOURCE" ] || [ -z "$rv_holder" ] || [ "$rv_wanted" != "$SOURCE" ] ||
-			[ "$main_result" = FAIL ] || [ "$ci_result" = FAIL ] ||
-			{ [ "$main_result" = PASS ] && [ "$ci_result" = PASS ]; }; then
+			[ "$main_result" = FAIL ] || [ "$main_result" = PASS ]; then
 			verdict_queue_end
 		fi
-		if [ "$main_result" = FAIL ] || [ "$ci_result" = FAIL ]; then die "release verdict FAIL for exact prepare $SOURCE"; fi
-		[ "$main_result" != PASS ] || [ "$ci_result" != PASS ] || break
+		if [ "$main_result" = FAIL ]; then die "release verdict FAIL for exact prepare $SOURCE"; fi
+		[ "$main_result" != PASS ] || break
 		verdict_now="release-verdict run ${rv_holder:-none} judges ${rv_judging:-unknown}; queued next ${rv_wanted:-none}"
 		[ "$verdict_now" = "$verdict_seen" ] || { say "verdict wait for $SOURCE: $verdict_now"; verdict_seen=$verdict_now; }
 		if [ -z "$rv_holder" ]; then
-			verdict_mismatch "$main_result" "$ci_result"
-			die "VERDICT_STARVED: no release-verdict run holds the lock and prepare $SOURCE has no verdict (main ${main_result:-none}, ci-only ${ci_result:-none}); $verdict_fix"
+			verdict_mismatch "$main_result"
+			die "VERDICT_STARVED: no release-verdict run holds the lock and prepare $SOURCE has no verdict (main ${main_result:-none}); $verdict_fix"
 		fi
 		if [ -n "$rv_judging" ] && [ "$rv_judging" != "$SOURCE" ] && [ "$rv_wanted" != "$SOURCE" ]; then
-			verdict_mismatch "$main_result" "$ci_result"
+			verdict_mismatch "$main_result"
 			die "VERDICT_STARVED: release-verdict run $rv_holder judges $rv_judging and queues ${rv_wanted:-nothing} next, so it skips prepare $SOURCE; $verdict_fix"
 		fi
 		[ "$(date +%s)" -lt "$verdict_deadline" ] || die "timed out waiting for exact prepare verdict $SOURCE"
@@ -662,19 +641,6 @@ if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass 
 fi
 [ "$(cat "$WORK/full-suite-verdict.out")" = PASS ] || die "source tree $source_tree full-suite readback is not PASS"
 say "full-suite verdict $source_tree: PASS (main role)"
-# CIONLY1 (Joshua J-2026-11-03-34/35: a full release in under 4 minutes, failing fast). The local gate-ci-only.tsv
-# files (package-release, kit-update and their split live journeys; full-suite-verdict-store.py CI_ONLY_FILES) are
-# kept out of the full suite and run by release-verdict.sh at push time, on a git-initialized export of the exact
-# commit, and recorded for its tree. The cut never runs them: it requires that recorded PASS here, in seconds,
-# before build, sign and notarize, and refuses with the producer command.
-ci_only_status=0
-bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-ci-only-pass \
-	--repo "$ROOT" --tree "$source_tree" --judge-root "$SRC" --suite-root "$SRC" \
-	>"$WORK/ci-only-verdict.out" 2>"$WORK/ci-only-verdict.err" || ci_only_status=$?
-if [ "$ci_only_status" != 0 ] || [ "$(cat "$WORK/ci-only-verdict.out")" != PASS ]; then
-	die "source tree $source_tree has no push-time ci-only PASS ($(head -n 1 "$WORK/ci-only-verdict.out") $(head -n 1 "$WORK/ci-only-verdict.err")); produce it with: sh scripts/release-verdict.sh --commit $SOURCE"
-fi
-say "ci-only verdict $source_tree: PASS (push time)"
 substep verdict.signing-preflight
 
 [ -f "$KEYCHAIN" ] || die "signing keychain $KEYCHAIN not found"

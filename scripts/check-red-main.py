@@ -38,29 +38,21 @@ def git(store, repo: Path, *args: str) -> str:
     return result.stdout.decode("utf-8", errors="strict").strip()
 
 
-def latest(store, directory: Path, tree: str, ci_only: bool = False) -> dict | None:
+def latest(store, directory: Path, tree: str) -> dict | None:
     rows = []
-    folder = directory / "ci-only" if ci_only else directory
-    kind = "ci-only" if ci_only else "main"
-    for path in folder.glob(f"{tree}.{kind}.*.json"):
-        if ci_only:
-            raw = store.json_file(path)
-            entry, _reason = store.validate_ci_only_record(
-                path, tree=tree, checks=raw.get("checks"), runtime=raw.get("runtime"))
-            stamp = entry.get("finished_ms", 0) if entry else 0
-        else:
-            entry, _reason = store.validate_record(path, judge_root=SCRIPTS.parent, tree=tree,
-                                                  role="main", exact_filename=True, historical=True)
-            stamp = entry.get("timing", {}).get("started_ms", 0) if entry else 0
+    for path in directory.glob(f"{tree}.main.*.json"):
+        entry, _reason = store.validate_record(path, judge_root=SCRIPTS.parent, tree=tree,
+                                              role="main", exact_filename=True, historical=True)
+        stamp = entry.get("timing", {}).get("started_ms", 0) if entry else 0
         if entry is not None:
             rows.append((stamp, path.name, entry))
     return max(rows, key=lambda row: row[:2])[2] if rows else None
 
 
-def red_files(entry: dict | None, ci_only: bool = False) -> set[str]:
+def red_files(entry: dict | None) -> set[str]:
     if entry is None or entry["verdict"] != "FAIL":
         return set()
-    rows = entry["files"] if ci_only else entry["evidence"]["files"]
+    rows = entry["evidence"]["files"]
     failures = {row["path"] for row in rows if row["rc"] != 0}
     culprit = entry.get("culprit", {})
     if culprit.get("method") == "flake-rerun":
@@ -69,18 +61,15 @@ def red_files(entry: dict | None, ci_only: bool = False) -> set[str]:
     return failures
 
 
-def is_red(entry: dict | None, ci_only: bool = False) -> bool:
+def is_red(entry: dict | None) -> bool:
     if entry is None or entry["verdict"] != "FAIL":
         return False
-    if ci_only:
-        return bool(red_files(entry, True))
     return entry["exit_code"] != 0 and (
         bool(red_files(entry)) or bool(entry.get("minimum_run", {}).get("shortfalls"))
         or entry.get("culprit", {}).get("method") != "flake-rerun")
 
 
-def first_red(store, repo: Path, directory: Path, base: str, entry: dict | None,
-              ci_only: bool) -> tuple[str, str | None]:
+def first_red(store, repo: Path, directory: Path, base: str, entry: dict | None) -> tuple[str, str | None]:
     culprit = (entry or {}).get("culprit", {})
     if culprit.get("method") == "bisect":
         return culprit["sha"], culprit["bead"]
@@ -89,10 +78,10 @@ def first_red(store, repo: Path, directory: Path, base: str, entry: dict | None,
     first = base
     for row in git(store, repo, "log", "--first-parent", "--max-count=128", "--format=%H:%T", base).splitlines():
         sha, tree = row.split(":", 1)
-        prior = latest(store, directory, tree, ci_only)
+        prior = latest(store, directory, tree)
         if prior is None:
             continue
-        if not is_red(prior, ci_only):
+        if not is_red(prior):
             break
         first = sha
     message = git(store, repo, "log", "-1", "--format=%B", first)
@@ -103,14 +92,12 @@ def check(store, repo: Path, base: str, message: Path) -> int:
     directory = store.cache_directory(repo, None)
     tree = git(store, repo, "rev-parse", base + "^{tree}")
     full = latest(store, directory, tree)
-    ci = latest(store, directory, tree, True)
-    full_red, ci_red = is_red(full), is_red(ci, True)
-    if not full_red and not ci_red:
-        if full is None or ci is None:
+    if not is_red(full):
+        if full is None:
             print(f"commit-gate: UNKNOWN release verdict for origin/main {base[:12]} (absent, pending or unreadable)", file=sys.stderr)
         return 0
-    files = red_files(full) | red_files(ci, True)
-    first, bead = first_red(store, repo, directory, base, full if full_red else ci, not full_red)
+    files = red_files(full)
+    first, bead = first_red(store, repo, directory, base, full)
     detail = f"origin/main {base[:12]} is RED; first recorded red commit {first}; bead {bead or 'none'}; failing tests: {', '.join(sorted(files)) or '(no failing file recorded)'}"
     trailer = message_bead(store, message.read_text(encoding="utf-8"), "Fixes-Red")
     changed = set(git(store, repo, "diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD").rstrip("\0").split("\0"))

@@ -123,7 +123,7 @@ test("release gate refuses a kit rule with its fire fixture removed", () => {
 });
 
 // RELFAILFAST1 (ompkit-fp72.120.16.104, Joshua J-2026-11-03-34): heavy admission is asked in preflight, in seconds,
-// instead of being discovered by the ci-only stage's 900 s timeout. Stubs: gh (authenticated), omp-kit (admission),
+// instead of waiting for packaged qualification work to time out. Stubs: gh (authenticated), omp-kit (admission),
 // git (records the fetch and fails it, so a passing probe stops right after preflight's next step).
 test.skipIf(process.platform !== "darwin")("RELFAILFAST1 preflight refuses at once when heavy work cannot be admitted", async () => {
 	const work = realpathSync(ownedTmp("relfailfast", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
@@ -166,7 +166,7 @@ ${admission === 75 ? "echo 'heavy: waiting: disk low: statfs 4 GiB free, floor 1
 		expect(admitted.rc, admitted.err).toBe(4);
 		expect(admitted.err).toContain("git fetch origin main failed");
 		expect(admitted.gitCalled).toBe(true);
-		// Planted: sbh reports pressure while statfs is above the floor; the ci-only stage observes statfs, so admit.
+		// Planted: sbh reports pressure while statfs is above the floor; qualification observes statfs, so admit.
 		const sbhOnly = await attempt("sbh");
 		expect(sbhOnly.rc, sbhOnly.err).toBe(4);
 		expect(sbhOnly.err).not.toContain("heavy work cannot be admitted now");
@@ -591,20 +591,17 @@ ${releaseStage("substep verdict.signing-preflight", "# -------------------------
 		expect(stdout + new TextDecoder().decode(result.stderr)).not.toContain("private-password-input");
 	} finally { rmSync(work, { recursive: true, force: true }); }
 }, fixtureDeadlineS(30) * 1_000);
-for (const verdict of ["cached", "missing-main", "missing-ci", "queued", "failure"] as const) {
-	test(`release qualification ${verdict} uses exact source and both verdicts`, async () => {
+for (const verdict of ["cached", "missing-main", "queued", "failure"] as const) {
+	test(`release qualification ${verdict} uses the exact-source main verdict`, async () => {
 		const work = realpathSync(ownedTmp("release-verdict-wait", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
 		const env = gitFixtureEnv(work);
 		initFixtureRepo(work, env);
 		const bin = join(work, "bin");
 		mkdirSync(bin);
-		// Planted negatives: either PASS alone is insufficient. The producer returns
-		// a queue acknowledgement, so only subsequent reads can prove qualification.
+		// The producer's queue acknowledgement alone cannot prove qualification.
 		writeFileSync(join(bin, "python3"), `#!/bin/sh
 echo "$*" >>"$RELEASE_TEST_WORK/reads"
 if [ "$RELEASE_TEST_VERDICT" = cached ]; then echo PASS; exit 0; fi
-if [ "$RELEASE_TEST_VERDICT" = missing-main ] && [ "$2" = require-ci-only-pass ]; then echo PASS; exit 0; fi
-if [ "$RELEASE_TEST_VERDICT" = missing-ci ] && [ "$2" = require-pass ]; then echo PASS; exit 0; fi
 if [ -f "$RELEASE_TEST_WORK/triggered" ]; then
   if [ "$RELEASE_TEST_VERDICT" = failure ]; then echo FAIL; exit 1; fi
   echo PASS; exit 0
@@ -635,7 +632,6 @@ substep ''`, "release-verdict-test", work], {
 			else expect(readFileSync(join(work, "producer"), "utf8")).toContain("--commit 0123456789012345678901234567890123456789 --no-fetch");
 			const reads = readFileSync(join(work, "reads"), "utf8");
 			expect(reads).toContain("require-pass --repo");
-			expect(reads).toContain("require-ci-only-pass --repo");
 			expect(reads.split("\n").filter(Boolean).every(line => line.includes("--tree exact-tree") && line.includes(`--judge-root ${work}/export`))).toBe(true);
 		} finally { rmSync(work, { recursive: true, force: true }); }
 	}, fixtureDeadlineS(30) * 1_000);
@@ -695,8 +691,8 @@ ${qualification}`, "verdict-starve-test", work], {
 			const holderPid = readFileSync(join(state, "release-verdict.lock/pid"), "utf8").trim();
 			// First poll: the prepare is still queued (or judged), so the stage waits and says what the holder judges.
 			expect(stdout).toContain(`verdict wait for ${source}: release-verdict run ${holderPid} judges ${judged}; queued next ${source}`);
-			// One pre-check read, then two per poll: the stage decides on the first poll after the push (read 3).
-			expect(reads.length).toBe(5);
+			// One pre-check read, then one per poll; stop on the first poll after the push.
+			expect(reads.length).toBe(4);
 			if (holderJudges === "other") {
 				expect(result.rc, stderr).toBe(4);
 				expectSubstepTiming(stdout, "verdict.per-repo-holder");
@@ -707,7 +703,7 @@ ${qualification}`, "verdict-starve-test", work], {
 				expect(result.rc, stderr).toBe(0);
 				expect(stderr).not.toContain("VERDICT_STARVED");
 			}
-			// Bound: one 3 s poll plus fixture reads (reads.length above is exact), far inside the 73 s worst case.
+			// Two 3 s polls plus fixture reads stay inside the fixture's 20 s bound.
 			expect(Date.now() - started).toBeLessThan(fixtureDeadlineS(20) * 1_000);
 		} finally {
 			rmSync(work, { recursive: true, force: true });
@@ -715,12 +711,8 @@ ${qualification}`, "verdict-starve-test", work], {
 	}, fixtureDeadlineS(40) * 1_000);
 }
 
-// RUNTIMEMISS1 (ompkit-fp72.120.16.242): a verdict stored under another runtime id reads RUNTIME_MISMATCH. When every
-// read is PASS or RUNTIME_MISMATCH, the stage refuses with the mismatch and starts no verdict run. A genuine ci-only
-// MISS still needs a run, so that case starts one; when it leaves ci-only missing, starvation is the true cause and
-// the VERDICT_STARVED refusal carries the main mismatch text.
-for (const ciOnly of ["PASS", "MISS"] as const) {
-	test(`RUNTIMEMISS1 verdict stage with a main runtime mismatch and ci-only ${ciOnly}`, async () => {
+// A main runtime mismatch refuses without launching another qualification.
+	test("RUNTIMEMISS1 verdict stage refuses a main runtime mismatch", async () => {
 		const work = realpathSync(ownedTmp("runtimemiss", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
 		const env = gitFixtureEnv(work);
 		initFixtureRepo(work, env);
@@ -730,7 +722,6 @@ for (const ciOnly of ["PASS", "MISS"] as const) {
 		writeFileSync(join(bin, "python3"), `#!/bin/sh
 echo "$*" >>"$RELEASE_TEST_WORK/reads"
 case "$2" in require-pass) echo ${JSON.stringify(mismatch)}; exit 1 ;; esac
-echo ${ciOnly}; [ ${ciOnly} = PASS ]
 `);
 		writeFileSync(join(bin, "sh"), `#!/bin/sh
 printf '%s\\n' "$*" >>"$RELEASE_TEST_WORK/producer"
@@ -745,19 +736,12 @@ ${qualification}`, "runtimemiss-test", work], {
 			const stderr = new TextDecoder().decode(result.stderr);
 			expect(result.rc, stderr).toBe(4);
 			const reads = readFileSync(join(work, "reads"), "utf8").trim().split("\n");
-			if (ciOnly === "PASS") {
 				expect(stderr).toContain(`release-local: refused: ${mismatch} (main verdict of prepare 0123456789012345678901234567890123456789`);
 				expect(stderr).not.toContain("VERDICT_STARVED");
 				expect(existsSync(join(work, "producer"))).toBe(false);
-				expect(reads.length).toBe(2);
-			} else {
-				expect(stderr).toContain(`VERDICT_STARVED: no release-verdict run holds the lock and prepare 0123456789012345678901234567890123456789 has no verdict (main ${mismatch}, ci-only MISS)`);
-				expect(readFileSync(join(work, "producer"), "utf8")).toContain("--commit 0123456789012345678901234567890123456789 --no-fetch");
-				expect(reads.length).toBe(4);
-			}
+				expect(reads.length).toBe(1);
 		} finally { rmSync(work, { recursive: true, force: true }); }
 	}, fixtureDeadlineS(30) * 1_000);
-}
 
 for (const failure of ["none", "http", "bytes"] as const) {
 	test(`public release downloads ${failure === "none" ? "overlap without rejecting valid bytes" : "refuse " + failure + " failures"}`, async () => {
