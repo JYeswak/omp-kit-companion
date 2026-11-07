@@ -23,7 +23,7 @@ const env: Record<string, string | undefined> = {
 	GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@invalid",
 	OMP_KIT_GATE_EVENTS_SKIP: "1",
 };
-const suite = "tests/cli/layout.test.sh";
+const suite = "tests/cli/layout.test.py";
 
 async function sh(argv: string[], floor = 20) {
 	const result = await runFixtureAsync(argv, { cwd: repo, env, floor_s: floor });
@@ -34,13 +34,20 @@ async function sh(argv: string[], floor = 20) {
 // The suite needs the verdict layout: its own repository root, a stamped source_revision, and the overlay named.
 function plant(revision: string): void {
 	writeFileSync(join(repo, suite), [
-		"#!/bin/sh",
-		"set -eu",
-		"top=$(git rev-parse --show-toplevel) || exit 1",
-		"[ \"$top\" = \"$(pwd -P)\" ] || { printf 'not the repository root: %s\\n' \"$top\"; exit 1; }",
-		`grep -q '"source_revision": "${revision}"' package.json || { echo 'source_revision unstamped'; exit 1; }`,
-		`grep -q '"${suite}"' .git/omp-kit-export.json || { echo 'overlay unnamed'; exit 1; }`,
-		"echo 'verdict layout ok'",
+		"import json, sys",
+		"from pathlib import Path",
+		`sys.path.insert(0, ${JSON.stringify(join(source, "scripts"))})`,
+		"from kitlib_run import run",
+		`top = run(["git", "rev-parse", "--show-toplevel"], deadline_s=${fixtureDeadlineS(10)})`,
+		"assert top.rc == 0, top.stderr.decode('utf-8', errors='replace')",
+		"assert Path(top.stdout.decode().strip()).resolve() == Path.cwd().resolve(), 'not the repository root'",
+		"with open('package.json', encoding='utf-8') as handle:",
+		"    package = json.loads(handle.read(65536))",
+		`assert package.get("source_revision") == ${JSON.stringify(revision)}, "source_revision unstamped"`,
+		"with open('.git/omp-kit-export.json', encoding='utf-8') as handle:",
+		"    record = json.loads(handle.read(65536))",
+		`assert ${JSON.stringify(suite)} in record["overlay"], "overlay unnamed"`,
+		"print('verdict layout ok')",
 		"",
 	].join("\n"));
 }

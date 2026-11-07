@@ -27,3 +27,4 @@
 - Validate daemon install plans against the native scheduler artifact: launchd KeepAlive on macOS and systemd Restart=on-failure on Linux.
 - Keep the physical disk-floor test aligned with its immediate typed refusal: exit 1, no command run and no queue waiting or retryable deferral.
 - Make the blocked-worker concurrency fixture's initial admission deterministic without changing its real lock exclusion, timeout, cleanup or deadline assertions.
+- Keep export-layout parity tests independent of a cached ShellCheck image while retaining real repository-root, source-stamp, overlay and wrong-stamp refusal checks.
