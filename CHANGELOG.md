@@ -4,6 +4,48 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.99] - 2026-11-07
+
+### Added
+
+- `ovnfs-land` lands committed Worktrunk linked worktrees or independent worker checkouts through one repository lock, replays each worker commit with normal hooks, preserves unrelated shared edits, and refuses dirty or historically overlapping main paths before writing.
+- `omp-kit tools verify NAME [--artifact PATH] [--platform OS_ARCH]` checks pinned archive and binary SHA-256 without installing or executing artifact code; seeds ovnfs darwin_arm64 and reports the mismatched field on refusal. No execution authority or SLB policy changes.
+- Release readiness reports one READY or NOT-READY line with every failing cut prerequisite, using exact origin/main source and stored runtime-bound verdicts; inspect it with `doctor --scope release --project PATH` or in the push qualification log.
+
+### Changed
+
+- Release measurements retain every reading with its load instead of voiding high-load pairs. Heavy-work admission now reports process owners, elapsed times, zombie parents and stale-session MCP candidates before deferring, and stops expired incarnation-checked kit jobs; load-watch retains the diagnosis.
+- Restore save-path and checker-contract regression tests by including heavy's load-census dependencies in both Git and exported-source fixtures; retain pressure warnings, statfs execution, incomplete-suite refusal and missing-checker rejection.
+- Child model policy now runs only in OMP's native `before_subagent_spawn` hook: fleet chief/director Sol children are admitted and Opus-class children are denied before provider requests. Removed private OMP settings-source imports and obsolete task-call model refusals; brief-contract and prior-art checks remain unchanged. (ompkit-1ra0d.35, NATIVESPAWN1)
+- Send Tern seat messages through the native agent prompt queue instead of composer paste and Enter, including busy seats; require target identity and journal consumption before reporting success.
+- Busy native sends report QUEUED then DELIVERED on journal consumption, or EXPIRED when proof times out; expired submissions remain pending and are never automatically resent.
+- Native br owns dependency-type and template validation, and bv owns ranking; bead lint no longer duplicates these checks. Retired the unsupported-br-flag and todo-phase reminder rules in favor of native tool validation. Usage statistics remain available through `omp stats`.
+- Native verifier children can record export-bound pregrades with `kit_record_pregrade`; authors, stale acceptance digests and missing export commits are refused. Child reservation calls cannot borrow the parent's identity and require their own registered Agent Mail name.
+- Native verifiers that ran untracked source-repository shell commands or any eval are refused, even when the lead committed their edits. Single read/setup commands remain allowed; run verification from an independent export and use `git -C` for source reads.
+- Minimum full-run qualification now honors a reviewed per-suite retirement ledger only after verifying exact Git deletion and ancestry, retaining each applied or already-accounted-for retirement in the verdict. Unlisted deletions still fail; count-drop allowances remain zero.
+- Restore the full-suite disk-pressure regression test by including the release-readiness README checker required to start its real CLI fixture; keep auto/sbh refusal and inherited-statfs admission assertions unchanged.
+
+### Fixed
+
+- Commit preflight now judges the same candidate outside Git's index lock; commits verify the prepared tree and refuse changed paths or parents instead of blocking other writers for the gate run. `save` and `land` prepare automatically; direct commits use `scripts/commit-preflight.sh --message FILE --files PATH...` first.
+- ompkit-1ra0d.29: the near-budget REGEXREF1 test now asserts the gate's documented contract on any host, FAIL at reference ratio 1 and never PASS when slower, instead of requiring FAIL on a loaded host where the gate correctly reports INCONCLUSIVE.
+- Require a real native build spawn with the verbatim kit brief in a fresh non-kit tracker before a local release; catch the retired cross-tracker prior-art refusal. Portable tests explicitly skip when OMP or native br is absent, while the release smoke refuses missing prerequisites.
+- Release and verdict gates use one kit-owned PATH and locale instead of the invoking shell; verdict records retain the judged environment, and genuine runtime mismatches still refuse reuse.
+- Prefer Tern's native OMP launcher when installed, preventing user trust wrappers from hiding launcher versions in fixture homes.
+- Qualification constructs an explicit allowlisted child environment for release, verdict, focused-suite and Python-only storegate checks. Caller profile, Git, tracker and arbitrary variables cannot poison execution or cached PASS reuse; candidate-authored identity conflicts still fail.
+- Release archives carry the pinned environment policy, and suites with a private HOME still find OMP's exact-version source through the operator's read-only cache.
+- Fleet guard permits builders to work on non-main branches in linked worktrees, keeps branch switching and creation out of the canonical checkout, directs raw worktree creation to Worktrunk, and explains that only the lead lands commits.
+- ompkit-1ra0d.42 (WORKTREEKEY1): a `git commit` in a linked worktree now reads the seat's Agent Mail reservations under the canonical repo key (the parent of git's common dir) instead of the worktree path, so paths reserved for a builder worktree are no longer refused as PATH_UNRESERVED; unreserved paths still are.
+- Rules doctor follows OMP's profile YAML precedence (`config.yml`, then `config.yaml`), so ignored legacy settings no longer make healthy profiles unverified. Invalid selected YAML and missing rules still report their causes; inspection never migrates profile settings.
+- Isolated rule probes now run inside their private HOME, preventing the inspected HOME's default plugin from shadowing named-profile plugins or receiving probe writes.
+
+### Removed
+
+- Bead lint no longer blocks work for missing labels, prose-letter citations, blanket dependency size/depth limits, legacy plan citations, historical mentions without edges, or mandatory goal-path placement. Native dependency/cycle/claim checks and acceptance replay remain unchanged; backlog migration preserves clean label-free records.
+- Remove role-based question vetoes, milestone-cut claim vetoes, prose-gap scanning, prior-art citation passwords and seat-specific wait refusals. Native claim custody, human gates, independent acceptance replay, finite-job deadlines and script dependency validation remain enforced.
+- Retire commit-message gap-prose and staged citation-registry blockers; tested repairs can commit on the first attempt. Hook refresh removes unchanged legacy members and preserves owner-modified hooks for review. Explicit fetched-source verification remains available.
+- Remove duplicated standing-law injection, starter-checker reminders, prescribed retry-ledger prose, and the discovery canary from the rule packs; retain checker selftests, explicit discovery diagnostics, and unverified-completion protection.
+
 ## [0.2.98] - 2026-11-07
 
 ### Added

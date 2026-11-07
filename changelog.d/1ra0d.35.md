@@ -1,1 +1,0 @@
-- Child model policy now runs only in OMP's native `before_subagent_spawn` hook: fleet chief/director Sol children are admitted and Opus-class children are denied before provider requests. Removed private OMP settings-source imports and obsolete task-call model refusals; brief-contract and prior-art checks remain unchanged. (ompkit-1ra0d.35, NATIVESPAWN1)

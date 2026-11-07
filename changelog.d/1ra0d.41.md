@@ -1,2 +1,0 @@
-- Native verifier children can record export-bound pregrades with `kit_record_pregrade`; authors, stale acceptance digests and missing export commits are refused. Child reservation calls cannot borrow the parent's identity and require their own registered Agent Mail name.
-- Native verifiers that ran untracked source-repository shell commands or any eval are refused, even when the lead committed their edits. Single read/setup commands remain allowed; run verification from an independent export and use `git -C` for source reads.

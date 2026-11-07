@@ -1,1 +1,0 @@
-- Restore save-path and checker-contract regression tests by including heavy's load-census dependencies in both Git and exported-source fixtures; retain pressure warnings, statfs execution, incomplete-suite refusal and missing-checker rejection.

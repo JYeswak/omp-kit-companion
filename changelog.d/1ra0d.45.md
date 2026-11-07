@@ -1,1 +1,0 @@
-- Minimum full-run qualification now honors a reviewed per-suite retirement ledger only after verifying exact Git deletion and ancestry, retaining each applied or already-accounted-for retirement in the verdict. Unlisted deletions still fail; count-drop allowances remain zero.
