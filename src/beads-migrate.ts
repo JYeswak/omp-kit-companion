@@ -227,11 +227,7 @@ export function planBeadMigration(bead: MigrationBead, options: PlanOptions): Mi
 			descriptionInsertions.push({ at: match.index, text: "WHY: " });
 		}
 	}
-	let labels = bead.labels;
-	if (failures.includes("a-label")) {
-		if (typeof bead.issue_type !== "string" || bead.issue_type.trim() === "") return unchanged("label-not-derived");
-		labels = [bead.issue_type];
-	}
+	const labels = bead.labels;
 	if (source.range === null && candidate === bead.acceptance_criteria && descriptionInsertions.length === 0 && labels === bead.labels) return unchanged("already-clean");
 	if (bead.description.split("\n").some(line => line.startsWith(ORIGINAL))) return unchanged("original-acceptance-already-present");
 	const plan: MigrationPlan = { id: bead.id, status: "PLANNED", before: bead,

@@ -4,8 +4,10 @@ import { afterAll, expect, test } from "bun:test";
 import { readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BEAD_LINT_REFUSED, BEAD_LINT_SCRIPTS_DIR, BEAD_LINT_UNEVALUABLE, BEAD_LINT_UNVERIFIED, checkBeadLint, type FlywheelExecResult } from "../../extensions/kit-flywheel-guard";
-import { createFlywheelHost, toolCall, type Responder } from "./kit-flywheel-host";
+import { BEAD_LINT_REFUSED, BEAD_LINT_SCRIPTS_DIR, BEAD_LINT_UNEVALUABLE, BEAD_LINT_UNVERIFIED, checkBeadLint } from "../../extensions/kit-flywheel-guard";
+import type { FlywheelExecResult } from "../../extensions/kit-flywheel-guard";
+import { createFlywheelHost, toolCall } from "./kit-flywheel-host";
+import type { Responder } from "./kit-flywheel-host";
 
 // LINTEVERY1 (ompkit-nskhp): bead-lint admission at the tool-call layer. A real
 // native br tracker, the real shipped python helpers, the real guard handler.
@@ -89,7 +91,7 @@ test("LINTEVERY1 AC1 planted: an unlinted br create tool call is refused naming 
 	const result = await toolCall(h, t.project, PLANTED);
 	expect(result?.block).toBe(true);
 	expect(result?.reason).toContain(BEAD_LINT_REFUSED);
-	for (const check of ["a-label", "b-what-why-acc", "d-negative-specimen"]) expect(result?.reason).toContain(check);
+	for (const check of ["b-what-why-acc", "d-negative-specimen"]) expect(result?.reason).toContain(check);
 	expect(result?.reason).toContain("`WHAT:` and `WHY:`");
 	expect(result?.reason).toContain("Template: write a file");
 	expect(lintExecs(h.execs).map(call => call.args.slice(-8))).toEqual([["python3", join(BEAD_LINT_SCRIPTS_DIR, "br-create-lint.py"), "create", "x", "-t", "task", "--acceptance", "- [ ] AC1: x"]]);

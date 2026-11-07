@@ -40,7 +40,6 @@ CODE_ACC = (
 MIXED_ACC = CODE_ACC + "\n- [ ] [b] [after 7d] measured over 7 days; planted negative: a one-day sample is rejected"
 BAD_DESC = "no sections here"
 GOOD_DESC = "WHAT: (a) gate parser tags; (b) measure the gate. WHY: early submissions bounce."
-# Lettered scope matches CODE_ACC's single letter, so this bead fails nothing.
 CLEAN_DESC = "WHAT: (a) gate parser tags. WHY: early submissions bounce."
 FAKE_BR = """#!/usr/bin/env python3
 import json, os, sys
@@ -123,10 +122,10 @@ class RepairAdmission(unittest.TestCase):
         self.assertIn("b-what-why-acc", err)
 
     def test_edit_that_adds_a_failure_is_refused_naming_it(self) -> None:
-        # Planted negative: the same repair while dropping every label adds a-label.
-        rc, err = self.run_update(fixture(), "--set-labels", "", new_desc=GOOD_DESC)
+        # Planted negative: repairing scope while introducing a placeholder is not an improvement.
+        rc, err = self.run_update(fixture(), new_desc=GOOD_DESC + " TODO")
         self.assertEqual(rc, 4, err)
-        self.assertIn("a-label", self.refused_checks(err))
+        self.assertIn("h-placeholders", self.refused_checks(err))
 
     def test_edit_that_repairs_nothing_is_refused(self) -> None:
         # Planted negative: a title-only edit leaves the same failures, so nothing is admitted.

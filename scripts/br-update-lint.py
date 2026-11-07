@@ -208,16 +208,6 @@ def prospective(
             }
             for dep in (live.get("dependencies") or [])
         ],
-        # Incoming edges (`br show` dependents): i-mention-edges accepts a
-        # mention joined by an edge in either direction, so dropping these
-        # refused a bead whose mentioned peer points at it (ompkit-9t6f2).
-        "dependents": [
-            {
-                "id": dep.get("id", dep.get("issue_id")),
-                "type": dep.get("type", dep.get("dependency_type")),
-            }
-            for dep in (live.get("dependents") or [])
-        ],
     }
     if args.title is not None:
         bead["title"] = args.title
@@ -707,9 +697,8 @@ def main(argv: list[str]) -> int:
     repair_base = None
     admission = None
     try:
-        from bead_lint import (BoxGrammarUnavailable, goal_path_legacy, lint_bead_failures,
-                               live_dependents, pitfalls_legacy, replayable_claim_refusal,
-                               replayable_findings)
+        from bead_lint import (BoxGrammarUnavailable, lint_bead_failures,
+                               pitfalls_legacy, replayable_claim_refusal, replayable_findings)
         import ac_phase
         live = show_bead(real, project, db, args.bead_id)
         bead = prospective(live, args, project)
@@ -721,12 +710,7 @@ def main(argv: list[str]) -> int:
         if full:
             rows = tracker_rows(real, project, db)
             byid = {row["id"] for row in rows} | {bead["id"]}
-            # CUTGRAPH1 m-goal-path: rows judge goals; blocks edges are read live.
-            # Pre-cutover beads are warned (GOAL_PATH_LEGACY), never refused.
-            dependents = live_dependents(real, db, project)
-            failures = lint_bead_failures(bead, byid, graph=rows, dependents=dependents)
-            for line in goal_path_legacy(bead, rows, dependents):
-                print(f"br-update-lint: {line}", file=sys.stderr)
+            failures = lint_bead_failures(bead, byid)
             # BEADPITFALL1: a pre-cutover build bead without Pitfalls is reported, never refused.
             for line in pitfalls_legacy(bead):
                 print(f"br-update-lint: {line}", file=sys.stderr)

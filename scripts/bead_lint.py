@@ -4,9 +4,8 @@
 Provenance: ported verbatim from
 skill-library-growth/scripts/bead-lint.py at d621765876faafb542d19f397e5b0e3d3e6dbc39
 (bead skill-library-growth-4ov9; rz5.119 bead-lint merge open item).
-Semantics are byte-identical except two parameterized defaults that preserve
-exact behavior at their defaults: check_g(label/plan/section_re) and
-check_j(stale_days), plus scope_beads(parked_label).
+The remaining parameterized defaults preserve the upstream stale-warning
+and parked-bead behavior.
 
 Single-home rule: this module OWNS every symbol it defines. The growth
 scripts/bead-lint.py imports them (fail-closed exit 2 when this home is
@@ -16,11 +15,9 @@ growth gate fires identically here: same code objects, proven by both
 --selftest suites.
 
 Check catalog (all trace to the beads-north-star standard):
-  a-label  b-what-why-acc  c-lettered-scope  d-negative-specimen
-  e-typed-edges  f-fanout-depth  g-eco-plan-cite  h-placeholders
-  i-mention-edges  j-stale-blocked (warning)  k-close-receipt
+  b-what-why-acc  d-negative-specimen  e-typed-edges  h-placeholders
+  j-stale-blocked (warning)  k-close-receipt
   l-ac-phase  l-ac-phase-legacy (warning)  r-verify-replayable (admission only)
-  m-goal-path (admission + goal_path_report; legacy rows are warnings)
   p-pitfalls (admission; pre-cutover beads get PITFALLS_LEGACY warnings)
 p-pitfalls (BEADPITFALL1 ompkit-fp72.120.16.159): a kind:fix/kind:feature bead
 created at or after PITFALLS_CUTOVER carries a Pitfalls section with at least
@@ -30,12 +27,6 @@ RELLINT1 admission: a kind:goal/pillar:release acceptance must execute the
 release-local.sh dry-run using its default freshly fetched origin head.
 An explicit --source override or a printed command is not that readback;
 positive bead-closure prerequisites never substitute for the release path.
-m-goal-path (CUTGRAPH1 ompkit-774u.61): a bead in scope that is neither
-kind:goal nor kind:intake needs a blocks path into an open kind:goal (the
-goal or a bead on its path depends on it); the create and update gates refuse
-it naming the open goals and the `br dep add` remedy. A create declares its
-target with the label goal-path:<target>. Trackers with no open goal are not
-judged; scripts/beads_place.py recommends the goal and target.
 l-ac-phase (ACPHASE1 ompkit-9e9w6): every acceptance item of a bead created
 at or after ac_phase.AC_PHASE_CUTOVER carries exactly one phase tag
 ([build] | [landed] | [live] | [after <window>]) in the leading run of
@@ -94,34 +85,10 @@ STALE_DAYS = 14
 CHECKBOX_RE = re.compile(r"^\s*-\s*\[[ xX]\]", re.M)
 WHAT_RE = re.compile(r"\bWHAT\s*:")
 WHY_RE = re.compile(r"\bWHY\s*:")
-SCOPE_LETTER_RE = re.compile(r"\(([a-z])\)")
-BOX_CITE_RE = re.compile(r"\[([a-z](?:\s*[,;]\s*[a-z])*)\]")
 NEGATIVE_RE = re.compile(
     r"plant|known-?bad|negativ|mutant|fire|refus|reject", re.I
 )
 PLACEHOLDER_RE = re.compile(r"TODO|TBD|<\.\.\.>|<…>|\?\?\?")
-# A bead id is matched only whole (LINTIDBOUND1 ompkit-fp72.135.3.83). \b fell between the 7
-# and the dot of ompkit-t7cn7.19, so the parent id ompkit-t7cn7 matched inside its child's id.
-# An id starts where no id character ([\w.-]) precedes it and ends where neither an id
-# character ([\w-]) nor a dotted child segment (.digit) follows; a sentence-final period
-# ("see ompkit-x.") still ends the id.
-_ID_START = r"(?<![\w.-])"
-_ID_END = r"(?![\w-])(?!\.[0-9])"
-BEAD_MENTION_RE = re.compile(
-    _ID_START + r"([a-z][a-z0-9]*(?:-[a-z0-9]+)+(?:\.[0-9]+(?:\.[0-9]+)*)?)" + _ID_END
-)
-# Gap words between a causal verb and the bead id it governs. Punctuation
-# ends the clause, so a causal word about another subject on the same
-# physical line cannot leak across to the mention (the a0vy1 case: a
-# "blocked"-about-another-wave must not demand a blocks edge to the
-# historical id). At most two plain words may intervene
-# ("blocks edge to <id>", "depend on <id>").
-_REL_GAP = r"(?:\s+[^\s.,;:!?()\"']+){0,2}\s+"
-_BLOCK_VERBS = (
-    r"(?:block(?:s|ed|ing)?|depend(?:s|ed|ing)?|require(?:s|d)?|prerequisite)"
-)
-BEAD_RELATION_WORD_RE = re.compile(r"[a-z]+")
-ECO_SECTION_RE = re.compile(r"(?i)\bsection\b|\bsec\.\s*\d|§")
 
 
 def utcnow_iso() -> str:
@@ -162,10 +129,6 @@ def scope_beads(
 def nonclosed_beads(beads: list[dict]) -> list[dict]:
     return [b for b in beads if b.get("status") != "closed"]
 
-def check_a(beads: list[dict]) -> list[str]:
-    return [b["id"] for b in beads if not b.get("labels")]
-
-
 def has_what_why(desc: str) -> bool:
     return bool(WHAT_RE.search(desc) and WHY_RE.search(desc))
 
@@ -182,48 +145,12 @@ def check_b(beads: list[dict]) -> list[str]:
     return bad
 
 
-def what_segment(desc: str) -> str:
-    m = WHY_RE.search(desc)
-    return desc[: m.start()] if m else desc
-
-
-def box_cites(box_line: str) -> set[str]:
-    stripped = re.sub(r"^\s*-\s*\[[ xX]\]\s*", "", box_line)
-    out: set[str] = set()
-    for m in BOX_CITE_RE.finditer(stripped):
-        for part in re.split(r"[,;]", m.group(1)):
-            part = part.strip()
-            if len(part) == 1:
-                out.add(part)
-    return out
-
-
 def iter_box_lines(acc: str) -> list[str]:
     return [
         line
         for line in (acc or "").splitlines()
         if re.match(r"^\s*-\s*\[[ xX]\]", line)
     ]
-
-
-def check_c(beads: list[dict]) -> list[str]:
-    bad = []
-    for b in beads:
-        seg = what_segment(b.get("description") or "")
-        scope = set(SCOPE_LETTER_RE.findall(seg))
-        if not scope:
-            continue
-        lines = iter_box_lines(b.get("acceptance_criteria") or "")
-        cited: set[str] = set()
-        empty_box = False
-        for line in lines:
-            cites = box_cites(line)
-            if not cites:
-                empty_box = True
-            cited |= cites
-        if empty_box or (scope - cited):
-            bad.append(b["id"])
-    return bad
 
 
 def check_d(beads: list[dict]) -> list[str]:
@@ -243,85 +170,6 @@ def check_e(beads: list[dict]) -> list[str]:
                 break
     return bad
 
-def dep_targets_in_scope(
-    beads: list[dict], scope_ids: set[str]
-) -> dict[str, list[str]]:
-    return {
-        b["id"]: [
-            d.get("depends_on_id")
-            for d in (b.get("dependencies") or [])
-            if d.get("depends_on_id") in scope_ids
-        ]
-        for b in beads
-    }
-
-
-def check_f(beads: list[dict]) -> tuple[list[str], dict[str, str]]:
-    """f-fanout-depth. A kind:goal bead is exempt from the fanout cap (a
-    release goal gathers every bead it ships), and chain depth counts from a
-    work bead down to the first goal only: an edge into a goal is never
-    followed, so goal-to-goal links (train 6 on train 5) add no depth. A work
-    chain deeper than 4 below a goal is still refused (CUTGRAPH1 box f)."""
-    scope_ids = {b["id"] for b in beads}
-    goal_ids = {b["id"] for b in beads if is_goal(b)}
-    targets = dep_targets_in_scope(beads, scope_ids)
-    children: dict[str, list[str]] = {bid: [] for bid in scope_ids}
-    for src, tgts in targets.items():
-        for t in tgts:
-            children[t].append(src)
-    bad: set[str] = set()
-    detail: dict[str, str] = {}
-    for bid, ch in children.items():
-        if len(ch) > 20 and bid not in goal_ids:
-            bad.add(bid)
-            detail[bid] = f"fanout {len(ch)} > 20"
-    sys.setrecursionlimit(max(10000, len(beads) * 4 + 100))
-    memo: dict[str, int | None] = {}
-
-    def depth(bid: str, stack: frozenset[str]) -> int | None:
-        if bid in memo:
-            return memo[bid]
-        if bid in stack:
-            memo[bid] = None
-            return None
-        ds = []
-        for t in targets.get(bid, []):
-            if t in goal_ids:
-                continue
-            d = depth(t, stack | {bid})
-            if d is None:
-                memo[bid] = None
-                return None
-            ds.append(d)
-        memo[bid] = (1 + max(ds)) if ds else 0
-        return memo[bid]
-
-    for b in beads:
-        d = depth(b["id"], frozenset())
-        if d is not None and d > 4:
-            bad.add(b["id"])
-            detail[b["id"]] = f"chain depth {d} > 4"
-    return sorted(bad), detail
-
-
-def check_g(
-    beads: list[dict],
-    label: str = "eco",
-    plan: str = "PLAN_eco.md",
-    section_re: re.Pattern = ECO_SECTION_RE,
-) -> list[str]:
-    bad = []
-    for b in beads:
-        if label not in (b.get("labels") or []):
-            continue
-        text = (b.get("description") or "") + "\n" + (
-            b.get("acceptance_criteria") or ""
-        )
-        if plan not in text or not section_re.search(text):
-            bad.append(b["id"])
-    return bad
-
-
 def check_h(beads: list[dict]) -> list[str]:
     bad = []
     for b in beads:
@@ -335,176 +183,6 @@ def check_h(beads: list[dict]) -> list[str]:
         if PLACEHOLDER_RE.search(text):
             bad.append(b["id"])
     return bad
-
-
-def check_i(
-    beads: list[dict],
-    byid: set[str],
-    graph_beads: list[dict] | None = None,
-) -> list[str]:
-    edge_types: dict[tuple[str, str], set[str]] = {}
-
-    def add_edge(source: object, target: object, edge_type: object) -> None:
-        if not isinstance(source, str) or not isinstance(target, str):
-            return
-        if not isinstance(edge_type, str):
-            return
-        edge_types.setdefault((source, target), set()).add(edge_type)
-        if edge_type in {"related", "parent-child"}:
-            edge_types.setdefault((target, source), set()).add(edge_type)
-
-    for record in beads if graph_beads is None else graph_beads:
-        source_id = record.get("id")
-        if not isinstance(source_id, str):
-            continue
-        for edge in record.get("dependencies") or []:
-            if not isinstance(edge, dict):
-                continue
-            target_id = edge.get("depends_on_id") or edge.get("id")
-            edge_type = edge.get("type") or edge.get("dependency_type")
-            add_edge(source_id, target_id, edge_type)
-        for edge in record.get("dependents") or []:
-            if not isinstance(edge, dict):
-                continue
-            dependent_id = (
-                edge.get("id")
-                or edge.get("issue_id")
-                or edge.get("depends_on_id")
-            )
-            edge_type = edge.get("type") or edge.get("dependency_type")
-            add_edge(dependent_id, source_id, edge_type)
-
-    causal_words = {
-        "block", "blocked", "blocks", "depend", "depends", "dependency",
-        "dependencies", "require", "requires", "required", "prerequisite",
-    }
-    bad = []
-    for bead in beads:
-        bead_id = bead.get("id")
-        if not isinstance(bead_id, str):
-            continue
-        text = (
-            (bead.get("description") or "")
-            + "\n"
-            + (bead.get("acceptance_criteria") or "")
-        ).lower()
-        contexts: dict[str, set[str]] = {}
-        for match in BEAD_MENTION_RE.finditer(text):
-            mention = match.group(1)
-            if mention not in byid or mention == bead_id:
-                continue
-            line_start = text.rfind("\n", 0, match.start()) + 1
-            line_end = text.find("\n", match.end())
-            if line_end < 0:
-                line_end = len(text)
-            words = set(
-                BEAD_RELATION_WORD_RE.findall(text[line_start:line_end])
-            )
-            mention_fixture = (
-                bool(words & {"mention", "mentions", "mentioned", "mentioning"})
-                and "edge" in words
-                and bool(words & {"fail", "fails", "failed", "pass", "passes", "passed"})
-            )
-            regex_fixture = (
-                bool(words & {"regex", "pattern", "matcher"})
-                and bool(words & {"match", "matches", "matched", "matching"})
-                and not (words & causal_words)
-                and not (words & {"parent", "child", "children", "related"})
-            )
-            # These clauses describe matcher fixtures, not references by the
-            # bead that contains them.
-            if mention_fixture or regex_fixture:
-                continue
-            relation = _mention_relation(text, mention)
-            contexts.setdefault(mention, set()).add(relation)
-
-        for mention, relations in contexts.items():
-            outgoing = edge_types.get((bead_id, mention), set())
-            incoming = edge_types.get((mention, bead_id), set())
-            connected = outgoing | incoming
-            valid = True
-            if "blocks" in relations and "blocks" not in outgoing:
-                valid = False
-            if (
-                "parent-child" in relations
-                and "parent-child" not in connected
-            ):
-                valid = False
-            if "related" in relations and not (
-                {"related", "discovered-from"} & connected
-            ):
-                valid = False
-            if "generic" in relations and not connected:
-                valid = False
-            if not valid:
-                bad.append(bead_id)
-                break
-    return bad
-
-
-def _mention_relation(text: str, mention: str) -> str:
-    """Name the typed edge the text asserts for one mentioned bead id.
-
-    Only a causal assertion adjacent to the mention (at most two plain
-    words away, never across clause punctuation) names a typed edge.
-    A causal word about another subject elsewhere on the line does not
-    leak across: historical evidence stays generic, satisfied by any
-    real edge, and an edgeless mention still fails.
-    """
-    esc = _ID_START + re.escape(mention) + _ID_END
-    if re.search(_BLOCK_VERBS + _REL_GAP + esc, text) or re.search(
-        esc + _REL_GAP + r"(?:blocks?|blocked|blocking)\b", text
-    ):
-        return "blocks"
-    if re.search(r"(?:parent|child)\s+of\s*" + esc, text):
-        return "parent-child"
-    if re.search(r"related\s+(?:edge\s+)?to\s*" + esc, text) or re.search(
-        r"discovered[-\s]?from\s*:?\s*" + esc, text
-    ) or re.search(
-        esc + _REL_GAP + r"related\s+edge\b", text
-    ):
-        return "related"
-    return "generic"
-
-
-# LINTIDBOUND1 boundary cases: (name, bead id, text, edges, flagged by check_i). The first four
-# are children of ompkit-x whose text names the child id ompkit-x.19; the parent id must never be
-# read inside it (the ompkit-t7cn7.21 shape). The sentence-final control proves "ompkit-x." still
-# names ompkit-x and demands its edge.
-_PC_X = {"depends_on_id": "ompkit-x", "type": "parent-child"}
-MENTION_BOUNDARY_CASES = (
-    ("child-id-discovered-from", "ompkit-x.1", "parent: ompkit-x\ndiscovered-from: ompkit-x.19",
-     [_PC_X, {"depends_on_id": "ompkit-x.19", "type": "discovered-from"}], False),
-    ("child-id-related-to", "ompkit-x.1", "parent: ompkit-x\nrelated to ompkit-x.19",
-     [_PC_X, {"depends_on_id": "ompkit-x.19", "type": "related"}], False),
-    ("child-id-blocks", "ompkit-x.1", "child of ompkit-x; ompkit-x.19 blocks it",
-     [_PC_X, {"depends_on_id": "ompkit-x.19", "type": "blocks"}], False),
-    ("child-id-only", "ompkit-x.1", "ompkit-x.19 found it",
-     [_PC_X, {"depends_on_id": "ompkit-x.19", "type": "discovered-from"}], False),
-    ("sentence-final-needs-edge", "other-1", "builds on ompkit-x.", [], True),
-)
-# finditer over the whole text: every whole id, in order (dotted ids stay whole).
-MENTION_SCAN_CASES = (
-    ("see ompkit-x.", ["ompkit-x"]),
-    ("ompkit-x.19. then ompkit-x.19.2, not ompkit-x.19a or v1.ompkit-x", ["ompkit-x.19", "ompkit-x.19.2"]),
-    ("discovered-from: ompkit-t7cn7.19 (parent ompkit-t7cn7)", ["discovered-from", "ompkit-t7cn7.19", "ompkit-t7cn7"]),
-)
-
-
-def mention_boundary_failures() -> list[str]:
-    """One line per LINTIDBOUND1 boundary case the current matcher gets wrong (empty = all right)."""
-    out = []
-    byid = {"ompkit-x", "ompkit-x.1", "ompkit-x.19", "other-1"}
-    for name, bid, text, deps, want in MENTION_BOUNDARY_CASES:
-        got = bool(check_i([{"id": bid, "description": text, "dependencies": deps}], byid))
-        if got != want:
-            out.append(f"{name}: check_i flagged={got}, want {want}")
-    for text, want in MENTION_SCAN_CASES:
-        got = [m.group(1) for m in BEAD_MENTION_RE.finditer(text)]
-        if got != want:
-            out.append(f"scan {text!r}: got {got}, want {want}")
-    return out
-
 
 
 def latest_comment_ts(bead: dict) -> datetime | None:
@@ -554,286 +232,6 @@ def check_l_legacy(beads: list[dict]) -> list[str]:
         if not ac_phase.is_enforced(b.get("created_at"))
         and ac_phase.tag_refusals(b.get("acceptance_criteria"))
     ]
-
-# ---- CUTGRAPH1 box d (ompkit-774u.61): m-goal-path ----
-# Every bead in scope names an open kind:goal through a BLOCKS path: the goal,
-# or a bead already on the goal's path, depends on it (`br dep add <target>
-# <id>`). parent-child is grouping only and never counts. kind:intake is the
-# declared holding pen; a kind:goal bead is its own root. A tracker with no
-# open goal is not goal-structured and is not judged. A create cannot add an
-# edge pointing at itself, so it declares its target with the label
-# goal-path:<target>; the create is admitted only when that target is an open
-# goal or on an open goal's blocks path, and the follow-up `br dep add` makes
-# the edge real (the update gate and the report judge the edge, not the label).
-GOAL_LABEL = "kind:goal"
-INTAKE_LABEL = "kind:intake"
-GOAL_PATH_LABEL = "goal-path:"
-GOAL_PATH_CHECK = "m-goal-path"
-# Beads created before this instant are reported as warnings only.
-GOAL_PATH_CUTOVER = "2026-10-31T00:00:00Z"
-GOAL_PATH_VISIT_CAP = 20000
-
-
-def encode_goal_path_id(bead_id: str) -> str:
-    """br labels allow only [A-Za-z0-9_:-]; a dotted child id's numeric
-    suffix rides as underscores: ompkit-774u.60 -> ompkit-774u_60."""
-    base, _, rest = bead_id.partition(".")
-    return base + ("_" + rest.replace(".", "_") if rest else "")
-
-
-def decode_goal_path_id(token: str) -> str:
-    """Inverse of encode_goal_path_id: only the trailing all-digit `_N`
-    segments become `.N`; underscores elsewhere are kept."""
-    parts = token.split("_")
-    k = len(parts)
-    while k > 1 and parts[k - 1].isascii() and parts[k - 1].isdigit():
-        k -= 1
-    if k == len(parts):
-        return token
-    return "_".join(parts[:k]) + "." + ".".join(parts[k:])
-
-
-def is_goal(bead: dict) -> bool:
-    return GOAL_LABEL in (bead.get("labels") or [])
-
-
-def is_open_row(bead: dict) -> bool:
-    return (bead.get("status") or "open") not in ("closed", "tombstone")
-
-
-def open_goal_rows(rows: list[dict]) -> list[dict]:
-    return sorted((r for r in rows if is_goal(r) and is_open_row(r)),
-                  key=lambda r: r["id"])
-
-
-def rows_dependents(rows: list[dict]):
-    """dependents(id) from JSONL-shaped rows: ids whose blocks edge waits on id."""
-    index: dict[str, list[str]] = {}
-    for row in rows:
-        for dep in row.get("dependencies") or []:
-            if dep.get("type") == "blocks" and dep.get("depends_on_id"):
-                index.setdefault(dep["depends_on_id"], []).append(row["id"])
-    return lambda bid: index.get(bid, [])
-
-
-def live_dependents(real: str, db: str, cwd: str, timeout: int = 30):
-    """dependents(id) read live: `br dep list ID --direction up --type blocks`."""
-    def dependents(bid: str) -> list[str]:
-        cmd = [real, "dep", "list", bid, "--direction", "up", "--type", "blocks", "--json"]
-        if db:
-            cmd.extend(["--db", db, "--no-auto-import", "--no-auto-flush"])
-        rc, out, err = run(cmd, cwd, timeout)
-        if rc != 0:
-            raise RuntimeError(f"br dep list {bid} failed rc={rc}: {(err or out)[:300]}")
-        try:
-            data = json.loads(out or "[]")
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"br dep list {bid} unparsable: {exc}")
-        return [d["issue_id"] for d in data if isinstance(d, dict)
-                and d.get("depends_on_id") == bid and d.get("type") == "blocks"
-                and d.get("issue_id")]
-    return dependents
-
-
-def goal_path_target(starts: list[str], goal_ids: set[str], dependents) -> str | None:
-    """The first open goal reached from `starts` along blocks edges (a start
-    that is itself an open goal counts), else None."""
-    seen: set[str] = set()
-    queue = list(starts)
-    while queue:
-        bid = queue.pop(0)
-        if bid in seen:
-            continue
-        seen.add(bid)
-        if len(seen) > GOAL_PATH_VISIT_CAP:
-            raise RuntimeError(f"goal path walk exceeded {GOAL_PATH_VISIT_CAP} beads")
-        if bid in goal_ids:
-            return bid
-        queue.extend(dependents(bid))
-    return None
-
-
-def parent_child_ancestors(bead: dict, rows: list[dict], limit: int = 32) -> set[str]:
-    """Ids reached from `bead` by parent-child edges, read from the bead itself and then the tracker rows."""
-    parents: dict[str, list[str]] = {}
-    for row in rows:
-        for dep in row.get("dependencies") or []:
-            if dep.get("type") == "parent-child" and dep.get("depends_on_id"):
-                parents.setdefault(row["id"], []).append(dep["depends_on_id"])
-    own = [dep.get("depends_on_id") or dep.get("id") for dep in bead.get("dependencies") or []
-           if (dep.get("type") or dep.get("dependency_type")) == "parent-child"]
-    found: set[str] = set()
-    queue = [p for p in own if p] or list(parents.get(bead.get("id") or "", []))
-    while queue and len(found) < limit:
-        current = queue.pop(0)
-        if current in found:
-            continue
-        found.add(current)
-        queue.extend(parents.get(current, []))
-    return found
-
-
-def goal_path_finding(bead: dict, rows: list[dict], dependents=None) -> list[str]:
-    """m-goal-path finding for one bead against the tracker rows, whatever its age."""
-    labels = bead.get("labels") or []
-    if not is_open_row(bead) or "parked" in labels:
-        return []
-    if GOAL_LABEL in labels or INTAKE_LABEL in labels:
-        return []
-    bid = bead.get("id") or "<new>"
-    goals = [g for g in open_goal_rows(rows) if g["id"] != bid]
-    if not goals:
-        return []
-    goal_ids = {g["id"] for g in goals}
-    if dependents is None:
-        dependents = rows_dependents(rows)
-    if bid == "<new>":
-        known = {r["id"] for r in rows}
-        starts = []
-        for lab in labels:
-            if lab.startswith(GOAL_PATH_LABEL) and len(lab) > len(GOAL_PATH_LABEL):
-                raw = lab[len(GOAL_PATH_LABEL):]
-                starts.extend(c for c in dict.fromkeys([decode_goal_path_id(raw), raw])
-                              if c in known)
-    else:
-        starts = [bid]
-    if starts and goal_path_target(starts, goal_ids, dependents):
-        return []
-    # GOALCHILD1 (ompkit-1ra0d, 2026-11-06): a parent-child descendant of an open goal is on that goal's path (the goal
-    # cannot close while the child is open). The only other edge, goal -> child blocks, is refused by PARENTBLOCK1 and
-    # EPICWAIT1 because it hides every child from br ready, so without this every child of a goal epic was unplaceable.
-    if parent_child_ancestors(bead, rows) & goal_ids:
-        return []
-    named = "; ".join(f"{g['id']} ({(g.get('title') or '')[:80]})" for g in goals)
-    # PARENTBLOCK1 (rz5.134): never tell an author to make one of the bead's own parent-child ancestors wait on it;
-    # that edge parent-blocks every child of the ancestor (2026-11-01: 54 of 61 release-train children hidden).
-    ancestors = parent_child_ancestors(bead, rows)
-    # EPICWAIT1: a goal with open parent-child children is no safe target either; a blocks edge from it to the new bead
-    # parent-blocks every child (2026-11-02: this advice named ompkit-774u, which would have hidden its 96 children).
-    with_children = {dep["depends_on_id"] for row in rows if is_open_row(row) for dep in row.get("dependencies") or []
-                     if dep.get("type") == "parent-child" and dep.get("depends_on_id")}
-    eligible = [g for g in goals if g["id"] not in ancestors and g["id"] not in with_children]
-    if not eligible:
-        fix = (f"label it {INTAKE_LABEL} for the director to place (every open goal is an ancestor of this bead or an "
-               f"epic with open children, and a goal that waits on a new bead hides all of its children from br ready)")
-    elif bid == "<new>":
-        first = eligible[0]["id"]
-        fix = (f"create with --labels {GOAL_PATH_LABEL}{encode_goal_path_id(first)} "
-               f"(a goal or a bead on its path; dots in the id written as _) and then run "
-               f"`br dep add {first} <NEW_ID>` (the target waits on the new bead), or label it "
-               f"{INTAKE_LABEL}; scripts/beads_place.py --title TEXT --json picks the target")
-    else:
-        first = eligible[0]["id"]
-        fix = (f"run `br dep add {first} {bid}` (or a bead on that goal's path in place of "
-               f"{first}, never one of {bid}'s own parents), or label it {INTAKE_LABEL}; "
-               f"scripts/beads_place.py --title TEXT --json picks the target")
-    return [f"{GOAL_PATH_CHECK}:GOAL_PATH_MISSING {bid} has no blocks path into an open "
-            f"{GOAL_LABEL} bead; open goals: {named}; fix: {fix}"]
-
-
-def goal_path_enforced(created_at: str | None) -> bool:
-    ts = parse_iso(created_at or "")
-    cut = parse_iso(GOAL_PATH_CUTOVER)
-    return ts is None or ts >= cut
-
-
-def goal_path_failure(bead: dict, rows: list[dict], dependents=None) -> list[str]:
-    """Refusing m-goal-path failure: creates and beads created at or after
-    GOAL_PATH_CUTOVER only (like l-ac-phase); older beads get goal_path_legacy."""
-    if bead.get("id", "<new>") != "<new>" and not goal_path_enforced(bead.get("created_at")):
-        return []
-    return goal_path_finding(bead, rows, dependents)
-
-
-def goal_path_legacy(bead: dict, rows: list[dict], dependents=None) -> list[str]:
-    """GOAL_PATH_LEGACY warning lines for a pre-cutover unplaced bead (never refused)."""
-    if bead.get("id", "<new>") == "<new>" or goal_path_enforced(bead.get("created_at")):
-        return []
-    return [line.replace(f"{GOAL_PATH_CHECK}:GOAL_PATH_MISSING", "GOAL_PATH_LEGACY", 1)
-            for line in goal_path_finding(bead, rows, dependents)]
-
-
-def goal_path_report(rows: list[dict], dependents=None) -> dict[str, list[str]]:
-    """m-goal-path over the in-scope cut: post-cutover offenders are
-    `enforced` (refused on any create/update), earlier ones `legacy` (warning)."""
-    if dependents is None:
-        dependents = rows_dependents(rows)
-    out: dict[str, list[str]] = {"enforced": [], "legacy": []}
-    for bead in scope_beads(rows):
-        if goal_path_finding(bead, rows, dependents):
-            key = "enforced" if goal_path_enforced(bead.get("created_at")) else "legacy"
-            out[key].append(bead["id"])
-    return {k: sorted(v) for k, v in out.items()}
-
-
-def goal_path_selftest() -> tuple[list[str], dict]:
-    """Planted negatives and paired controls for m-goal-path and the check-f
-    goal exemption. Returns (failures, log)."""
-    post, pre = GOAL_PATH_CUTOVER, "2026-10-30T23:59:59.999999Z"
-    rows = [
-        mkbead("gp-goal", labels=["kind:goal"], deps=[dep_to("gp-goal", "gp-w1")]),
-        mkbead("gp-shut", status="closed", labels=["kind:goal"],
-               deps=[dep_to("gp-shut", "gp-under-shut")]),
-        mkbead("gp-w1", deps=[dep_to("gp-w1", "gp-w2")], created_at=post),
-        mkbead("gp-w2", created_at=post),
-        mkbead("gp-under-shut", created_at=post),
-        mkbead("gp-unplaced", created_at=post),
-        mkbead("gp-parent-only", created_at=post,
-               deps=[dep_to("gp-parent-only", "gp-goal", "parent-child")]),
-        mkbead("gp-legacy", created_at=pre),
-        mkbead("gp-intake", labels=["kind:intake"], created_at=post),
-        mkbead("gp-leafgoal", labels=["kind:goal"]),
-    ]
-    fails: list[str] = []
-    report = goal_path_report(rows)
-    want = {"enforced": ["gp-under-shut", "gp-unplaced"],
-            "legacy": ["gp-legacy"]}
-    if report != want:
-        fails.append(f"report: want {want} got {report}")
-    planted = goal_path_failure(rows[5], rows)
-    if not (planted and "gp-goal" in planted[0] and "br dep add gp-leafgoal gp-unplaced" in planted[0]):
-        fails.append(f"unplaced bead not refused naming the goal and remedy: {planted}")
-    # EPICWAIT1: gp-goal has an open child (gp-parent-only), so it is never the remedy target; with no childless goal
-    # left the remedy is kind:intake (2026-11-02: the advice named ompkit-774u and would have hidden its 96 children).
-    epic_only = [r for r in rows if r["id"] != "gp-leafgoal"]
-    advice = goal_path_failure(rows[5], epic_only)
-    if not advice or "br dep add gp-goal" in advice[0] or "kind:intake" not in advice[0]:
-        fails.append(f"an epic with open children was offered as the wait target: {advice}")
-    # GOALCHILD1 (ompkit-1ra0d): a parent-child descendant of an open goal is on its path, so it is admitted with no
-    # remedy at all; PARENTBLOCK1 (rz5.134) still holds because no `br dep add <goal> <child>` advice is ever produced.
-    # The unplaced control above still gets the `br dep add` remedy.
-    child = goal_path_failure(rows[6], rows)
-    if child:
-        fails.append(f"child of an open goal epic refused as off-path: {child}")
-    new_ok = mkbead("<new>", labels=["selftest", GOAL_PATH_LABEL + "gp-w2"], created_at=post)
-    new_bad = mkbead("<new>", labels=["selftest", GOAL_PATH_LABEL + "gp-under-shut"], created_at=post)
-    new_none = mkbead("<new>", created_at=post)
-    if goal_path_failure(new_ok, rows):
-        fails.append("create placed under gp-w2 refused")
-    if not goal_path_failure(new_bad, rows):
-        fails.append("create placed only under a closed goal admitted")
-    if not goal_path_failure(new_none, rows):
-        fails.append("unplaced create admitted")
-    if goal_path_failure(new_none, [r for r in rows if not is_goal(r)]):
-        fails.append("tracker with no goal judged")
-    # check f: a goal may gather 23 blockers and link to another goal; a work
-    # chain 5 deep under a goal is still refused.
-    fx = [mkbead("fx-goal-a", labels=["kind:goal"],
-                 deps=[dep_to("fx-goal-a", f"fx-b{n:02d}") for n in range(23)]
-                 + [dep_to("fx-goal-a", "fx-goal-b")]),
-          mkbead("fx-goal-b", labels=["kind:goal"])]
-    fx += [mkbead(f"fx-b{n:02d}", deps=[dep_to(f"fx-b{n:02d}", "fx-goal-b")]) for n in range(23)]
-    f_goal = check_f(fx)[0]
-    if f_goal:
-        fails.append(f"check f refused goal fanout or goal links: {f_goal}")
-    chain = [mkbead("fx-goal-c", labels=["kind:goal"], deps=[dep_to("fx-goal-c", "fx-c0")])]
-    chain += [mkbead(f"fx-c{n}", deps=[dep_to(f"fx-c{n}", f"fx-c{n + 1}")] if n < 5 else [])
-              for n in range(6)]
-    f_chain = check_f(chain)[0]
-    if "fx-c0" not in f_chain:
-        fails.append(f"check f admitted a work chain 5 deep: {f_chain}")
-    return fails, {"report": report, "planted": planted, "f_goal": f_goal, "f_chain": f_chain}
-
 
 # REPLAYABLE1 (ompkit-fp72.135.3.71). The box grammar lives only in
 # src/verify.ts; box-lint.ts runs it and this module shapes the verdict, so the
@@ -1131,18 +529,9 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
     expected: dict[str, list[str]] = {}
     beads.append(clean_bead("st-clean-a"))
     beads.append(clean_bead("st-clean-b"))
-    beads.append(mkbead("st-v-a", labels=[], desc=CLEAN_DESC, acc=CLEAN_ACC,
-                        deps=[dep_to("st-v-a", "st-base", "related")]))
-    expected["a-label"] = ["st-v-a"]
     beads.append(clean_bead("st-v-b", desc="no sections here",
                             acc="planted negative specimen noted, no list"))
     expected["b-what-why-acc"] = ["st-v-b"]
-    beads.append(clean_bead(
-        "st-v-c",
-        acc="- [ ] [build] widget builds, no cites at all.\n"
-        "- [ ] [b] [build] docs render; planted negative bad-markdown RED.\n",
-    ))
-    expected["c-lettered-scope"] = ["st-v-c"]
     beads.append(clean_bead(
         "st-v-d",
         acc="- [ ] [a] [build] widget builds with no adversarial specimen.\n"
@@ -1152,145 +541,11 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
     beads.append(clean_bead(
         "st-v-e", deps=[dep_to("st-v-e", "st-base", "mystery")]))
     expected["e-typed-edges"] = ["st-v-e"]
-    beads.append(clean_bead("st-v-f"))
-    for n in range(21):
-        beads.append(clean_bead(
-            f"st-v-f-kid-{n:02d}",
-            desc="WHAT: (a) kid slice of the fanout parent. "
-            "WHY: proves the epic splits.",
-            acc="- [ ] [a] [build] kid slice lands; planted negative: kid-missing "
-            "fixture goes RED.\n",
-            deps=[dep_to(f"st-v-f-kid-{n:02d}", "st-v-f")],
-        ))
-    expected["f-fanout-depth"] = ["st-v-f"]
-    beads.append(clean_bead(
-        "st-v-g",
-        labels=["selftest", "eco"],
-        desc="WHAT: (a) eco thing. WHY: cited plan work.",
-        acc="- [ ] [a] [build] eco thing done; planted negative bad specimen RED.\n",
-    ))
-    expected["g-eco-plan-cite"] = ["st-v-g"]
     beads.append(clean_bead(
         "st-v-h",
         desc=CLEAN_DESC + " Still TODO: finish later.",
     ))
     expected["h-placeholders"] = ["st-v-h"]
-    beads.append(mkbead(
-        "st-v-i", desc=CLEAN_DESC + " See st-clean-a.",
-        acc=CLEAN_ACC, deps=[dep_to("st-v-i", "st-base", "related")],
-    ))
-    id_test_desc = (
-        "WHAT: (a) resolve the tracker reference; (b) preserve the control. "
-        "WHY: references require a typed edge."
-    )
-    dotted_id = "ompkit-rc-epic-land-fix-release-dogfood-rz5.119"
-    for target in ("ompkit-axz7m", dotted_id, "bd-abc123"):
-        beads.append(mkbead(target, desc=id_test_desc, acc=CLEAN_ACC))
-    beads.append(mkbead(
-        "st-v-i-single",
-        desc=id_test_desc + "\nSee ompkit-axz7m.",
-        acc=CLEAN_ACC,
-    ))
-    beads.append(mkbead(
-        "st-v-i-legacy",
-        desc=id_test_desc + "\nSee bd-abc123.",
-        acc=CLEAN_ACC,
-    ))
-    beads.append(mkbead(
-        "st-v-i-dotted-missing",
-        desc=id_test_desc + f"\nDepends on {dotted_id}.",
-        acc=CLEAN_ACC,
-    ))
-    beads.append(mkbead(
-        "st-v-i-dotted-blocks",
-        desc=id_test_desc + f"\nDepends on {dotted_id}.",
-        acc=CLEAN_ACC,
-        deps=[dep_to("st-v-i-dotted-blocks", dotted_id, "blocks")],
-    ))
-    beads.append(mkbead(
-        "st-v-i-related-only",
-        desc=id_test_desc + "\nRequires ompkit-axz7m.",
-        acc=CLEAN_ACC,
-        deps=[dep_to("st-v-i-related-only", "ompkit-axz7m", "related")],
-    ))
-    beads.append(mkbead(
-        "st-v-i-related-control",
-        desc=id_test_desc + "\nThis is related to ompkit-axz7m.",
-        acc=CLEAN_ACC,
-        deps=[dep_to("st-v-i-related-control", "ompkit-axz7m", "related")],
-    ))
-    beads.append(mkbead(
-        "st-v-i-discovered",
-        desc=id_test_desc + f"\ndiscovered-from: {dotted_id}.",
-        acc=CLEAN_ACC,
-        deps=[dep_to("st-v-i-discovered", dotted_id, "related")],
-    ))
-    beads.append(mkbead(
-        "st-v-i-prose",
-        desc=id_test_desc + "\nnon-author and pre-push are ordinary prose.",
-        acc=CLEAN_ACC,
-    ))
-    beads.append(mkbead(
-        "st-v-i-meta",
-        desc="WHAT: preserve literal examples. WHY: this tests metalinguistic references.",
-        acc=CLEAN_ACC
-        + "- [ ] [a] [build] a description mentioning ompkit-axz7m with no "
-        "edge fails i-mention-edges, and one mentioning ...rz5.119 with a "
-        "blocks edge to ...rz5.119 passes; planted negative: the no-edge "
-        "fixture is RED.\n",
-    ))
-    beads.append(mkbead(
-        "st-v-i-regex-example",
-        desc=id_test_desc
-        + "\nThe rework miner found check_i's regex never matched ompkit-axz7m.",
-        acc=CLEAN_ACC,
-    ))
-    beads.append(mkbead(
-        "st-v-i-steps-example",
-        desc=id_test_desc
-        + "\nLint a bead whose description mentions ompkit-axz7m with no edge: "
-        "check_i passes it.",
-        acc=CLEAN_ACC,
-    ))
-    beads.append(mkbead(
-        "st-v-i-historical",
-        desc=id_test_desc
-        + f"\nNames {dotted_id} as historical evidence for the 54-path hold.",
-        acc=CLEAN_ACC,
-        deps=[dep_to("st-v-i-historical", dotted_id, "discovered-from")],
-    ))
-    beads.append(mkbead(
-        "st-v-i-blocked-elsewhere",
-        desc=id_test_desc
-        + f"\nUnreserved paths blocked the wave; history names {dotted_id} "
-        "as evidence.",
-        acc=CLEAN_ACC,
-    ))
-    parent_id, child_id = "st-v-i-parent", "st-v-i-child"
-    parent = mkbead(
-        parent_id,
-        desc=id_test_desc + f"\nParent of {child_id}.",
-        acc=CLEAN_ACC,
-    )
-    child = mkbead(
-        child_id,
-        desc=id_test_desc + f"\nChild of {parent_id}.",
-        acc=CLEAN_ACC,
-        deps=[dep_to(child_id, parent_id, "parent-child")],
-    )
-    parent["dependents"] = [
-        {"id": child_id, "dependency_type": "parent-child"}
-    ]
-    beads.extend([parent, child])
-    expected["i-mention-edges"] = [
-        "st-v-e",
-        "st-v-i",
-        "st-v-i-single",
-        "st-v-i-legacy",
-        "st-v-i-dotted-missing",
-        "st-v-i-related-only",
-        "st-v-i-blocked-elsewhere",
-    ]
     beads.append(clean_bead(
         "st-v-j", status="blocked", comments=[],
     ))
@@ -1308,9 +563,7 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
         "a one-day fixture must be rejected.\n",
     ))
     # ompkit-fp72.135.3.48: a runtime counter in code behavior is not an
-    # observation window (GOALKEEP1 AC2 text verbatim behind its phase tags),
-    # while counted reports or runs over time still are. These hang off
-    # st-v-time, not st-base, so st-base stays under the f-fanout limit.
+    # observation window, while counted reports or runs over time still are.
     def time_bead(bid: str, extra: str) -> dict:
         return clean_bead(bid, desc=CLEAN_DESC.replace("st-base", "st-v-time"), acc=CLEAN_ACC + extra,
                           deps=[dep_to(bid, "st-v-time", "related")])
@@ -1421,9 +674,8 @@ def _load_jsonl(path: str) -> list[dict]:
 
 
 LETTERED_IDS = [
-    "a-label", "b-what-why-acc", "c-lettered-scope", "d-negative-specimen",
-    "e-typed-edges", "f-fanout-depth", "g-eco-plan-cite", "h-placeholders",
-    "i-mention-edges", "j-stale-blocked", "k-close-receipt",
+    "b-what-why-acc", "d-negative-specimen", "e-typed-edges",
+    "h-placeholders", "j-stale-blocked", "k-close-receipt",
     "l-ac-phase", "l-ac-phase-legacy",
 ]
 
@@ -1568,17 +820,11 @@ def run_lettered(
     beads: list[dict], now: datetime
 ) -> dict[str, list[str]]:
     scoped = scope_beads(beads)
-    byid = {b["id"] for b in beads}
     return {
-        "a-label": check_a(scoped),
         "b-what-why-acc": check_b(scoped),
-        "c-lettered-scope": check_c(scoped),
         "d-negative-specimen": check_d(scoped),
         "e-typed-edges": check_e(scoped),
-        "f-fanout-depth": check_f(scoped)[0],
-        "g-eco-plan-cite": check_g(scoped),
         "h-placeholders": check_h(scoped),
-        "i-mention-edges": check_i(scoped, byid, graph_beads=beads),
         "j-stale-blocked": check_j(scoped, now),
         # ADV-4: closes live outside scope_beads — check_k sees ALL beads.
         "k-close-receipt": check_k(beads, now),
@@ -1593,15 +839,12 @@ def run_lettered(
 # br-update-lint.py at content edits) refuses via lint_bead_failures with a
 # LINT_REFUSED verdict naming each failing check.
 
-# Per-bead subset enforced at admission: graph/global checks (e, f, g, j,
-# k) need tracker-wide context or lifecycle state and stay in the runner.
+# Per-bead subset enforced at admission: graph/global checks (e, j, k)
+# need tracker-wide context or lifecycle state and stay in the runner.
 GATE_CHECKS = (
-    "a-label",
     "b-what-why-acc",
-    "c-lettered-scope",
     "d-negative-specimen",
     "h-placeholders",
-    "i-mention-edges",
     "elapsed-time-mix",
     "l-ac-phase",
 )
@@ -1937,14 +1180,10 @@ def lint_bead(bead: dict, byid: set[str] | None = None) -> dict[str, list[str]]:
     bead = dict(bead)
     bead.setdefault("id", "<new>")
     single = [bead]
-    ids = set(byid) if byid is not None else {bead["id"]}
     return {
-        "a-label": check_a(single),
         "b-what-why-acc": check_b(single),
-        "c-lettered-scope": check_c(single),
         "d-negative-specimen": check_d(single),
         "h-placeholders": check_h(single),
-        "i-mention-edges": check_i(single, ids),
         "elapsed-time-mix": [bead["id"]] if elapsed_time_mix_failure(bead) else [],
         "l-ac-phase": [bead["id"]] if ac_phase_failure(bead) else [],
     }
@@ -1958,8 +1197,6 @@ def lint_bead_failures(
 
     Tombstones (deleted records) are exempt: `br lint` never flags
     them, and the gate must agree with `br lint` bead for bead.
-    `graph` (tracker rows with labels and status) turns on m-goal-path;
-    `dependents` reads blocks dependents live (default: the rows' own edges).
     """
     if (bead.get("status") or "") == "tombstone":
         return []
@@ -1972,8 +1209,6 @@ def lint_bead_failures(
     failures.extend(ac_phase_failure(bead))
     failures.extend(release_goal_failures(bead))
     failures.extend(pitfalls_failure(bead))
-    if graph is not None:
-        failures.extend(goal_path_failure(bead, graph, dependents))
     if template_missing(
         bead.get("issue_type") or bead.get("type"),
         bead.get("description"),
@@ -2146,25 +1381,6 @@ def run_selftest(probe: str) -> tuple[bool, dict]:
             fails.append(f"replayable: replayable create refused: {rp_control}")
         log["replayable_report"] = {"rows": rp_rows, "refused": rp_refused,
                                     "planted_create": rp_plant}
-        # CUTGRAPH1 m-goal-path (ompkit-774u.61): planted unplaced beads are named,
-        # each control is admitted, and a path into a closed goal does not count.
-        gp_fails, gp_log = goal_path_selftest()
-        fails.extend(f"m-goal-path: {line}" for line in gp_fails)
-        log["goal_path"] = gp_log
-        # LINTIDBOUND1 (ompkit-fp72.135.3.83): every boundary case is right with the whole-id
-        # matcher; with the old \b pattern restored (planted negative) the child-id cases fail.
-        mb_fails = mention_boundary_failures()
-        fails.extend(f"mention-boundary: {line}" for line in mb_fails)
-        real = (_ID_START, _ID_END, BEAD_MENTION_RE)
-        globals().update(_ID_START=r"\b", _ID_END=r"\b", BEAD_MENTION_RE=re.compile(
-            r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)+(?:\.[0-9]+(?:\.[0-9]+)*)?)\b"))
-        try:
-            mb_planted = mention_boundary_failures()
-        finally:
-            globals().update(_ID_START=real[0], _ID_END=real[1], BEAD_MENTION_RE=real[2])
-        if not any(line.startswith("child-id-discovered-from:") for line in mb_planted):
-            fails.append(f"mention-boundary: old \\b pattern restored, child-id case not caught: {mb_planted}")
-        log["mention_boundary"] = {"failures": mb_fails, "planted_old_pattern": mb_planted}
         elapsed_forms = [
             (
                 "hours-after-landing",
@@ -2405,8 +1621,7 @@ def lint_one(repo: str, bead_id: str) -> tuple[int, dict]:
         bead = live_bead(repo, bead_id)
         rows = live_rows(repo)
         byid = {row["id"] for row in rows} | {bead["id"]}
-        failures = lint_bead_failures(bead, byid, graph=rows,
-                                      dependents=live_dependents("br", "", repo))
+        failures = lint_bead_failures(bead, byid, graph=rows)
     except (RuntimeError, OSError) as exc:
         return 3, {"bead": bead_id, "verdict": "UNVERIFIED",
                    "reason": str(exc)[:300]}

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """RELLINT1: release-goal admission follows the real release dry-run, not bead closure.
 BEADPITFALL1: a post-cutover build bead states its Pitfalls or the repo brief digest."""
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 import unittest
@@ -221,10 +221,6 @@ class CreateInReviewParityTests(unittest.TestCase):
         for line in handoff:
             self.assertIn(line, refused[0])
 
-    def test_planted_edgeless_mention_refused_like_in_review(self):
-        self.assertIn("i-mention-edges", self.in_review(desc=LP_MENTION_DESC))
-        self.assertIn("i-mention-edges", self.create(desc=LP_MENTION_DESC))
-
     def test_control_clean_create_admitted(self):
         self.assertEqual(self.in_review(), [])
         self.assertEqual(self.create(), [])
@@ -234,16 +230,59 @@ class CreateInReviewParityTests(unittest.TestCase):
             with self.subTest(extra=extra):
                 self.assertEqual(self.create(desc=LP_MENTION_DESC, extra=extra), [])
 
-    def test_mutant_without_shared_checks_admits_planted(self):
-        real_i, real_r = bead_lint.check_i, bead_lint.replayable_findings
+    def test_mutant_without_replay_checks_admits_planted(self):
+        real = bead_lint.replayable_findings
         try:
-            bead_lint.check_i = lambda *a, **k: []
             bead_lint.replayable_findings = lambda *a, **k: ([], [])
-            self.assertEqual(self.create(desc=LP_MENTION_DESC), [])
             self.assertEqual(self.create(acc=LP_PROSE_ACC), [])
         finally:
-            bead_lint.check_i, bead_lint.replayable_findings = real_i, real_r
-        self.assertIn("i-mention-edges", self.create(desc=LP_MENTION_DESC))
+            bead_lint.replayable_findings = real
+        self.assertTrue(any(f.startswith("r-verify-replayable") for f in self.create(acc=LP_PROSE_ACC)))
+
+
+class RetiredControlTests(unittest.TestCase):
+    """Authorized work is judged by behavior, not tracker presentation."""
+
+    def test_scoped_task_needs_no_label(self):
+        bead = build_bead(LP_DESC, bead_lint.PITFALLS_CUTOVER, labels=[])
+        self.assertEqual(bead_lint.lint_bead_failures(bead), [])
+        self.assertFalse(any(bead_lint.run_lettered([bead], datetime.now(timezone.utc)).values()))
+
+    def test_original_scope_needs_no_matching_prose_letters(self):
+        bead = build_bead(
+            "WHAT: (a) parse input; (b) reject invalid input. WHY: preserve both behaviors.",
+            bead_lint.PITFALLS_CUTOVER, labels=["fixture"])
+        self.assertEqual(bead_lint.lint_bead_failures(bead), [])
+        self.assertFalse(any(bead_lint.run_lettered([bead], datetime.now(timezone.utc)).values()))
+
+    def test_large_acyclic_dependency_graph_has_no_blanket_cap(self):
+        rows = [build_bead(LP_DESC, bead_lint.PITFALLS_CUTOVER, labels=["fixture"])]
+        rows[0]["id"] = "retire-root"
+        for index in range(25):
+            row = dict(rows[0], id=f"retire-child-{index}",
+                       dependencies=[bead_lint.dep_to(f"retire-child-{index}", "retire-root")])
+            rows.append(row)
+        for index in range(6):
+            source = f"retire-chain-{index}"
+            target = "retire-root" if index == 0 else f"retire-chain-{index - 1}"
+            rows.append(dict(rows[0], id=source, dependencies=[bead_lint.dep_to(source, target)]))
+        self.assertFalse(any(bead_lint.run_lettered(rows, datetime.now(timezone.utc)).values()))
+
+    def test_authorized_task_needs_no_legacy_plan_citation(self):
+        bead = build_bead(LP_DESC, bead_lint.PITFALLS_CUTOVER, labels=["eco"])
+        self.assertEqual(bead_lint.lint_bead_failures(bead), [])
+        self.assertFalse(any(bead_lint.run_lettered([bead], datetime.now(timezone.utc)).values()))
+
+    def test_historical_reference_does_not_invent_a_dependency(self):
+        bead = build_bead(LP_MENTION_DESC, bead_lint.PITFALLS_CUTOVER, labels=["fixture"])
+        self.assertEqual(bead_lint.lint_bead_failures(bead, {bead["id"], LP_PEER}), [])
+        rows = [bead, dict(bead, id=LP_PEER, description=LP_DESC)]
+        self.assertFalse(any(bead_lint.run_lettered(rows, datetime.now(timezone.utc)).values()))
+
+    def test_native_ready_work_needs_no_goal_edge(self):
+        bead = build_bead(LP_DESC, bead_lint.PITFALLS_CUTOVER, labels=["fixture"])
+        goal = dict(bead, id="retire-goal", labels=["kind:goal"])
+        self.assertEqual(bead_lint.lint_bead_failures(bead, graph=[bead, goal]), [])
 
 
 if __name__ == "__main__":

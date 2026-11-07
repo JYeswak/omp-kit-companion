@@ -60,31 +60,34 @@ async function fixture() {
 	return { root, project, env, db, original, br, read, cli };
 }
 
-test("BACKLOGMIG1 dry-run plans five lossless repairs and leaves underivable and already-clean records unchanged", async () => {
+test("BACKLOGMIG1 dry-run plans lossless replay repairs and leaves label-free clean records unchanged", async () => {
 	const f = await fixture();
 	const before = await f.read();
 	const result = await f.cli();
 	expect(result.rc, JSON.stringify(before.map(row => Object.keys(row))) + "\n" + new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)).toBe(0);
 	const output = JSON.parse(new TextDecoder().decode(result.stdout));
 	expect(output.data.migrations.filter((row: { status: string }) => row.status === "PLANNED").map((row: { id: string }) => row.id).sort()).toEqual([
-		"bm-delimiter", "bm-description", "bm-label", "bm-markers", "bm-prose",
+		"bm-delimiter", "bm-description", "bm-markers", "bm-prose",
 	]);
 	expect(output.data.migrations.find((row: { id: string }) => row.id === "bm-underivable").reason).toBe("needs-builder-command");
 	expect(output.data.migrations.find((row: { id: string }) => row.id === "bm-clean").status).toBe("UNCHANGED");
+	expect(output.data.migrations.find((row: { id: string }) => row.id === "bm-label").status).toBe("UNCHANGED");
 	expect(await f.read()).toEqual(before);
 }, 120_000);
 
-test("BACKLOGMIG1 applies only the five derived repairs, archives exact originals and is idempotent", async () => {
+test("BACKLOGMIG1 applies only derived replay repairs, preserves label-free records and exact originals, and is idempotent", async () => {
 	const f = await fixture();
 	const before = await f.read();
 	const result = await f.cli(true);
 	expect(result.rc, new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)).toBe(1);
 	const output = JSON.parse(new TextDecoder().decode(result.stdout));
-	expect(output.data.migrations.filter((row: { status: string }) => row.status === "APPLIED").length).toBe(5);
+	expect(output.data.migrations.filter((row: { status: string }) => row.status === "APPLIED").map((row: { id: string }) => row.id).sort()).toEqual([
+		"bm-delimiter", "bm-description", "bm-markers", "bm-prose",
+	]);
 	const after = await f.read();
 	for (const original of before) {
 		const current = after.find(row => row.id === original.id);
-		if (original.id === "bm-underivable" || original.id === "bm-clean") {
+		if (original.id === "bm-underivable" || original.id === "bm-clean" || original.id === "bm-label") {
 			expect(current).toEqual(original);
 			continue;
 		}

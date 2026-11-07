@@ -9,10 +9,10 @@ nearest bead the new bead should block, and the two commands that place it:
   1. br create --title ... --labels goal-path:<target> [--parent <epic>]
   2. br dep add <target> <NEW_ID>      (the target waits on the new bead)
 
-parent-child is grouping only; the blocks edge from step 2 is what satisfies
-bead_lint m-goal-path. Read-only: reads the tracker's JSONL export (--db takes
-a .jsonl file, a beads.db whose sibling issues.jsonl is read, or a directory
-holding issues.jsonl or .beads/issues.jsonl). Stdlib only.
+The second command records a real dependency; the label is optional placement
+metadata, not an admission requirement. Read-only: reads the tracker's JSONL
+export (--db takes a .jsonl file, a beads.db whose sibling issues.jsonl is read,
+or a directory holding issues.jsonl or .beads/issues.jsonl). Stdlib only.
 
 Exit 0 recommendation printed, 3 no open goal (label the bead kind:intake),
 2 usage or unreadable tracker.
@@ -28,8 +28,14 @@ import shlex
 import sys
 from collections import Counter
 
-sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from bead_lint import GOAL_LABEL, GOAL_PATH_LABEL, encode_goal_path_id  # noqa: E402  (single home)
+GOAL_LABEL = "kind:goal"
+GOAL_PATH_LABEL = "goal-path:"
+
+
+def encode_goal_path_id(bead_id: str) -> str:
+    """Encode dotted child ids in optional placement labels."""
+    base, _, rest = bead_id.partition(".")
+    return base + ("_" + rest.replace(".", "_") if rest else "")
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 STOPWORDS = frozenset(
