@@ -207,7 +207,7 @@ class CiOnlyCoverage(unittest.TestCase):
             'import { expect, test } from "bun:test";\n'
             'import { mkdirSync, rmdirSync } from "node:fs";\n'
             'test("KITUPDATELOAD1 no other CI-only file is running", async () => {\n'
-            '  const marker = process.env.KITUPDATELOAD1_MARKER!;\n'
+            '  const marker = MARKER_PATH;\n'
             '  expect(() => mkdirSync(marker)).not.toThrow();\n'
             '  await Bun.sleep(1500);\n'
             '  rmdirSync(marker);\n'
@@ -221,7 +221,7 @@ class CiOnlyCoverage(unittest.TestCase):
             for name, _limit in store.CI_ONLY_FILES:
                 target = source / name
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(fixture)
+                target.write_text(fixture.replace("MARKER_PATH", json.dumps(str(Path(tmp) / "running"))))  # FIXEDENV1: a literal path; ci-only children get the constructed env
             env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
             env.update({
                 "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,

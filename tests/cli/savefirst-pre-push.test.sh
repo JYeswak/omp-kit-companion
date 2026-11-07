@@ -62,6 +62,11 @@ prepare_fixture() {
 	sf_max_wait=$3
 	mkdir -p "$sf_repo/scripts" "$sf_repo/src" "$sf_repo/tests/cli" "$sf_repo/rules" "$sf_repo/config/omp-kit" "$sf_repo/var/agent-tmp/savefirst-top-owner.1" "$sf_repo/home" "$sf_bin"
 	tar -xf "$TMP/source-subset.tar" -C "$sf_repo"
+	# FIXEDENV1: the gate pins PATH from its own scripts/fixed-env.sh, so a caller PATH cannot select sbh.
+	# This fixture's policy puts the sbh stand-in first; production policy is unchanged (fixed-env.test.ts).
+	sed "s|^PATH=\"|PATH=\"$sf_bin:|" "$sf_repo/scripts/fixed-env.sh" > "$sf_repo/scripts/fixed-env.sh.fixture" \
+		&& mv "$sf_repo/scripts/fixed-env.sh.fixture" "$sf_repo/scripts/fixed-env.sh" || return 1
+	grep -q "^PATH=\"$sf_bin:" "$sf_repo/scripts/fixed-env.sh" || { echo "fixture policy PATH line moved" >&2; return 1; }
 	if [ -n "${OMP_KIT_TEST_GATE_OVERRIDE:-}" ]; then
 		cp "$OMP_KIT_TEST_GATE_OVERRIDE" "$sf_repo/scripts/pre-push-gate.sh"
 		chmod +x "$sf_repo/scripts/pre-push-gate.sh"

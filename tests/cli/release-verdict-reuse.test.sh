@@ -116,7 +116,8 @@ case "${1:-}" in auth) exit 0 ;; api) printf '[[{"tag_name":"v0.2.82","draft":fa
 EOF
 chmod +x "$TMP/fake-bin/uname" "$TMP/fake-bin/timeout" "$TMP/fake-bin/gh"
 cio_stub_bin "$TMP/fake-bin" || exit 1
-CIO_LOG="$TMP/ci-only.log"
+# FIXEDENV1: the stub writes its fixed log beside its bin dir (tests/cli/ci-only-verdict-fixtures.sh).
+CIO_LOG="$TMP/bun.log"
 export CIO_LOG
 
 if env PATH="$TMP/fake-bin:$PATH" HOME="$TMP/home" TMPDIR="$TMP" \

@@ -263,10 +263,12 @@ test("CI-only fixture runs at the exact head in an isolated repository", () => {
     expect(existsSync("ci-rerun.marker")).toBe(false);
     writeFileSync("ci-rerun.marker", name);
   }
-  appendFileSync(process.env.CI_CULPRIT_LOG!, JSON.stringify({ name, cwd, rerun }) + "\n");
+  appendFileSync("CI_CULPRIT_LOG_PATH", JSON.stringify({ name, cwd, rerun }) + "\n");
   expect(readFileSync("lib/mode.txt", "utf8").trim() === "flake" && rerun).toBe(true);
 });
 EOF
+	# FIXEDENV1: ci-only children run in the constructed environment, so the log is a literal path.
+	sed "s|CI_CULPRIT_LOG_PATH|$CI_CULPRIT_LOG|" "$ci/tests/cli/$name.test.ts" >"$ci/tests/cli/$name.test.ts.tmp" && mv "$ci/tests/cli/$name.test.ts.tmp" "$ci/tests/cli/$name.test.ts"
 done
 ci0=$(change "$ci" ci@example.invalid ompkit-ci "[test] reproducing CI-only failure" lib/mode.txt red)
 ci_record() {

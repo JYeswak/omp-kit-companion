@@ -715,6 +715,10 @@ describe("release paths", () => {
 			...hostile, PATH: [nativeBin, "/usr/bin", "/bin"].join(delimiter),
 			TMPDIR: hostileTmp, TMP: hostileTmp, TEMP: hostileTmp,
 			OMP: omp.launcher, OMP_BIN: omp.launcher, OMP_PATH: omp.launcher, OMP_SRC: omp.source,
+			// A Tern launcher has no enclosing package; its exact-version source comes from the read-only cache the
+			// identity above resolved with (the hostile HOME holds none), never from a fetch.
+			...(process.env.OMP_KIT_OMP_SRC_CACHE ? { OMP_KIT_OMP_SRC_CACHE: process.env.OMP_KIT_OMP_SRC_CACHE } : {}),
+			OMP_KIT_OMP_SRC_FETCH: "0",
 			...admission,
 		};
 		const releaseBefore = snapshotTree(prefix);
