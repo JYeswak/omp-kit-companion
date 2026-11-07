@@ -142,7 +142,7 @@ export function candidateRepo(fx: SaveFixture): string {
 }
 export function runFocused(fx: SaveFixture, source: string, archive: string, changed: string, scriptDir = gateTree(fx, MANIFEST_HEADER)) {
 	const probe = join(fx.dir, `focused-${Math.random().toString(36).slice(2)}.sh`);
-	writeFileSync(probe, `set -eu\ngate_defer_record=1\n${gateFunctions(source, FOCUSED_FUNCTIONS)}rc=0\nrun_step focused gate_focused || rc=$?\ngate_defer_record=0\nrecord_run "$last_record_tests" "$last_record_files" "$rc"\nexit "$rc"\n`);
+	writeFileSync(probe, `set -eu\ngate_defer_record=1\nlast_record_tests=0; last_record_files=0\n${gateFunctions(source, FOCUSED_FUNCTIONS)}rc=0\nrun_step focused gate_focused || rc=$?\ngate_defer_record=0\nrecord_run "$last_record_tests" "$last_record_files" "$rc"\nexit "$rc"\n`);
 	const repo = candidateRepo(fx);
 	const started = Date.now();
 	const result = runSync(["sh", probe], {

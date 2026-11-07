@@ -2,7 +2,8 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
-import { AMPLE, LOW_BASE, NEED_BYTES, affectedArchive, freeBytes, gate, ledger, runFocused, saveFixture } from "./fresh-gate.helpers.ts";
+import { AMPLE, LOW_BASE, NEED_BYTES, affectedArchive, freeBytes, gate, gateTree, ledger, runFocused, saveFixture } from "./fresh-gate.helpers.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 test("CIGATE1 planted: a docs-only commit runs no suites and passes fast", () => {
 	const source = readFileSync(gate, "utf8");
@@ -41,6 +42,23 @@ test("CIGATE1 planted: a product-code change that no test reaches is refused, ne
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
 }, 60_000);
+
+test("focused fixture preserves an early malformed-manifest refusal and records zero executed tests", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const archive = affectedArchive(fx, 42, 42);
+		const scriptDir = gateTree(fx, "invalid manifest header\n");
+		const refused = runFocused(fx, source, archive, "lib/mod.ts", scriptDir);
+		expect(refused.code, refused.out).toBe(3);
+		expect(refused.out).toContain("REFUSED reason=CI_ONLY_MANIFEST_INVALID");
+		expect(refused.out).not.toContain("parameter not set");
+		expect(refused.out).not.toContain("affected tests:");
+		expect(ledger(fx).map((row) => [row.selected_files, row.tests_ran, row.rc])).toEqual([[0, 0, 3]]);
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, fixtureDeadlineS(60) * 1000);
 
 test.skipIf(!AMPLE)("CIGATE1 planted: a shell suite naming a changed script runs, and its failure refuses the push (needs >= 10 GiB free)", () => {
 	const source = readFileSync(gate, "utf8");

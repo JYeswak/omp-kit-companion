@@ -20,3 +20,4 @@
 - Allow the matching advisory commit-preflight reminder in the no-verify live scenario while still requiring its blocking rule and the absence of the forbidden marker.
 - Execute the selected OMP launcher directly through the bounded 30-second runner in custom live checks, supporting compiled Tern releases without treating their binary bytes as JavaScript or inheriting Bun's interpreter override.
 - Preserve exact hook-member permissions on rollback on Linux as well as macOS, without mixing failed BSD-stat stdout into the saved mode.
+- Preserve early focused-gate refusal codes and record zero executed tests by initializing the fixture's counters exactly like the production gate.
