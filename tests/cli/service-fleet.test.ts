@@ -66,7 +66,7 @@ test("planted: fleet spawns resolve the fixture OMP package and fetch no OMP sou
 	const home = fixtureHome();
 	const result = cli(["service", "install", "omp-watch", "--dry-run"], home, namespace());
 	expect(result.code, JSON.stringify(result.envelope.errors)).toBe(0);
-	expect(result.envelope.data.plist).toContain(join(realpathSync(home), "fixture-omp", "package", "package.json"));
+	expect(process.platform === "darwin" ? result.envelope.data.plist : result.envelope.data.path).toContain(join(realpathSync(home), "fixture-omp", "package", "package.json"));
 	expect(existsSync(join(home, ".local", "opt", "omp-kit", "omp-src"))).toBe(false);
 });
 
