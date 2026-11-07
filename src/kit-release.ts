@@ -167,8 +167,8 @@ export function assertFreshKitPlan(plan: KitReleasePreview, observed: { currentV
  if (plan.currentVersion !== observed.currentVersion || plan.currentSha256 !== observed.currentSha256 || plan.version !== index.version || plan.sourceTag !== index.source_tag || plan.indexSha256 !== hash(index) || !asset || releasePlatformKey(plan.platform) !== releasePlatformKey(observed.platform) || hash(asset) !== hash(plan.asset)) fail("STALE_KIT_PLAN");
 }
 
-type Member = { path: string; bytes: Buffer; kind: "file" | "directory" };
-function tarMembers(archive: Buffer): Member[] {
+export type Member = { path: string; bytes: Buffer; kind: "file" | "directory" };
+export function tarMembers(archive: Buffer): Member[] {
  let payload: Buffer;
  try { payload = archive[0] === 0x1f && archive[1] === 0x8b ? gunzipSync(archive, { maxOutputLength: 256 * 1024 * 1024 }) : archive; }
  catch { return fail("ARCHIVE_INVALID"); }

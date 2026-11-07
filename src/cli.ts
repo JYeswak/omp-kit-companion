@@ -118,6 +118,7 @@ import { agentMailRetentionRoot, retainAgentMailRotations } from "./am-retain.ts
 import { retainFleetCaches } from "./cache-retain.ts";
 import { beadsMigrateCommand } from "./beads-migrate.ts";
 import { briefContract, briefCandidates, renderBrief } from "./brief.ts";
+import { toolsVerifyCommand } from "./tools-manifest.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -127,6 +128,7 @@ export type CliResult = PresentationResult;
 export type ParsedCommand = { command: Command; parent?: Command; flags: ReadonlyMap<string, string | true>; argument?: string; commandArgs?: readonly string[]; json: boolean; robot: boolean };
 export type CommandHandler = (request: ParsedCommand) => CliResult | Promise<CliResult>;
 const handlers = new Map<string, CommandHandler>();
+registerCommandHandler("tools verify", toolsVerifyCommand);
 
 /** Register a real handler by grammar path (e.g. "apply rules"); absent handlers remain unavailable. */
 export function registerCommandHandler(path: string, handler: CommandHandler): void {

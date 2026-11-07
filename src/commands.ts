@@ -4,6 +4,7 @@ import { TERN_COMMAND } from "./tern/registry.ts";
 import { NEXT_DATA_SCHEMA } from "./next.ts";
 import { GRADER_NEXT_DATA_SCHEMA } from "./grader-next.ts";
 import { MILESTONE_COMMAND } from "./milestone.ts";
+import { TOOLS_COMMAND } from "./tools-manifest.ts";
 
 export type Flag = {
 	readonly aliases?: readonly string[];
@@ -480,6 +481,7 @@ const lessonData: DataSchema = { type: "object", required: ["overall", "entry", 
 } };
 
 export const COMMANDS: readonly Command[] = [
+	TOOLS_COMMAND,
 	{ name: "rch", description: "Native remote-build lifecycle; no replacement daemon or cache policy", usage: "rch lease [FLAGS] -- COMMAND [ARG ...]", flags: [], example: "omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2", runnable: false, subcommands: [
 		{ name: "lease", description: "Observe, reclaim under native policy, admit, execute and verify next-agent readiness", usage: "rch lease --slots N [--worker ID] [--project PATH] [--plan | --apply --yes] -- COMMAND [ARG ...]", argument: "COMMAND", flags: [
 			...planApply,
