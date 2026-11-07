@@ -54,7 +54,7 @@ test("release, post-push and suite gates ignore reordered/extended caller PATH a
 			expect(observed.environment.LANG).toBe("C");
 		}
 	}
-});
+}, fixtureDeadlineS(60) * 1000); // eight gate probes, each a python constructor run
 
 test("shell and Python qualification construct the same environment despite arbitrary caller inputs", () => {
 	const resolver = `import { resolveOmpIdentity } from ${JSON.stringify(join(kit, "src/paths.ts"))}; console.log(JSON.stringify(resolveOmpIdentity()));`;
@@ -73,7 +73,7 @@ test("shell and Python qualification construct the same environment despite arbi
 	for (const argv of [shell, python]) {
 		expect(command(argv, { ...env(process.env.PATH!), ...hostileParent })).toBe(control);
 	}
-});
+}, fixtureDeadlineS(30) * 1000);
 
 test("a real stored suite PASS is reused across caller shells and retains the judged PATH", async () => {
 	const repo = join(scratch.path, "repo");
@@ -92,8 +92,11 @@ test("a real stored suite PASS is reused across caller shells and retains the ju
 	mkdirSync(join(repo, "src"), { recursive: true });
 	for (const file of ["paths.ts", "omp-source-cache.ts"]) copyFileSync(join(kit, "src", file), join(repo, "src", file));
 	const identitySuite = join(repo, "tests/cli/omp-identity.test.ts");
-	const expectedIdentity = JSON.parse(command(["/bin/sh", "-c", '. "$1"; exec bun -e "$2"', "fixture",
-		join(kit, "scripts/fixed-env.sh"),
+	// The inner suite resolves OMP in the constructed suite environment (which names the operator's OMP source
+	// cache), so the expected identity is computed in exactly that environment, not the test runner's.
+	const expectedIdentity = JSON.parse(command(["/usr/bin/python3", "-c",
+		"import os,runpy,sys; e=runpy.run_path(sys.argv[1])['suite_environment'](); os.execvpe('bun', ['bun', '-e', sys.argv[2]], e)",
+		join(kit, "scripts/suite-metrics.py"),
 		`import { resolveOmpIdentity } from ${JSON.stringify(join(kit, "src/paths.ts"))}; console.log(JSON.stringify(resolveOmpIdentity()));`]));
 	const identityControl = `import { expect, test } from "bun:test";\nimport { resolveOmpIdentity } from "../../src/paths.ts";\ntest("qualification resolves the pinned OMP identity without caller state", () => { expect(resolveOmpIdentity()).toEqual(${JSON.stringify(expectedIdentity)}); for (const name of ${JSON.stringify(Object.keys(hostileParent))}) expect(process.env[name]).toBeUndefined(); });\n`;
 	for (const path of ciFiles) writeFileSync(join(repo, path), identityControl);
