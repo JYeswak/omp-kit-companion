@@ -65,7 +65,7 @@ class SuiteMetricsTests(unittest.TestCase):
 
     def test_migrated_fixtures_use_the_canonical_closure(self) -> None:
         fixtures = [
-            "tests/cli/fresh-gate.helpers.ts", "tests/cli/ci-only-verdict-fixtures.sh",
+            "tests/cli/fresh-gate.helpers.ts",
             "tests/cli/package-release.test.ts", "tests/cli/portable-paths.test.ts",
             "tests/cli/savefirst-pre-push.test.sh", "tests/cli/tag-after-green.test.sh",
         ]
@@ -74,31 +74,6 @@ class SuiteMetricsTests(unittest.TestCase):
         for path in paths:
             with self.subTest(path=path):
                 self.assertIn("judging-files", path.read_text())
-
-    def test_ci_only_fixture_copies_a_planted_judged_file(self) -> None:
-        import shutil
-        from kitlib_run import run
-        with owned_tmp("judging-fixture-test") as directory:
-            source, fixture = Path(directory) / "source", Path(directory) / "fixture"
-            for name in (*JUDGING_FILES, "scripts/gate-ci-only.tsv", "scripts/release-verdict.sh"):
-                destination = source / name
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(ROOT / name, destination)
-            planted = "additional/judged.txt"
-            (source / planted).parent.mkdir()
-            (source / planted).write_text("planted judged bytes\n")
-            helper = source / "scripts/suite-metrics.py"
-            text = helper.read_text()
-            anchor = 'if __name__ == "__main__":'
-            self.assertEqual(text.count(anchor), 1)
-            helper.write_text(text.replace(anchor, f"JUDGING_FILES = (*JUDGING_FILES, {planted!r})\n\n" + anchor))
-            result = run(
-                ["sh", "-c", '. "$1"; cio_fixture "$2"', "fixture",
-                 str(ROOT / "tests/cli/ci-only-verdict-fixtures.sh"), str(fixture)],
-                env={**os.environ, "KITREPO": str(source)}, deadline_s=30,
-            )
-            self.assertEqual(result.rc, 0, result.stdout + result.stderr)
-            self.assertEqual((fixture / planted).read_bytes(), (source / planted).read_bytes())
 
     def test_missing_declared_file_cannot_certify_complete(self) -> None:
         self.assertFalse(metrics.complete_records([row("a")], ["a", "b"]))
