@@ -57,9 +57,10 @@ const MAX_INHERIT_FD = 1023;
 /** Bound on reading the pipes once the group has been SIGKILLed (pysafe `_DRAIN_S`). */
 const DRAIN_MS = 1000;
 
-/** $1 = CPU seconds or "-", $2 = address-space KiB or "-", then argv. Mirrors RLIMIT_PROLOGUE in scripts/kitlib_run.py. */
+/** $1 = CPU seconds or "-", $2 = address-space KiB or "-", then argv. Mirrors RLIMIT_PROLOGUE in scripts/kitlib_run.py.
+ * Keep the hard CPU limit one second above soft: equal limits deliver SIGKILL instead of SIGXCPU on Linux. */
 export const RLIMIT_PROLOGUE = 'cpu=$1; as=$2; shift 2; '
-	+ 'if [ "$cpu" != - ]; then ulimit -t "$cpu" || { printf "kitlib-run: cannot apply RLIMIT_CPU=%s\\n" "$cpu" >&2; exit 126; }; fi; '
+	+ 'if [ "$cpu" != - ]; then { ulimit -S -t "$cpu" && ulimit -H -t "$((cpu + 1))"; } || { printf "kitlib-run: cannot apply RLIMIT_CPU=%s\\n" "$cpu" >&2; exit 126; }; fi; '
 	+ 'if [ "$as" != - ]; then ulimit -v "$as" || { printf "kitlib-run: cannot apply RLIMIT_AS=%sKiB\\n" "$as" >&2; exit 126; }; fi; '
 	+ 'exec "$@"';
 

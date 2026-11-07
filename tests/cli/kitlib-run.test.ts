@@ -9,7 +9,7 @@ import { closeSync, existsSync, openSync, readFileSync, realpathSync, rmSync, wr
 import { constants } from "node:os";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
-import { run, runSync, type RunOptions, type RunResult, type RunSyncOptions, type RunTimings } from "../../src/kitlib/run";
+import { RLIMIT_PROLOGUE, run, runSync, type RunOptions, type RunResult, type RunSyncOptions, type RunTimings } from "../../src/kitlib/run";
 import { safePid } from "../../src/kitlib/proc";
 import { PYSAFE_SHA256, PYSAFE_SOURCE_BASE64 } from "../../src/kitlib/pysafe-source";
 import { fixtureDeadlineS } from "./fixture-process";
@@ -94,7 +94,32 @@ async function survivors(marker: string, budgetMs = 3000): Promise<number[]> {
 	}
 }
 
-const peakRssBytes = () => process.resourceUsage().maxRSS * 1024;
+/** Observe current resident bytes, not ru_maxrss: Linux can carry a launcher's
+ * high-water mark through exec, even in the isolated corpus subprocess. */
+function observeRss(readRss = process.memoryUsage.rss) {
+	const before = readRss();
+	let peak = before;
+	const sample = () => { peak = Math.max(peak, readRss()); };
+	return { sample, growth: () => { sample(); return peak - before; } };
+}
+
+test("RSS observations preserve transient queue growth without an inherited high-water baseline", () => {
+	const mib = 1024 * 1024;
+	// Deterministic observation boundary: the launcher once peaked at 1 GiB,
+	// but the child's current RSS starts at 64 MiB. Queue storage is freed
+	// before the final observation; the observed 100 MiB peak must survive.
+	let current = 64 * mib;
+	const observed = observeRss(() => current);
+	current += 100 * mib;
+	observed.sample();
+	current = 64 * mib;
+	expect(observed.growth()).toBe(100 * mib);
+	const bounded = observeRss(() => current);
+	current += mib;
+	bounded.sample();
+	current = 64 * mib;
+	expect(bounded.growth()).toBe(mib);
+});
 
 function judge(result: RunResult, want: Expect, rssGrowth: number): void {
 	const shown = JSON.stringify({ ...result, stdout: decoder.decode(result.stdout.subarray(0, 200)), stderr: decoder.decode(result.stderr.subarray(0, 200)) });
@@ -112,6 +137,35 @@ function judge(result: RunResult, want: Expect, rssGrowth: number): void {
 	if (want.max_parent_rss_growth_bytes !== undefined) expect(rssGrowth).toBeLessThan(want.max_parent_rss_growth_bytes);
 }
 
+
+describe("kitlib CPU limit soft/hard contract", () => {
+	test("both runners reserve a hard-limit second for SIGXCPU", async () => {
+		const inspect = "import json,resource; print(json.dumps(resource.getrlimit(resource.RLIMIT_CPU)))";
+		const ts = await run(["python3", "-c", "import json,resource; print(json.dumps(resource.getrlimit(resource.RLIMIT_CPU)))"], { deadline_s: fixtureDeadlineS(), rlimit_cpu_s: 3 });
+		expect(ts.rc, decoder.decode(ts.stderr)).toBe(0);
+		expect(JSON.parse(decoder.decode(ts.stdout))).toEqual([3, 4]);
+		const python = await run(["python3", "-c", "import json,sys; sys.path.insert(0,sys.argv[1]); import kitlib_run; assert kitlib_run.RLIMIT_PROLOGUE == sys.argv[2]; r=kitlib_run.run(['python3','-c',sys.argv[3]],deadline_s=30,rlimit_cpu_s=3); cpu=kitlib_run.run(['/bin/sh','-c','while :; do :; done'],deadline_s=30,rlimit_cpu_s=1); print(json.dumps({'rc':r.rc,'stdout':r.stdout.decode(),'stderr':r.stderr.decode(),'cpu_rc':cpu.rc,'timed_out':cpu.timed_out}))",
+			join(import.meta.dir, "../../scripts"), RLIMIT_PROLOGUE, inspect], { deadline_s: fixtureDeadlineS() });
+		expect(python.rc, decoder.decode(python.stderr)).toBe(0);
+		const result = JSON.parse(decoder.decode(python.stdout));
+		expect(result.rc, result.stderr).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual([3, 4]);
+		expect(result.cpu_rc).toBe(-constants.signals.SIGXCPU);
+		expect(result.timed_out).toBe(false);
+	});
+	test("planted equal limits are observed as equal, not mistaken for the SIGXCPU contract", async () => {
+		const result = await run(["/bin/sh", "-c", "ulimit -t 3; exec python3 -c 'import json,resource; print(json.dumps(resource.getrlimit(resource.RLIMIT_CPU)))'"], { deadline_s: fixtureDeadlineS() });
+		expect(result.rc, decoder.decode(result.stderr)).toBe(0);
+		expect(JSON.parse(decoder.decode(result.stdout))).toEqual([3, 3]);
+	});
+	test("planted equal CPU limits deliver Linux SIGKILL rather than SIGXCPU", async () => {
+		const result = await run(["/bin/sh", "-c", "ulimit -t 1; while :; do :; done"], { deadline_s: fixtureDeadlineS() });
+		// Darwin delivers SIGXCPU even with equal limits; Linux enforces hard first.
+		const signal = process.platform === "linux" ? constants.signals.SIGKILL : constants.signals.SIGXCPU;
+		expect(result.rc, decoder.decode(result.stderr)).toBe(-signal);
+		expect(result.timed_out).toBe(false);
+	});
+});
 describe("kitlib run conformance corpus", () => {
 	test("corpus is a kitlib-run-corpus.v1 corpus", () => {
 		expect(corpus.schema).toBe("kitlib-run-corpus.v1");
@@ -129,7 +183,7 @@ describe("kitlib run conformance corpus", () => {
 				rssChild = true;
 			}
 			if (measuresRss && !rssChild) {
-				// maxRSS is process-global: an earlier test's peak must not hide this case's allocation.
+				// A separate allocator keeps each case's current-RSS baseline independent.
 				const isolated = ownedTmp("run-rss");
 				const proof = join(isolated.path, "completed.json");
 				const nonce = randomBytes(24).toString("hex");
@@ -181,11 +235,18 @@ describe("kitlib run conformance corpus", () => {
 					await expect(run(argv, options)).rejects.toThrow();
 					return;
 				}
-				const before = peakRssBytes();
-				const result = await run(argv, options);
+				const rss = observeRss();
+				// Real process memory must be sampled while the stalled sink still
+				// retains its queue; finish() releases it before run() returns.
+				// Fake timers cannot observe the real child's allocations.
+				const sampling = measuresRss ? setInterval(rss.sample, 10) : undefined;
+				let result: RunResult;
+				try { result = await run(argv, options); }
+				finally { clearInterval(sampling); }
 				const returnedAt = performance.now();
-				judge(result, want, peakRssBytes() - before);
-				judgeKl02(result, want, peakRssBytes() - before, recorder, returnedAt);
+				const growth = rss.growth();
+				judge(result, want, growth);
+				judgeKl02(result, want, growth, recorder, returnedAt);
 				if (want.no_survivor) expect(await survivors(marker), `process-group members outlived run(): marker ${marker}`).toEqual([]);
 				if (measuresRss && rssChild) {
 					const proof = process.env.KITLIB_RUN_RSS_PROOF;

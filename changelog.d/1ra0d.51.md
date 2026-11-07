@@ -1,0 +1,1 @@
+- CPU-limited TypeScript and Python commands now receive SIGXCPU at their requested soft limit before the hard limit can send SIGKILL on Linux. Runner memory checks sample current resident memory while queues are retained, rather than subtracting inherited process high-water marks.

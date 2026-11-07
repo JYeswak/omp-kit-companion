@@ -49,9 +49,10 @@ STREAMS = ("stdout", "stderr")
 _SINK_POLL_S = 0.5
 
 # $1 = CPU seconds or "-", $2 = address-space KiB or "-", then argv. Mirrors RLIMIT_PROLOGUE in src/kitlib/run.ts.
+# Keep hard CPU one second above soft so Linux delivers SIGXCPU before SIGKILL.
 RLIMIT_PROLOGUE = (
     'cpu=$1; as=$2; shift 2; '
-    'if [ "$cpu" != - ]; then ulimit -t "$cpu" || { printf "kitlib-run: cannot apply RLIMIT_CPU=%s\\n" "$cpu" >&2; exit 126; }; fi; '
+    'if [ "$cpu" != - ]; then { ulimit -S -t "$cpu" && ulimit -H -t "$((cpu + 1))"; } || { printf "kitlib-run: cannot apply RLIMIT_CPU=%s\\n" "$cpu" >&2; exit 126; }; fi; '
     'if [ "$as" != - ]; then ulimit -v "$as" || { printf "kitlib-run: cannot apply RLIMIT_AS=%sKiB\\n" "$as" >&2; exit 126; }; fi; '
     'exec "$@"'
 )
