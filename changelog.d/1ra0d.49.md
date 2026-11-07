@@ -21,3 +21,4 @@
 - Execute the selected OMP launcher directly through the bounded 30-second runner in custom live checks, supporting compiled Tern releases without treating their binary bytes as JavaScript or inheriting Bun's interpreter override.
 - Preserve exact hook-member permissions on rollback on Linux as well as macOS, without mixing failed BSD-stat stdout into the saved mode.
 - Preserve early focused-gate refusal codes and record zero executed tests by initializing the fixture's counters exactly like the production gate.
+- Keep the actual Bun executable available in the package fixture's private HOME so pinned runtime identity works on Linux without relying on a system-wide Bun.

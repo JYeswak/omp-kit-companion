@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { delimiter, join, resolve } from "node:path";
 import type { ReleaseAsset, ReleasePlatform } from "../../src/kit-release.ts";
@@ -21,6 +21,11 @@ const output = outputTmp.path;
 // not an exact-commit export's cwd or the runner's unrelated TMPDIR.
 writeFileSync(join(output, ".owner"),
 	`pid=${process.pid}\nlabel=p21-release\nrepo=${caseCwd}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+// Runtime identity rebuilds fixed-env PATH from this private HOME, not stubFirstPath.
+// CI installs Bun under the original HOME; retain the actual executable in this one too.
+const homeBunBin = join(output, ".bun", "bin");
+mkdirSync(homeBunBin, { recursive: true });
+symlinkSync(process.execPath, join(homeBunBin, "bun"));
 const stubBin = join(output, "stub-bin");
 mkdirSync(stubBin, { recursive: true });
 writeFileSync(join(stubBin, "omp"), "#!/bin/sh\nprintf 'omp stub\\n'\n");
