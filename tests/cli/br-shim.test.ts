@@ -459,21 +459,6 @@ esac
 		}));
 		writeFileSync(join(tracker, ".beads/issues.jsonl"), beads.map(b => JSON.stringify(b)).join("\n") + "\n");
 		await br(["sync", "--import-only", "--actor", "HandoffAuthor"]);
-		mkdirSync(join(tracker, ".omp"));
-		writeFileSync(join(tracker, ".omp/pregrade.json"), JSON.stringify({ required: false, hint: "sh tests/replay.sh" }));
-		const recordDir = join(env.XDG_STATE_HOME, "omp-kit/pregrade");
-		mkdirSync(recordDir, { recursive: true });
-		const recordPath = join(recordDir, "hh-owned.json");
-		const pregrade = (changes: Record<string, unknown> = {}) => {
-			// Prior-observation protocol input, not a claim of an actual non-author review.
-			writeFileSync(recordPath, JSON.stringify({
-				schema: "omp-kit.pregrade.v1", bead: "hh-owned", repo: tracker,
-				author: "HandoffAuthor", grader: "HandoffReviewer", at: new Date().toISOString(),
-				candidate_commit: commit, verdict: "PASS",
-				ac_sha256: createHash("sha256").update(HANDOFF_AC.replace("[x]", "[ ]")).digest("hex"),
-				items: [{ ac: "AC1", phase: "build", status: "PASS" }], ...changes,
-			}));
-		};
 		const shim = (args: string[], input?: string) => run(["sh", join(root, "scripts/br-shim.sh"), "--db", db, ...args], {
 			cwd: code, env, deadline_s: fixtureDeadlineS(30), max_output_bytes: 4 << 20,
 			...(input === undefined ? {} : { stdin: input }),
@@ -490,7 +475,7 @@ esac
 				version: 2, commit, rc: 0, evidence: { complete: true },
 			}) + "\n");
 		};
-		return { scratch, tracker, code, commit, recordPath, pregrade, shim, status, comments, green, checked, br, env,
+		return { scratch, tracker, code, commit, shim, status, comments, green, checked, br, env,
 			done: `DONE ${code}@${commit}: exact native source observation` };
 	} catch (error) {
 		scratch.cleanup();
@@ -498,59 +483,24 @@ esac
 	}
 }
 
-test("HANDOFFREPO1 exact non-companion pregrade admits the real native author handoff", async () => {
+test("HANDOFFREPO1 missing observation refuses without mutation and names the exact source fresh-gate check", async () => {
 	const f = await handoffRepo();
 	try {
-		f.pregrade();
-		const result = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
-		expect(result.rc, decoder.decode(result.stderr)).toBe(0);
-		expect(await f.status()).toBe("in_review");
-	} finally { f.scratch.cleanup(); }
-}, fixtureDeadlineS(120) * 1_000);
-
-test("HANDOFFREPO1 missing observation refuses without mutation and names the declared existing repo check", async () => {
-	const f = await handoffRepo();
-	try {
+		const before = await f.comments();
 		const result = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
 		const out = decoder.decode(result.stderr);
 		expect(result.rc).toBe(4);
 		expect(out).toContain("HANDOFF_UNGATED");
-		expect(out).toContain("sh tests/replay.sh");
-		expect(out).not.toContain("sh scripts/fresh-gate.sh");
+		expect(out).toContain(`sh scripts/fresh-gate.sh --commit ${f.commit}`);
+		expect(out).toContain(`${f.code}@${f.commit}`);
 		expect(await f.status()).toBe("in_progress");
-		const command = out.slice(out.lastIndexOf("run: ") + 5).trim();
-		const declaredCwd = command.slice("cd ".length, command.indexOf(" && "));
-		const repaired = await run(["sh", "tests/replay.sh"], { cwd: declaredCwd, env: f.env, deadline_s: fixtureDeadlineS(15) });
-		expect(repaired.rc, decoder.decode(repaired.stderr)).toBe(0);
-		unlinkSync(join(f.tracker, "payload.txt"));
-		const negative = await run(["sh", "tests/replay.sh"], { cwd: declaredCwd, env: f.env, deadline_s: fixtureDeadlineS(15) });
-		expect(negative.rc).toBe(1);
-	} finally { f.scratch.cleanup(); }
-}, fixtureDeadlineS(120) * 1_000);
-
-test("HANDOFFREPO1 pregrade must bind the candidate, tracker, acceptance, non-author and passing build outcomes", async () => {
-	const f = await handoffRepo();
-	try {
-		for (const changes of [
-			{ candidate_commit: "0".repeat(40) }, { repo: f.code }, { ac_sha256: "changed" },
-			{ grader: "HandoffAuthor" }, { items: [] },
-		]) {
-			f.pregrade(changes);
-			const result = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
-			expect(result.rc).toBe(4);
-			expect(await f.status()).toBe("in_progress");
-		}
-		f.pregrade();
-		const control = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
-		expect(control.rc, decoder.decode(control.stderr)).toBe(0);
-		expect(await f.status()).toBe("in_review");
+		expect(await f.comments()).toEqual(before);
 	} finally { f.scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1_000);
 
 test("HANDOFFREPO1 companion still requires its ledger even if its committed script is missing from the worktree", async () => {
 	const f = await handoffRepo(true);
 	try {
-		f.pregrade();
 		unlinkSync(join(f.code, "scripts/fresh-gate.sh"));
 		const refused = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
 		expect(refused.rc).toBe(4);
@@ -566,7 +516,6 @@ test("HANDOFFREPO1 companion still requires its ledger even if its committed scr
 test("HANDOFFTREE1 a GREEN candidate differing from the landed commit only in committer time admits the handoff; other parent, tree, message, author/committer email or rc 1 refuse", async () => {
 	const f = await handoffRepo(true);
 	try {
-		f.pregrade();
 		const tree = await f.checked(["git", "-C", f.code, "rev-parse", `${f.commit}^{tree}`]);
 		const parents = (await f.checked(["git", "-C", f.code, "rev-parse", `${f.commit}^@`])).split("\n").filter(Boolean);
 		const authorDate = await f.checked(["git", "-C", f.code, "log", "-1", "--format=%ad", "--date=raw", f.commit]);
@@ -610,59 +559,13 @@ test("HANDOFFTREE1 a GREEN candidate differing from the landed commit only in co
 	} finally { f.scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1_000);
 
-test("HANDOFFREPO1 native positional, file and stdin DONE comments all use the same exact pregrade", async () => {
+test("HANDOFFREPO1 missing observations cannot admit an ambiguous multiple-bead update", async () => {
 	const f = await handoffRepo();
 	try {
-		const file = join(f.scratch.path, "done.txt");
-		writeFileSync(file, f.done);
-		for (const [args, input] of [
-			[["--message", f.done], undefined],
-			[["--file", file], undefined],
-			[["-f", "-"], f.done],
-		] as const) {
-			if (existsSync(f.recordPath)) unlinkSync(f.recordPath);
-			const before = await f.comments();
-			const refused = await f.shim(["comments", "add", "hh-owned", ...args], input);
-			expect(refused.rc).toBe(4);
-			expect(await f.comments()).toEqual(before);
-			f.pregrade();
-			const accepted = await f.shim(["comments", "add", "hh-owned", ...args], input);
-			expect(accepted.rc, decoder.decode(accepted.stderr)).toBe(0);
-			const after = await f.comments();
-			expect(after.at(-1).text).toBe(f.done);
-			expect(await f.status()).toBe("in_progress");
-		}
-	} finally { f.scratch.cleanup(); }
-}, fixtureDeadlineS(120) * 1_000);
-
-test("HANDOFFREPO1 one pregrade cannot admit an ambiguous multiple-bead update", async () => {
-	const f = await handoffRepo();
-	try {
-		f.pregrade();
 		const result = await f.shim(["update", "hh-owned", "hh-other", "--status", "in_review", "--transition-comment", f.done]);
 		expect(result.rc).toBe(4);
 		expect(await f.status()).toBe("in_progress");
 		expect(await f.status("hh-other")).toBe("in_progress");
-	} finally { f.scratch.cleanup(); }
-}, fixtureDeadlineS(120) * 1_000);
-
-test("HANDOFFREPO1 pregrade binds prospective acceptance in the same native update", async () => {
-	const f = await handoffRepo();
-	try {
-		const next = HANDOFF_AC.replace("source payload", "exact source payload");
-		f.pregrade();
-		const args = ["update", "hh-owned", "--acceptance", next, "--status", "in_review", "--transition-comment", f.done];
-		const refused = await f.shim(args);
-		expect(refused.rc).toBe(4);
-		const before = JSON.parse(await f.br(["show", "hh-owned", "--json"]))[0];
-		expect(before.status).toBe("in_progress");
-		expect(before.acceptance_criteria).toBe(HANDOFF_AC);
-		f.pregrade({ ac_sha256: createHash("sha256").update(next.replace("[x]", "[ ]")).digest("hex") });
-		const accepted = await f.shim(args);
-		expect(accepted.rc, decoder.decode(accepted.stderr)).toBe(0);
-		const after = JSON.parse(await f.br(["show", "hh-owned", "--json"]))[0];
-		expect(after.status).toBe("in_review");
-		expect(after.acceptance_criteria).toBe(next);
 	} finally { f.scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1_000);
 

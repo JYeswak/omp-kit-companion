@@ -1,0 +1,1 @@
+- Remove obsolete pregrade-admission tests after pregrade retirement; retain handoff refusal, unchanged native state, exact source check, and GREEN-ledger coverage.
