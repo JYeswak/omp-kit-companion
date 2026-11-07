@@ -1794,8 +1794,9 @@ async function nativeCloseFixture() {
 	const parent: FlywheelContext = { cwd, agent: { kind: "main", id: "Main" }, sessionManager: { getSessionId: () => `parent:${cwd}`, getSessionFile: () => parentFile } };
 	const child: FlywheelContext = { cwd, agent: { kind: "sub", id: "NativeVerifier", parentId: "Main" }, sessionManager: { getSessionId: () => `child:${cwd}`, getSessionFile: () => join(cwd, "parent", "NativeVerifier.jsonl") } };
 	await handlers.get("before_subagent_spawn")!({ type: "before_subagent_spawn", spawnKey: "NativeVerifier", agent: "task", invocationKind: "task", patterns: [] }, parent);
-	const call = (ctx: FlywheelContext, command: string) => handlers.get("tool_call")!({ toolName: "bash", toolCallId: `native-close-${Date.now()}`, input: { command } }, ctx);
-	const pregrade = () => recordNativePregrade(child, { bead: row.id, repo: cwd, export_sha: sha, ac_sha256: nativeAcDigest(acceptance), evidence: "[a] PASS control and planted negative, 2 pass 0 fail" }, exec, env);
+	// Tracker acts run outside the implementation repo, just as an export-based verifier must.
+	const call = (ctx: FlywheelContext, command: string) => handlers.get("tool_call")!({ toolName: "bash", toolCallId: `native-close-${Date.now()}`, input: { cwd: base, command } }, ctx);
+	const pregrade = () => recordNativePregrade(child, { bead: row.id, repo: cwd, tracker: base, export_sha: sha, ac_sha256: nativeAcDigest(acceptance), evidence: "[a] PASS control and planted negative, 2 pass 0 fail" }, exec, env);
 	const close = `br close ${row.id} --actor NativeVerifier --reason 'PASS by NativeVerifier family: fixture export ${sha} [a]'`;
 	return { cwd, row, child, parent, call, pregrade, close, handlers };
 }
@@ -1823,4 +1824,13 @@ test("AGENTCLOSE1 planted: parent self-close and a child without a native verdic
 	const borrowed = await f.call(f.child, f.close.replace("--actor NativeVerifier", "--actor Lead"));
 	expect(borrowed?.block).toBe(true);
 	expect(borrowed?.reason).toContain("--actor NativeVerifier");
+});
+
+test("AGENTCLOSE1 untracked source execution withdraws a child's previous native pregrade", async () => {
+	const f = await nativeCloseFixture();
+	await f.pregrade();
+	await f.handlers.get("tool_call")!({ toolName: "bash", toolCallId: "untracked-source-write", input: { cwd: f.cwd, command: "printf changed > implementation.ts" } }, f.child);
+	const refused = await f.call(f.child, f.close);
+	expect(refused?.block).toBe(true);
+	expect(refused?.reason).toContain("NATIVE_UNTRACKED_EXEC");
 });

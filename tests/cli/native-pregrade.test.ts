@@ -221,3 +221,66 @@ test("pregrade binds a separate tracker to the implementation export and cannot 
 	await expect(checkNativeClose(child, { ...bead, acceptance }, base, `PASS export ${sha}`, exec)).resolves.toBeUndefined();
 	await expect(checkNativeClose(child, { ...bead, acceptance }, repo, `PASS export ${sha}`, exec)).rejects.toThrow("NATIVE_VERDICT_REQUIRED");
 });
+
+test("untracked bash implementation edit with a lead-authored commit cannot self-pregrade", async () => {
+	const { child } = contexts();
+	const { exec } = tracker();
+	const command = "printf '%s\\n' 'export const value = 2;' > feature.ts";
+	await observeNativeWrite({ toolName: "bash", input: { cwd: "repo", command } }, { ...child, cwd: base }, exec);
+	const edit = await runFixtureAsync(["sh", "-c", command], { cwd: repo, env });
+	expect(edit.rc).toBe(0);
+	await git("add", "--", "feature.ts");
+	await git("-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "lead commits child shell edit\n\nBead: kit-native");
+	const candidate = await git("rev-parse", "HEAD");
+	expect(await git("show", "-s", "--format=%an", candidate)).toBe("Builder");
+	await expect(recordNativePregrade(child, { ...input(), export_sha: candidate }, exec, env)).rejects.toThrow("NATIVE_UNTRACKED_EXEC");
+});
+
+test("untracked execution control: independent git export and repo-less cwd do not taint implementation", async () => {
+	const { child } = contexts();
+	const { exec } = tracker();
+	const exported = join(base, `export-${randomUUID()}`);
+	mkdirSync(exported);
+	const initialized = await runFixtureAsync(["git", "init", "--quiet", "--template="], { cwd: exported, env });
+	expect(initialized.rc).toBe(0);
+	await observeNativeWrite({ toolName: "bash", input: { cwd: exported, command: "python3 -c 'print(1)'" } }, child, exec);
+	await observeNativeWrite({ toolName: "bash", input: { cwd: base, command: "printf control" } }, child, exec);
+	await expect(recordNativePregrade(child, input(), exec, env)).resolves.toBeDefined();
+});
+
+test("untracked execution control: fixed single-invocation reads and scratch export setup stay independent", async () => {
+	const { child } = contexts();
+	const { exec } = tracker();
+	for (const command of [
+		"omp-kit scratch new --export abcdef123456 --json",
+		"git fetch origin main", "git rev-parse HEAD", "git show HEAD",
+		"git log --oneline", "git diff --stat", "git status --short",
+		"br show kit-native", "br comments list kit-native", "br search native", "br ready --json",
+	]) await observeNativeWrite({ toolName: "bash", input: { cwd: repo, command } }, child, exec);
+	await expect(recordNativePregrade(child, input(), exec, env)).resolves.toBeDefined();
+});
+
+test("untracked execution planted: an allowlisted read chained with sed is not an independent verifier", async () => {
+	const { child } = contexts();
+	const { exec } = tracker();
+	await observeNativeWrite({ toolName: "bash", input: { cwd: repo, command: "git status --short; sed -i.bak s/1/2/ feature.ts" } }, child, exec);
+	await expect(recordNativePregrade(child, input(), exec, env)).rejects.toThrow("NATIVE_UNTRACKED_EXEC");
+});
+
+test("untracked execution planted: every eval taints verification, even from outside the implementation repo", async () => {
+	for (const cwd of [repo, base]) {
+		const { child } = contexts();
+		const { exec } = tracker();
+		await observeNativeWrite({ toolName: "eval", input: { cwd, language: "py", code: "print(1)" } }, child, exec);
+		await expect(recordNativePregrade(child, input(), exec, env)).rejects.toThrow("NATIVE_UNTRACKED_EXEC");
+	}
+});
+
+test("untracked execution planted: archive, redirection, substitutions and multiline reads are not allowlisted", async () => {
+	for (const command of ["git archive HEAD", "git show HEAD > feature.ts", "git show $(printf HEAD)", "git status\nprintf changed", "git status && printf changed"]) {
+		const { child } = contexts();
+		const { exec } = tracker();
+		await observeNativeWrite({ toolName: "bash", input: { cwd: repo, command } }, child, exec);
+		await expect(recordNativePregrade(child, input(), exec, env)).rejects.toThrow("NATIVE_UNTRACKED_EXEC");
+	}
+});
