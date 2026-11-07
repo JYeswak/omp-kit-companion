@@ -1634,6 +1634,11 @@ test("RELPREREG1 prereg: cut cards keep their verdict at their commits; the same
 			expect(existsSync(join(fx.lease, "suite-lease", "holder.json"))).toBe(false);
 			expect(tickets(fx.lease)).toEqual([]);
 			expect(leaseFree(fx.lease)).toBe("RELEASED");
+			// RELEASEDIET1: historical optional minimum_run metadata remains readable.
+			const recordPath = join(fx.store, readdirSync(fx.store).find(name => name.endsWith(".json"))!);
+			const historical = JSON.parse(readFileSync(recordPath, "utf8"));
+			historical.minimum_run = { version: 1, status: "PASS", policy: { max_count_drop: { bun: 0, shell: 0, python: 0 }, wall_floor_ms: 1, wall_floor_percent: 25 }, baseline: null, counts: { bun: 0, shell: 0, python: 1 }, wall_ms: historical.timing.wall_ms, shortfalls: [] };
+			writeFileSync(recordPath, JSON.stringify(historical));
 			const again = await launch(fx, sha, "again").done;
 			expect(again.rc, again.out + again.err).toBe(0);
 			expect(again.out).toContain(`FULL-SUITE: VERDICT REUSED PASS tree=${tree} role=base`);

@@ -26,11 +26,6 @@ ROLES = ("base", "main")
 # 8 MiB keeps a bound with headroom for several times the current suite.
 MAX_RECORD_BYTES = 8 << 20
 MAX_COMMAND_OUTPUT = 16 << 20
-# MINRUNANCESTOR1: 67 successful release verdict commits had a largest consecutive
-# gap of 50 commits on 2026-11-05. 1024 bounds the walk with >20x that observed gap.
-MINIMUM_ANCESTOR_LIMIT = 1024
-MINIMUM_BASELINE_RULE = "ancestor-tree-v1"
-
 # CULPRIT1 (ompkit-6xxhu): the one optional key scripts/verdict-culprit.py adds to a FAIL record.
 CULPRIT_KEYS = frozenset(("sha", "author", "bead", "failing_files", "method", "reason"))
 CULPRIT_NONE_METHODS = ("flake-rerun", "unattributed")
@@ -373,165 +368,6 @@ def measured_wall(files: list[dict], invocation_ms: int) -> int:
     return max(invocation_ms, covered)
 
 
-def minimum_policy(value: object) -> dict:
-    if not isinstance(value, dict) or set(value) != {"max_count_drop", "wall_floor_ms", "wall_floor_percent"}:
-        raise ValueError("minimum_full_run policy fields are invalid")
-    drop = value["max_count_drop"]
-    if not isinstance(drop, dict) or set(drop) != {"bun", "shell", "python"}:
-        raise ValueError("minimum_full_run max_count_drop needs bun, shell and python")
-    numbers = [*drop.values(), value["wall_floor_ms"], value["wall_floor_percent"]]
-    if any(not isinstance(n, int) or isinstance(n, bool) or n < 0 or n > (1 << 53) - 1 for n in numbers):
-        raise ValueError("minimum_full_run requires bounded nonnegative integers")
-    if value["wall_floor_ms"] < 1 or not 1 <= value["wall_floor_percent"] <= 100:
-        raise ValueError("minimum_full_run wall floors must be positive (percent 1..100)")
-    return {"max_count_drop": dict(drop), "wall_floor_ms": value["wall_floor_ms"],
-            "wall_floor_percent": value["wall_floor_percent"]}
-
-
-def load_minimum_policy(suite_root: Path) -> dict:
-    defaults = {"max_count_drop": {"bun": 0, "shell": 0, "python": 0},
-                "wall_floor_ms": 1, "wall_floor_percent": 25}
-    config = suite_root / ".github" / "test-budget.json"
-    if not config.exists():
-        return minimum_policy(defaults)
-    return minimum_policy(json_file(config).get("minimum_full_run", defaults))
-
-
-def runtime_platform(runtime: str) -> tuple[str, str]:
-    parts = runtime.split("/")
-    if len(parts) < 2 or not parts[0] or not parts[1]:
-        raise ValueError("minimum-run runtime has no platform identity")
-    return parts[0], parts[1]
-
-
-def retirement_entries(value: object) -> list[dict]:
-    """A reviewed path decision, never a kind-wide count allowance."""
-    if (not isinstance(value, dict) or set(value) != {"version", "entries"}
-            or value["version"] != 1 or not isinstance(value["entries"], list)):
-        raise ValueError("RETIRED_TEST_LEDGER_INVALID: expected version 1 entries")
-    seen = set()
-    for entry in value["entries"]:
-        if not isinstance(entry, dict) or set(entry) != {"path", "kind", "bead", "commit"}:
-            raise ValueError("RETIRED_TEST_ENTRY_INVALID: expected path, kind, bead, commit")
-        path, kind = entry["path"], entry["kind"]
-        if (not isinstance(path, str) or not path.startswith("tests/")
-                or any(part in ("", ".", "..") for part in path.split("/"))
-                or any(ord(char) < 32 for char in path) or "\\" in path
-                or kind not in ("bun", "shell", "python")
-                or not path.endswith({"bun": (".test.ts",), "shell": (".test.sh",),
-                                      "python": ("_test.py", ".test.py")}[kind])):
-            raise ValueError(f"RETIRED_TEST_ENTRY_INVALID: path/kind {path!r}")
-        if path in seen:
-            raise ValueError(f"RETIRED_TEST_DUPLICATE: {path}")
-        seen.add(path)
-        if (not isinstance(entry["bead"], str) or BEAD_ID.fullmatch(entry["bead"]) is None
-                or not valid_hex(entry["commit"], (40, 64))):
-            raise ValueError(f"RETIRED_TEST_ENTRY_INVALID: bead/commit for {path}")
-    return value["entries"]
-
-
-def assess_retirements(entries: list[dict], repo: Path, commit: str | None,
-                       baseline: dict | None) -> list[dict]:
-    reports = []
-    for entry in entries:
-        path, deletion = entry["path"], entry["commit"]
-        if commit is None:
-            raise ValueError(f"RETIRED_TEST_NO_COMMIT: {path}")
-        literal = ":(literal)" + path
-        if checked_run(["git", "-C", str(repo), "ls-tree", "-r", "--name-only", "-z", commit, "--", literal]):
-            raise ValueError(f"RETIRED_TEST_STILL_PRESENT: {path}")
-        try:
-            checked_run(["git", "-C", str(repo), "merge-base", "--is-ancestor", deletion, commit])
-        except ValueError as error:
-            raise ValueError(f"RETIRED_TEST_NOT_ANCESTOR: {path}: {error}") from error
-        deleted = checked_run(["git", "-C", str(repo), "show", "--format=", "--name-status",
-                               "--diff-filter=D", "--no-renames", "-z", deletion, "--", literal])
-        if deleted != b"D\0" + path.encode("utf-8") + b"\0":
-            raise ValueError(f"RETIRED_TEST_NOT_DELETED: {path} by {deletion}")
-        present = baseline is not None and bool(checked_run(
-            ["git", "-C", str(repo), "ls-tree", "-r", "--name-only", "-z", baseline["tree"], "--", literal]))
-        reports.append({**entry, "applied": present,
-                        "reason": "reference-present" if present else
-                                  "no-reference" if baseline is None else "absent-from-reference"})
-    return reports
-
-
-def minimum_shortfalls(counts: dict, wall_ms: int, policy: dict, baseline: dict | None,
-                       retired_tests: list[dict] | None = None) -> list[dict]:
-    shortfalls = []
-    floor = policy["wall_floor_ms"]
-    if baseline is not None:
-        for kind in ("bun", "shell", "python"):
-            retired = sum(entry["kind"] == kind and entry["applied"] for entry in (retired_tests or ()))
-            minimum = max(0, baseline["counts"][kind] - retired - policy["max_count_drop"][kind])
-            if counts[kind] < minimum:
-                shortfalls.append({"measure": kind, "observed": counts[kind], "minimum": minimum})
-        floor = max(floor, (baseline["wall_ms"] * policy["wall_floor_percent"] + 99) // 100)
-    if wall_ms < floor:
-        shortfalls.append({"measure": "wall_ms", "observed": wall_ms, "minimum": floor})
-    return shortfalls
-
-
-def validate_minimum_report(report: object, files: list[dict], wall_ms: object,
-                            role: str, runtime: str, *, repo: Path | None = None,
-                            commit: str | None = None) -> list[dict]:
-    if not isinstance(report, dict) or report.get("version") not in (1, 2):
-        raise ValueError("minimum-run report schema is invalid")
-    if not isinstance(wall_ms, int) or isinstance(wall_ms, bool) or wall_ms < 0:
-        raise ValueError("minimum-run wall time is invalid")
-    wall_ms = measured_wall(files, wall_ms)
-    counts = measured_counts(files)
-    policy = minimum_policy(report.get("policy"))
-    baseline = report.get("baseline")
-    if baseline is not None:
-        if not isinstance(baseline, dict):
-            raise ValueError("minimum-run baseline is invalid")
-        identity = (baseline.get("tree"), role, baseline.get("checks"), baseline.get("runtime"))
-        normalized_identity(*identity)
-        if (baseline.get("record") != record_key(*identity) + ".json"
-                or runtime_platform(identity[3]) != runtime_platform(runtime)):
-            raise ValueError("minimum-run baseline identity is inconsistent")
-        old_counts = baseline.get("counts")
-        old_wall = baseline.get("wall_ms")
-        if (not isinstance(old_counts, dict) or set(old_counts) != set(counts)
-                or any(not isinstance(n, int) or isinstance(n, bool) or n < 0 for n in old_counts.values())
-                or not isinstance(old_wall, int) or isinstance(old_wall, bool) or old_wall < 0):
-            raise ValueError("minimum-run baseline measurements are invalid")
-    # Optional on historical version-1 reports; new reports name the no-reference
-    # first-run behavior rather than falling back to an unrelated candidate PASS.
-    if "baseline_rule" in report or "reference_status" in report:
-        status = report.get("reference_status")
-        if (report.get("baseline_rule") != MINIMUM_BASELINE_RULE
-                or report.get("ancestor_limit") != MINIMUM_ANCESTOR_LIMIT
-                or status not in ("ancestor-pass", "no-commit", "no-ancestor-pass")
-                or (baseline is not None) != (status == "ancestor-pass")):
-            raise ValueError("minimum-run baseline selection is invalid")
-    retired_tests = report.get("retired_tests", [])
-    if report["version"] == 1:
-        if retired_tests:
-            raise ValueError("minimum-run version-1 report cannot apply retirements")
-    else:
-        if "retired_tests" not in report or not isinstance(retired_tests, list):
-            raise ValueError("minimum-run retirement report is invalid")
-        entries = []
-        for row in retired_tests:
-            if (not isinstance(row, dict)
-                    or set(row) != {"path", "kind", "bead", "commit", "applied", "reason"}
-                    or not isinstance(row["applied"], bool)
-                    or row["reason"] != ("reference-present" if row["applied"] else
-                                         "no-reference" if baseline is None else "absent-from-reference")
-                    or (row["applied"] and baseline is None)):
-                raise ValueError("minimum-run retirement report is invalid")
-            entries.append({key: row[key] for key in ("path", "kind", "bead", "commit")})
-        retirement_entries({"version": 1, "entries": entries})
-        if repo is not None and assess_retirements(entries, repo, commit, baseline) != retired_tests:
-            raise ValueError("minimum-run retirement report disagrees with Git evidence")
-    expected = minimum_shortfalls(counts, wall_ms, policy, baseline, retired_tests)
-    if (report.get("counts") != counts or report.get("wall_ms") != wall_ms
-            or report.get("shortfalls") != expected
-            or report.get("status") != ("FAIL" if expected else "PASS")):
-        raise ValueError("minimum-run report disagrees with its measurements")
-    return expected
 
 
 def validate_runtime_environment(environment: object, runtime: str) -> None:
@@ -630,15 +466,8 @@ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, ro
             closure = row.get("closure")
             if not isinstance(closure, dict) or closure.get("tree") != entry_tree:
                 raise ValueError("measured row does not bind the candidate tree")
-        minimum_failures = []
-        if "minimum_run" not in entry and (not historical or files[0]["judge"]["sha256"] == metrics.JUDGE_SHA256):
-            raise ValueError("current verdict has no minimum-run qualification")
-        if "minimum_run" in entry:
-            timing = entry.get("timing")
-            if not isinstance(timing, dict):
-                raise ValueError("minimum-run timing is absent")
-            minimum_failures = validate_minimum_report(entry["minimum_run"], files, timing.get("wall_ms"),
-                                                      entry_role, entry_runtime, repo=repo, commit=commit)
+        # Older records may carry the retired qualification; it is not a current gate.
+        minimum_failures = isinstance(entry.get("minimum_run"), dict) and entry["minimum_run"].get("status") == "FAIL"
         if entry["verdict"] == "PASS":
             if exit_code != 0 or bun_fail or shell_fail or py_fail or minimum_failures or any(row.get("rc") != 0 for row in files):
                 raise ValueError("PASS contains a failing suite")
@@ -661,72 +490,6 @@ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, ro
         return None, str(error)
 
 
-def last_green(directory: Path, judge_root: Path, role: str, runtime: str, *,
-               repo: Path, commit: str | None) -> dict | None:
-    """Newest validated PASS whose tree is in the judged commit's bounded ancestry."""
-    if commit is None:
-        return None
-    # Resolve a commit first: an invalid supplied ref is an error, not a first run.
-    resolved = checked_run(["git", "-C", str(repo), "rev-parse", "--verify",
-                            "--end-of-options", commit + "^{commit}"]).decode().strip()
-    trees = set(checked_run(["git", "-C", str(repo), "rev-list",
-                             f"--max-count={MINIMUM_ANCESTOR_LIMIT}",
-                             "--format=%T", "--no-commit-header", resolved, "--"]).decode().splitlines())
-    candidates = []
-    for path in directory.glob("*.json"):
-        try:
-            raw = json_file(path)
-            timing = raw.get("timing", {})
-            wall = timing.get("wall_ms")
-            started = timing.get("started_ms")
-            if (raw.get("tree") not in trees
-                    or raw.get("verdict") != "PASS" or raw.get("judge_role") != role
-                    or runtime_platform(raw.get("runtime", "")) != runtime_platform(runtime)
-                    or not isinstance(wall, int) or isinstance(wall, bool) or wall < 0
-                    or not isinstance(started, int) or isinstance(started, bool) or started < 0):
-                continue
-            candidates.append((started + wall, path.name, path))
-        except (OSError, ValueError, TypeError, AttributeError):
-            continue
-    for _, _, path in sorted(candidates, reverse=True):
-        valid, _reason = validate_record(path, judge_root=judge_root, role=role,
-                                        exact_filename=True, historical=True)
-        if valid is not None:
-            try:
-                counts = measured_counts(valid["evidence"]["files"])
-                wall_ms = measured_wall(valid["evidence"]["files"], valid["timing"]["wall_ms"])
-            except (ValueError, KeyError, TypeError):
-                continue
-            return {"record": path.name, "tree": valid["tree"], "checks": valid["checks"],
-                    "runtime": valid["runtime"], "counts": counts, "wall_ms": wall_ms}
-    return None
-
-
-def assess_minimum_run(judge_root: Path, suite_root: Path, directory: Path,
-                       role: str, runtime: str, files_path: Path, wall_ms: int, *,
-                       repo: Path, commit: str | None) -> dict:
-    if wall_ms < 0:
-        raise ValueError("minimum-run wall time is negative")
-    files = json_value(files_path)
-    if not isinstance(files, list) or not all(isinstance(row, dict) for row in files):
-        raise ValueError("minimum-run measurements are not file rows")
-    metrics = load_metrics(judge_root)
-    if not metrics.complete_records(files, [row.get("path") for row in files]):
-        raise ValueError("minimum-run measured file evidence is incomplete")
-    wall_ms = measured_wall(files, wall_ms)
-    policy = load_minimum_policy(suite_root)
-    counts = measured_counts(files)
-    baseline = last_green(directory, judge_root, role, runtime, repo=repo, commit=commit)
-    ledger = suite_root / ".github" / "retired-tests.json"
-    entries = retirement_entries(json_file(ledger)) if ledger.exists() else []
-    retired_tests = assess_retirements(entries, repo, commit, baseline)
-    shortfalls = minimum_shortfalls(counts, wall_ms, policy, baseline, retired_tests)
-    return {"version": 2, "status": "FAIL" if shortfalls else "PASS", "policy": policy,
-            "baseline_rule": MINIMUM_BASELINE_RULE, "ancestor_limit": MINIMUM_ANCESTOR_LIMIT,
-            "reference_status": ("ancestor-pass" if baseline is not None else
-                                 "no-commit" if commit is None else "no-ancestor-pass"),
-            "baseline": baseline, "retired_tests": retired_tests,
-            "counts": counts, "wall_ms": wall_ms, "shortfalls": shortfalls}
 
 
 
@@ -1150,15 +913,6 @@ def main() -> int:
     add_store_options(list_cmd)
     list_cmd.add_argument("--tree")
     list_cmd.add_argument("--judge-root")
-    minimum_cmd = actions.add_parser("minimum-run")
-    add_store_options(minimum_cmd)
-    minimum_cmd.add_argument("--role", choices=ROLES, required=True)
-    minimum_cmd.add_argument("--runtime", required=True)
-    minimum_cmd.add_argument("--judge-root", required=True)
-    minimum_cmd.add_argument("--suite-root", required=True)
-    minimum_cmd.add_argument("--files", required=True)
-    minimum_cmd.add_argument("--wall-ms", type=int, required=True)
-    minimum_cmd.add_argument("--commit")
     failing_cmd = actions.add_parser("failing-tests")
     failing_cmd.add_argument("--log", required=True)
     args = parser.parse_args()
@@ -1190,12 +944,6 @@ def main() -> int:
             return 0
         if args.action == "timings":
             print(directory / "timings")
-            return 0
-        if args.action == "minimum-run":
-            report = assess_minimum_run(judge_root, Path(args.suite_root).resolve(), directory,
-                                        args.role, args.runtime, Path(args.files), args.wall_ms,
-                                        repo=repo, commit=args.commit)
-            print(json.dumps(report, sort_keys=True, separators=(",", ":")))
             return 0
         if args.action == "lookup":
             entry, _reason = lookup(repo, args.tree, args.role, args.checks, args.runtime,

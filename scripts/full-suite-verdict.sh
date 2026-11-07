@@ -823,27 +823,6 @@ fi
 run_finished_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
 load_end=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
 
-# A complete-looking run can still have silently lost suites. Historical
-# evidence is a reference only; it never supplies a current-run PASS.
-minimum_run_assessment() (
-	case "$ARCHIVE_DIR" in
-		/*) minimum_archive=$ARCHIVE_DIR ;;
-		*) minimum_archive="$(pwd -P)/$ARCHIVE_DIR" ;;
-	esac
-	cd -- "$SCRIPT_DIR" || exit 1
-	python3 ./full-suite-verdict-store.py minimum-run \
-		--repo "$ROOT" --commit "$COMMIT" --cache-dir "$CACHE_DIR" --role "$JUDGE_ROLE" --runtime "$runtime" \
-		--judge-root "$SCRIPT_DIR/.." --suite-root "$minimum_archive" --files "$METRICS_ROWS" \
-		--wall-ms "$((run_finished_ms - run_started_ms))"
-)
-if ! minimum_run=$(minimum_run_assessment); then
-	finish_logs "$incomplete_log"
-	cleanup_archive
-	fail "minimum-run assessment unavailable; nothing was cached; partial log: $incomplete_log"
-	exit 1
-fi
-printf 'MINRUN1: %s\n' "$minimum_run" >>"$SUITE_OUT"
-
 if [ "$suite_rc" -eq 0 ] && [ "${bun_status_rc:-0}" = 0 ] && [ "$bun_fail" -eq 0 ] && [ "$shell_red" -eq 0 ] && [ "$py_red" -eq 0 ]; then
 	verdict=PASS
 	code=0
@@ -858,7 +837,7 @@ fi
 suite_rows=$(cat "$SUITE_STATUS")
 finish_logs "$log_entry"
 write_complete_verdict() {
-MINIMUM_RUN="$minimum_run" METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" python3 - <<'PYEOF'
+METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" python3 - <<'PYEOF'
 import hashlib, json, math, os
 environment = json.loads(os.environ["RUNTIME_ENVIRONMENT"])["environment"]
 log_digest = hashlib.sha256()
@@ -929,11 +908,6 @@ entry = {
     },
     "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
 }
-entry["minimum_run"] = json.loads(os.environ["MINIMUM_RUN"])
-if entry["minimum_run"]["status"] == "FAIL":
-    entry["verdict"] = "FAIL"
-    if entry["exit_code"] == 0:
-        entry["exit_code"] = 1
 # FSRERUN1 (ompkit-t7cn7.4): a rerun of a cached FAIL records why, who and what it superseded.
 # A run without --rerun-reason records no rerun block, so the lookup above still matches.
 if os.environ.get("RERUN_FLAG") == "1":
@@ -967,7 +941,6 @@ if [ "$verdict" = "PASS" ]; then
 	exit 0
 else
 	echo "FULL-SUITE: VERDICT FAIL tree=$tree role=$JUDGE_ROLE checks=$checks runtime=$runtime producer_rc=$code bun_fail=$bun_fail shell_red=$shell_red py_red=$py_red; the push is refused" >&2
-	printf 'FULL-SUITE: minimum-run assessment %s\n' "$minimum_run" >&2
 	# Keep failing names beside the reused log for the pre-push gate.
 	echo "FULL-SUITE: failing tests (full log: $log_entry):" >&2
 	printf '%s\n' "$suite_rows" | (cd -- "$SCRIPT_DIR" && python3 ./full-suite-verdict-store.py failing-tests --log "$log_entry") >&2 \

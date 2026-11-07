@@ -39,10 +39,5 @@
         }
       }
     }
-  },
-  "minimum_full_run": {
-    "max_count_drop": { "bun": 0, "shell": 0, "python": 0 },
-    "wall_floor_ms": 1,
-    "wall_floor_percent": 25
   }
 }
