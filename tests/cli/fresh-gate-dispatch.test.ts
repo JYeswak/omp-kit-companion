@@ -95,7 +95,7 @@ test.skipIf(LOW_BASE === null)("CIGATE1 planted: below the 10 GiB physical floor
 		writeFileSync(join(low, ".owner"), `pid=${process.pid}\nlabel=fresh-gate-lowfs\ncreated=${new Date().toISOString()}\n`);
 		expect(freeBytes(low)).toBeLessThan(NEED_BYTES);
 		const refused = runFocused(fx, source, affectedArchive(fx, 42, 42, low), "lib/mod.ts");
-		expect(refused.code).toBe(1);
+		expect(refused.code, refused.out).toBe(1);
 		expect(refused.out).toMatch(/FRESH-GATE: REFUSED reason=DISK_BELOW_FLOOR need=10G need_bytes=10737418240 free_bytes=[0-9]+ observer=statfs/);
 		expect(refused.out).not.toContain("affected tests:");
 		expect(refused.out).not.toContain("GREEN");

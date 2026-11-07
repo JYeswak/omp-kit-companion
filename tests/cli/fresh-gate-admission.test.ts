@@ -67,7 +67,7 @@ test.skipIf(LOW_BASE === null)("SAVEFIRST1 planted (b): below the 10 GiB physica
 		symlinkSync(join(root, "src"), join(low, "src"));
 		const marker = join(fx.dir, "lowfs-ran");
 		const refused = runProbe(fx, source, `heavy_step cli-compile sh -c 'printf ran > "$1"' sh '${marker}'`, low);
-		expect(refused.code).toBe(75);
+		expect(refused.code, refused.out).toBe(75);
 		expect(existsSync(marker)).toBe(false);
 		expect(refused.out).toContain("waiting: disk low (statfs)");
 		expect(refused.out).toContain("deferred: queue timeout");

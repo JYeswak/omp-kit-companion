@@ -8,3 +8,4 @@
 - Verify restored hook permissions with the portable filesystem API rather than mixing incompatible BSD and GNU stat output.
 - Preserve the stock OS Python in the isolated extension-test PATH so portable process cleanup works while fleet tools remain absent.
 - Run parallel live-test cases from a caller-owned workspace scratch root instead of the runner's system temporary directory.
+- Include native low-filesystem refusal output in failing CI assertions without changing their required exit codes or disk-floor checks.
