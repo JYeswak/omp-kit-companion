@@ -26,3 +26,4 @@
 - Make the live runtime's private Bun command enter interpreter mode only when invoked, supporting native, shell-to-Bun and Bun-shebang OMP launchers without leaking that override to native executables.
 - Validate daemon install plans against the native scheduler artifact: launchd KeepAlive on macOS and systemd Restart=on-failure on Linux.
 - Keep the physical disk-floor test aligned with its immediate typed refusal: exit 1, no command run and no queue waiting or retryable deferral.
+- Make the blocked-worker concurrency fixture's initial admission deterministic without changing its real lock exclusion, timeout, cleanup or deadline assertions.

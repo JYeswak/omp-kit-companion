@@ -1454,7 +1454,21 @@ test("REAP1 concurrent actual service invocation cannot enter a blocked scratch 
   expect(Bun.spawnSync(["mkfifo", join(blocked, ".owner")]).exitCode).toBe(0);
   const bin = join(home, ".local", "bin");
   writeFileSync(join(bin, "lsof"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-  const extraEnv = { OMP_KIT_SCRATCH_ROOTS: root, TMPDIR: home, OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "1200", PATH: `${LAUNCHER_TABLE}:${bin}:${process.env.PATH ?? ""}` };
+  const realPs = Bun.which("ps");
+  if (realPs === null) throw new Error("REAP1 fixture needs ps for real liveness probes");
+  // Admission is this case's precondition, not the process-census behavior under test.
+  // The file-wide table includes transient sibling launchers; report the actual caller
+  // for admission only, and leave lock liveness/start-identity probes on the real ps.
+  writeFileSync(join(bin, "ps"), [
+    "#!/bin/sh",
+    'if [ "$#" -eq 2 ] && [ "$1" = "-axo" ] && [ "$2" = "pid=,args=" ]; then',
+    '\tprintf "%s service run scratch-reaper\\n" "$PPID"',
+    "\texit 0",
+    "fi",
+    `exec '${realPs.replaceAll("'", "'\\''")}' "$@"`,
+    "",
+  ].join("\n"), { mode: 0o700 });
+  const extraEnv = { OMP_KIT_SCRATCH_ROOTS: root, TMPDIR: home, OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "1200", PATH: `${bin}:${LAUNCHER_TABLE}:${process.env.PATH ?? ""}` };
   // A separate CLI process exercises the real platform deadline; parent fake timers cannot drive it.
   const jobs = join(home, ".local", "state", "omp-kit", "jobs");
   mkdirSync(jobs, { recursive: true, mode: 0o700 });
