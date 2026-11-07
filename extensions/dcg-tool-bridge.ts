@@ -29,7 +29,6 @@ export type DcgRunner = (payload: DcgPayload) => Promise<DcgRunResult>;
 
 export type BlockResult = { block: true; reason: string };
 
-const DCG_PATH = "/Users/josh/.local/bin/dcg";
 const DCG_TIMEOUT_MS = 10_000;
 
 function object(value: unknown): JsonRecord | undefined {
@@ -96,7 +95,7 @@ export function evaluateDcgResult(result: DcgRunResult):
 }
 
 export function makeDcgRunner(
-  path = DCG_PATH,
+  path = Bun.which("dcg", { PATH: process.env.PATH ?? "" }) ?? "dcg",
   timeoutMs = DCG_TIMEOUT_MS,
 ): DcgRunner {
   return async (payload) => {
@@ -385,7 +384,9 @@ type OmpExtensionApi = {
 };
 
 export default function dcgToolBridge(pi: OmpExtensionApi): void {
-  const runGate = makeDcgRunner();
+  const path = Bun.which("dcg", { PATH: process.env.PATH ?? "" });
+  if (path === null) return;
+  const runGate = makeDcgRunner(path);
   const bridge = createDcgToolBridge(runGate);
   const userBash = createDcgUserBashBridge(runGate);
   pi.on("tool_call", async (event, ctx) => {

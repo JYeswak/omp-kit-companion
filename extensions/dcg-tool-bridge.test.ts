@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import {
+import { ownedTmp } from "../src/kitlib/tmp.ts";
+import dcgToolBridge, {
   buildDcgPayload,
   createDcgToolBridge,
   createDcgUserBashBridge,
@@ -14,6 +15,21 @@ const allow: DcgRunResult = {
   stderr: "",
   timedOut: false,
 };
+
+test("an absent optional dcg adapter registers no guards", () => {
+  const saved = process.env.PATH;
+  const empty = ownedTmp("dcg-absent");
+  process.env.PATH = empty.path;
+  try {
+    const registrations: string[] = [];
+    dcgToolBridge({ on: (event: string) => { registrations.push(event); } });
+    expect(registrations).toEqual([]);
+  } finally {
+    if (saved === undefined) delete process.env.PATH;
+    else process.env.PATH = saved;
+    empty.cleanup();
+  }
+});
 
 test("maps an OMP bash call to dcg's JSONL hook contract", async () => {
   let received: unknown;
@@ -31,7 +47,7 @@ test("maps an OMP bash call to dcg's JSONL hook contract", async () => {
   expect(received).toEqual(buildDcgPayload("git status", "/tmp"));
 });
 
-test("runs the installed dcg binary for a safe bash call", async () => {
+test.skipIf(Bun.which("dcg") === null)("runs the installed dcg binary for a safe bash call", async () => {
   const bridge = createDcgToolBridge(makeDcgRunner());
   await expect(
     bridge.handle({ type: "tool_call", toolName: "bash", toolCallId: "call-real", input: { command: "git status" } }),
