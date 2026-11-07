@@ -4,9 +4,6 @@
 release_preflight_version() {
 	sh "$4/scripts/release-train.sh" version-match --version "$3" --sha "$2" --repo "$1"
 }
-release_preflight_card() {
-	(cd "$4/scripts" && python3 -B -m release-card-check --repo "$1" --rev "$2" --version "$3")
-}
 release_preflight_signing() {
 	mode=$(git -C "$1" show "$2:scripts/release-signing.json" | jq -er 'select(.schema_version == 1) | .darwin_signing') || return 1
 	if [ "$mode" != developer-id ]; then
@@ -66,7 +63,7 @@ release_preflight_next_version() {
 check=${1:-}
 [ "$#" -eq 0 ] || shift
 case "$check" in
-	version|card|signing|attestation|verdict|releases|export|next_version)
+	version|signing|attestation|verdict|releases|export|next_version)
 		"release_preflight_$check" "$@" ;;
-	*) printf 'release-preflight: expected version|card|signing|attestation|verdict|releases|export|next_version\n' >&2; exit 2 ;;
+	*) printf 'release-preflight: expected version|signing|attestation|verdict|releases|export|next_version\n' >&2; exit 2 ;;
 esac

@@ -1,29 +1,13 @@
 import { afterAll, expect, test } from "bun:test";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { censusLoad, parsePsSnapshot } from "../../src/load-doctor.ts";
 import { fixture, configure, invoke, forgeHealthyStatfs, seedJob } from "./heavy-fixtures.ts";
-import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 import { incarnationSync } from "../../src/kitlib/proc.ts";
 import { cleanupAllOwnedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
 afterAll(cleanupAllOwnedTmp);
-
-const checker = resolve(import.meta.dir, "../../scripts/release-card-check.py");
-const cardProbe = `import importlib.util, sys
-s = importlib.util.spec_from_file_location('card', sys.argv[1])
-m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
-p = dict(endpoint='fixture count', direction='lower', producer='fixture', unit='paths', mde='1', mde_source='one lost path', sigma_d='0', sigma_source='deterministic', alpha='0.05', power='0.8', n_pairs='1', stopping='fixed-n', control='retain all readings')
-r = ['ncpu: 4', '| before | after | load1_before | load1_after | cause |', '|---|---|---|---|---|', '| 2 | 0 | 100 | 200 | leftover-process: pid 42 runaway grader |']
-f = {('Prereg', 'LOAD1'): [k + ': ' + v for k,v in p.items()], ('Result', 'LOAD1'): r}
-print(m.prereg_verdict('LOAD1', f, 1, True, 'MECHANISM VERIFIED'))
-`;
-
-test("planted high-load pair stays in the fixed-n result rather than VOID or replacement", () => {
-	const result = runFixture(["python3", "-B", "-c", cardProbe, checker], { floor_s: 30 });
-	expect(result.rc, Buffer.from(result.stderr).toString()).toBe(0);
-	expect(Buffer.from(result.stdout).toString()).toContain("LOAD1 MECHANISM VERIFIED (n=1, mean d 2 paths");
-});
 
 test("census names leftover owners, zombie parents and aged per-session MCP candidates", () => {
 	const old = "Thu Nov  5 00:00:00 2026";

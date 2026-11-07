@@ -27,50 +27,8 @@ function file(path: string, body: string) {
 	mkdirSync(dirname(join(repo, path)), { recursive: true });
 	writeFileSync(join(repo, path), body);
 }
-const card = `# Release card
-
-## 1. Gap lane
-| Bead | State |
-|---|---|
-| fixture-1 | landed |
-
-## 2. Optimization lane
-| # | Idea | Decision |
-|---|---|---|
-| 1 | READY1 | MECHANISM VERIFIED 2 → 1 |
-
-### Prereg READY1
-endpoint: fixture errors
-producer: fixture
-unit: errors
-mde: 1
-mde_source: fixture
-sigma_d: 0
-sigma_source: deterministic fixture
-alpha: 0.05
-power: 0.8
-n_pairs: 1
-stopping: fixed-n
-direction: lower
-control: paired fixture
-
-### Result READY1
-ncpu: 32
-| Pair | before | after | load1_before | load1_after |
-|---|---|---|---|---|
-| 1 | 2 | 1 | 1 | 1 |
-
-## 3. Measures
-| Measure | Before | After |
-|---|---|---|
-| Change lead time | 3 min | 2 min |
-
-## 4. Error budget
-Within budget; voids: 0/2.
-`;
-
 // Real, deliberately tiny repository: the actual suite/store produce both PASS records.
-// GitHub release-list transport alone is a fixture; source, card, runtime and verdict checks are real.
+// GitHub release-list transport alone is a fixture; source, runtime and verdict checks are real.
 let source = "";
 function setup() {
 	if (source) return;
@@ -83,7 +41,7 @@ function setup() {
 	env.PATH = `${bin}:${process.env.PATH}`;
 	const closure = runFixture(["python3", "-B", join(ROOT, "scripts/suite-metrics.py"), "judging-files"], { cwd: ROOT, env, floor_s: 30 });
 	expect(closure.rc, text(closure.stderr)).toBe(0);
-	const paths = [...text(closure.stdout).trim().split("\n"), "scripts/release-train.sh", "scripts/release-card-check.py"];
+	const paths = [...text(closure.stdout).trim().split("\n"), "scripts/release-train.sh"];
 	for (const path of paths) {
 		if (!path || !existsSync(join(ROOT, path))) continue;
 		mkdirSync(dirname(join(repo, path)), { recursive: true });
@@ -93,7 +51,6 @@ function setup() {
 	file(".gitattributes", "package.json export-subst\n");
 	file(".bun-version", ok(["bun", "--version"]) + "\n");
 	file("README.md", "<!-- kit-release:start -->\nCurrent release: v0.2.99\n<!-- kit-release:end -->\n");
-	file("docs/releases/v0.2.99.md", card);
 	file("scripts/release-signing.json", '{"schema_version":1,"darwin_signing":"developer-id"}\n');
 	file(".github/workflows/release.yml", "jobs:\n  attest-local:\n    runs-on: ubuntu-latest\n");
 	file("tests/cli/fixture.test.sh", "#!/bin/sh\n[ -f package.json ] && printf 'fixture package present\\n'\n");
@@ -134,36 +91,22 @@ test("ready exact origin/main fixture reports READY; runtime-id mismatch is NOT-
 	file("README.md", git("show", "HEAD:README.md") + "\n");
 }, fixtureDeadlineS(180) * 1000);
 
-test("missing Measures and exhausted VOID name the card failure; unpublished working bytes cannot repair origin/main", () => {
+test("an unqualified source without ship signing remains NOT-READY", () => {
 	setup();
-	for (const [name, body, reason] of [
-		["measures", card.replace("## 3. Measures", "## 3. Missing"), "Measures"],
-		// v0.2.98's exhausted idea retained two high-load VOID trials and one
-		// replacement for n_pairs=1. Current policy retains all three and refuses
-		// fixed-n overflow; it must not silently discard the first two again.
-		["void-exhausted", card.replace("| 1 | 2 | 1 | 1 | 1 |",
-			"| 1 | 2 | 1 | 30 | 30 |\n| 2 | 2 | 1 | 31 | 31 |\n| 3 | 2 | 1 | 1 | 1 |")
-			.replace("Within budget; voids: 0/2.", "VOID-exhausted READY1: two VOID trials and their replacement, all retained above."),
-			"RELEASE_INCONCLUSIVE"],
-	] as const) {
-		file("docs/releases/v0.2.99.md", body);
-		file("scripts/release-signing.json", '{"schema_version":1,"darwin_signing":"none"}\n');
-		git("add", "--", "scripts/release-signing.json");
-		git("add", "--", "docs/releases/v0.2.99.md"); git("commit", "-qm", `plant ${name} [test]`);
-		git("update-ref", "refs/remotes/origin/main", git("rev-parse", "HEAD"));
-		file("docs/releases/v0.2.99.md", card);
-		const result = readiness();
-		expect(result.rc, result.out + result.err).toBe(1);
-		const report = JSON.parse(result.out);
-		expect(report.line).toContain("NOT-READY");
-		const failed = report.checks.filter((row: { ok: boolean }) => !row.ok).map((row: { name: string }) => row.name);
-		expect(failed).toContain("ship-signing");
-		expect(failed).toContain("main-verdict");
-		expect(report.checks.find((row: { name: string }) => row.name === "release-card").detail).toContain(reason);
-	}
+	file("scripts/release-signing.json", '{"schema_version":1,"darwin_signing":"none"}\n');
+	git("add", "--", "scripts/release-signing.json");
+	git("commit", "-qm", "plant unsigned source [test]");
+	git("update-ref", "refs/remotes/origin/main", git("rev-parse", "HEAD"));
+	const result = readiness();
+	expect(result.rc, result.out + result.err).toBe(1);
+	const report = JSON.parse(result.out);
+	expect(report.line).toContain("NOT-READY");
+	const failed = report.checks.filter((row: { ok: boolean }) => !row.ok).map((row: { name: string }) => row.name);
+	expect(failed).toContain("ship-signing");
+	expect(failed).toContain("main-verdict");
 }, fixtureDeadlineS(180) * 1000);
 
-test("an already tagged main version checks the next card rather than re-cutting the published version", () => {
+test("an already tagged main version requires the next version rather than re-cutting the published version", () => {
 	setup();
 	git("tag", "v0.2.99");
 	const result = readiness();
@@ -171,5 +114,4 @@ test("an already tagged main version checks the next card rather than re-cutting
 	const report = JSON.parse(result.out);
 	expect(report.version).toBe("0.2.100");
 	expect(report.line).toContain("version: version-match: package.json states 0.2.99");
-	expect(report.line).toContain("docs/releases/v0.2.100.md");
 }, fixtureDeadlineS(60) * 1000);

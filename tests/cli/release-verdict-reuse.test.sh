@@ -51,7 +51,7 @@ for path in $(PYTHONPATH="$KITREPO/scripts" python3 -B -m suite-metrics judging-
 	mkdir -p "$seed/$(dirname -- "$path")"
 	cp "$KITREPO/$path" "$seed/$path" || exit 1
 done
-for path in scripts/release-verdict.sh scripts/release-local.sh scripts/release-train.sh scripts/release-signing.json scripts/release-card-check.py; do
+for path in scripts/release-verdict.sh scripts/release-local.sh scripts/release-train.sh scripts/release-signing.json; do
 	cp "$KITREPO/$path" "$seed/$path" || exit 1
 done
 cp "$KITREPO/scripts/gate-ci-only.tsv" "$seed/scripts/gate-ci-only.tsv"

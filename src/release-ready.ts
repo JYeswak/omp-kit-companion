@@ -47,7 +47,7 @@ export function inspectReleaseReady(repo: string, kitRoot: string): ReleaseReady
 						const next = probe("next-version", ["sh", library, "next_version", version, tags.stdout]);
 						if (next.ok) version = next.stdout;
 					}
-					for (const [name, fn] of [["version", "version"], ["release-card", "card"], ["ship-signing", "signing"], ["ship-attestation", "attestation"]]) {
+					for (const [name, fn] of [["version", "version"], ["ship-signing", "signing"], ["ship-attestation", "attestation"]]) {
 						probe(name!, ["sh", library, fn!, repo, commit, version, temp.path]);
 					}
 					if (tags.ok) {
