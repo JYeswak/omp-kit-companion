@@ -1,15 +1,14 @@
 import { afterAll, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { buildTernProofKey, proveTernCliSend, proveTernEntry, readComposerRecord, routeSendTarget, COMPOSER_RECORD_MAX_AGE_MS } from "../../src/send.ts";
+import { buildTernProofKey, proveTernCliSend, proveTernEntry, routeSendTarget } from "../../src/send.ts";
 import type { ComposerVerdict } from "../../src/send.ts";
 import { parseSessionView, readSessionTail, SESSION_HEAD_BYTES, SESSION_TAIL_WINDOW_BYTES } from "../../src/plane-tern.ts";
 import type { SessionProofRange } from "../../src/plane-tern.ts";
 import type { SessionJournalView, TernObserverIo } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
-/** TERNADDR1 (ompkit-fixjo): a Tern seat with no window key admits by `tern send BLOCK paste` + `keys Enter`. */
+/** TERNADDR1 and SESSIONCAP1 native prompt delivery and bounded journal proof. */
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
@@ -43,12 +42,9 @@ function idleJournal(repo: string, uuid: string): string {
 	].join("\n");
 }
 
-interface Taken { runs: string[][]; luaDispatches: number; pastes: number; enters: number }
+interface Taken { runs: string[][]; luaDispatches: number }
 
-/**
- * Owned Tern surface: canned inspect/process/ps/am answers. `send N paste T` holds T in a fake composer and
- * `send N keys Enter` journals it as a USER entry, as OMP does; `ctl carly lua` journals its decoded payload.
- */
+/** Owned inspect/process/identity responses; native ask journals its decoded prompt. */
 interface TernFixture { io: TernObserverIo; taken: Taken; repo: string; sessionFile: string; tailReads: number[] }
 
 const OVER_CAP = 64 * 1024 * 1024;
@@ -72,7 +68,7 @@ function overCapJournal(repo: string, uuid: string): string {
 	return lines.join("\n") + "\n";
 }
 
-function ternFixture(opts: { pasteCode?: number; overCap?: boolean; boundedReader?: boolean } = {}): TernFixture {
+function ternFixture(opts: { overCap?: boolean; boundedReader?: boolean } = {}): TernFixture {
 	const paneId = 5;
 	const repo = freshDir("repo");
 	const uuid = `sess-${Math.random().toString(36).slice(2)}`;
@@ -80,9 +76,8 @@ function ternFixture(opts: { pasteCode?: number; overCap?: boolean; boundedReade
 	let journal = opts.overCap ? overCapJournal(repo, uuid) : idleJournal(repo, uuid);
 	const leafId = opts.overCap ? "exit-1" : "m2";
 	writeFileSync(sessionFile, journal);
-	const taken: Taken = { runs: [], luaDispatches: 0, pastes: 0, enters: 0 };
+	const taken: Taken = { runs: [], luaDispatches: 0 };
 	const tailReads: number[] = [];
-	let composer = "";
 	const userEntry = (content: string) => {
 		const entry = JSON.stringify({ type: "message", id: `m-live-${taken.runs.length}`, parentId: leafId, message: { role: "user", content } }) + "\n";
 		journal += entry;
@@ -100,19 +95,7 @@ function ternFixture(opts: { pasteCode?: number; overCap?: boolean; boundedReade
 				userEntry(Buffer.from(groups[groups.length - 1]!.split(",").map(Number)).toString("utf8"));
 				return { code: 0, out: "" };
 			}
-			const send = argv.indexOf("send");
-			if (send >= 0 && argv[send + 2] === "paste") {
-				taken.pastes++;
-				if ((opts.pasteCode ?? 0) !== 0) return { code: opts.pasteCode!, out: "" };
-				composer += argv[send + 3] ?? "";
-				return { code: 0, out: "" };
-			}
-			if (send >= 0 && argv[send + 2] === "keys" && argv[send + 3] === "Enter") {
-				taken.enters++;
-				if (composer !== "") userEntry(composer.trim());
-				composer = "";
-				return { code: 0, out: "" };
-			}
+			if (argv.includes("paste") || argv.includes("keys")) throw new Error("composer transport is forbidden");
 			if (argv[0] === "/bin/ps") return { code: 0, out: "Mon Oct 20 02:00:00 2026 omp AGENT_NAME=FixtureSeat" };
 			if (argv[0] === "am") return { code: 0, out: JSON.stringify({ agent_name: "FixtureSeat", pane_id: `tern:${paneId}`, project_key: resolve(repo), binding: "verified-live" }) };
 			if (argv.includes("process")) return { code: 0, out: proc };
@@ -135,41 +118,21 @@ function ternFixture(opts: { pasteCode?: number; overCap?: boolean; boundedReade
 	return { io, taken, repo, sessionFile, tailReads };
 }
 
-/** Plant the seat's kit-composer-state record exactly as extensions/kit-composer-state.ts writes it. */
-function plantComposer(sessionFile: string, rec: Partial<{ empty: boolean; at: number; pid: number; session_file: string; schema: number }> = {}): string {
-	const dir = freshDir("composer");
-	const real = realpathSync(sessionFile);
-	const key = createHash("sha1").update(real).digest("hex").slice(0, 16);
-	writeFileSync(join(dir, `${key}.json`), JSON.stringify({ schema: 1, session_file: real, pid: process.pid, at: Date.now(), empty: true, idle: true, ...rec }));
-	return dir;
-}
 
 function send(fx: TernFixture, dir: string, extra: { windowKey?: string; composer?: (sessionFile: string) => ComposerVerdict } = {}) {
 	return proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update", dropDir: dir, cwd: fx.repo,
 		knownPrefixes: EMPTY_PREFIXES, env: { AGENT_MAIL_PROJECT: fx.repo }, pollMs: 1, deadlineMs: 20, wait: noWait, io: fx.io, ...extra });
 }
 
-const effects = (taken: Taken) => taken.luaDispatches + taken.pastes + taken.enters;
 
-test("AC1 TERNADDR1: no window key delivers by paste + Enter, proven by the USER journal entry", async () => {
+test("NATIVESEND1 TERNADDR1: no window key uses native ask and journal consumption", async () => {
 	const fx = ternFixture();
-	const composerDir = plantComposer(fx.sessionFile);
 	const dir = dropDir();
-	const got = await send(fx, dir, { composer: (sf) => readComposerRecord(sf, { dir: composerDir }) });
-	expect(got.status).toBe("OK");
-	expect(got.code).toBe("PROVEN");
-	expect(got.sends).toBe(1);
-	expect(got.detail).toContain("via paste+Enter");
+	const got = await send(fx, dir);
+	expect(got).toMatchObject({ status: "OK", code: "PROVEN", sends: 1, drop_path: null });
 	expect(got.offset).toBeGreaterThan(0);
-	expect(fx.taken.luaDispatches).toBe(0);
-	expect(fx.taken.pastes).toBe(1);
-	expect(fx.taken.enters).toBe(1);
-	const paste = fx.taken.runs.find((argv) => argv.includes("paste"))!;
-	expect(paste.slice(1)).toEqual(["send", "5", "paste", `[from an unnamed agent or kit service via omp-kit send]\nstatus update\n[${got.marker}]`]);
-	expect(fx.taken.runs.some((argv) => argv.includes("--window") || argv.includes("ctl"))).toBe(false);
-	// Enter comes only after the paste.
-	expect(fx.taken.runs.findIndex((argv) => argv.includes("Enter"))).toBeGreaterThan(fx.taken.runs.indexOf(paste));
-	expect(got.drop_path).toBeNull();
+	expect(fx.taken.luaDispatches).toBe(1);
+	expect(fx.taken.runs.some(argv => argv.includes("paste") || argv.includes("keys"))).toBe(false);
 	expect(readdirSync(dir)).toEqual([]);
 });
 
@@ -179,7 +142,7 @@ test("control: a keyed seat keeps the one ctl turn, never pastes and never consu
 	const got = await send(fx, dropDir(), { windowKey: "/run/tern-fixture.sock", composer: () => { consulted++; return { state: "DRAFT" }; } });
 	expect(got.status).toBe("OK");
 	expect(fx.taken.luaDispatches).toBe(1);
-	expect(fx.taken.pastes + fx.taken.enters).toBe(0);
+	expect(fx.taken.runs.some(argv => argv.includes("paste") || argv.includes("keys"))).toBe(false);
 	expect(consulted).toBe(0);
 	expect(got.detail).not.toContain("paste");
 });
@@ -193,62 +156,17 @@ test("control: a tmux pane still routes to the tmux (ntm) path and the Tern send
 	expect(fx.taken.runs).toEqual([]);
 });
 
-test("planted: a composer holding a draft refuses TERN_COMPOSER_BUSY with zero sends and no drop or pending file", async () => {
-	const fx = ternFixture();
-	const composerDir = plantComposer(fx.sessionFile, { empty: false });
-	const dir = dropDir();
-	const got = await send(fx, dir, { composer: (sf) => readComposerRecord(sf, { dir: composerDir }) });
-	expect(got.status).toBe("REFUSED");
-	expect(got.code).toBe("TERN_COMPOSER_BUSY");
-	expect(got.sends).toBe(0);
-	expect(effects(fx.taken)).toBe(0);
-	expect(got.drop_path).toBeNull();
-	expect(readdirSync(dir)).toEqual([]);
-	const pending = join(dir, "..", "tern-pending");
-	expect(existsSync(pending) ? readdirSync(pending).filter((n) => n.endsWith(".json")) : []).toEqual([]);
-});
-
-test("planted: a missing, stale, dead-writer or foreign composer record is UNKNOWN and never pastes blind", async () => {
-	const cases: Array<[string, (sessionFile: string) => string]> = [
-		["missing", () => freshDir("composer-empty")],
-		["stale", (sf) => plantComposer(sf, { at: Date.now() - COMPOSER_RECORD_MAX_AGE_MS - 1_000 })],
-		["dead writer", (sf) => plantComposer(sf, { pid: 2 ** 22 + 12345 })],
-		["foreign session", (sf) => plantComposer(sf, { session_file: "/elsewhere.jsonl" })],
-	];
-	for (const [label, plant] of cases) {
-		const fx = ternFixture();
-		const composerDir = plant(fx.sessionFile);
-		const dir = dropDir();
-		const got = await send(fx, dir, { composer: (sf) => readComposerRecord(sf, { dir: composerDir }) });
-		expect([label, got.status, got.code]).toEqual([label, "REFUSED", "TERN_COMPOSER_UNKNOWN"]);
-		expect(got.sends).toBe(0);
-		expect(effects(fx.taken)).toBe(0);
-		expect(got.drop_path).toBeNull();
-	}
-});
-
-test("planted: a failed paste never presses Enter (an empty submit aborts a streaming turn); unproven stays pending", async () => {
-	const fx = ternFixture({ pasteCode: 1 });
-	const composerDir = plantComposer(fx.sessionFile);
-	const got = await send(fx, dropDir(), { composer: (sf) => readComposerRecord(sf, { dir: composerDir }) });
-	expect(fx.taken.pastes).toBe(1);
-	expect(fx.taken.enters).toBe(0);
-	expect(got.status).toBe("PENDING_CONSUME");
-	expect(got.code).toBe("SEND_AMBIGUOUS");
-	expect(got.drop_path).not.toBeNull();
-});
 
 test("SESSIONCAP1: a 70 MiB seat is observed, admitted and proven from bounded tail reads only", async () => {
 	const fx = ternFixture({ overCap: true });
-	const composerDir = plantComposer(fx.sessionFile);
 	const dir = dropDir();
-	const got = await send(fx, dir, { composer: (sf) => readComposerRecord(sf, { dir: composerDir }) });
+	const got = await send(fx, dir);
 	expect(got.status).toBe("OK");
 	expect(got.code).toBe("PROVEN");
 	expect(got.sends).toBe(1);
 	expect(got.offset).toBeGreaterThan(OVER_CAP);
-	expect(fx.taken.pastes).toBe(1);
-	expect(fx.taken.enters).toBe(1);
+	expect(fx.taken.luaDispatches).toBe(1);
+	expect(fx.taken.runs.some(argv => argv.includes("paste") || argv.includes("keys"))).toBe(false);
 	// Observe (bracketed), eligibility, pre-effect re-read and proof: every read is bounded.
 	expect(fx.tailReads.length).toBeGreaterThanOrEqual(4);
 	for (const bytes of fx.tailReads) expect(bytes).toBeLessThanOrEqual(SESSION_TAIL_WINDOW_BYTES + SESSION_HEAD_BYTES);
@@ -257,10 +175,9 @@ test("SESSIONCAP1: a 70 MiB seat is observed, admitted and proven from bounded t
 
 test("control: the same 70 MiB seat without the bounded reader is never typed into", async () => {
 	const fx = ternFixture({ overCap: true, boundedReader: false });
-	const composerDir = plantComposer(fx.sessionFile);
-	const got = await send(fx, dropDir(), { composer: (sf) => readComposerRecord(sf, { dir: composerDir }) });
+	const got = await send(fx, dropDir());
 	expect(got.sends).toBe(0);
-	expect(effects(fx.taken)).toBe(0);
+	expect(fx.taken.luaDispatches).toBe(0);
 	expect(got.detail).toContain("SESSION_FILE_UNAVAILABLE");
 });
 

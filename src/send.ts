@@ -1321,7 +1321,7 @@ export async function deliverToTernSeat(input: {
 		|| (observation.state === "UNKNOWN" && observation.working === true
 			&& (observation.reason === "SESSION_TURN_IN_FLIGHT" || observation.reason === "ACTIVE_BRANCH_UNAVAILABLE"
 				|| observation.reason === "SESSION_FILE_UNAVAILABLE" || observation.reason === "SESSION_ORACLE_STATE_UNKNOWN"));
-	queued = waitsForTurnBoundary() && busyRetries > 0;
+	queued = (steerable && observation.state === "BUSY") || (waitsForTurnBoundary() && busyRetries > 0);
 	for (let retry = 0; waitsForTurnBoundary() && retry < busyRetries; retry++) {
 		const remainingMs = untilDeliveredDeadline - now();
 		if (remainingMs <= 0) {
@@ -1508,7 +1508,7 @@ export async function deliverToTernSeat(input: {
 		}
 		const via = " via native agent API";
 		let last: TernProof = { status: "ABSENT", reason: "NOT_READ" };
-		const polls = Math.max(1, Math.ceil(deadlineMs / proofPollMs));
+		const polls = Math.max(1, Math.ceil((steer && untilDeliveredMs > 0 ? Math.min(deadlineMs, untilDeliveredMs) : deadlineMs) / proofPollMs));
 		let readSize: number | null = null;
 		for (let poll = 0; ; poll++) {
 			// A journal that has not grown since the last read holds no new entry; a failed stat always re-reads.
@@ -1538,7 +1538,7 @@ export async function deliverToTernSeat(input: {
 			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
 			detail: `${dispatched ? `sent${via}` : "dispatch failed, effect unknown"}; proof ${last.status} (${last.reason})${note}; pending retained, never auto-resent`,
 			code: !dispatched ? "SEND_AMBIGUOUS" : payloadKind.kind === "goal-set" ? "GOAL_NOT_ADOPTED" : "PROOF_TIMEOUT",
-			...(queued ? { queue_states: ["QUEUED", "PENDING_CONSUME"] as const } : {}) };
+			...(queued ? { queue_states: ["QUEUED", dispatched && steer ? "EXPIRED" : "PENDING_CONSUME"] as const } : {}) };
 	} finally {
 		releaseLock();
 	}

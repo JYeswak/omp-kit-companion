@@ -1236,32 +1236,6 @@ const inFlightJournal = settledJournal + userEntry("u2", "m1", "work")
 		content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: {} }] } });
 const keylessSeat: TernSeatBinding = { ...ternSeat, windowKey: "" };
 
-/** Keyless Tern surface: `send N paste T` holds T in the composer; `keys Enter` journals it as OMP does. */
-function pasteFake(opts: { steering: boolean }) {
-	const fake = { journal: inFlightJournal, pastes: 0, enters: 0, observes: 0, composerReads: 0, io: undefined as unknown as TernObserverIo };
-	let composer = "";
-	fake.io = {
-		run: (argv: string[]) => {
-			const send = argv.indexOf("send");
-			if (send >= 0 && argv[send + 2] === "paste") { fake.pastes++; composer += argv[send + 3] ?? ""; }
-			if (send >= 0 && argv[send + 2] === "keys") {
-				fake.enters++;
-				fake.journal += userEntry(`s${fake.enters}`, "a3", composer.trim(), opts.steering ? { steering: true } : {});
-				composer = "";
-			}
-			return { code: 0, out: "" };
-		},
-		readSessionFile: () => fake.journal,
-		wait: noWait,
-	};
-	const busy = async (): Promise<TernObservation> => {
-		fake.observes++;
-		return { ...ternIdle, state: "BUSY", working: true, oracleBusy: null, sessionSha: sha(fake.journal),
-			sessionCursorBytes: Buffer.byteLength(fake.journal) };
-	};
-	return { fake, busy };
-}
-
 test("SENDFAST1: the steer opt-in reads a working seat whose journal is mid-turn as BUSY with its runtime binding", () => {
 	const inspection = { status: "FOUND" as const, sessionId: "1", sessionName: "s", paneId: "7", cwd: "/repo", working: true,
 		exited: null, sessionFile: "/sf" };
@@ -1279,25 +1253,30 @@ test("SENDFAST1: the steer opt-in reads a working seat whose journal is mid-turn
 
 
 test("SENDFAST1 control: a keyless /goal set to a BUSY seat keeps its turn-boundary admission", async () => {
-	const { fake, busy } = pasteFake({ steering: true });
+	const fake = ternFake({ journal: inFlightJournal });
+	let observations = 0;
+	const busy = async (): Promise<TernObservation> => {
+		observations++;
+		return { ...ternIdle, state: "BUSY", working: true, sessionSha: sha(fake.journal.text),
+			sessionCursorBytes: Buffer.byteLength(fake.journal.text) };
+	};
 	let clock = 0;
 	const r = await deliverToTernSeat({ seat: keylessSeat, text: "/goal set Ship it", dropDir: ternDropDir(), io: fake.io,
 		observe: busy, identify: async () => ternIdentified, untilDeliveredMs: 5, pollMs: 1, deadlineMs: 5,
 		now: () => clock, wait: async (ms) => { clock += ms; }, composer: () => ({ state: "EMPTY" }) });
 	expect(r).toMatchObject({ status: "NOT_DELIVERED", code: "UNTIL_DELIVERED_EXHAUSTED", sends: 0 });
-	expect(fake.pastes + fake.enters).toBe(0);
-	expect(fake.observes).toBeGreaterThan(1);
+	expect(fake.runs).toHaveLength(0);
+	expect(observations).toBeGreaterThan(1);
 });
 
 /**
- * An idle keyless seat whose OMP journals the pasted entry `delayMs` after Enter, as a live seat does. The delay is
+ * An idle keyless seat journals a native prompt `delayMs` after admission. The delay is
  * real wall-clock time on purpose: the property under test is how soon the production proof read (no injected
  * wait) sees an entry that lands between polls.
  */
 async function proveLateEntry(sessionFile: string, onDisk: boolean, delayMs: number) {
 	let journal = settledJournal;
 	if (onDisk) writeFileSync(sessionFile, journal);
-	let composer = "";
 	const io: TernObserverIo = {
 		run: (argv: string[]) => {
 			if (argv.includes("carly")) {
@@ -1321,7 +1300,7 @@ async function proveLateEntry(sessionFile: string, onDisk: boolean, delayMs: num
 	return { r, ms: performance.now() - started };
 }
 
-test("SENDFAST1.proof: an entry journaled 50 ms after Enter is proven by the stat-gated 50 ms read in under 300 ms", async () => {
+test("SENDFAST1.proof: an entry journaled 50 ms after native ask is proven by the stat-gated 50 ms read in under 300 ms", async () => {
 	const { r, ms } = await proveLateEntry(join(scratch, `sendfast-${Math.random().toString(36).slice(2)}.jsonl`), true, 50);
 	expect(r).toMatchObject({ status: "OK", code: "PROVEN", sends: 1 });
 	expect(ms).toBeLessThan(300);
@@ -1346,7 +1325,6 @@ function ww1rFixture(repo: string, resolvePane: boolean) {
 	].join("\n");
 	writeFileSync(sessionFile, journal);
 	const taken = { runs: [] as string[][], sends: 0 };
-	let pasted: string | null = null;
 	const io: TernObserverIo = {
 		run(argv) {
 			taken.runs.push([...argv]);
@@ -1354,7 +1332,6 @@ function ww1rFixture(repo: string, resolvePane: boolean) {
 				taken.sends++;
 				journal += JSON.stringify({ type: "message", id: "m-live", parentId: "m2", message: { role: "user", content: sentPayload(argv) } }) + "\n";
 				writeFileSync(sessionFile, journal);
-				pasted = null;
 				return { code: 0, out: "" };
 			}
 			// The live macOS read: lstart + argv, and no environment at all.

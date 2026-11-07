@@ -40,7 +40,6 @@ function resetJournals(): void {
 
 function fixtureIo(id: string): { io: TernObserverIo; sent: string[][] } {
 	const sent: string[][] = [];
-	let pasted = "";
 	const file = files[id === first ? 0 : 1]!;
 	return { sent, io: {
 		run(argv) {
@@ -49,13 +48,14 @@ function fixtureIo(id: string): { io: TernObserverIo; sent: string[][] } {
 			if (argv[0] === "/bin/ps") return { code: 0, out: "Fri Nov 6 10:00:00 2026 omp AGENT_NAME=BigIdSeat" };
 			if (argv[0] === "am") return { code: 0, out: JSON.stringify({ agent_name: "BigIdSeat", pane_id: argv[argv.indexOf("--pane") + 1],
 				project_key: repo, binding: "verified-live" }) };
-			if (argv.includes("send")) {
-				const args = argv.slice(argv.indexOf("send") + 1);
-				sent.push(args);
-				if (args[0] !== id) return { code: 1, out: "wrong block" };
-				if (args[1] === "paste") pasted = args[2]!;
-				if (args[1] === "keys" && args[2] === "Enter") appendFileSync(file,
-					JSON.stringify({ type: "message", id: "m3", parentId: "m2", message: { role: "user", content: pasted } }) + "\n");
+			if (argv.includes("carly") && argv.includes("lua")) {
+				const groups = argv.at(-1)!.split("string.char(").slice(1)
+					.map(group => Buffer.from(group.slice(0, group.indexOf(")")).split(",").map(Number)).toString("utf8"));
+				const [target, payload] = groups;
+				sent.push([target!, "ask", payload!]);
+				if (target !== id) return { code: 1, out: "wrong block" };
+				appendFileSync(file,
+					JSON.stringify({ type: "message", id: "m3", parentId: "m2", message: { role: "user", content: payload } }) + "\n");
 				return { code: 0, out: "" };
 			}
 			return { code: 1, out: "unexpected command" };
@@ -96,7 +96,7 @@ test("TERNBIGID1: send routes and submits to each exact pane, proving only its o
 		const result = await deliverToTernSeat({ seat: seat(id), text: "big-id regression", dropDir: join(tmp.path, `drop-${index}`), io,
 			composer: () => ({ state: "EMPTY" }), env: {}, wait: async () => {}, pollMs: 1, deadlineMs: 50 });
 		expect(result).toMatchObject({ status: "OK", code: "PROVEN", sessionFile: files[index], sends: 1 });
-		expect(sent.map(args => args.slice(0, 2))).toEqual([[id, "paste"], [id, "keys"]]);
+		expect(sent.map(args => args.slice(0, 2))).toEqual([[id, "ask"]]);
 		expect(readFileSync(files[1 - index]!, "utf8")).not.toContain("big-id regression");
 	}
 });

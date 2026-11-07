@@ -1,1 +1,2 @@
 - Send Tern seat messages through the native agent prompt queue instead of composer paste and Enter, including busy seats; require target identity and journal consumption before reporting success.
+- Busy native sends report QUEUED then DELIVERED on journal consumption, or EXPIRED when proof times out; expired submissions remain pending and are never automatically resent.
