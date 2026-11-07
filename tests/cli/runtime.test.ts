@@ -15,6 +15,7 @@ import { verifyBead } from "../../src/verify.ts";
 import { identifyExactSource } from "../../scripts/exact-source.ts";
 import { createParentTracker, runUnpinnedInitControl } from "./tracker-init-parent.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
+import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
 const createdScratchDirs: string[] = [];
 afterAll(() => {
 	for (const dir of createdScratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -717,7 +718,7 @@ describe("release paths", () => {
 			OMP: omp.launcher, OMP_BIN: omp.launcher, OMP_PATH: omp.launcher, OMP_SRC: omp.source,
 			// A Tern launcher has no enclosing package; its exact-version source comes from the read-only cache the
 			// identity above resolved with (the hostile HOME holds none), never from a fetch.
-			...(process.env.OMP_KIT_OMP_SRC_CACHE ? { OMP_KIT_OMP_SRC_CACHE: process.env.OMP_KIT_OMP_SRC_CACHE } : {}),
+			OMP_KIT_OMP_SRC_CACHE: ompSourceCacheRoot(process.env) ?? undefined,
 			OMP_KIT_OMP_SRC_FETCH: "0",
 			...admission,
 		};
