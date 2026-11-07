@@ -15,3 +15,4 @@
 - Keep the resolved OMP source-cache location available to packaged-runtime fixtures after they replace HOME with protected canaries.
 - Build and execute the host-native official release artifact in the runtime replay smoke instead of attempting a macOS executable on Linux.
 - Check the same OMP package watch path in each platform's native fleet service definition, including Linux systemd path units.
+- Scope fleet-guard scratch-write quiet controls to their own owned TMPDIR rather than the runner's ambient temporary directory.

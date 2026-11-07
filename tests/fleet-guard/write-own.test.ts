@@ -203,12 +203,19 @@ describe("WRITEOWN1 AC1: unreserved writes in a canonical checkout are refused a
 			expect((await bash("git add scripts"))?.reason).toContain("WRITE_OWN_UNRESERVED");
 		});
 		await withAm(holds("Holder"), "fail", "Holder", async () => {
-			for (const command of ["cat scripts/x.py", "git status --porcelain", "ls > /dev/null 2>&1", "grep -rn x scripts | head",
-				`echo x > ${owned}/out.txt`, "echo x > var/agent-tmp/own.1/out.txt", `cp scripts/x.py ${owned}/`,
-				`cd ${owned} && echo x > rel.txt`, "git add --dry-run scripts/x.py", "echo x > \"$TMPDIR/out.txt\"",
-				"echo 'git add scripts/x.py > scripts/x.py'", "printf x > >(sed 's/^/a/') 2> >(cat >&2)", "make 2>&1 >&2 | cat",
-				"sh scripts/x.py 2> >(sed 's/^/[err] /' >&2)"]) {
-				expect(await bash(command), command).toBeUndefined();
+			const savedTmpdir = process.env.TMPDIR;
+			process.env.TMPDIR = owned;
+			try {
+				for (const command of ["cat scripts/x.py", "git status --porcelain", "ls > /dev/null 2>&1", "grep -rn x scripts | head",
+					`echo x > ${owned}/out.txt`, "echo x > var/agent-tmp/own.1/out.txt", `cp scripts/x.py ${owned}/`,
+					`cd ${owned} && echo x > rel.txt`, "git add --dry-run scripts/x.py", "echo x > \"$TMPDIR/out.txt\"",
+					"echo 'git add scripts/x.py > scripts/x.py'", "printf x > >(sed 's/^/a/') 2> >(cat >&2)", "make 2>&1 >&2 | cat",
+					"sh scripts/x.py 2> >(sed 's/^/[err] /' >&2)"]) {
+					expect(await bash(command), command).toBeUndefined();
+				}
+			} finally {
+				if (savedTmpdir === undefined) delete process.env.TMPDIR;
+				else process.env.TMPDIR = savedTmpdir;
 			}
 			expect(await write(join(owned, "note.txt"), "evidence notes\n")).toBeUndefined();
 			expect(await write("var/agent-tmp/own.1/raw.txt", "raw capture\n")).toBeUndefined();
