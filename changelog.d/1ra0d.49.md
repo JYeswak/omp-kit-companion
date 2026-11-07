@@ -11,3 +11,4 @@
 - Include native low-filesystem refusal output in failing CI assertions without changing their required exit codes or disk-floor checks.
 - Make the live Git lock-holder fixture preserve Git's exact PID across Linux shell execution.
 - Use a job-control-capable shell for detached seat fixtures on Linux while keeping scratch ownership and capability checks intact.
+- Preserve shared land/save fixture templates until their Bun process exits, even when another test suite cleans its own temporary registry.

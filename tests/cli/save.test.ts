@@ -9,6 +9,19 @@ import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 import { cliPath, commandEnvironment, fixture, git, remoteHead, repoRoot, scratch, stringEnvironment } from "./private-index-land.helpers.ts";
 
 const decoder = new TextDecoder();
+
+test("the shared land template survives another suite's global owned-temp cleanup", () => {
+	const probe = `
+import { cleanupAllOwnedTmp } from ${JSON.stringify(join(repoRoot, "src/kitlib/tmp.ts"))};
+import { fixture, git } from ${JSON.stringify(join(import.meta.dir, "private-index-land.helpers.ts"))};
+cleanupAllOwnedTmp();
+const { work } = fixture();
+process.stdout.write(git(work, ["rev-parse", "--is-inside-work-tree"]).trim());
+`;
+	const result = runFixture([process.execPath, "-e", probe], { cwd: repoRoot, floor_s: 60 });
+	expect(result.rc, decoder.decode(result.stderr)).toBe(0);
+	expect(decoder.decode(result.stdout)).toBe("true");
+});
 const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 
 function saveOnce(work: string, fakeBin: string, args: string[]) {

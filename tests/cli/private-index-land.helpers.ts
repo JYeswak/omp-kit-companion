@@ -41,7 +41,8 @@ export function expectLandSchema(data: unknown): void {
 
 export const repoRoot = resolve(import.meta.dir, "../..");
 export const cliPath = join(repoRoot, "src", "cli.ts");
-export const ownedScratch = ownedTmp("private-index-land");
+export const ownedScratch = ownedTmp("private-index-land", { autoCleanup: false });
+process.once("exit", () => ownedScratch.cleanup());
 export const scratch = ownedScratch.path;
 // land's push-time scratch disposal gate scans the scratch roots for dirs the
 // caller owns. Every land run here reads this empty fixture root instead of the
@@ -56,8 +57,8 @@ declare global {
 	var fixtureNumber: number;
 }
 globalThis.fixtureNumber ??= 0;
-// No afterAll here: bun shares this module across the split files of one run, so the first file's
-// afterAll would remove the scratch the next file still uses. ownedTmp removes it at process exit.
+// No per-file afterAll or shared cleanup registry: other suites call cleanupAllOwnedTmp(),
+// while this module's cached template must remain valid until the shared Bun process exits.
 
 export type Fixture = { work: string; fakeBin: string };
 
