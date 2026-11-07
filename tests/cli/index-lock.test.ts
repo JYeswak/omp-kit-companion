@@ -358,7 +358,7 @@ test("INDEXLOCKHELD1 live git add holds an empty lock; plan and reap name its ex
 		"    time.sleep(0.02)",
 		"sys.stdout.buffer.write(sys.stdin.buffer.read(65536))",
 	].join("\n"));
-	const writer = runFixtureAsync(["git", "-c", `filter.hold.clean=python3 .git/hold-clean.py ${fixtureDeadlineS()}`,
+	const writer = runFixtureAsync(["git", "-c", `filter.hold.clean=exec python3 .git/hold-clean.py ${fixtureDeadlineS()}`,
 		"add", "f.txt"], { cwd: root, env });
 	try {
 		await waitForFixture(() => existsSync(ready));
