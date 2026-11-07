@@ -259,7 +259,11 @@ test("install plan renders with the fleet adapter present", () => {
 	const result = cli(["service", "install", "cc", "--plan"], home, namespace(), { OMP_KIT_FLEET_ROOT: root });
 	expect(result.code).toBe(0);
 	expect(result.envelope.data.plan).toBe(true);
-	expect(result.envelope.data.plist).toContain("<key>KeepAlive</key>");
+	if (process.platform === "darwin") {
+		expect(result.envelope.data.plist).toContain("<key>KeepAlive</key>");
+	} else {
+		expect(result.envelope.data.service.split("\n")).toContain("Restart=on-failure");
+	}
 });
 
 test("single_instance_lock: second concurrent service run exits 75 ALREADY_RUNNING", () => {

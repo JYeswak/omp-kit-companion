@@ -24,3 +24,4 @@
 - Keep the actual Bun executable available in the package fixture's private HOME so pinned runtime identity works on Linux without relying on a system-wide Bun.
 - Include the blocked-service child's typed stdout, stderr and signal identity when its unchanged exit-code assertion fails in CI, without treating diagnostics as a fix.
 - Make the live runtime's private Bun command enter interpreter mode only when invoked, supporting native, shell-to-Bun and Bun-shebang OMP launchers without leaking that override to native executables.
+- Validate daemon install plans against the native scheduler artifact: launchd KeepAlive on macOS and systemd Restart=on-failure on Linux.
