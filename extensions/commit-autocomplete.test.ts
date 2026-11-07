@@ -1,8 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseCommit, planAutocomplete, supersededCommits, type Exec } from "./commit-autocomplete";
+import { parseCommit, planAutocomplete, reservationProjectKey, supersededCommits, type Exec } from "./commit-autocomplete";
 import { run } from "../src/kitlib/run.ts";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 
@@ -95,4 +95,33 @@ test("a commit covered by the seat's live reservation lands with the Bead traile
 	expect((await planAutocomplete({ command: 'git commit -m "x [test]"', repo, agent: "Seat", projectKey: repo, storagePath: storePath + ".4", nowMs: now, exec }))?.findings.map(f => f.code)).toEqual(["PATH_UNRESERVED"]);
 	expect(await supersededCommits(exec, repo)).toEqual([first]);
 	void head;
+});
+
+test("WORKTREEKEY1: in a linked worktree a path reserved under the canonical repo key is covered and an unreserved one still refuses; planted: a reservation keyed to the worktree path covers nothing", async () => {
+	const canonical = join(base, "canon");
+	mkdirSync(canonical, { recursive: true });
+	await git(canonical, "init", "-q", "-b", "main");
+	writeFileSync(join(canonical, "src.txt"), "one\n");
+	await git(canonical, "add", "src.txt");
+	await git(canonical, "commit", "-q", "-m", "root [test]");
+	const linked = join(base, "canon.builder");
+	await git(canonical, "worktree", "add", "-q", "-b", "builder", linked);
+	const canonicalReal = realpathSync(canonical), linkedReal = realpathSync(linked);
+	// The canonical checkout keeps its own toplevel; the linked worktree resolves to the canonical repo.
+	expect(await reservationProjectKey(exec, canonical, canonicalReal)).toBe(canonicalReal);
+	expect(await reservationProjectKey(exec, linked, linkedReal)).toBe(canonicalReal);
+	writeFileSync(join(linked, "src.txt"), "ONE\n");
+	writeFileSync(join(linked, "other.txt"), "x\n");
+	await git(linked, "add", "src.txt", "other.txt");
+	const storePath = join(base, "storage-worktree.sqlite3");
+	const now = Date.now();
+	store(storePath, [{ agent: "Seat", project: canonicalReal, pattern: "src.txt", reason: "ompkit-ab12c", expiresMs: now + 3600_000 }]);
+	const key = await reservationProjectKey(exec, linked, linkedReal);
+	const plan = await planAutocomplete({ command: 'git commit -m "x [test]"', repo: linkedReal, agent: "Seat", projectKey: key, storagePath: storePath, nowMs: now, exec });
+	expect(plan?.findings.map(f => f.code)).toEqual(["PATH_UNRESERVED"]);
+	expect(plan?.findings[0]?.detail).toContain("other.txt");
+	// planted: the same paths reserved under the worktree path are invisible under the canonical key
+	store(storePath + ".wt", [{ agent: "Seat", project: linkedReal, pattern: "src.txt", reason: "ompkit-ab12c", expiresMs: now + 3600_000 }, { agent: "Seat", project: linkedReal, pattern: "other.txt", reason: "ompkit-ab12c", expiresMs: now + 3600_000 }]);
+	const keyedToWorktree = await planAutocomplete({ command: 'git commit -m "x [test]"', repo: linkedReal, agent: "Seat", projectKey: key, storagePath: storePath + ".wt", nowMs: now, exec });
+	expect(keyedToWorktree?.findings.map(f => f.code)).toEqual(["PATH_UNRESERVED", "PATH_UNRESERVED"]);
 });

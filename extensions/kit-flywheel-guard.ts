@@ -9,7 +9,7 @@ import { ccSpool } from "../src/cc-spool.ts";
 import { holderVerdict, readLivenessSourcesAsync } from "../src/holder-liveness.ts";
 import type { HolderVerdict } from "../src/holder-liveness.ts";
 import { gateFromReason, recordGateEvent, trackerAct } from "./gate-events";
-import { parseCommit, planAutocomplete } from "./commit-autocomplete";
+import { parseCommit, planAutocomplete, reservationProjectKey } from "./commit-autocomplete";
 import { renderEnvelope } from "../src/kitlib/findings.ts";
 import { agentMailStorageRoot } from "../src/holder-liveness.ts";
 import { projectAgentBrShimPath } from "../src/gate-plane.ts";
@@ -2849,8 +2849,9 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			const top = await git(["rev-parse", "--show-toplevel"], repo);
 			if (top.code === 0) {
 				const root = agentMailStorageRoot(env, home);
-				const plan = await planAutocomplete({ command, repo: top.stdout.trim(), agent: seat, projectKey: top.stdout.trim(), storagePath: root ? join(root, "storage.sqlite3") : null, nowMs: Date.now(),
-					exec: (argv, cwd) => git(argv.slice(1), cwd) });
+				const exec = (argv: string[], cwd: string) => git(argv.slice(1), cwd);
+				const projectKey = await reservationProjectKey(exec, repo, top.stdout.trim());
+				const plan = await planAutocomplete({ command, repo: top.stdout.trim(), agent: seat, projectKey, storagePath: root ? join(root, "storage.sqlite3") : null, nowMs: Date.now(), exec });
 				if (plan !== null) {
 					for (const done of plan.completed) {
 						await recordGateEvent({ ...timing(), repo: top.stdout.trim(), seat, act: "commit", target: plan.bead, gate: "commit-autocomplete", kind: "auto_complete", detail: `${done.what}: ${done.detail}`.slice(0, 200), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId } : {}) }, { env, home });

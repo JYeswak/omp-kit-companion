@@ -12,7 +12,7 @@
  */
 import { Database } from "bun:sqlite";
 import { existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { Finding } from "../src/kitlib/findings.ts";
 
 export interface Completion { what: "bead-trailer" | "fragment" | "supersedes"; detail: string }
@@ -45,6 +45,15 @@ export function liveReservations(storagePath: string, projectKey: string, agent:
 	} finally {
 		db?.close();
 	}
+}
+
+/** The Agent Mail project key reservations live under: the canonical repo (J-2026-11-07-01, ompkit-1ra0d.42).
+ * In a linked worktree `--show-toplevel` is the worktree, so the key is the parent of git's absolute common
+ * dir; in a canonical checkout that parent is the toplevel itself. A bare or unusual layout keeps the toplevel. */
+export async function reservationProjectKey(exec: Exec, repo: string, toplevel: string): Promise<string> {
+	const common = await exec(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], repo);
+	const dir = common.code === 0 ? common.stdout.trim() : "";
+	return dir !== "" && basename(dir) === ".git" ? dirname(dir) : toplevel;
 }
 
 function covers(pattern: string, path: string): boolean {
