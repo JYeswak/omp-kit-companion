@@ -1256,9 +1256,13 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const pkgVer = (JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { version: string }).version;
 		const resultDir = join(root, "official-out");
 		mkdirSync(resultDir, { recursive: true });
-		const built = await run(["bun", join(srcExport, "scripts", "package-release.ts"), "--version", pkgVer, "--platform", "darwin-arm64-none", "--out", resultDir], { cwd: root, deadline_s: 600 });
+		const built = await run(["bun", join(srcExport, "scripts", "package-release.ts"), "--version", pkgVer, "--platform", "native", "--out", resultDir], { cwd: root, deadline_s: fixtureDeadlineS(600) });
 		if (built.rc !== 0) throw new Error(`official recipe -> ${built.rc}: ${utf8(built.stdout).slice(0, 300)} ${utf8(built.stderr).slice(0, 300)}`);
-		const tarball = join(resultDir, `omp-kit-v${pkgVer}-darwin-arm64-none.tar`);
+		const asset: unknown = JSON.parse(utf8(built.stdout));
+		if (typeof asset !== "object" || asset === null || !("filename" in asset) || typeof asset.filename !== "string") {
+			throw new Error("official recipe emitted no asset filename");
+		}
+		const tarball = join(resultDir, asset.filename);
 		const extractDir = join(root, "official-extract");
 		mkdirSync(extractDir, { recursive: true });
 		const extracted = await run(["tar", "-x", "-f", tarball, "-C", extractDir], { cwd: root, deadline_s: 300 });

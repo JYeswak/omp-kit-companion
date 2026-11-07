@@ -13,3 +13,4 @@
 - Use a job-control-capable shell for detached seat fixtures on Linux while keeping scratch ownership and capability checks intact.
 - Preserve shared land/save fixture templates until their Bun process exits, even when another test suite cleans its own temporary registry.
 - Keep the resolved OMP source-cache location available to packaged-runtime fixtures after they replace HOME with protected canaries.
+- Build and execute the host-native official release artifact in the runtime replay smoke instead of attempting a macOS executable on Linux.
