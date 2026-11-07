@@ -4,6 +4,40 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.98] - 2026-11-07
+
+### Added
+
+- Repositories can configure `.omp/gate-wiring.json` to refuse pushes exceeding their unwired-gate, statically unreachable shell-gate, or expired-quarantine maxima. The audit uses committed candidate bytes and incumbent policy, names offending gates, and requires no hosted-CI API. Repositories without a policy are explicitly not judged.
+
+### Changed
+
+- Allow never-claimed, unimplemented work to close with an owner decision ID and commit citation; bare close reasons and unreadable history remain refused.
+- Commit and push gates skip unrelated manifest, budget-policy, CLI compile/boot, harness and README phases; notes provenance and affected-test checks still run, and failing changed inputs still block.
+- `apply extensions` now installs only tool-independent observers by default; use `--fleet` to opt into external guard, memory, search, topology and RCH integrations. Existing profile entries are preserved.
+- Document the default profile extension selection from `policy/extensions.json`; the README checker now rejects missing or stale entries.
+- Keep personal fleet decisions out of the default standing rule; preserve them unchanged in the opt-in fleet rule pack.
+- Make shipped skill instructions resolve installed kit resources instead of private checkouts, document `scratch mine`, and reject machine-specific user paths in shipped skill files.
+- bead-lint tests: `br create` is now pinned to the in_review handoff's own checks. A create whose box's first backticked span is prose is refused with the handoff's exact replay text, and one that mentions another bead with no edge is refused i-mention-edges. A clean create, or a mention joined by a `--deps`/`--parent` edge, is admitted. A mutant that strips the shared checks makes the planted creates pass. (ompkit-fp72.120.16.238)
+- Local-release attestation verifies the three platform archives concurrently with the existing bounded consumer verifier; any archive or index verification failure still prevents publication.
+
+### Fixed
+
+- The commit-imports gate finds the host TypeScript library past a launcher shim: it tries every `tsc` on `PATH` in order and loads the first whose real path has a sibling `lib/typescript.js`. Before, a pnpm global `~/.local/bin/tsc` first on `PATH` (as on headless builders) made every TypeScript commit fail `PARSER_UNAVAILABLE`. A candidate compiler inside the repository is still refused. (ompkit-1ra0d.1, TSCSHIM1)
+- Tern send, inspection, and seat binding preserve exact decimal pane IDs above JavaScript's safe-integer limit, keeping neighbouring 64-bit blocks distinct.
+- The release's next-version advance commits through the commit hooks again: its subject carries a proof level (`[pending]`), and the commit gate's README release-line check reads tags from the canonical repository instead of the gate's archive copy, where an initialized `.git` hid the published tag and reported it absent. (ompkit-1ra0d.19, RELADVANCE1; diagnosis by builder TopazGate)
+- Goal keepalive no longer wakes a seat whose fleet-watch session is paused (`pullEnabled: false`); a paused project spends no keepalive turns. The timer stays armed while paused (a config read, no model turn), so the idle seat wakes on its next interval once the session is unpaused. An unreadable config or a seat outside every session keeps the wake. (ompkit-1ra0d.3, KEEPALIVEPAUSE1)
+- Release SBOMs now list versioned Bun native libraries, the pinned Tern SDK and runtime lockfile dependencies instead of scanning an opaque archive directory. Attestation uses each archive's build-time inventory, including after Darwin signing; invalid lockfile inputs refuse generation.
+- Doctor checks installed rules in per-profile plugin packages instead of requiring legacy rule copies, names missing rule files, distinguishes failed activation probes from confirmed missing rules, and gives an explicit planning-skill repair command.
+- bead-lint's goal-path check treats a parent-child descendant of an open `kind:goal` bead as on that goal's path. Before, every child of a goal epic with other children was unplaceable: the only other edge (goal blocks child) is refused because it hides all children from `br ready`. A child of a closed goal is still refused. (ompkit-1ra0d, GOALCHILD1)
+- The update service now automatically restores a failed kit-only activation only when its receipt is still pending and READY, both recorded binaries verify, and the current tick reports a revert-safe postcheck failure. Successful recovery clears the pending receipt as compensated while retaining the failure; unsafe or restarted recovery requires inspection.
+- Full-suite qualification allocates launcher staging per worker instead of per test file, while retaining fresh private scratch, native timing evidence, and execution for every declared file.
+- Resume a published release's next-version advance with `scripts/release-local.sh --advance-only --version X.Y.Z`, without rebuilding, signing, publishing or installing. Unpublished or unattested releases refuse before checkout writes; completed advances are idempotent. Commit refusals retain the actual hook diagnostic and retry command instead of a manual recipe.
+- Allow empty completion sentinels in owned scratch even when tracked files are empty; continue refusing canonical source paths and nonempty source copies.
+- Keep commit and push release-note checks bound to the pushing repository after the base judge initializes the candidate archive for tests.
+- Wake configured chiefs for mail sent under another project key, using their canonical seat identity, launch directory and session journal while preserving identity and pause checks.
+- On native OMP hosts (18.17 and later), the spawn-model policy is enforced only by the `before_subagent_spawn` check on the patterns OMP resolves; the task-call path, whose settings-source import a compiled host cannot resolve and which refused every background agent, now runs on legacy hosts only. Opus-class children of chief/director seats are still refused. (ompkit-xa5s.45, SPAWNNATIVE1)
+
 ## [0.2.97] - 2026-11-06
 
 ### Changed

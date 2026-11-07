@@ -1,1 +1,0 @@
-- `apply extensions` now installs only tool-independent observers by default; use `--fleet` to opt into external guard, memory, search, topology and RCH integrations. Existing profile entries are preserved.

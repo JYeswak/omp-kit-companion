@@ -1,1 +1,0 @@
-- Commit and push gates skip unrelated manifest, budget-policy, CLI compile/boot, harness and README phases; notes provenance and affected-test checks still run, and failing changed inputs still block.

@@ -1,1 +1,0 @@
-- Allow never-claimed, unimplemented work to close with an owner decision ID and commit citation; bare close reasons and unreadable history remain refused.
