@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "path": "tests/cli/gap-mention.test.sh",
+      "kind": "shell",
+      "bead": "ompkit-1ra0d.22",
+      "commit": "f03bed746046119c3ea66660b9306e5ba30786ce"
+    },
+    {
+      "path": "tests/cli/check-staged-sources.test.sh",
+      "kind": "shell",
+      "bead": "ompkit-1ra0d.22",
+      "commit": "f03bed746046119c3ea66660b9306e5ba30786ce"
+    }
+  ]
+}

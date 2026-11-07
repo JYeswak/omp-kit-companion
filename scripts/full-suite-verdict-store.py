@@ -404,12 +404,66 @@ def runtime_platform(runtime: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def minimum_shortfalls(counts: dict, wall_ms: int, policy: dict, baseline: dict | None) -> list[dict]:
+def retirement_entries(value: object) -> list[dict]:
+    """A reviewed path decision, never a kind-wide count allowance."""
+    if (not isinstance(value, dict) or set(value) != {"version", "entries"}
+            or value["version"] != 1 or not isinstance(value["entries"], list)):
+        raise ValueError("RETIRED_TEST_LEDGER_INVALID: expected version 1 entries")
+    seen = set()
+    for entry in value["entries"]:
+        if not isinstance(entry, dict) or set(entry) != {"path", "kind", "bead", "commit"}:
+            raise ValueError("RETIRED_TEST_ENTRY_INVALID: expected path, kind, bead, commit")
+        path, kind = entry["path"], entry["kind"]
+        if (not isinstance(path, str) or not path.startswith("tests/")
+                or any(part in ("", ".", "..") for part in path.split("/"))
+                or any(ord(char) < 32 for char in path) or "\\" in path
+                or kind not in ("bun", "shell", "python")
+                or not path.endswith({"bun": (".test.ts",), "shell": (".test.sh",),
+                                      "python": ("_test.py", ".test.py")}[kind])):
+            raise ValueError(f"RETIRED_TEST_ENTRY_INVALID: path/kind {path!r}")
+        if path in seen:
+            raise ValueError(f"RETIRED_TEST_DUPLICATE: {path}")
+        seen.add(path)
+        if (not isinstance(entry["bead"], str) or BEAD_ID.fullmatch(entry["bead"]) is None
+                or not valid_hex(entry["commit"], (40, 64))):
+            raise ValueError(f"RETIRED_TEST_ENTRY_INVALID: bead/commit for {path}")
+    return value["entries"]
+
+
+def assess_retirements(entries: list[dict], repo: Path, commit: str | None,
+                       baseline: dict | None) -> list[dict]:
+    reports = []
+    for entry in entries:
+        path, deletion = entry["path"], entry["commit"]
+        if commit is None:
+            raise ValueError(f"RETIRED_TEST_NO_COMMIT: {path}")
+        literal = ":(literal)" + path
+        if checked_run(["git", "-C", str(repo), "ls-tree", "-r", "--name-only", "-z", commit, "--", literal]):
+            raise ValueError(f"RETIRED_TEST_STILL_PRESENT: {path}")
+        try:
+            checked_run(["git", "-C", str(repo), "merge-base", "--is-ancestor", deletion, commit])
+        except ValueError as error:
+            raise ValueError(f"RETIRED_TEST_NOT_ANCESTOR: {path}: {error}") from error
+        deleted = checked_run(["git", "-C", str(repo), "show", "--format=", "--name-status",
+                               "--diff-filter=D", "--no-renames", "-z", deletion, "--", literal])
+        if deleted != b"D\0" + path.encode("utf-8") + b"\0":
+            raise ValueError(f"RETIRED_TEST_NOT_DELETED: {path} by {deletion}")
+        present = baseline is not None and bool(checked_run(
+            ["git", "-C", str(repo), "ls-tree", "-r", "--name-only", "-z", baseline["tree"], "--", literal]))
+        reports.append({**entry, "applied": present,
+                        "reason": "reference-present" if present else
+                                  "no-reference" if baseline is None else "absent-from-reference"})
+    return reports
+
+
+def minimum_shortfalls(counts: dict, wall_ms: int, policy: dict, baseline: dict | None,
+                       retired_tests: list[dict] | None = None) -> list[dict]:
     shortfalls = []
     floor = policy["wall_floor_ms"]
     if baseline is not None:
         for kind in ("bun", "shell", "python"):
-            minimum = max(0, baseline["counts"][kind] - policy["max_count_drop"][kind])
+            retired = sum(entry["kind"] == kind and entry["applied"] for entry in (retired_tests or ()))
+            minimum = max(0, baseline["counts"][kind] - retired - policy["max_count_drop"][kind])
             if counts[kind] < minimum:
                 shortfalls.append({"measure": kind, "observed": counts[kind], "minimum": minimum})
         floor = max(floor, (baseline["wall_ms"] * policy["wall_floor_percent"] + 99) // 100)
@@ -419,8 +473,9 @@ def minimum_shortfalls(counts: dict, wall_ms: int, policy: dict, baseline: dict 
 
 
 def validate_minimum_report(report: object, files: list[dict], wall_ms: object,
-                            role: str, runtime: str) -> list[dict]:
-    if not isinstance(report, dict) or report.get("version") != 1:
+                            role: str, runtime: str, *, repo: Path | None = None,
+                            commit: str | None = None) -> list[dict]:
+    if not isinstance(report, dict) or report.get("version") not in (1, 2):
         raise ValueError("minimum-run report schema is invalid")
     if not isinstance(wall_ms, int) or isinstance(wall_ms, bool) or wall_ms < 0:
         raise ValueError("minimum-run wall time is invalid")
@@ -451,7 +506,27 @@ def validate_minimum_report(report: object, files: list[dict], wall_ms: object,
                 or status not in ("ancestor-pass", "no-commit", "no-ancestor-pass")
                 or (baseline is not None) != (status == "ancestor-pass")):
             raise ValueError("minimum-run baseline selection is invalid")
-    expected = minimum_shortfalls(counts, wall_ms, policy, baseline)
+    retired_tests = report.get("retired_tests", [])
+    if report["version"] == 1:
+        if retired_tests:
+            raise ValueError("minimum-run version-1 report cannot apply retirements")
+    else:
+        if "retired_tests" not in report or not isinstance(retired_tests, list):
+            raise ValueError("minimum-run retirement report is invalid")
+        entries = []
+        for row in retired_tests:
+            if (not isinstance(row, dict)
+                    or set(row) != {"path", "kind", "bead", "commit", "applied", "reason"}
+                    or not isinstance(row["applied"], bool)
+                    or row["reason"] != ("reference-present" if row["applied"] else
+                                         "no-reference" if baseline is None else "absent-from-reference")
+                    or (row["applied"] and baseline is None)):
+                raise ValueError("minimum-run retirement report is invalid")
+            entries.append({key: row[key] for key in ("path", "kind", "bead", "commit")})
+        retirement_entries({"version": 1, "entries": entries})
+        if repo is not None and assess_retirements(entries, repo, commit, baseline) != retired_tests:
+            raise ValueError("minimum-run retirement report disagrees with Git evidence")
+    expected = minimum_shortfalls(counts, wall_ms, policy, baseline, retired_tests)
     if (report.get("counts") != counts or report.get("wall_ms") != wall_ms
             or report.get("shortfalls") != expected
             or report.get("status") != ("FAIL" if expected else "PASS")):
@@ -563,7 +638,7 @@ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, ro
             if not isinstance(timing, dict):
                 raise ValueError("minimum-run timing is absent")
             minimum_failures = validate_minimum_report(entry["minimum_run"], files, timing.get("wall_ms"),
-                                                      entry_role, entry_runtime)
+                                                      entry_role, entry_runtime, repo=repo, commit=commit)
         if entry["verdict"] == "PASS":
             if exit_code != 0 or bun_fail or shell_fail or py_fail or minimum_failures or any(row.get("rc") != 0 for row in files):
                 raise ValueError("PASS contains a failing suite")
@@ -642,12 +717,16 @@ def assess_minimum_run(judge_root: Path, suite_root: Path, directory: Path,
     policy = load_minimum_policy(suite_root)
     counts = measured_counts(files)
     baseline = last_green(directory, judge_root, role, runtime, repo=repo, commit=commit)
-    shortfalls = minimum_shortfalls(counts, wall_ms, policy, baseline)
-    return {"version": 1, "status": "FAIL" if shortfalls else "PASS", "policy": policy,
+    ledger = suite_root / ".github" / "retired-tests.json"
+    entries = retirement_entries(json_file(ledger)) if ledger.exists() else []
+    retired_tests = assess_retirements(entries, repo, commit, baseline)
+    shortfalls = minimum_shortfalls(counts, wall_ms, policy, baseline, retired_tests)
+    return {"version": 2, "status": "FAIL" if shortfalls else "PASS", "policy": policy,
             "baseline_rule": MINIMUM_BASELINE_RULE, "ancestor_limit": MINIMUM_ANCESTOR_LIMIT,
             "reference_status": ("ancestor-pass" if baseline is not None else
                                  "no-commit" if commit is None else "no-ancestor-pass"),
-            "baseline": baseline, "counts": counts, "wall_ms": wall_ms, "shortfalls": shortfalls}
+            "baseline": baseline, "retired_tests": retired_tests,
+            "counts": counts, "wall_ms": wall_ms, "shortfalls": shortfalls}
 
 
 

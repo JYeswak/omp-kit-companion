@@ -199,7 +199,8 @@ it never authorizes reuse as a current-judge PASS.
 `.github/test-budget.json` declares `minimum_full_run`:
 
 * `max_count_drop`: nonnegative integer allowances for `bun`, `shell` and `python`;
-  the default is zero for every kind.
+  these stay zero for every kind. Reviewed suite retirements use the ledger below,
+  not a blanket allowance.
 * `wall_floor_ms`: a positive absolute floor, default 1 ms.
 * `wall_floor_percent`: a positive integer through 100, default 25. The effective
   floor is `max(wall_floor_ms, ceil(last_green_wall_ms * wall_floor_percent / 100))`.
@@ -211,6 +212,23 @@ Bun counts follow its native reported test count; shell/Python counts are measur
 files. Verified focused rows count too. Wall qualification uses the greater of the current
 invocation's wall time and the union of measured file intervals, so focused coverage is
 neither omitted nor counted twice, and idle gaps do not inflate it.
+
+`.github/retired-tests.json` is the reviewed retirement ledger: `{"version":1,
+"entries":[...]}`, with one entry per suite containing `path`, `kind` (`bun`,
+`shell` or `python`), `bead`, and the full deleting `commit` SHA. Every entry must
+name a path absent from the judged commit, and its deleting commit must be an
+ancestor of that commit and actually delete that exact path. Invalid entries
+refuse qualification with a named `RETIRED_TEST_*` reason; duplicates and malformed
+entries also refuse. No entry is silently ignored.
+
+Only validated entries whose paths are present in the reference tree subtract
+one each from their kind's reference count. Entries already absent from the
+reference (or with no reference yet) remain validated but subtract nothing.
+An unlisted deletion still causes a count shortfall. Wall floors are unchanged.
+The version-2 `minimum_run.retired_tests` report retains every entry, its `applied`
+boolean and `reason` (`reference-present`, `absent-from-reference`, or
+`no-reference`), so the exact subtraction is visible. Historical version-1
+minimum-run reports still validate without retirement adjustments.
 
 Every new verdict retains a `minimum_run` report with the policy, reference identity,
 observed counts/wall time and named shortfalls. A shortfall produces a complete `FAIL`
