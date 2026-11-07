@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { cpus } from "node:os";
 import { ownedTmp } from "../../src/kitlib/tmp";
@@ -16,6 +16,8 @@ function fixture() {
 	const scratch = ownedTmp("fresh-load-test", { root: join(root, "var/agent-tmp") });
 	const dir = scratch.path;
 	for (const path of ["tests/cli", "var/agent-tmp", ".github", "home/.config", "home/.cache", "home/.local/share", "home/.state", "audit", "active"]) mkdirSync(join(dir, path), { recursive: true });
+	mkdirSync(join(dir, "home/.bun/bin"), { recursive: true });
+	symlinkSync(process.execPath, join(dir, "home/.bun/bin/bun"));
 	writeFileSync(join(dir, "bunfig.toml"), "[test]\ntimeout = 120000\n");
 	writeFileSync(join(dir, "changed"), "tests/cli/control.test.ts\n");
 	writeFileSync(join(dir, "queued.secs"), "0\n");
