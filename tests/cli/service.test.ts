@@ -1472,14 +1472,23 @@ test("REAP1 concurrent actual service invocation cannot enter a blocked scratch 
       await Bun.sleep(10);
     }
     expect(existsSync(lock)).toBe(true);
-    const overlap = cli(["service", "run", "scratch-reaper"], home, extraEnv);
-    expect(overlap.envelope.data).toMatchObject({ status: "SKIPPED-OVERLAP", receipt: { status: "SKIPPED-OVERLAP" } });
+    // Freeze the actual owner while the second CLI starts: startup latency
+    // must not let the 1200 ms worker deadline turn this into a sequential run.
+    // A stopped but live keeper still owns its claim and must exclude overlap.
+    first.kill("SIGSTOP");
+    try {
+      const overlap = cli(["service", "run", "scratch-reaper"], home, extraEnv);
+      expect(overlap.envelope.data).toMatchObject({ status: "SKIPPED-OVERLAP", receipt: { status: "SKIPPED-OVERLAP" } });
+    } finally {
+      first.kill("SIGCONT");
+    }
     expect(await first.exited).toBe(1);
     const terminal = JSON.parse(await firstOutput);
     expect(terminal.data).toMatchObject({ status: "TIMEOUT", receipt: { status: "TIMEOUT" } });
     expect(existsSync(lock)).toBe(false);
     expect(existsSync(join(blocked, ".owner"))).toBe(true);
   } finally {
+    if (first.exitCode === null) first.kill("SIGCONT");
     if (first.exitCode === null) first.kill("SIGTERM");
     await first.exited;
     await firstErrors;

@@ -1,0 +1,1 @@
+- Keep daemon single-instance locks held on Linux: SQLite now owns existing lock-file descriptors, so validation and rejected local contenders cannot silently release the kernel reservation. Preserve private-file, no-symlink and inode-identity checks, and verify overlap without racing the scheduled worker's deadline.

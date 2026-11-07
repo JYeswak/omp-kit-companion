@@ -4,7 +4,7 @@ import { Readable } from "node:stream";
 import { finished } from "node:stream/promises";
 import { loadGate } from "./infra.ts";
 import { randomUUID } from "node:crypto";
-import { Database } from "bun:sqlite";
+import { constants as sqliteConstants, Database } from "bun:sqlite";
 
 /**
  * SVC1 single-flight: one running job per name. The second overlapping run
@@ -34,19 +34,32 @@ export function acquireDaemonLock(jobsDir: string, job: string): DaemonAcquire {
 		return { status: "HELD" };
 	}
 	const path = join(jobsDir, `${job}.lock`);
-	let fd: number | undefined;
+	// Only the creator opens a raw fd, and closes it before SQLite can lock.
+	// POSIX close(any fd for an inode) drops this process's fcntl locks on it,
+	// including a different Database connection's reservation after a refusal.
 	let db: Database | undefined;
 	try {
-		fd = openSync(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
-		const opened = fstatSync(fd);
+		try {
+			const created = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+			closeSync(created);
+		} catch (error) {
+			if (!(error !== null && typeof error === "object" && "code" in error && error.code === "EEXIST")) throw error;
+		}
+		const opened = lstatSync(path);
 		if (!opened.isFile() || opened.nlink !== 1 || (opened.mode & 0o077) !== 0
 			|| (process.getuid !== undefined && opened.uid !== process.getuid())) return { status: "HELD" };
-		db = new Database(path);
+		// Let SQLite own every descriptor for an existing inode so its VFS can
+		// defer closes while another local connection holds a transaction.
+		db = new Database(path, sqliteConstants.SQLITE_OPEN_READWRITE | sqliteConstants.SQLITE_OPEN_NOFOLLOW);
+		const current = lstatSync(path);
+		if (current.dev !== opened.dev || current.ino !== opened.ino || !current.isFile()) throw new Error("Daemon lock inode changed");
 		db.exec("PRAGMA busy_timeout = 0");
 		try {
 			db.exec("BEGIN IMMEDIATE");
+			const locked = lstatSync(path);
+			if (locked.dev !== opened.dev || locked.ino !== opened.ino || !locked.isFile()) throw new Error("Daemon lock inode changed");
 		} catch {
-			try { db.close(); } catch { /* A failed BEGIN holds nothing; close the handle. */ }
+			try { db.close(); } catch { /* Close also rolls back if identity changed after BEGIN. */ }
 			db = undefined;
 			return { status: "HELD" };
 		}
@@ -56,10 +69,6 @@ export function acquireDaemonLock(jobsDir: string, job: string): DaemonAcquire {
 			db = undefined;
 		}
 		return { status: "HELD" };
-	} finally {
-		// The pre-lock fd verified identity only; the Database connection
-		// holds the live lock from here on.
-		if (fd !== undefined) closeSync(fd);
 	}
 	if (db === undefined) return { status: "HELD" };
 	const held = db;

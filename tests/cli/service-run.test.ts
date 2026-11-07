@@ -1,10 +1,11 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { acquireRunLock, bunCapExec, claimIncarnation, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, readRunClaim, runWithCap, RUN_TIME_CAPS_MS, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
+import { acquireDaemonLock, acquireRunLock, bunCapExec, claimIncarnation, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, readRunClaim, runWithCap, RUN_TIME_CAPS_MS, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { run } from "../../src/kitlib/run.ts";
+import { run, runSync } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 
 mkdirSync(join(resolve(import.meta.dir, "../.."), "var", "agent-tmp"), { recursive: true });
@@ -28,6 +29,48 @@ function writeClaimFixture(dir: string, pid: number, startedAt: number): void {
 	mkdirSync(lock, { mode: 0o700 });
 	writeFileSync(join(lock, "pid"), JSON.stringify({ pid, startedAt, token: "fixture-claim" }), { mode: 0o600 });
 }
+
+test("LINUXLOCK1: daemon acquisition and rejected local contenders preserve the kernel reservation", () => {
+	const dir = jobsDir();
+	const probe = () => runSync([process.execPath, "-e", `
+		import { acquireDaemonLock } from ${JSON.stringify(join(repoRoot, "src", "service-run.ts"))};
+		const claim = acquireDaemonLock(${JSON.stringify(dir)}, "cc");
+		console.log(claim.status);
+		if (claim.status === "ACQUIRED") claim.lock.release();
+	`], { deadline_s: fixtureDeadlineS(10) });
+	const first = acquireDaemonLock(dir, "cc");
+	if (first.status !== "ACQUIRED") throw new Error("expected first daemon keeper");
+	try {
+		const external = probe();
+		expect(external.rc).toBe(0);
+		expect(new TextDecoder().decode(external.stdout).trim()).toBe("HELD");
+		expect(acquireDaemonLock(dir, "cc").status).toBe("HELD");
+		const afterRefusal = probe();
+		expect(afterRefusal.rc).toBe(0);
+		expect(new TextDecoder().decode(afterRefusal.stdout).trim()).toBe("HELD");
+	} finally {
+		first.lock.release();
+		first.lock.release();
+	}
+	const afterRelease = probe();
+	expect(afterRelease.rc).toBe(0);
+	expect(new TextDecoder().decode(afterRelease.stdout).trim()).toBe("ACQUIRED");
+});
+
+test("LINUXLOCK1: daemon lock refuses unsafe existing files without changing them", () => {
+	const dir = jobsDir();
+	const target = join(dir, "target");
+	writeFileSync(target, "preserve", { mode: 0o600 });
+	symlinkSync(target, join(dir, "symlink.lock"));
+	linkSync(target, join(dir, "linked.lock"));
+	writeFileSync(join(dir, "public.lock"), "", { mode: 0o600 });
+	chmodSync(join(dir, "public.lock"), 0o644);
+	mkdirSync(join(dir, "directory.lock"));
+	for (const job of ["symlink", "linked", "public", "directory"]) {
+		expect(acquireDaemonLock(dir, job).status).toBe("HELD");
+	}
+	expect(readFileSync(target, "utf8")).toBe("preserve");
+});
 
 test("SVC1: an unreadable liveness probe cannot authorize stealing a claim", () => {
 	const dir = jobsDir();
