@@ -18,11 +18,11 @@ function workspace(): string {
 type CapsCommand = { name: string; subcommands?: CapsCommand[] };
 type CapsResult = { code: number; data: { commands: CapsCommand[] }; stdout: string };
 
-/** Stock-runner simulation: PATH carries only the caller-supplied bindir plus the OS defaults. */
+/** Stock-runner simulation: expose exactly the caller-supplied tools, never host /usr/bin tools. */
 function robot(args: string[], root: string, bindir: string): CapsResult & { errorsCode: string } {
 	const spawned = Bun.spawnSync([process.execPath, entry, ...args], {
 		cwd: root,
-		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "xdg-config"), XDG_STATE_HOME: join(root, "xdg-state"), XDG_DATA_HOME: join(root, "xdg-data"), XDG_CACHE_HOME: join(root, "xdg-cache"), PATH: `${bindir}:/usr/bin:/bin`, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", NO_COLOR: "" },
+		env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "xdg-config"), XDG_STATE_HOME: join(root, "xdg-state"), XDG_DATA_HOME: join(root, "xdg-data"), XDG_CACHE_HOME: join(root, "xdg-cache"), PATH: bindir, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", NO_COLOR: "" },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -62,6 +62,10 @@ describe("oq1h.6 tool-gated capabilities", () => {
 		expect(names).not.toContain("send");
 		expect(names).not.toContain("rch");
 		expect(names).not.toContain("fleet");
+		const fleet = caps.data.commands.find((command) => command.name === "fleet");
+		const fleetNames = (fleet?.subcommands ?? []).map((command) => command.name);
+		expect(fleetNames).not.toContain("flush-pending");
+		expect(fleetNames).not.toContain("respawn");
 		expect(names).not.toContain("tern-ref");
 		expect(names).not.toContain("drain");
 		const planning = caps.data.commands.find((command) => command.name === "planning");
@@ -95,9 +99,9 @@ describe("oq1h.6 tool-gated capabilities", () => {
 		expect((planning?.subcommands ?? []).map((child) => child.name)).toContain("convert");
 	});
 
-	test("real PATH still lists tool-backed verbs", () => {
+	test("a complete explicit tool PATH lists every tool-backed verb", () => {
 		const root = workspace();
-		const caps = robot(["capabilities", "--json"], root, process.env.PATH ?? "/usr/bin:/bin");
+		const caps = robot(["capabilities", "--json"], root, fakeBin(["am", "ntm", "rch", "tern", "br", "tmux"]));
 		expect(caps.data.commands.map((command) => command.name)).toEqual(expect.arrayContaining(["land", "send", "rch", "fleet", "tern-ref", "drain"]));
 	});
 });

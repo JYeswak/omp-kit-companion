@@ -2,3 +2,4 @@
 - Discover the optional DCG adapter on the caller's PATH instead of requiring a machine-local executable path; retain fail-closed decisions when the adapter is present.
 - Discover the optional failure-capture adapter on PATH and keep command details on stdin, without requiring a particular user's home directory.
 - Run the pre-push regex checker with the gate's existing python3 interpreter instead of requiring an unrelated Python minor version.
+- Keep capability contracts hermetic by exposing only explicitly supplied fixture tools, without assuming every fleet binary is installed on the host.
