@@ -16,3 +16,4 @@
 - Build and execute the host-native official release artifact in the runtime replay smoke instead of attempting a macOS executable on Linux.
 - Check the same OMP package watch path in each platform's native fleet service definition, including Linux systemd path units.
 - Scope fleet-guard scratch-write quiet controls to their own owned TMPDIR rather than the runner's ambient temporary directory.
+- Configure task/smol model roles through OMP's supported fixture configuration so the native spawn smoke reaches its real child without unsupported per-call model arguments.

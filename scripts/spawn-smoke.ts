@@ -60,11 +60,11 @@ export async function runSpawnSmoke(options: { guard?: string } = {}) {
 		const guard = realpathSync(options.guard ?? join(root, "extensions/kit-flywheel-guard.ts"));
 		const agentDir = join(env.HOME!, ".omp", "agent");
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(join(agentDir, "config.yml"), "bash:\n  enabled: true\nasync:\n  enabled: false\ntask:\n  batch: true\n  perCallModel: on\n  isolation:\n    enabled: false\ndisabledProviders:\n  - ollama\n  - llama.cpp\n  - lm-studio\n");
+		writeFileSync(join(agentDir, "config.yml"), "bash:\n  enabled: true\nasync:\n  enabled: false\nmodelRoles:\n  task: mock/mock\n  smol: mock/mock\ntask:\n  batch: true\n  isolation:\n    enabled: false\ndisabledProviders:\n  - ollama\n  - llama.cpp\n  - lm-studio\n");
 		const requests: { messages?: { role: string; content?: unknown }[]; tools?: unknown[] }[] = [];
 		let parentTurn = 0, childTurn = 0;
 		const task = { context: `Repo: ${project}\n${brief}`, tasks: [{
-			name: "build", agent: "task", model: "mock/mock", solutionSpace: "Write only spawned.txt in this repository.",
+			name: "build", solutionSpace: "Write only spawned.txt in this repository.",
 			task: "# Change\nCreate spawned.txt containing native-spawn-admitted. Use the write tool.",
 		}] };
 		server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
