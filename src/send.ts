@@ -792,93 +792,16 @@ export function luaCharCodes(text: string): string {
 }
 
 /**
- * ompkit-kdbz.2.4 native admission turn (AM58464, revised AM58562): one
- * carly-lua turn that re-reads the pane (absent, busy or exited ends the
- * turn), reads the live dock surface, admits only a single sendable editor
- * with an empty draft and no modal layer content, then emits a single
- * evsend. Every check reads the window's own snapshot inside one
- * synchronous turn, so a BUSY/draft/modal transition the window has seen
- * before the effect cannot slip through; the OMP backend revalidates at
- * handle time (live editor id match, sendable, blank-text drop). The editor
- * test is per-node scoped: the editor id must immediately precede its
- * `"k":"editor"` tag, sendable and empty-draft markers must follow within a
- * bounded window containing no other `"k":` tag, and exactly one eligible
- * editor may exist. `block` is the bare decimal pane id (what
- * `pane`/`surface`/`event` address); anything else is refused. Returns null
- * without running anything when the block is not a bare id.
- *
- * Residual (F1, unqualified): the window's snapshot can lag the program, and
- * the event carries no program-side compare-and-send incarnation witness;
- * Tern 0.9.4's plugin API (types sha 9de89a72) offers none. A program that
- * turned busy after the window's last report journals the text as a
- * steering entry, which the proof reports as PROVEN_STEERED instead of
- * hiding it. A silent in-turn refusal leaves pending retained, never
- * auto-resent.
+ * Tern 0.9.12 AgentsCx native queue, exposed through Carly's Lua control.
+ * get refuses non-agent targets; ask queues atomically until sendable.
+ * Admission and journal consumption remain separate kit obligations.
  */
 export function buildNativeSendTurn(block: string, payload: string): string | null {
 	if (!/^[0-9]+$/.test(block)) return null;
 	return [
 		`local blk = string.char(${luaCharCodes(block)})`,
-		`local pi = cx.session:pane(blk)`,
-		`if pi == nil then return end`,
-		`local pb = pi.busy`,
-		`if pb == true then return end`,
-		`local px = pi.exited`,
-		`if px == nil then`,
-		`local jd = cx.session:surface(blk, {root="dock", nodes=100, max_chars=16})`,
-		`if jd == nil then return end`,
-		`local dj = tern.json.encode(jd)`,
-		`local Q = string.char(34)`,
-		`local C = string.char(44)`,
-		`local SURF = jd.surface`,
-		`if SURF == nil then return end`,
-		`local sf = SURF.id`,
-		`if sf == nil then return end`,
-		`local ly = cx.session:surface(blk, {root="layer", nodes=100, max_chars=16})`,
-		`local lj = tern.json.encode(ly)`,
-		`local lc = lj:find([["c":]], 1, true)`,
-		`if lc == nil then`,
-		`local EN = 0`,
-		`local EL = false`,
-		`local init = 1`,
-		`while true do`,
-		`local ks, ke = dj:find([["k":"editor"]], init, true)`,
-		`if ks == nil then break end`,
-		`init = ke + 1`,
-		`local eid = false`,
-		`local pre = dj:sub(ks-1, ks-1)`,
-		`local cq = dj:sub(ks-2, ks-2)`,
-		`if pre == C then`,
-		`if cq == Q then`,
-		`local vs = ks - 3`,
-		`while vs > 1 do`,
-		`local ch = dj:sub(vs, vs)`,
-		`if ch == Q then break end`,
-		`vs = vs - 1`,
-		`end`,
-		`local tag = dj:sub(vs-5, vs-1)`,
-		`if tag == [["id":]] then`,
-		`eid = dj:sub(vs+1, ks-3)`,
-		`end`,
-		`end`,
-		`end`,
-		`if eid == false then return end`,
-		`local nk = dj:find([["k":]], ke, true)`,
-		`if nk == nil then nk = ke + 600 end`,
-		`local win = dj:sub(ke, nk)`,
-		`local s1 = win:find([["sendable":true]], 1, true)`,
-		`if s1 == nil then return end`,
-		`local t1 = win:find([["text":""]], 1, true)`,
-		`if t1 == nil then return end`,
-		`EN = EN + 1`,
-		`if EN == 1 then EL = eid end`,
-		`if EN == 2 then return end`,
-		`end`,
-		`if EN == 0 then return end`,
-		`local text = string.char(` + luaCharCodes(payload) + `)`,
-		`cx.session:event(blk, {ev="send", sf=sf, id=EL, text=text})`,
-		`end`,
-		`end`,
+		`local agent = cx.agents:get(blk)`,
+		`cx.agents:ask(agent, string.char(${luaCharCodes(payload)}))`,
 	].join("\n");
 }
 
@@ -1304,8 +1227,7 @@ export function acknowledgeTernPending(path: string, dropDir: string): {
  *
  * Flow: GOALSEND form and payload class (an OMP shell escape is refused
  * outright, SENDGATE1) -> gate flags -> exact seat binding -> observe
- * (BUSY waits up to untilDeliveredMs, then NOT_DELIVERED with a drop file,
- * except a keyless message, which steers: SENDFAST1;
+ * (messages admit busy seats into the native queue; goal controls wait for idle;
  * a destructive payload to a pane not proven to run OMP is refused by rule
  * id) -> identify -> observe/identify/configured-pane fence (SENDX1) ->
  * eligibility from the very snapshot observe hashed -> refuse slash
@@ -1343,7 +1265,7 @@ export async function deliverToTernSeat(input: {
 	/** Overridable for tests; production uses plane-tern's functions. */
 	observe?: typeof observeTernSeat;
 	identify?: typeof identifyTernSeat;
-	/** Composer truth for paste admission (no window key); default reads the seat's kit-composer-state record. */
+	/** Legacy caller observation seam; native delivery never reads or modifies the composer. */
 	composer?: (sessionFile: string) => ComposerVerdict;
 	/** Test-only v0.2.95 mutant: replaced journals remain pending, with no acknowledgement transition. */
 	testOnlyPendingSettlement?: "v0.2.95";
@@ -1384,12 +1306,9 @@ export async function deliverToTernSeat(input: {
 		|| typeof input.seat.windowKey !== "string" || paneId === null) {
 		return fail("PLANE_SEAT_UNBOUND", "seat needs a configured session and exact pane id; zero sends");
 	}
-	// TERNADDR1: no window key means no ctl endpoint; admit by paste + Enter into the pane's own window.
+	// No window key selects the default native control endpoint, never keyboard input.
 	const windowKey = input.seat.windowKey.trim();
-	const pasteMode = windowKey === "";
-	// SENDFAST1: a message pasted into an EMPTY composer reaches a running OMP through its native steering queue, so
-	// a keyless message never waits for the turn boundary; ctl turns and `/goal set` keep their idle admission.
-	const steerable = pasteMode && payloadKind.kind === "message";
+	const steerable = payloadKind.kind === "message";
 	const observeOpts: TernObserveOptions = steerable ? { turnInFlightIsBusy: true } : {};
 	const seatKey = `${input.seat.session}/${input.seat.pane}@${input.seat.windowKey}`.replace(/[^A-Za-z0-9]+/g, "_");
 	let observation = await observe(input.seat, input.io, observeOpts);
@@ -1577,56 +1496,17 @@ export async function deliverToTernSeat(input: {
 		// F5: a failed or crashed dispatch does not prove zero native effects;
 		// the attempt stays pending and proof is still reconciled below.
 		let dispatched = false;
-		if (pasteMode) {
-			// Paste has no atomic admission, so the seat's own composer record must
-			// prove an empty composer first; a running agent is fine (omp queues the
-			// submit as a steer). Enter is never pressed after a failed paste: an
-			// empty submit aborts a streaming turn.
-			const readComposer = input.composer ?? readComposerRecord;
-			let composer = readComposer(sessionFile);
-			const composerDeadline = now() + TERN_STEER_BOUND_MS;
-			while (steer && composer.state !== "EMPTY" && now() < composerDeadline) {
-				await wait(Math.min(TERN_STEER_COMPOSER_POLL_MS, composerDeadline - now()));
-				composer = readComposer(sessionFile);
-			}
-			if (composer.state !== "EMPTY") {
-				try { rmSync(pendingPath, { force: true }); } catch {}
-				const code = composer.state === "DRAFT" ? "TERN_COMPOSER_BUSY" : "TERN_COMPOSER_UNKNOWN";
-				const why = composer.state === "DRAFT" ? "seat composer holds unsent text"
-					: `seat composer state UNKNOWN (${composer.reason}); never paste blind`;
-				if (steer) {
-					return { status: "NOT_DELIVERED", marker, sends: 0, sessionFile, offset: null,
-						drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
-						detail: `${why} through the ${TERN_STEER_BOUND_MS} ms steer bound; nothing pasted; recovery copy written`, code };
-				}
-				return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
-					detail: composer.state === "DRAFT" ? `${why}; nothing pasted, zero sends` : `${why}, zero sends`,
-					code, ...(queued ? { queue_states: ["QUEUED", "REFUSED"] as const } : {}) };
-			}
-			const socket = resolveDaemonSocket();
-			const env = socket === null ? undefined : { TERN_DAEMON_SOCKET: socket };
-			try {
-				if (input.io.run([ternCtlBin(), "send", paneId, "paste", payload], env).code === 0) {
-					dispatched = input.io.run([ternCtlBin(), "send", paneId, "keys", "Enter"], env).code === 0;
-				}
-			} catch {
-				dispatched = false;
-			}
-		} else {
-			const lua = buildNativeSendTurn(paneId, payload);
-			if (lua === null) {
-				try { rmSync(pendingPath, { force: true }); } catch {}
-				return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
-					detail: `block not a bare decimal pane id; zero sends`, code: "BLOCK_UNWIREABLE",
-					...(queued ? { queue_states: ["QUEUED", "REFUSED"] as const } : {}) };
-			}
-			try {
-				dispatched = input.io.run([ternCtlBin(), "--window", windowKey, "ctl", "carly", "lua", lua]).code === 0;
-			} catch {
-				dispatched = false;
-			}
+		const lua = buildNativeSendTurn(paneId, payload);
+		if (lua === null) {
+			try { rmSync(pendingPath, { force: true }); } catch {}
+			return fail("BLOCK_UNWIREABLE", "block not a bare decimal pane id; zero sends");
 		}
-		const via = pasteMode ? " via paste+Enter" : "";
+		try {
+			dispatched = input.io.run([ternCtlBin(), ...(windowKey ? ["--window", windowKey] : []), "ctl", "carly", "lua", lua]).code === 0;
+		} catch {
+			dispatched = false;
+		}
+		const via = " via native agent API";
 		let last: TernProof = { status: "ABSENT", reason: "NOT_READ" };
 		const polls = Math.max(1, Math.ceil(deadlineMs / proofPollMs));
 		let readSize: number | null = null;
@@ -1653,12 +1533,7 @@ export async function deliverToTernSeat(input: {
 			if (poll + 1 >= polls) break;
 			await wait(proofPollMs);
 		}
-		let note = "";
-		if (payloadKind.kind === "message") {
-			const cap = input.io.run([ternCtlBin(), ...(pasteMode ? [] : ["--window", windowKey]), "capture", `${input.seat.session}/${paneId}`, "--surfaces"]);
-			note = cap.code !== 0 ? `; capture failed (rc=${cap.code})`
-				: cap.out.includes(`[${marker}]`) ? "; composer holds marker" : "; composer shows no marker";
-		}
+		const note = "";
 		return { status: "PENDING_CONSUME", marker, sends: 1, sessionFile, offset: null,
 			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
 			detail: `${dispatched ? `sent${via}` : "dispatch failed, effect unknown"}; proof ${last.status} (${last.reason})${note}; pending retained, never auto-resent`,
