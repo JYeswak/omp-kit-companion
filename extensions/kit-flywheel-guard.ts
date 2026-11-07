@@ -174,7 +174,6 @@ export const COMPACTION_REREAD = "COMPACTION_REREAD";
 export const SELF_CLOSE_REFUSED = "SELF_CLOSE_REFUSED";
 export const SCRATCH_DISPOSAL_REFUSED = "SCRATCH_DISPOSAL_REFUSED";
 export const EXPORT_INDEX_REFUSED = "EXPORT_INDEX_REFUSED";
-export const GOAL_END_REFUSED = "GOAL_END_REFUSED";
 export const GOAL_SEND_REFUSED = "GOAL_SEND_REFUSED";
 
 const IDENTITY_ENV = ["BR_ACTOR", "BR_AGENT_NAME", "AGENT_NAME"] as const;
@@ -1394,21 +1393,6 @@ function orchestrationSeat(name: string, sessions: Record<string, unknown>, chie
 }
 
 
-/** GOAL_END_REFUSED (J-2026-10-18-44): a fleet seat never ends its own goal. In a session with a fleet identity
-(admissionOwner), the goal tool's `drop` and `complete` ops are refused; `create`, `get` and `resume` pass. A chief or
-director changes a seat's goal with omp's `/goal set` slash command (arm_seat.py --set), which never reaches the tool
-hook, and a person can still type `/goal drop`. Sessions without a fleet identity pass untouched. */
-export function checkGoalEnd(event: FlywheelToolCallEvent, owner: string | null): FlywheelToolCallResult | undefined {
-	if (owner === null || event.toolName !== "goal") return undefined;
-	const op = field(event.input, "op");
-	if (op !== "drop" && op !== "complete") return undefined;
-	return {
-		block: true,
-		reason: `kit-flywheel-guard ${GOAL_END_REFUSED}: ${owner} may not ${op} its own goal (J-2026-10-18-44). `
-			+ "Only your director or a chief changes your goal, with /goal set. Keep working your goal: with no pinned work, "
-			+ "send one NO-WORK line to your director and end the turn. Nothing was changed.",
-	};
-}
 
 const SENDERS: Record<string, true> = { tern: true, "omp-kit": true, ntm: true };
 
@@ -2788,8 +2772,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			}
 			// COMPACTION_REREAD never blocks: a compaction delivers one summary
 			// message and every call stays allowed (ompkit-j27dd).
-			const goalEnd = checkGoalEnd(event, admissionOwner(env)) ?? checkGoalSend(event, admissionOwner(env));
-			if (goalEnd !== undefined) return goalEnd;
+			const goalSend = checkGoalSend(event, admissionOwner(env));
+			if (goalSend !== undefined) return goalSend;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
 			const clone = checkCloneScratch(event, { env, home, sessionCwd: ctx.cwd });

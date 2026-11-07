@@ -1298,7 +1298,7 @@ test("service run notifies on failure and stays silent on success", () => {
   expect(passing.code).toBe(0);
   expect(passing.envelope.data.notification).toEqual({ attempted: false, method: "none" });
   expect(existsSync(log)).toBe(false);
-});
+}, fixtureDeadlineS(5) * 1000);
 
 function realLaunchctlPath(label: string): { code: number; path: string | null } {
   const child = Bun.spawnSync(["launchctl", "print", `gui/${process.getuid?.() ?? 501}/${label}`], { stdout: "pipe", stderr: "pipe" });

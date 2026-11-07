@@ -45,12 +45,6 @@
    "scripts/test-stock-extensions.ts": 1,
    "scripts/ttsr-harness.ts": 3,
    "scripts/verify-published.ts": 8,
-   "skills/fleet-restart/scripts/fleet_restart.py": 2,
-   "skills/fleet-restart/scripts/fr_run.py": 1,
-   "skills/fleet-restart/scripts/fr_save.py": 1,
-   "skills/fleet-restart/scripts/selftest.py": 1,
-   "skills/fleet-restart/scripts/selftest_run.py": 11,
-   "skills/fleet-restart/scripts/sitrep.py": 1,
    "skills/fleet-round/references/probes/br_shapes.py": 1,
    "skills/fleet-round/references/probes/edge_shapes.py": 2,
    "skills/fleet-round/references/probes/seat_shapes.py": 2,
@@ -276,6 +270,6 @@
  },
  "schema": 1,
  "totals": {
-  "raw-spawn": 754
+  "raw-spawn": 737
  }
 }

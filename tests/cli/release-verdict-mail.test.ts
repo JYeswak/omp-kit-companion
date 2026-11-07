@@ -40,10 +40,10 @@ async function fixture() {
 	} });
 	const subscribe = async (agent: string, heads: string[]) => {
 		const handlers = new Map<string, (event: never, ctx: GoalKeepaliveContext) => unknown>();
-		await kitGoalKeepalive({ on: (name, handler) => { handlers.set(name, handler); }, sendMessage() {}, appendEntry() {} }, {
-			env: { AGENT_NAME: agent }, cwd: repo, preflightBlocked: false,
+		await kitGoalKeepalive({ on: (name, handler) => { handlers.set(name, handler); } }, {
+			env: { AGENT_NAME: agent }, cwd: repo,
 		});
-		const ctx: GoalKeepaliveContext = { cwd: repo, setTimeout: () => 1, clearTimer() {}, sessionManager: { getBranch: () => [
+		const ctx: GoalKeepaliveContext = { cwd: repo, sessionManager: { getBranch: () => [
 			{ type: "custom", customType: "user_todo_edit", data: { phases: [{ tasks: heads.map(head => ({ status: "blocked", blocker: `release verdict ${head}` })) }] } },
 		] } };
 		handlers.get("goal_updated")?.({ goal: { status: "active" }, state: { enabled: true } } as never, ctx);

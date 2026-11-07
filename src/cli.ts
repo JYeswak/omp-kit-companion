@@ -2749,7 +2749,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	const linux = platform === "linux";
 	const scoped: Record<string, ServiceJobDef> = {};
-	// Operator-configured jobs (loop-sentinel): their command is read once per invocation from
+	// Operator-configured jobs: their command is read once per invocation from
 	// fleet-watch.json; an absent or unusable entry keeps the job UNCONFIGURED, never a crash.
 	const operator: Record<string, Exclude<OperatorCommand, { status: "CONFIGURED" }>> = {};
 	try {

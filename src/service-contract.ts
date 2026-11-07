@@ -67,7 +67,7 @@ function secretEnvKey(env: Record<string, string>): string | null {
 	return null;
 }
 
-/** A daemon's restart policy: on-failure (cc: a clean exit stays down) or always (loop-sentinel: any exit relaunches). */
+/** A daemon's restart policy: on-failure (clean exits stay down) or always (any exit relaunches). */
 export type DaemonRestart = "on-failure" | "always";
 
 /**

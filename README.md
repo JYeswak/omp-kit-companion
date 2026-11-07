@@ -188,17 +188,11 @@ Existing profile entries are preserved; use their original receipt to undo them.
   plugin links, and read-only settings.
 - **jeff-planning-enhanced:** the fleet planning protocol (plan, review,
   beads, polish), scored with `omp-kit planning score`.
-- **fleet-restart:** restarts every OMP pane in a tmux fleet onto the target OMP
-  build, kit, plugin links and MCP servers as one approved run. `run --plan`
-  writes a manifest; `run --apply` (approval bound to its sha256) pauses the
-  pane-acting watchers, saves sessions and advisor state, `/restart`s panes on
-  the target build and respawns the rest with `--resume`, verifies version and
-  session, re-applies advisors, resumes the watchers and reports.
-  `scripts/fleet_restart.py` also has `check-env`, `watchers`, `save`,
-  `snapshot`, `align`, `plan`, `manifest`, `send` (dry-run by default),
-  `approval-template`, `verify` and `handoff`; `scripts/sitrep.py` reports
-  per-pane state, flags, MCP versions and last callback plus per-repo counts and
-  CI.
+- **fleet-restart:** native Tern daemon persistence and OMP session/goal
+  lifecycle replace kit respawn loops. Preserve owner identity and explicit
+  pause intent; never resume a paused goal automatically. Tern restart does
+  not reload extensions inside OMP. The retained read-only
+  `scripts/fleet_restart.py align --version X.Y.Z` checks release profile links.
 - **fleet-round:** the lock-step fleet round protocol and a read-only
   validator for its reports. `scripts/fleet-round.ts` has `collect`,
   `snapshot`, `check`, `validate`, `spot-check`, `score` and `barrier`: it
@@ -208,8 +202,8 @@ Existing profile entries are preserved; use their original receipt to undo them.
   arrived on time and was accepted, escalating a repeated blocker.
 
 ```sh
-python3 skills/fleet-restart/scripts/selftest.py
-python3 skills/fleet-restart/scripts/sitrep.py --selftest
+OMP_KIT_TERN_LIVE=1 bun test extensions/kit-goal-keepalive.test.ts -t NATIVESESSION1
+bun test tests/cli/profile-align.test.ts
 bun skills/fleet-round/scripts/fleet-round.ts check --config fleet.json --project app --focus app-e1,app-e2,app-e3
 omp-kit planning score --json
 ```
@@ -243,12 +237,12 @@ mapping fields, activation commands and read-only verification.
 
 ### Service jobs and kit updates
 
-18 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
+17 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
 `load-watch`, `ci-poller`, `fleet-flush`; 120 s: `fleet-watch`; 300 s:
 `kit-update`, `close-pass`; hourly: `claude-save`, [`am-retain`](docs/service-contract.md#agent-mail-retention),
 `session-retain`, `cache-retain`, `autocut`; 6 h: `scratch-reaper`,
-`fleet-lessons`; weekly: `gate-rationalize`; daemons: `cc`, `loop-sentinel`.
-Install previews a diff first and keeps a backup.
+`fleet-lessons`; weekly: `gate-rationalize`; daemon: `cc`.
+Install previews a diff first, keeps a backup, and retires installed lifecycle definitions.
 
 ```sh
 omp-kit service list --json

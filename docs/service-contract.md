@@ -293,29 +293,25 @@ service.
 The service contract reports `HOME`, `PATH`, and (for systemd) `TMPDIR`
 separately, so a path failure is attributed to the field that failed.
 
-## Operator-configured daemon: loop-sentinel
+## Native seat lifecycle
 
-`loop-sentinel` (SENTINELLIVE1 `ompkit-b4zip`) is a daemon whose command is
-operator data, never a kit path. fleet-watch.json (or
-`$OMP_KIT_FLEET_WATCH_CONFIG`) holds it:
+NATIVESESSION1 (`ompkit-1ra0d.37`) removes the kit-owned seat lifecycle daemon.
+Tern owns session persistence; OMP owns goal get/create/pause/resume/drop.
+The service registry cannot install or re-arm that retired daemon. Applied
+service installation reconciles `RETIRED_JOBS` before its unchanged-byte fast
+path: an installed legacy launchd definition is booted out, verified absent,
+and moved to backup. The systemd equivalent disables/stops its units,
+verifies they are no longer active or enabled, then backs them up. A still-loaded
+job refuses installation rather than reporting success. Definitions loaded
+from another HOME are not taken over.
 
-```json
-{ "loopSentinel": { "argv": ["/absolute/python3", "/absolute/loop_sentinel.py", "--apply", "--interval", "120"], "cwd": "/absolute/dir" } }
-```
+No installed legacy definition means there is nothing for the installer to
+migrate; an externally launched process or a loaded job whose owner already
+deleted its definition still requires that owner's explicit stop.
 
-`argv[0]` must be absolute; `cwd` defaults to `HOME`. The plist's
-`ProgramArguments` is that argv, with `KeepAlive` true, so launchd relaunches it
-after any exit, a clean one included (the 2026-10-21 runner exited cleanly on a
-cycle cap). The systemd unit gets `ExecStart` with that argv and
-`Restart=always`. `contract-daemon-keepalive` and `contract-daemon-lock` check
-each job's own restart policy in both directions. An `always` job fails with the
-conditional `SuccessfulExit` dict, and `cc` fails with `KeepAlive` true.
-
-| Situation | Result |
-|---|---|
-| key or file absent | `service install` refuses `LOOP_SENTINEL_UNCONFIGURED` and writes nothing; `service status` row `state: "UNCONFIGURED"`, `liveness: "UNKNOWN"`, not a finding; `service doctor` reports one `configured` WARN |
-| key present but unusable | refuses `LOOP_SENTINEL_CONFIG_INVALID`, naming the field |
-| `service run loop-sentinel` | refused `LOOP_SENTINEL_SUPERVISED`: only the supervisor runs it |
+A native owner pause remains a pause. A goal-less session remains goal-less.
+Native goal suppression is not a reason to inject a timed continuation.
+Tern window/daemon replacement does not reload code inside a running OMP.
 
 Every daemon status row carries `liveness`. It is `LIVE` only when the job is
 loaded with a pid, and `DEAD` when it is loaded without a pid or launchd reports

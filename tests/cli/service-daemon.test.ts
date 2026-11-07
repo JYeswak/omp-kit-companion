@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { daemonLiveness, KNOWN_JOBS, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveOperatorCommand, serviceLabel, type ServiceJobDef } from "../../src/service.ts";
 import { CC_BOOT_SOURCE, CC_SERVICE_HOST, CC_SERVICE_PORT, ccServiceCommand } from "../../src/service.ts";
+import { installService, parseLaunchctlPrint, readInstalledPlist, reconcileRetiredServices, type ServiceRunner } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 import { acquireDaemonLock, DAEMON_HELD_EXIT, readRunClaim } from "../../src/service-run.ts";
 import { run, runSync } from "../../src/kitlib/run.ts";
@@ -340,16 +341,6 @@ test("doctor_flags_missing_keepalive on a hand-edited daemon plist", () => {
 	expect(result.code).toBe(1);
 });
 
-// SENTINELLIVE1 (ompkit-b4zip): the loop sentinel is a kit daemon whose command is operator
-// data (fleet-watch.json `loopSentinel`), never a path in the kit.
-
-const SENTINEL_ARGV = ["/opt/fixture/bin/python3", "/opt/fixture/sentinel/loop_sentinel.py", "--apply", "--interval", "120"];
-const SENTINEL_CWD = "/opt/fixture/sentinel";
-
-function sentinelJob(): ServiceJobDef {
-	return { ...KNOWN_JOBS["loop-sentinel"]!, program: { argv: [...SENTINEL_ARGV], cwd: SENTINEL_CWD } };
-}
-
 /** Write fleet-watch.json under the fixture HOME; undefined writes no file. Returns its path. */
 function fleetConfig(home: string, config: unknown): string {
 	const path = join(home, ".config", "omp-kit", "fleet-watch.json");
@@ -360,133 +351,20 @@ function fleetConfig(home: string, config: unknown): string {
 	return path;
 }
 
-/**
- * Every file and directory under root with its byte size: a write anywhere changes it. The bun
- * runtime itself writes its transpiler cache under $HOME/Library/Caches/bun (HOME is the
- * fixture); that is the test runner's write, not the kit's, so it alone is excluded.
- */
-function tree(root: string): string[] {
-	return (readdirSync(root, { recursive: true }) as string[])
-		.filter(entry => entry !== "Library" && entry !== join("Library", "Caches") && !entry.startsWith(join("Library", "Caches", "bun")))
-		.sort()
-		.map(entry => `${entry}:${statSync(join(root, entry)).isDirectory() ? "dir" : statSync(join(root, entry)).size}`);
-}
 
 /** Portability guard: hard-coded per-user paths (the kit must not require /Users/<name>). */
 function hardcodedUserPaths(text: string): string[] {
 	return text.match(/\/Users\/[^\s"<]*/g) ?? [];
 }
 
-test("SENTINELLIVE1 (1): configured loop-sentinel renders KeepAlive true and runs the configured argv", () => {
-	sanitizedEnv();
-	expect(KNOWN_JOBS["loop-sentinel"]).toMatchObject({ name: "loop-sentinel", label: "com.omp-kit.loop-sentinel", kind: "daemon", restart: "always", commandConfigKey: "loopSentinel" });
-	const plist = renderLaunchdPlist(HOME, sentinelJob(), LAUNCHER, null).text;
-	expect(plist).toContain("\t<key>KeepAlive</key>\n\t<true/>\n\t<key>RunAtLoad</key>\n\t<true/>");
-	expect(plist).not.toContain("SuccessfulExit");
-	expect(plist).not.toContain("StartInterval");
-	const programArguments = plist.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1] ?? "";
-	expect([...programArguments.matchAll(/<string>([^<]*)<\/string>/g)].map(match => match[1])).toEqual(SENTINEL_ARGV);
-	expect(plist).not.toContain(`<string>${LAUNCHER}</string>`);
-	expect(plist).toContain(`<key>WorkingDirectory</key>\n\t<string>${SENTINEL_CWD}</string>`);
-	expect(plist).toContain(`<string>${HOME}/Library/Logs/omp-kit/loop-sentinel.out.log</string>`);
-	expect(plist).toContain(`<string>${HOME}/Library/Logs/omp-kit/loop-sentinel.err.log</string>`);
-	expect(checkPlistContract("loop-sentinel", plist, "always").filter(check => check.status === "FAIL")).toEqual([]);
-	expect(statusOf(checkPlistContract("loop-sentinel", plist, "always"), "contract-daemon-keepalive")).toBe("PASS");
-	// The restart policy is checked both ways: a clean-exit-stays-down dict fails an always job,
-	// and KeepAlive true fails the on-failure cc daemon.
-	expect(statusOf(checkPlistContract("loop-sentinel", DAEMON_PLIST_GOLDEN, "always"), "contract-daemon-keepalive")).toBe("FAIL");
-	expect(statusOf(checkPlistContract("cc", plist), "contract-daemon-keepalive")).toBe("FAIL");
-	const unit = renderSystemdUnits(HOME, sentinelJob(), LAUNCHER, null).service;
-	expect(unit).toContain(`ExecStart=${SENTINEL_ARGV.map(arg => `"${arg}"`).join(" ")}`);
-	expect(unit).toContain(`WorkingDirectory=${SENTINEL_CWD}`);
-	expect(unit).toContain("Restart=always\nRestartSec=60");
-	expect(checkSystemdContract("loop-sentinel", unit, "always").filter(check => check.status === "FAIL")).toEqual([]);
-	expect(statusOf(checkSystemdContract("cc", unit), "contract-daemon-lock")).toBe("FAIL");
-});
-
-test("SENTINELLIVE1 (1): install --plan reads the argv from fleet-watch.json loopSentinel", () => {
-	if (process.platform !== "darwin") return;
-	sanitizedEnv();
+test("NATIVESESSION1: the kit cannot install a seat-rearming daemon", () => {
+	expect(KNOWN_JOBS["loop-sentinel"]).toBeUndefined();
 	const home = fixtureHome();
-	const configPath = fleetConfig(home, { sessions: [], loopSentinel: { argv: SENTINEL_ARGV, cwd: SENTINEL_CWD } });
-	const result = cli(["service", "install", "loop-sentinel", "--plan"], home, namespace(), { OMP_KIT_FLEET_WATCH_CONFIG: configPath });
-	expect(result.envelope.errors ?? []).toEqual([]);
-	expect(result.code).toBe(0);
-	expect(result.envelope.data.plan).toBe(true);
-	expect(result.envelope.data.plist).toContain("\t<key>KeepAlive</key>\n\t<true/>");
-	for (const arg of SENTINEL_ARGV) expect(result.envelope.data.plist).toContain(`<string>${arg}</string>`);
-});
-
-test("SENTINELLIVE1 (2) planted negative: unconfigured install refuses LOOP_SENTINEL_UNCONFIGURED and writes nothing", () => {
-	if (process.platform !== "darwin" && process.platform !== "linux") return;
-	sanitizedEnv();
-	const home = fixtureHome();
-	const ns = namespace();
-	const attempt = (configPath: string) => {
-		const before = tree(home);
-		const result = cli(["service", "install", "loop-sentinel", "--apply", "--yes"], home, ns, { OMP_KIT_FLEET_WATCH_CONFIG: configPath });
-		expect(tree(home)).toEqual(before);
-		return result;
-	};
-	const absent = attempt(fleetConfig(home, undefined));
-	expect(absent.code).toBe(2);
-	expect(absent.envelope.errors[0].code).toBe("LOOP_SENTINEL_UNCONFIGURED");
-	expect(absent.envelope.errors[0].message).toContain("does not exist");
-	const keyless = attempt(fleetConfig(home, { sessions: [] }));
-	expect(keyless.code).toBe(2);
-	expect(keyless.envelope.errors[0].code).toBe("LOOP_SENTINEL_UNCONFIGURED");
-	expect(keyless.envelope.errors[0].message).toContain("no loopSentinel key");
-	const relative = attempt(fleetConfig(home, { sessions: [], loopSentinel: { argv: ["python3", "loop_sentinel.py"] } }));
-	expect(relative.code).toBe(2);
-	expect(relative.envelope.errors[0].code).toBe("LOOP_SENTINEL_CONFIG_INVALID");
-	expect(existsSync(join(home, "Library", "LaunchAgents"))).toBe(false);
-	expect(existsSync(join(home, "Library", "Logs", "omp-kit"))).toBe(false);
-	// Control: the same HOME with the key present renders, so the refusal came from the config.
-	if (process.platform === "darwin") {
-		const configured = cli(["service", "install", "loop-sentinel", "--plan"], home, ns,
-			{ OMP_KIT_FLEET_WATCH_CONFIG: fleetConfig(home, { sessions: [], loopSentinel: { argv: SENTINEL_ARGV } }) });
-		expect(configured.code).toBe(0);
-		expect(configured.envelope.data.plist).toContain(`<string>${SENTINEL_ARGV[1]}</string>`);
-		expect(configured.envelope.data.plist).toContain(`<key>WorkingDirectory</key>\n\t<string>${home}</string>`);
-	}
-});
-
-test("SENTINELLIVE1 (3): status and doctor report an unconfigured loop-sentinel as UNCONFIGURED, never an error", () => {
-	if (process.platform !== "darwin" && process.platform !== "linux") return;
-	sanitizedEnv();
-	const home = fixtureHome();
-	const ns = namespace();
-	const env = { OMP_KIT_FLEET_WATCH_CONFIG: fleetConfig(home, { sessions: [] }) };
-	const status = cli(["service", "status", "loop-sentinel"], home, ns, env);
-	expect(status.envelope.errors ?? []).toEqual([]);
-	expect(status.code).toBe(0);
-	expect(status.envelope.data.overall).toBe("OK");
-	const row = status.envelope.data.status[0];
-	expect(row).toMatchObject({ name: "loop-sentinel", installed: false, state: "UNCONFIGURED", configured: "UNCONFIGURED", liveness: "UNKNOWN" });
-	expect(row.config_reason).toContain("no loopSentinel key");
-	expect(row.loaded).not.toBe(true);
-	const doctor = cli(["service", "doctor", "loop-sentinel"], home, ns, env);
-	const checks = doctor.envelope.data.checks as { id: string; status: string; message: string }[];
-	expect(checks.map(check => check.id)).toEqual(["configured"]);
-	expect(checks[0]).toMatchObject({ status: "WARN" });
-	expect(checks[0]!.message).toContain("UNCONFIGURED");
-	// A configured but uninstalled sentinel should be running and is not: launchd/systemd answer
-	// "not found"/inactive, which is DEAD, not UNKNOWN.
-	const configuredEnv = { OMP_KIT_FLEET_WATCH_CONFIG: fleetConfig(home, { sessions: [], loopSentinel: { argv: SENTINEL_ARGV } }) };
-	const down = cli(["service", "status", "loop-sentinel"], home, ns, configuredEnv);
-	expect(down.envelope.errors ?? []).toEqual([]);
-	expect(down.envelope.data.status[0]).toMatchObject({ configured: "CONFIGURED", installed: false, liveness: "DEAD" });
-	expect(down.envelope.data.status[0].state).not.toBe("UNCONFIGURED");
-});
-
-test("SENTINELLIVE1: a hand service run is refused; launchd runs the configured argv directly", () => {
-	sanitizedEnv();
-	const home = fixtureHome();
-	const env = { OMP_KIT_FLEET_WATCH_CONFIG: fleetConfig(home, { sessions: [], loopSentinel: { argv: SENTINEL_ARGV } }) };
-	const result = cli(["service", "run", "loop-sentinel"], home, namespace(), env);
+	const result = cli(["service", "install", "loop-sentinel", "--plan"], home, namespace());
 	expect(result.code).toBe(2);
-	expect(result.envelope.errors[0].code).toBe("LOOP_SENTINEL_SUPERVISED");
-	expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs"))).toBe(false);
+	expect(result.envelope.errors[0].code).toBe("UNKNOWN_JOB");
+	// Control: ordinary product daemons are still registered.
+	expect(KNOWN_JOBS.cc?.kind).toBe("daemon");
 });
 
 // CLOSEPASS1b (ompkit-774u.52.1): a close-pass tick while a pass holds the job lock starts no second pass.
@@ -551,54 +429,101 @@ test("CLOSEPASS1b: an overlapping close-pass tick starts no second pass, logs th
 	expect(decode.decode(secondRun.stderr)).toContain(`close-pass SKIPPED-OVERLAP holder_pid=${holder!.pid}`);
 }, fixtureDeadlineS(60) * 1000);
 
-test("SENTINELLIVE1 (4): no job definition or render carries a hard-coded /Users/ path", () => {
+test("operator jobs: no definition or render carries a hard-coded /Users/ path", () => {
 	sanitizedEnv();
-	// Operator env a render copies on purpose (update channel, CI repos, the Agent Mail root) is not a hard-coded path.
 	const saved = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("OMP_KIT_UPDATE_") || key === "OMP_KIT_CI_REPOS" || key === "AGENT_MAIL_STORAGE_ROOT"));
 	for (const key of Object.keys(saved)) delete process.env[key];
 	try {
 		for (const def of Object.values(KNOWN_JOBS)) {
-			const job = def.commandConfigKey === undefined ? def : { ...def, program: { argv: [...SENTINEL_ARGV], cwd: SENTINEL_CWD } };
+			const job = def.commandConfigKey === undefined ? def : { ...def, program: { argv: ["/opt/fixture/bin/judge"], cwd: "/opt/fixture" } };
 			const watch = def.kind === "watch" ? join(HOME, "pkg.json") : null;
 			expect(hardcodedUserPaths(JSON.stringify(def)), def.name).toEqual([]);
 			expect(hardcodedUserPaths(renderLaunchdPlist(HOME, job, LAUNCHER, watch).text), def.name).toEqual([]);
 			expect(hardcodedUserPaths(renderSystemdUnits(HOME, job, LAUNCHER, watch).service), def.name).toEqual([]);
 		}
-		// Planted: a definition that bakes in a per-user skill path is caught in the def and its render.
-		const planted: ServiceJobDef = { ...KNOWN_JOBS["loop-sentinel"]!, program: { argv: ["/Users/planted/.claude/skills/x/loop_sentinel.py"], cwd: SENTINEL_CWD } };
-		expect(hardcodedUserPaths(JSON.stringify(planted))).toEqual(["/Users/planted/.claude/skills/x/loop_sentinel.py"]);
-		expect(hardcodedUserPaths(renderLaunchdPlist(HOME, planted, LAUNCHER, null).text)).toEqual(["/Users/planted/.claude/skills/x/loop_sentinel.py"]);
-		// Rendering an operator-configured job without its config is a caller bug, never a guessed path.
-		expect(() => renderLaunchdPlist(HOME, { ...KNOWN_JOBS["loop-sentinel"]! }, LAUNCHER, null)).toThrow("LOOP_SENTINEL_UNCONFIGURED");
+		const planted: ServiceJobDef = { ...KNOWN_JOBS["gate-rationalize"]!, program: { argv: ["/Users/planted/judge"], cwd: "/opt/fixture" } };
+		expect(hardcodedUserPaths(JSON.stringify(planted))).toEqual(["/Users/planted/judge"]);
+		expect(hardcodedUserPaths(renderLaunchdPlist(HOME, planted, LAUNCHER, null).text)).toEqual(["/Users/planted/judge"]);
+		expect(() => renderLaunchdPlist(HOME, { ...KNOWN_JOBS["gate-rationalize"]! }, LAUNCHER, null)).toThrow("GATE_RATIONALIZE_UNCONFIGURED");
 	} finally {
 		Object.assign(process.env, saved);
 	}
 });
 
-test("SENTINELLIVE1: resolveOperatorCommand separates UNCONFIGURED from INVALID and validates argv/cwd", () => {
+test("operator commands separate UNCONFIGURED from INVALID and validate argv/cwd", () => {
 	const home = fixtureHome();
-	const read = (config: unknown) => resolveOperatorCommand(home, "loopSentinel", fleetConfig(home, config));
-	expect(resolveOperatorCommand(home, "loopSentinel", join(home, "absent.json"))).toMatchObject({ status: "UNCONFIGURED" });
+	const read = (config: unknown) => resolveOperatorCommand(home, "gateRationalize", fleetConfig(home, config));
+	expect(resolveOperatorCommand(home, "gateRationalize", join(home, "absent.json"))).toMatchObject({ status: "UNCONFIGURED" });
 	expect(read({ sessions: [] })).toMatchObject({ status: "UNCONFIGURED" });
 	expect(read("{not json")).toMatchObject({ status: "INVALID" });
 	expect(read([1])).toMatchObject({ status: "INVALID" });
-	expect(read({ loopSentinel: "python3 loop.py" })).toMatchObject({ status: "INVALID" });
-	expect(read({ loopSentinel: { argv: [] } })).toMatchObject({ status: "INVALID" });
-	expect(read({ loopSentinel: { argv: ["python3"] } })).toMatchObject({ status: "INVALID" });
-	expect(read({ loopSentinel: { argv: ["/bin/py", "a\nb"] } })).toMatchObject({ status: "INVALID" });
-	expect(read({ loopSentinel: { argv: ["/bin/py", ""] } })).toMatchObject({ status: "INVALID" });
-	expect(read({ loopSentinel: { argv: ["/bin/py", 7] } })).toMatchObject({ status: "INVALID" });
-	expect(read({ loopSentinel: { argv: Array(65).fill("/bin/py") } })).toMatchObject({ status: "INVALID" });
-	expect(read({ loopSentinel: { argv: ["/bin/py"], cwd: "relative" } })).toMatchObject({ status: "INVALID" });
-	expect(read({ loopSentinel: { argv: ["/bin/py", "--apply"] } })).toEqual({ status: "CONFIGURED", program: { argv: ["/bin/py", "--apply"], cwd: home }, configPath: fleetConfig(home, undefined) });
-	expect(read({ loopSentinel: { argv: SENTINEL_ARGV, cwd: SENTINEL_CWD } })).toMatchObject({ status: "CONFIGURED", program: { argv: SENTINEL_ARGV, cwd: SENTINEL_CWD } });
+	for (const value of ["python3 judge.py", { argv: [] }, { argv: ["python3"] }, { argv: ["/bin/py", "a\nb"] }, { argv: ["/bin/py", ""] }, { argv: ["/bin/py", 7] }, { argv: Array(65).fill("/bin/py") }, { argv: ["/bin/py"], cwd: "relative" }]) {
+		expect(read({ gateRationalize: value })).toMatchObject({ status: "INVALID" });
+	}
+	expect(read({ gateRationalize: { argv: ["/bin/py", "--apply"] } })).toEqual({ status: "CONFIGURED", program: { argv: ["/bin/py", "--apply"], cwd: home }, configPath: fleetConfig(home, undefined) });
+	expect(read({ gateRationalize: { argv: ["/bin/py"], cwd: "/opt/fixture" } })).toMatchObject({ status: "CONFIGURED", program: { argv: ["/bin/py"], cwd: "/opt/fixture" } });
 });
 
-test("SENTINELLIVE1: daemonLiveness is LIVE only with a loaded running pid and UNKNOWN on an unanswered query", () => {
+test("daemonLiveness is LIVE only with a loaded running pid and UNKNOWN on an unanswered query", () => {
 	expect(daemonLiveness({ loaded: true, pid: 4242 })).toBe("LIVE");
 	expect(daemonLiveness({ loaded: true, pid: null })).toBe("DEAD");
 	expect(daemonLiveness({ loaded: false, pid: null })).toBe("DEAD");
 	expect(daemonLiveness({ loaded: null, pid: null, query_error: "LAUNCHCTL_NOT_FOUND_LABEL" })).toBe("DEAD");
 	expect(daemonLiveness({ loaded: null, pid: null, query_error: "LAUNCHCTL_EXIT_5" })).toBe("UNKNOWN");
 	expect(daemonLiveness({ loaded: null, pid: 4242 })).toBe("UNKNOWN");
+});
+
+test("NATIVESESSION1: installer retires a generated loaded launchd sentinel before its no-op path; still-loaded plant refuses", () => {
+	for (const stuck of [false, true]) {
+		const home = fixtureHome();
+		const oldJob: ServiceJobDef = { name: "loop-sentinel", label: serviceLabel("loop-sentinel"), kind: "daemon", intervalSeconds: 0, restart: "always", program: { argv: ["/opt/fixture/sentinel"], cwd: "/opt/fixture" } };
+		const job = { ...KNOWN_JOBS["kit-update"]!, label: serviceLabel("kit-update") };
+		const dir = join(home, "Library/LaunchAgents");
+		mkdirSync(dir, { recursive: true });
+		const oldFile = join(dir, `${oldJob.label}.plist`);
+		const currentFile = join(dir, `${job.label}.plist`);
+		const launcher = join(home, ".local/bin/omp-kit");
+		writeFileSync(oldFile, renderLaunchdPlist(home, oldJob, launcher, null).text);
+		writeFileSync(currentFile, renderLaunchdPlist(home, job, launcher, null).text);
+		let loaded = true;
+		const run: ServiceRunner = args => {
+			if (args[1] === "bootout") {
+				if (!stuck) loaded = false;
+				return { code: 0, stdout: "", stderr: "" };
+			}
+			return loaded ? { code: 0, stdout: `path = ${oldFile}\nstate = running\npid = 4242\n`, stderr: "" }
+				: { code: 113, stdout: "", stderr: "Could not find service" };
+		};
+		const result = installService(home, job, launcher, null, readInstalledPlist(home, job.label), parseLaunchctlPrint(`path = ${currentFile}\nstate = running\n`), run);
+		expect(result.ok).toBe(!stuck);
+		expect(existsSync(oldFile)).toBe(stuck);
+		expect(existsSync(currentFile)).toBe(true);
+		if (stuck) expect(result.error).toBe("RETIRED_JOB_STILL_LOADED");
+		else expect(loaded).toBe(false);
+	}
+});
+
+test("NATIVESESSION1: retired systemd sentinel is disabled/stopped and removed; still-active plant refuses", () => {
+	for (const stuck of [false, true]) {
+		const home = fixtureHome();
+		const oldJob: ServiceJobDef = { name: "loop-sentinel", label: serviceLabel("loop-sentinel"), kind: "daemon", intervalSeconds: 0, restart: "always", program: { argv: ["/opt/fixture/sentinel"], cwd: "/opt/fixture" } };
+		const dir = join(home, ".config/systemd/user");
+		mkdirSync(dir, { recursive: true });
+		const oldFile = join(dir, "omp-kit-loop-sentinel.service");
+		writeFileSync(oldFile, renderSystemdUnits(home, oldJob, LAUNCHER, null).service);
+		let loaded = true;
+		const calls: string[][] = [];
+		const run: ServiceRunner = args => {
+			calls.push([...args]);
+			if (args[2] === "disable" || args[2] === "stop") { if (!stuck) loaded = false; return { code: 0, stdout: "", stderr: "" }; }
+			if (args[2] === "show") return { code: 0, stdout: existsSync(oldFile) ? oldFile : "", stderr: "" };
+			if (args[2] === "is-enabled" || args[2] === "is-active") return { code: loaded ? 0 : 1, stdout: "", stderr: "" };
+			return { code: 0, stdout: "", stderr: "" };
+		};
+		const result = reconcileRetiredServices(home, "linux", run);
+		expect(result.ok).toBe(!stuck);
+		expect(existsSync(oldFile)).toBe(stuck);
+		expect(calls.some(args => args.includes("disable") && args.includes("--now"))).toBe(true);
+		if (stuck) expect(result.error).toBe("RETIRED_JOB_STILL_LOADED");
+	}
 });

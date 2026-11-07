@@ -295,7 +295,7 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 		id: "release-verdict-mail", title: "Release verdict subscriptions <git-state>/release-verdict-subscribers/<sha256(project, lowercase agent)>.json and their <record>.<pid>.tmp files",
 		rows: [], class: "REHOME", ownerKey: "agent+project", scope: "seat", survivesRespawn: true,
 		writers: ["src/release-verdict-mail.ts"],
-		cancel: "subscribeReleaseVerdicts returns a remover; kit-goal-keepalive invokes it on shutdown, session reconciliation, cwd change or loss of eligibility; an empty wait removes the subscription; finally removes the atomic-write temp",
+		cancel: "subscribeReleaseVerdicts returns a remover; the verdict observer invokes it on stop, shutdown, session start/switch, loss of active goal intent and before each refreshed agent_end subscription; an empty wait removes the subscription; finally removes the atomic-write temp",
 		crash: "the last renamed subscription survives; a crash before rename can leave <record>.<pid>.tmp, which notification ignores and no automatic sweep reaps; sent markers remain for deduplication",
 		respawn: "the same project and lowercase agent rewrite the same subscription; pid names only the atomic-write temp, not the seat",
 		terminal: { outcome: "self-heals", producer: "subscribeReleaseVerdicts rewrites or removes the subscription; notifyReleaseVerdict writes a digest-keyed sent marker after confirmed mail delivery" },

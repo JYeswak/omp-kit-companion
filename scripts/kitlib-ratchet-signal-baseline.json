@@ -11,7 +11,6 @@
    "scripts/release-verdict.sh": 1,
    "scripts/suite-metrics.py": 1,
    "scripts/ubs-single-file-verdict.sh": 2,
-   "skills/fleet-restart/scripts/selftest_native.py": 2,
    "src/disk-stage.ts": 2,
    "src/lsp-probe.ts": 1,
    "src/runtime.ts": 1,
@@ -49,6 +48,6 @@
  },
  "schema": 1,
  "totals": {
-  "unsafe-signal-pid": 103
+  "unsafe-signal-pid": 101
  }
 }

@@ -76,10 +76,9 @@ bundle. `python3 -I installer/embed-bootstrap.py --check` refuses drift; explici
 without `--check`. Release packaging checks freshness before building and never regenerates source implicitly.
 The installer preserves its attestation deadlines and exception semantics and refuses truncated authority output.
 
-Fleet restart commands also use the canonical supervisor. Pane fanout runs one supervised Python worker per pane,
-with bounded input and a 600-second outer process deadline in addition to its stage budgets. A timed-out or
-failed worker cannot reuse a previous successful result file. Parent cancellation marks the run before canceling
-queued work; active groups use the canonical supervisor's cleanup path.
+Seat lifecycle uses Tern daemon persistence and native OMP goal/session state
+(NATIVESESSION1). The former per-pane respawn fanout and its supervisor chain
+are retired; no kit process polls composers or reconstructs launch commands.
 
 Scratch orphan cleanup recognizes direct interpreter scripts and literal Python `-c` invocations, including
 cwd-only and FD-only linkage. Reaping requires a private recognized session, the caller's UID, a known executable

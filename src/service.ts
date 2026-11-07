@@ -130,9 +130,6 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	// kit command appends spool/kit while the store exists) are its CC_STATE.
 	// SVCQOS1: deadline QoS; its fast lane must finish in 10 s every 15 s.
 	"cc": { name: "cc", label: "com.omp-kit.cc", kind: "daemon", intervalSeconds: 0, qos: "deadline", ownedState: home => [{ path: ccStateDir(home) }] },
-	// SENTINELLIVE1 (ompkit-b4zip): the fleet loop sentinel, supervised so it outlives the seat
-	// that launched it. Its command is operator data (fleet-watch.json `loopSentinel`).
-	"loop-sentinel": { name: "loop-sentinel", label: "com.omp-kit.loop-sentinel", kind: "daemon", intervalSeconds: 0, restart: "always", commandConfigKey: "loopSentinel" },
 	// GATEEVENTS1 (ompkit-fp72.135.3.12): weekly gate rationalization over the live gate-events ledger. Its
 	// command is operator data (fleet-watch.json `gateRationalize`: python3 gate_registry.py rationalize --out ...),
 	// so the kit never hardcodes a repo path; UNCONFIGURED until the operator sets it.
@@ -226,7 +223,7 @@ export function resolveOperatorCommand(home: string, key: string, configPath = f
 	return { status: "CONFIGURED", program: { argv: [...argv], cwd: typeof cwd === "string" ? cwd : home }, configPath };
 }
 
-/** Named refusal/status code prefix for a configured job: loop-sentinel -> LOOP_SENTINEL. */
+/** Named refusal/status code prefix for a configured job, e.g. gate-rationalize -> GATE_RATIONALIZE. */
 export function jobCodePrefix(name: string): string {
 	return name.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
 }
@@ -1109,6 +1106,42 @@ export function systemctlState(job: ServiceJobDef, run: ServiceRunner): SystemdS
 	return { enabled: enabled.code === 0, active: active.code === 0, fragmentPath: fragment };
 }
 
+/** Explicitly retired kit-owned lifecycle definitions; never offered for installation. */
+export const RETIRED_JOBS = ["loop-sentinel"] as const;
+
+/** Reconcile installed definitions before an installation's unchanged-byte fast path.
+ * No definition under this HOME means there is no installed copy to migrate.
+ * Never take over a label loaded from another HOME. */
+export function reconcileRetiredServices(home: string, platform: "darwin" | "linux", run: ServiceRunner): LifecycleResult {
+	let changed = false;
+	for (const name of RETIRED_JOBS) {
+		const job: ServiceJobDef = { name, label: serviceLabel(name), kind: "daemon", intervalSeconds: 0 };
+		const file = platform === "darwin" ? plistPath(home, job.label) : join(home, ".config/systemd/user", `omp-kit-${name}.service`);
+		if (!existsSync(file)) continue;
+		if (platform === "darwin") {
+			const target = `${domain()}/${job.label}`;
+			const before = run(["launchctl", "print", target]);
+			const loaded = parseLaunchctlPrint(before.stdout);
+			if (before.code === 0 && loaded.path !== file) return { ok: false, changed, backup: null, detail: `Retired label ${job.label} is loaded from ${loaded.path ?? "an unknown path"}, not ${file}.`, error: "LABEL_LOADED_ELSEWHERE" };
+			if (before.code !== 0 && !isAbsentService(before)) return { ok: false, changed, backup: null, detail: `Cannot inspect retired ${job.label}: ${before.stderr}`, error: "RETIRED_JOB_QUERY_FAILED" };
+			const stopped = run(["launchctl", "bootout", target]);
+			if (stopped.code !== 0 && !isAbsentService(stopped)) return { ok: false, changed, backup: null, detail: `Cannot unload retired ${job.label}: ${stopped.stderr}`, error: "RETIRED_JOB_STOP_FAILED" };
+			if (!isAbsentService(run(["launchctl", "print", target]))) return { ok: false, changed, backup: null, detail: `Retired ${job.label} remains loaded after bootout.`, error: "RETIRED_JOB_STILL_LOADED" };
+			uninstallService(home, job, run, false);
+		} else {
+			const loaded = systemctlState(job, run);
+			if (loaded.fragmentPath !== null && loaded.fragmentPath !== file) return { ok: false, changed, backup: null, detail: `Retired unit is loaded from ${loaded.fragmentPath}, not ${file}.`, error: "LABEL_LOADED_ELSEWHERE" };
+			run(["systemctl", "--user", "disable", "--now", `omp-kit-${name}.service`]);
+			run(["systemctl", "--user", "stop", `omp-kit-${name}.service`]);
+			const after = systemctlState(job, run);
+			if (after.active || after.enabled) return { ok: false, changed, backup: null, detail: `Retired omp-kit-${name}.service remains active or enabled.`, error: "RETIRED_JOB_STILL_LOADED" };
+			uninstallSystemd(home, job, run);
+		}
+		changed = true;
+	}
+	return { ok: true, changed, backup: null, detail: changed ? "Retired service definitions unloaded and moved to backup." : "No retired definitions installed." };
+}
+
 export function installSystemd(home: string, job: ServiceJobDef, units: RenderedSystemd, run: ServiceRunner, replace = false): LifecycleResult {
 	const dir = join(home, ".config", "systemd", "user");
 	const serviceFile = join(dir, `omp-kit-${job.name}.service`);
@@ -1125,6 +1158,8 @@ export function installSystemd(home: string, job: ServiceJobDef, units: Rendered
 			detail: `Unit omp-kit-${job.name}.service is already enabled from ${loaded.fragmentPath}, not ${serviceFile}. Re-run with --replace to take it over (a backup is kept).`,
 			error: "LABEL_LOADED_ELSEWHERE" };
 	}
+	const retired = reconcileRetiredServices(home, "linux", run);
+	if (!retired.ok) return retired;
 	try {
 		ensureServiceTmp(home);
 	} catch (error) {
@@ -1223,6 +1258,8 @@ export function installService(home: string, job: ServiceJobDef, launcher: strin
 			detail: `Label ${job.label} is already loaded from ${print.path ?? "an unknown plist"}, not ${dest}. Re-run with --replace to take it over (a backup is kept).`,
 			error: "LABEL_LOADED_ELSEWHERE" };
 	}
+	const retired = reconcileRetiredServices(home, "darwin", run);
+	if (!retired.ok) return retired;
 	try {
 		ensureServiceTmp(home);
 	} catch (error) {
