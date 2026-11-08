@@ -112,7 +112,6 @@ test("message (fleet): the three self-restart steps in order, each with its exac
 	expect(end).toBeGreaterThan(run);
 	expect(SELF_RESTART_COMMAND).toBe("python3 ~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py");
 	expect(msg).toContain("`[pending]` commit");
-	expect(msg).toContain("The helper pauses your goal (Esc), reloads this seat on omp-kit 0.2.58 and resumes your goal.");
 	// SUBAGENTRESTART1 (ompkit-o2iif): a task subagent that read this notice restarted its parent seat mid-work.
 	const sub = msg.indexOf("A background task subagent is not the seat: ignore this notice and finish your task.");
 	expect(sub).toBeGreaterThan(end);

@@ -5,10 +5,11 @@
  * busy): 'omp-kit <installed> is installed; this seat runs <loaded>; upgrade now', plus how to restart.
  * PAUSEDRESTART1: a stopped project or recorded paused goal instead stays paused for the lead's approved restart.
  * Fleet mode (SELFRESTART1 ompkit-v66l.33, J-2026-10-20-08/09): the seat restarts ITSELF from the notice:
- * save work, run the self-restart helper (one command), end the turn. The helper resolves the seat, pauses its
- * goal (Esc), reloads omp on the new release and resumes the goal; no seat waits on the chief's sentinel (the
- * lead waited 4.5 h on 2026-10-20). Fleet mode means the helper is installed (the configured restart command,
- * SELF_RESTART_SCRIPT under home). Stock mode (no helper) names no fleet command: it says how to restart omp.
+ * save work, run the self-restart helper (one command), end the turn. The helper resolves the seat, waits for it
+ * to go idle, restarts omp in place with its own /restart and resumes an active goal once (NATIVERESTART1
+ * ompkit-2un74); no sentinel or watcher is involved (retired by ompkit-1ra0d.37). Fleet mode means the helper
+ * is installed (the configured restart command, SELF_RESTART_SCRIPT under home). Stock mode (no helper) names
+ * no fleet command: it says how to restart omp.
  *
  * Loaded release: this file ships inside releases/<v>/extensions/, so the module's own path names the
  * loaded release. A checkout path (no /releases/<X.Y.Z>/) reads null and never notices. Installed release:
@@ -98,8 +99,9 @@ export function upgradeNoticeMessage(installed: string, loaded: string, fleet = 
 		`for its report); the helper refuses while one still runs (REFUSED_LIVE_AGENTS). Then save your work: ` +
 		`\`git commit --only -m "<msg>" -- <your reserved paths>\` and publish, or a \`[pending]\` commit.\n` +
 		`2. Run the self-restart helper: \`${SELF_RESTART_COMMAND}\`\n` +
-		`3. End your turn now with no further tool call. The helper pauses your goal (Esc), reloads this seat ` +
-		`on omp-kit ${installed} and resumes your goal.\n` +
+		`3. End your turn now with no further tool call. The helper waits until this seat is idle, restarts omp in ` +
+		`place with its own \`/restart\` (same session and launch flags) on omp-kit ${installed}, and resumes your ` +
+		`goal once if it was active.\n` +
 		`A background task subagent is not the seat: ignore this notice and finish your task. Only the seat ` +
 		`restarts the seat, and the helper refuses a subagent (REFUSED_SUBAGENT).`
 	);
