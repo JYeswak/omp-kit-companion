@@ -132,6 +132,18 @@ def run_export_tests(tests: list, env: dict, scratch: Path, root: Path) -> int:
     print('export: HEAD ' + head + ' + ' + str(len(overlay)) + ' overlaid, ' + str(len(deleted)) + ' deleted (.git/omp-kit-export.json)', flush=True)
     if (root / 'node_modules').is_dir() and not (archive / 'node_modules').exists():
         (archive / 'node_modules').symlink_to(root / 'node_modules')
+    # PREFLIGHTWS1 (ompkit-1ra0d.54): a workspace package's test resolves its own dependencies from the
+    # node_modules beside it first, as in the checkout; link every such ancestor the checkout has.
+    for path in tests:
+        parent = Path(path).parent
+        while parent != Path('.') and parent != Path(parent.anchor):
+            source_modules = root / parent / 'node_modules'
+            linked = archive / parent / 'node_modules'
+            if ('node_modules' not in parent.parts and source_modules.is_dir()
+                    and not linked.exists() and not linked.is_symlink()):
+                linked.parent.mkdir(parents=True, exist_ok=True)
+                linked.symlink_to(source_modules)
+            parent = parent.parent
     tmp = archive / 'var' / 'agent-tmp'
     tmp.mkdir(parents=True, exist_ok=True)
     test_env = {key: value for key, value in env.items() if not key.startswith('GIT_')}

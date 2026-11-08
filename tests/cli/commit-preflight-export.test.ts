@@ -106,3 +106,25 @@ test("a 6 s bun test the gate's runner admits is admitted by --tests too; a fail
 	expect(refused.rc, refused.out).toBe(1);
 	expect(refused.out).toContain(`REFUSED EXPORT_TEST_FAILED ${slow} (exit 1)`);
 }, fixtureDeadlineS(300) * 1000);
+
+// PREFLIGHTWS1 (ompkit-1ra0d.54): a workspace package's test resolves its own node_modules in the export,
+// as it does in the checkout. Control: a dependency the checkout lacks is still a real failure.
+test("PREFLIGHTWS1: a workspace test resolves the package's own node_modules; a missing dependency is still refused", async () => {
+	const dep = join(repo, "apps/x/node_modules/ws-fixture-dep");
+	mkdirSync(dep, { recursive: true });
+	writeFileSync(join(dep, "package.json"), '{ "name": "ws-fixture-dep", "version": "1.0.0", "main": "index.js" }\n');
+	writeFileSync(join(dep, "index.js"), "module.exports = { answer: 42 };\n");
+	const wsTest = "apps/x/test/dep.test.ts";
+	mkdirSync(join(repo, "apps/x/test"), { recursive: true });
+	const wsText = 'import { expect, test } from "bun:test";\nimport dep from "DEP";\ntest("dep", () => expect(dep.answer).toBe(42));\n';
+	writeFileSync(join(repo, wsTest), wsText.replace("DEP", "ws-fixture-dep"));
+	const preflight = ["sh", join(source, "scripts/commit-preflight.sh"), "--files", wsTest, "--tests", wsTest];
+	const admitted = await sh(preflight, 120);
+	expect(admitted.rc, admitted.out).toBe(0);
+	expect(admitted.out).toContain(`PASS export-test:${wsTest}`);
+	// Control: a package that exists nowhere in the checkout is not resolved by the links.
+	writeFileSync(join(repo, wsTest), wsText.replace("DEP", "ws-fixture-absent"));
+	const refused = await sh(preflight, 120);
+	expect(refused.rc, refused.out).toBe(1);
+	expect(refused.out).toContain(`REFUSED EXPORT_TEST_FAILED ${wsTest} (exit 1)`);
+}, fixtureDeadlineS(300) * 1000);
