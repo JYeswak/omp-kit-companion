@@ -38,6 +38,17 @@
 # SUITE_LEASE_QUEUE_FULL or SUITE_LEASE_WAIT_TIMEOUT. Cache hits take no lease. A judge whose
 # JUDGING_FILES predate the lease prints SUITE_LEASE_ABSENT and runs unserialized; one whose closure
 # lists scripts/suite-lease.sh refuses when it is missing.
+# SUITEREMOTE1 (ompkit-qsktr): when rch lists Linux workers that scripts/suite-worker-setup.sh brought to CI
+# parity, scripts/full-suite-remote.py runs every declared file except the store's local-required set (the
+# macOS-only files) on those workers, sharded longest-first from the exact `git archive` of the candidate,
+# while this host runs the local-required files in its own pool. Each worker runs this same script in shard
+# mode (--shard-files LIST --shard-out DIR: the listed files only, no store, no lease, no verdict). The one
+# record keeps this host's runtime key and lists every worker shard with its own runtime and producer under
+# evidence.remote; the store validates each subset against its own producer. Any shard that does not finish
+# with complete evidence ends the run with no verdict (never PASS). No configured, ready or reachable
+# worker, FULL_SUITE_REMOTE unset or not 1, or no rch: the complete suite runs here as before, and the run says why.
+# The adapter is opt-in (release-verdict.sh sets FULL_SUITE_REMOTE=1), so a test fixture or an ad hoc run never reaches
+# real hosts by accident.
 set -eu
 umask 077
 SCRIPT_DIR=$(CDPATH='' cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
@@ -57,8 +68,11 @@ JUDGE_ROLE=base
 TIMEOUT_SECS=${FULL_SUITE_TIMEOUT_SECS:-1800}
 FOCUSED_PASSED=
 CHECK_ENV=0
+SHARD_FILES=
+SHARD_OUT=
 usage() {
 	echo "usage: full-suite-verdict.sh --repo ROOT --commit SHA [--judge-role base|main] [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT]" >&2
+	echo "       full-suite-verdict.sh --repo ROOT --commit SHA --judge-role ROLE --archive-dir DIR --shard-files LIST --shard-out DIR   (worker shard)" >&2
 	echo "       full-suite-verdict.sh --check-env   (run only the environment guard below)" >&2
 }
 
@@ -76,6 +90,8 @@ while [ "$#" -gt 0 ]; do
 		--cache-dir) [ "$#" -ge 2 ] || { usage; exit 2; }; CACHE_DIR=$2; shift 2 ;;
 		--rerun-reason) [ "$#" -ge 2 ] || { usage; exit 2; }; RERUN=1; RERUN_REASON=$2; shift 2 ;;
 		--focused-passed) [ "$#" -ge 2 ] || { usage; exit 2; }; FOCUSED_PASSED=$2; shift 2 ;;
+		--shard-files) [ "$#" -ge 2 ] || { usage; exit 2; }; SHARD_FILES=$2; shift 2 ;;
+		--shard-out) [ "$#" -ge 2 ] || { usage; exit 2; }; SHARD_OUT=$2; shift 2 ;;
 		--check-env) CHECK_ENV=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) usage; exit 2 ;;
@@ -120,6 +136,16 @@ exec </dev/null
 # HERMETIC1-B: discard caller authority before Git probes and suite execution, not the requested verdict.
 unset GIT_DIR GIT_WORK_TREE BEADS_DB BEADS_DIR
 case "$JUDGE_ROLE" in base|main) ;; *) fail "--judge-role must be base or main"; exit 2 ;; esac
+# SUITEREMOTE1: a worker shard judges exactly its listed files in a caller-supplied archive and writes their
+# rows to --shard-out; it reads and writes no verdict store and takes no lease (its coordinator holds one).
+if [ -n "$SHARD_FILES$SHARD_OUT" ]; then
+	if [ -z "$SHARD_FILES" ] || [ -z "$SHARD_OUT" ] || [ -z "$ARCHIVE_DIR" ]; then usage; exit 2; fi
+	[ -f "$SHARD_FILES" ] || { fail "--shard-files $SHARD_FILES is not a file"; exit 2; }
+	if [ -n "$FOCUSED_PASSED" ] || [ "$RERUN" != 0 ]; then fail "a shard takes no focused report and no rerun"; exit 2; fi
+	mkdir -p "$SHARD_OUT" || { fail "cannot create --shard-out $SHARD_OUT"; exit 1; }
+	SHARD_OUT=$(CDPATH='' cd -- "$SHARD_OUT" && pwd -P)
+	SHARD_FILES="$(CDPATH='' cd -- "$(dirname -- "$SHARD_FILES")" && pwd -P)/$(basename -- "$SHARD_FILES")"
+fi
 
 command -v bun >/dev/null 2>&1 || { fail "bun is not on PATH; the full suite cannot run"; exit 1; }
 command -v python3 >/dev/null 2>&1 || { fail "python3 is not on PATH; verdict evidence cannot be recorded"; exit 1; }
@@ -159,7 +185,10 @@ export RUNTIME_ENVIRONMENT
 if [ -z "$CACHE_DIR" ]; then CACHE_DIR=${FULL_SUITE_VERDICT_CACHE_DIR:-}; fi
 # An explicit store is an isolated one (tests, fixtures); its suite lease lives beside it (suite-lease.sh).
 STORE_OVERRIDE=$CACHE_DIR
-if [ -n "$CACHE_DIR" ]; then
+if [ -n "$SHARD_OUT" ]; then
+	# A shard's evidence lives only in its own output directory; nothing is cached on a worker.
+	entry="$SHARD_OUT/shard.json"
+elif [ -n "$CACHE_DIR" ]; then
 	entry=$(python3 "$SCRIPT_DIR/full-suite-verdict-store.py" path --repo "$ROOT" --tree "$tree" \
 		--role "$JUDGE_ROLE" --checks "$checks" --runtime "$runtime" --judge-root "$SCRIPT_DIR/.." \
 		--cache-dir "$CACHE_DIR") || { fail "cannot resolve the shared verdict record path"; exit 1; }
@@ -205,8 +234,11 @@ verdict_reuse() {
 		*) fail "shared verdict lookup returned an invalid result"; exit 1 ;;
 	esac
 }
-verdict_lookup
-verdict_reuse
+cached=MISS
+if [ -z "$SHARD_OUT" ]; then
+	verdict_lookup
+	verdict_reuse
+fi
 case "$cached" in
 	FAIL*)
 		if [ "$RERUN" = 1 ]; then
@@ -233,7 +265,7 @@ case "$cached" in
 			export SUPERSEDED_DIGEST="$superseded_digest" SUPERSEDED_FILE="$SUPERSEDED_BASE.json"
 			echo "FULL-SUITE: RERUN reason='$RERUN_REASON' actor='$RERUN_ACTOR' superseded=$SUPERSEDED_BASE.json; running the complete suite again"
 		fi ;;
-	*) echo "FULL-SUITE: cache miss for tree $tree role=$JUDGE_ROLE (no reusable verdict); running the complete suite" ;;
+	*) [ -n "$SHARD_OUT" ] || echo "FULL-SUITE: cache miss for tree $tree role=$JUDGE_ROLE (no reusable verdict); running the complete suite" ;;
 esac
 
 # SUITESERIAL1 (ompkit-fp72.120.16.264): one full suite at a time machine-wide, whatever launched it
@@ -241,7 +273,9 @@ esac
 # registers its release in kitlib's exit registry, and a second source would reset that registry.
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$SCRIPT_DIR/kitlib-tmp.sh"
-if [ "$LEASE_PRESENT" = 0 ]; then
+if [ -n "$SHARD_OUT" ]; then
+	echo "FULL-SUITE: shard of tree $tree role=$JUDGE_ROLE; its coordinator holds the suite lease"
+elif [ "$LEASE_PRESENT" = 0 ]; then
 	echo "FULL-SUITE: SUITE_LEASE_ABSENT: this judge's JUDGING_FILES predate scripts/suite-lease.sh, so this run takes no suite lease and may overlap another suite"
 else
 	SUITE_LEASE_LIB=$SCRIPT_DIR
@@ -451,6 +485,25 @@ PYEOF
 		fi
 	fi
 fi
+# SUITEREMOTE1: a shard runs exactly its listed files, each of which the candidate itself declares.
+if [ -n "$SHARD_OUT" ]; then
+	shard_list=$(awk 'NF' "$SHARD_FILES")
+	if [ -n "$(printf '%s\n' "$shard_list" | sort | uniq -d)" ]; then cleanup_archive; fail "shard list names a file twice"; exit 1; fi
+	shard_bun=""; shard_shell=""; shard_py=""
+	for name in $shard_list; do
+		case " $kept_bun " in *" $name "*) shard_bun="$shard_bun $name"; continue ;; esac
+		case " $kept_shell " in *" $name "*) shard_shell="$shard_shell $name"; continue ;; esac
+		case " $kept_py " in *" $name "*) shard_py="$shard_py $name"; continue ;; esac
+		cleanup_archive
+		fail "shard file $name is not in the candidate's declared suite"
+		exit 1
+	done
+	kept_bun=$shard_bun; kept_shell=$shard_shell; kept_py=$shard_py
+	set -- $kept_bun; bun_count=$#
+	set -- $kept_shell; shell_count=$#
+	set -- $kept_py; py_count=$#
+	echo "full-suite: shard runs bun=$bun_count shell=$shell_count python=$py_count of the declared suite"
+fi
 if [ "$bun_count" -eq 0 ] && [ "$shell_count" -eq 0 ] && [ "$py_count" -eq 0 ]; then
 	if [ -n "$covered_bun$covered_shell$covered_py" ]; then
 		echo "full-suite: the focused pass covered the whole declared suite; nothing left to run"
@@ -471,6 +524,52 @@ if [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ] && [ -f "$ARCHIVE_DIR/scripts/build-mani
 		cleanup_archive
 		fail "manifest generation failed"
 		exit 1
+	fi
+fi
+
+# SUITEREMOTE1: hand everything but the store's local-required (macOS-only) files to ready Linux workers.
+# plan exits 0 with a worker assignment, 3 when no worker is configured, ready or reachable (the complete
+# suite then runs here, as before; plan prints why), anything else refuses with nothing cached.
+REMOTE_DIR=""
+remote_bun=""; remote_shell=""; remote_py=""
+if [ -z "$SHARD_OUT" ] && [ -n "$kept_bun$kept_shell$kept_py" ]; then
+	if [ "${FULL_SUITE_REMOTE:-}" != 1 ]; then
+		echo "FULL-SUITE: REMOTE: off (FULL_SUITE_REMOTE=${FULL_SUITE_REMOTE:-unset}; set 1 to use workers); running the complete suite on this host"
+	elif [ ! -f "$SCRIPT_DIR/full-suite-remote.py" ]; then
+		echo "FULL-SUITE: REMOTE: off (this judge has no scripts/full-suite-remote.py); running the complete suite on this host"
+	else
+		REMOTE_DIR="${entry%.json}.remote.$$"
+		mkdir "$REMOTE_DIR" || { cleanup_archive; fail "cannot create remote shard state"; exit 1; }
+		for remote_name in $kept_bun $kept_shell $kept_py; do printf '%s\n' "$remote_name"; done >"$REMOTE_DIR/files"
+		if ! PYTHONPATH="$SCRIPT_DIR" python3 -B -m full-suite-verdict-store local-required --suite-root "$ARCHIVE_DIR" >"$REMOTE_DIR/local-required"; then
+			rm -rf "$REMOTE_DIR"; cleanup_archive; fail "the local-required file set is unreadable"; exit 1
+		fi
+		remote_rc=0
+		PYTHONPATH="$SCRIPT_DIR" python3 -B -m full-suite-remote plan --repo "$ROOT" --commit "$COMMIT" --tree "$tree" \
+			--role "$JUDGE_ROLE" --checks "$checks" --files "$REMOTE_DIR/files" \
+			--local-required "$REMOTE_DIR/local-required" --cache-dir "$CACHE_DIR" --out "$REMOTE_DIR" || remote_rc=$?
+		case "$remote_rc" in
+			0)
+				remote_names=" $(tr '\n' ' ' <"$REMOTE_DIR/remote-files") "
+				rest_bun=""; rest_shell=""; rest_py=""
+				for remote_name in $kept_bun; do
+					case "$remote_names" in *" $remote_name "*) remote_bun="$remote_bun $remote_name" ;; *) rest_bun="$rest_bun $remote_name" ;; esac
+				done
+				for remote_name in $kept_shell; do
+					case "$remote_names" in *" $remote_name "*) remote_shell="$remote_shell $remote_name" ;; *) rest_shell="$rest_shell $remote_name" ;; esac
+				done
+				for remote_name in $kept_py; do
+					case "$remote_names" in *" $remote_name "*) remote_py="$remote_py $remote_name" ;; *) rest_py="$rest_py $remote_name" ;; esac
+				done
+				kept_bun=$rest_bun; kept_shell=$rest_shell; kept_py=$rest_py
+				set -- $kept_bun; bun_count=$#
+				set -- $kept_shell; shell_count=$#
+				set -- $kept_py; py_count=$#
+				set -- $remote_bun $remote_shell $remote_py
+				echo "FULL-SUITE: REMOTE: $# files on Linux workers; this host runs bun=$bun_count shell=$shell_count python=$py_count (local-required)" ;;
+			3) rm -rf "$REMOTE_DIR"; REMOTE_DIR="" ;;
+			*) rm -rf "$REMOTE_DIR"; cleanup_archive; fail "remote shard planning failed (rc=$remote_rc); nothing ran and nothing was cached"; exit 1 ;;
+		esac
 	fi
 fi
 
@@ -616,7 +715,7 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 		failed=0
 		# All languages claim work from the same immutable timing-sorted queue.
 		queue="$METRICS_DIR/queue"
-		KEPT_BUN="$kept_bun" KEPT_SH="$kept_shell" KEPT_PY="$kept_py" CACHE="$CACHE_DIR" ROLE="$JUDGE_ROLE" CHECKS="$checks" python3 - <<'PYQUEUE' >"$queue"
+		KEPT_BUN="$kept_bun" KEPT_SH="$kept_shell" KEPT_PY="$kept_py" CACHE="$CACHE_DIR" ROLE="$JUDGE_ROLE" CHECKS="$checks" SHARD_ORDER="$SHARD_FILES" python3 - <<'PYQUEUE' >"$queue"
 import json, os
 from pathlib import Path
 history = {}
@@ -640,6 +739,10 @@ for kind, key in [('bun','KEPT_BUN'), ('shell','KEPT_SH'), ('python','KEPT_PY')]
     for index, path in enumerate(os.environ[key].split(), 1):
         items.append((kind, index, path))
 items.sort(key=lambda item: (item[2] in history, -history.get(item[2], 0), item[2]))
+# SUITEREMOTE1: a shard keeps its coordinator's longest-first order (the hints live on the coordinator).
+if os.environ.get('SHARD_ORDER'):
+    order = {path: index for index, path in enumerate(Path(os.environ['SHARD_ORDER']).read_text().split())}
+    items.sort(key=lambda item: order[item[2]])
 for kind, index, path in items:
     print(kind, index, path)
 PYQUEUE
@@ -742,6 +845,27 @@ kill_tree() {
 timed_out=0
 timeout_at_ms=0
 suite_rc=0
+# SUITEREMOTE1: the Linux shards run while this host runs its local-required files; the coordinator
+# bounds itself by the same deadline.
+remote_pid=""
+remote_rc=0
+if [ -n "$REMOTE_DIR" ]; then
+	PYTHONPATH="$SCRIPT_DIR" python3 -B -m full-suite-remote run --out "$REMOTE_DIR" --deadline "$TIMEOUT_SECS" \
+		>"$REMOTE_DIR/run.out" 2>&1 &
+	remote_pid=$!
+	echo "FULL-SUITE: REMOTE: shards started; progress in $REMOTE_DIR/run.out"
+fi
+# finish_remote: append the coordinator's output to the suite log and drop its state.
+finish_remote() {
+	[ -n "$REMOTE_DIR" ] || return 0
+	if [ -n "$remote_pid" ]; then
+		kill_tree "$remote_pid" TERM
+		wait "$remote_pid" 2>/dev/null || :
+		remote_pid=""
+	fi
+	{ echo "full-suite: remote coordinator output follows"; cat "$REMOTE_DIR/run.out" 2>/dev/null || :; } >>"$SUITE_OUT"
+	rm -rf "$REMOTE_DIR"
+}
 run_suite &
 suite_pid=$!
 # Wait on the suite itself; a watchdog enforces the deadline. Polling every 5 s made even an
@@ -759,6 +883,10 @@ watchdog_pid=$!
 wait "$suite_pid" 2>/dev/null || suite_rc=$?
 kill_tree "$watchdog_pid" TERM
 wait "$watchdog_pid" 2>/dev/null || true
+if [ -n "$remote_pid" ] && [ ! -f "$timeout_mark" ]; then
+	wait "$remote_pid" 2>/dev/null || remote_rc=$?
+	remote_pid=""
+fi
 if [ -f "$timeout_mark" ]; then
 	timeout_at_ms=$(cat "$timeout_mark")
 	rm -f "$timeout_mark"
@@ -766,6 +894,7 @@ if [ -f "$timeout_mark" ]; then
 fi
 if [ "$timed_out" = 1 ]; then
 	unfinished=$(shell_unfinished)
+	finish_remote
 	finish_logs "$incomplete_log"
 	cleanup_archive
 	fail "full suite timed out after ${TIMEOUT_SECS}s${unfinished:+; unfinished script suites:$unfinished}; incomplete evidence is non-pass and nothing was cached; partial log: $incomplete_log"
@@ -805,6 +934,7 @@ fi
 [ "$(suite_set python-suite)" = "$(want_set "$kept_py")" ] || complete=0
 if [ "$complete" -ne 1 ]; then
 	unfinished=$(shell_unfinished)
+	finish_remote
 	finish_logs "$incomplete_log"
 	cleanup_archive
 	fail "full suite ended without complete evidence (rc=$suite_rc bun_ran=$bun_ran shell=$shell_green/$shell_count python=$py_green/$py_count)${unfinished:+; unfinished script suites:$unfinished}; incomplete evidence is non-pass and nothing was cached; partial log: $incomplete_log"
@@ -818,10 +948,39 @@ set --
 if ! python3 "$SCRIPT_DIR/suite-metrics.py" collect \
 	--records "$METRICS_DIR" --declared "$METRICS_DECLARED" --output "$METRICS_ROWS" \
 	--csv "$timings_csv" --cwd "$ARCHIVE_DIR" --tables-dir "$CACHE_DIR/timings" "$@"; then
+	finish_remote
 	finish_logs "$incomplete_log"
 	cleanup_archive
 	fail "per-file timing evidence is incomplete; nothing was cached; partial log: $incomplete_log"
 	exit 1
+fi
+# SUITEREMOTE1: fold the complete worker shards into this run's counts, rows, status and log. A coordinator
+# that did not finish with complete, validated shard evidence leaves no verdict.
+REMOTE_EVIDENCE=""
+if [ -n "$REMOTE_DIR" ]; then
+	if [ "$remote_rc" != 0 ] || ! PYTHONPATH="$SCRIPT_DIR" python3 -B -m full-suite-remote merge --out "$REMOTE_DIR" \
+		--rows "$METRICS_ROWS" --declared "$METRICS_DECLARED"; then
+		grep -F 'FULL-SUITE: REMOTE: INCOMPLETE' "$REMOTE_DIR/run.out" >&2 || :
+		finish_remote
+		finish_logs "$incomplete_log"
+		cleanup_archive
+		fail "remote shards ended without complete evidence (coordinator rc=$remote_rc); incomplete evidence is non-pass and nothing was cached; partial log: $incomplete_log"
+		exit 1
+	fi
+	r_status="$REMOTE_DIR/status"
+	bun_ran=$((bun_ran + $(awk '$1 == "BUN_RAN" { s += $2 } END { print s + 0 }' "$r_status")))
+	bun_fail=$((bun_fail + $(awk '$1 == "BUN_FAIL" { s += $2 } END { print s + 0 }' "$r_status")))
+	[ "$(awk '$1 == "BUN" && $2 != "rc=0" { n++ } END { print n + 0 }' "$r_status")" = 0 ] || bun_status_rc=1
+	shell_red=$((shell_red + $(grep -c '^RED script-suite ' "$r_status" || true)))
+	py_red=$((py_red + $(grep -c '^RED python-suite ' "$r_status" || true)))
+	set -- $remote_bun; bun_count=$((bun_count + $#))
+	set -- $remote_shell; shell_count=$((shell_count + $#))
+	set -- $remote_py; py_count=$((py_count + $#))
+	cat "$r_status" >>"$SUITE_STATUS"
+	cp "$REMOTE_DIR/evidence.json" "${entry%.json}.remote-evidence.$$.json"
+	REMOTE_EVIDENCE="${entry%.json}.remote-evidence.$$.json"
+	{ cat "$REMOTE_DIR/remote.log"; } >>"$SUITE_OUT"
+	finish_remote
 fi
 run_finished_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
 load_end=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
@@ -838,9 +997,47 @@ fi
 # Record the finished verdict atomically beside its evidence log. Only complete runs land here.
 # PHANTOMRED1: keep the runner's own status rows (finish_logs removes their file) for the failing list.
 suite_rows=$(cat "$SUITE_STATUS")
+# SUITEREMOTE1: a shard hands its complete rows, status and log to its coordinator; it records no verdict.
+if [ -n "$SHARD_OUT" ]; then
+	finish_logs "$SHARD_OUT/shard.log"
+	if ! SUITE_ROWS="$suite_rows" METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" TREE=$tree COMMIT=$COMMIT \
+		ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code SUITE_RC=$suite_rc \
+		RUN_START="$run_started_ms" RUN_END="$run_finished_ms" WORKERS="$POOL_JOBS" OUT="$SHARD_OUT" python3 - <<'PYSHARD'
+import hashlib, json, os
+out = os.environ["OUT"]
+digest = hashlib.sha256()
+with open(os.path.join(out, "shard.log"), "rb") as log:
+    for chunk in iter(lambda: log.read(1 << 20), b""):
+        digest.update(chunk)
+with open(os.environ["METRICS_ROWS"]) as handle:
+    rows = json.load(handle)
+with open(os.environ["METRICS_DECLARED"]) as handle:
+    declared = handle.read().split()
+result = {
+    "version": 1, "tree": os.environ["TREE"], "commit": os.environ["COMMIT"], "judge_role": os.environ["ROLE"],
+    "checks": os.environ["CHECKS"], "runtime": os.environ["RUNTIME"],
+    "environment": json.loads(os.environ["RUNTIME_ENVIRONMENT"])["environment"],
+    "verdict": os.environ["VERDICT"], "exit_code": int(os.environ["CODE"]), "suite_rc": int(os.environ["SUITE_RC"]),
+    "files": rows, "declared_files": declared, "status": os.environ["SUITE_ROWS"].splitlines(),
+    "log_sha256": digest.hexdigest(), "workers": int(os.environ["WORKERS"]),
+    "wall_ms": int(os.environ["RUN_END"]) - int(os.environ["RUN_START"]),
+}
+tmp = os.path.join(out, "result.json.tmp")
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(result, handle, sort_keys=True)
+os.replace(tmp, os.path.join(out, "result.json"))
+PYSHARD
+	then
+		fail "shard evidence could not be written"
+		exit 1
+	fi
+	rm -f "$METRICS_ROWS" "$METRICS_DECLARED"
+	echo "FULL-SUITE: SHARD COMPLETE tree=$tree role=$JUDGE_ROLE runtime=$runtime verdict=$verdict bun_fail=$bun_fail shell_red=$shell_red py_red=$py_red"
+	exit 0
+fi
 finish_logs "$log_entry"
 write_complete_verdict() {
-METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" python3 - <<'PYEOF'
+METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" REMOTE_EVIDENCE="$REMOTE_EVIDENCE" python3 - <<'PYEOF'
 import hashlib, json, math, os
 environment = json.loads(os.environ["RUNTIME_ENVIRONMENT"])["environment"]
 log_digest = hashlib.sha256()
@@ -911,6 +1108,10 @@ entry = {
     },
     "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
 }
+# SUITEREMOTE1: the worker shards that ran part of this suite, each with its own runtime and producer.
+if os.environ.get("REMOTE_EVIDENCE"):
+    with open(os.environ["REMOTE_EVIDENCE"]) as handle:
+        entry["evidence"]["remote"] = json.load(handle)
 # FSRERUN1 (ompkit-t7cn7.4): a rerun of a cached FAIL records why, who and what it superseded.
 # A run without --rerun-reason records no rerun block, so the lookup above still matches.
 if os.environ.get("RERUN_FLAG") == "1":
@@ -930,13 +1131,14 @@ os.replace(tmp, os.environ["ENTRY"])
 print(entry["verdict"])
 PYEOF
 }
-recorded_verdict=$(write_complete_verdict) || { rm -f "$log_entry"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
+recorded_verdict=$(write_complete_verdict) || { rm -f "$log_entry" "$REMOTE_EVIDENCE"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
 case "$recorded_verdict" in
 	PASS) verdict=PASS ;;
 	FAIL) verdict=FAIL; [ "$code" -ne 0 ] || code=1 ;;
 	*) cleanup_archive; fail "recorded verdict is invalid"; exit 1 ;;
 esac
 rm -f "$METRICS_ROWS" "$METRICS_DECLARED"
+[ -z "$REMOTE_EVIDENCE" ] || rm -f "$REMOTE_EVIDENCE"
 cleanup_archive
 if [ "$verdict" = "PASS" ]; then
 	set -- $covered_bun $covered_shell $covered_py; covered_count=$#

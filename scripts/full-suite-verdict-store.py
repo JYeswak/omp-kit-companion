@@ -27,6 +27,30 @@ MAX_COMMAND_OUTPUT = 16 << 20
 CULPRIT_KEYS = frozenset(("sha", "author", "bead", "failing_files", "method", "reason"))
 CULPRIT_NONE_METHODS = ("flake-rerun", "unattributed")
 BEAD_ID = re.compile(r"[a-z][a-z0-9]*-[a-z0-9]+(?:\.[a-z0-9]+)*")
+# SUITEREMOTE1 (ompkit-qsktr): declared suite files a composed record must judge on the reading (macOS) host,
+# never on a Linux worker. tests/cli/service.test.ts is what CI's push run judges only on macos-15
+# (mac-service-contracts). The rest run tests on Darwin that skip on Linux: measured 2026-11-08 by comparing
+# per-test (pass)/(skip) names of a Linux full run of 1b49f8ccb6 on contabo-1 with the Mac's main PASS of
+# tree 385dcbc66f (sandbox-exec write fences, macOS plutil, Darwin-only preflight and release paths).
+# tests/cli/snapshot-publication.test.py needs the native Agent Mail `am` binary, which only this host carries.
+LOCAL_REQUIRED = (
+    "tests/cli/operator-snapshot.test.ts",
+    "tests/cli/preflight.test.ts",
+    "tests/cli/release-local.test.ts",
+    "tests/cli/release-next-version.test.ts",
+    "tests/cli/runtime.test.ts",
+    "tests/cli/service.test.ts",
+    "tests/cli/snapshot-publication.test.py",
+    "tests/fleet-guard/plutil.test.ts",
+    "tests/cli/check-pushed-beads.test.sh",  # Linux failure, ompkit-ltawi
+    "tests/cli/install-commit-msg-bead.test.sh",  # Linux failure, ompkit-ltawi
+    "tests/cli/ref-txn-bead.test.sh",  # Linux failure, ompkit-ltawi
+    "tests/cli/savefirst-pre-push.test.sh",  # Linux failure, ompkit-ltawi
+    "tests/cli/scratch-kitlib.test.ts",  # Linux failure, ompkit-ltawi
+    "tests/cli/full-suite-complement.test.sh",  # Linux failure, ompkit-ltawi
+    "tests/cli/kit-update-nplus-two.test.ts",  # Linux failure, ompkit-ltawi
+    "tests/cli/package-release-live.test.ts",  # Linux failure, ompkit-ltawi
+)
 
 
 def validate_culprit(value: object, verdict: object) -> None:
@@ -338,6 +362,63 @@ def validate_runtime_environment(environment: object, runtime: str) -> None:
         raise ValueError("record environment differs from its runtime")
 
 
+def local_required(declared) -> list[str]:
+    """The declared files a composed record must judge on this host (LOCAL_REQUIRED), sorted."""
+    return sorted(set(LOCAL_REQUIRED) & set(declared))
+
+
+def validate_remote(remote: object, files: list, declared: list, metrics, producer: dict | None,
+                    entry_runtime: str) -> None:
+    """SUITEREMOTE1: a record whose evidence.remote lists Linux worker shards is valid only when every
+    shard's rows come from that shard's one producer (the same suite-metrics bytes this judge carries),
+    the shards are disjoint, and the rest, which holds every local-required file and is never empty,
+    comes from this host's producer. A record judged wholly on workers never satisfies a reader."""
+    if not isinstance(remote, dict) or set(remote) != {"shards", "local_required"}:
+        raise ValueError("remote evidence is malformed")
+    shards = remote["shards"]
+    if not isinstance(shards, list) or not shards:
+        raise ValueError("remote evidence names no shard")
+    expected_required = local_required(declared)
+    if not expected_required or remote["local_required"] != expected_required:
+        raise ValueError("remote evidence lacks this judge's local-required files")
+    local_producer = producer or {"sha256": metrics.JUDGE_SHA256, "python": sys.version.split()[0]}
+    rows: dict[str, dict] = {}
+    for row in files:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str) or row["path"] in rows:
+            raise ValueError("measured file evidence is invalid")
+        rows[row["path"]] = row
+    if set(rows) != set(declared):
+        raise ValueError("measured file evidence is incomplete")
+    remote_paths: set[str] = set()
+    for shard in shards:
+        if not isinstance(shard, dict):
+            raise ValueError("remote shard is malformed")
+        worker, runtime, judge, shard_files = (shard.get("worker"), shard.get("runtime"), shard.get("judge"),
+                                               shard.get("files"))
+        if not isinstance(worker, str) or not worker or not isinstance(runtime, str) or not isinstance(judge, dict):
+            raise ValueError("remote shard identity is incomplete")
+        normalized_identity("0" * 40, "main", "0" * 64, runtime)
+        validate_runtime_environment(shard.get("environment"), runtime)
+        if judge.get("sha256") != local_producer["sha256"]:
+            raise ValueError("remote shard ran another suite-metrics producer")
+        if (not isinstance(shard_files, list) or not shard_files or len(set(shard_files)) != len(shard_files)
+                or not set(shard_files) <= set(declared) or remote_paths & set(shard_files)):
+            raise ValueError("remote shard file set is invalid")
+        shard_rows = [rows[name] for name in shard_files]
+        if any(row.get("origin") != "remote" or row.get("worker") != worker for row in shard_rows):
+            raise ValueError("remote shard rows are not attributed to their worker")
+        if not metrics.complete_records(shard_rows, shard_files, expected_judge=judge):
+            raise ValueError("remote shard rows are incomplete or mix producers")
+        remote_paths.update(shard_files)
+    local = [name for name in declared if name not in remote_paths]
+    if not set(expected_required) <= set(local):
+        raise ValueError("a local-required file ran on a worker")
+    local_rows = [rows[name] for name in local]
+    if any(row.get("origin") == "remote" for row in local_rows):
+        raise ValueError("a worker row is outside every shard")
+    if not metrics.complete_records(local_rows, local, expected_judge=local_producer):
+        raise ValueError("local file evidence is incomplete or mixes producers")
+
 
 def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, role: str | None = None,
                     checks: str | None = None, runtime: str | None = None,
@@ -390,8 +471,11 @@ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, ro
             raise ValueError("declared suite list is invalid")
         metrics = load_metrics(judge_root)
         # Historical rows establish only a reference, never a reusable current PASS.
-        producer = files[0].get("judge") if historical and files and isinstance(files[0], dict) else None
-        if not metrics.complete_records(files, declared, expected_judge=producer):
+        local_rows = [row for row in files if isinstance(row, dict) and row.get("origin") != "remote"]
+        producer = local_rows[0].get("judge") if historical and local_rows else None
+        if "remote" in evidence:
+            validate_remote(evidence["remote"], files, declared, metrics, producer, entry_runtime)
+        elif not metrics.complete_records(files, declared, expected_judge=producer):
             raise ValueError("measured file evidence is incomplete")
         if suite_root is not None:
             expected_files = declared_suite_files(suite_root, entry_role)
@@ -615,7 +699,14 @@ def main() -> int:
     list_cmd.add_argument("--judge-root")
     failing_cmd = actions.add_parser("failing-tests")
     failing_cmd.add_argument("--log", required=True)
+    required_cmd = actions.add_parser("local-required")
+    required_cmd.add_argument("--suite-root", required=True)
     args = parser.parse_args()
+    if args.action == "local-required":
+        # SUITEREMOTE1: the declared files of this source tree a composed record judges on this host.
+        for name in local_required(declared_suite_files(Path(args.suite_root).expanduser().resolve(), "main")):
+            print(name)
+        return 0
     if args.action == "failing-tests":
         # The runner's status rows arrive on stdin: the verdict removes its status file with the run state.
         try:

@@ -160,7 +160,10 @@ while :; do
 	rc=0
 	if [ "$main_result" != PASS ]; then
 		substep_start verdict.main-judge
+		# SUITEREMOTE1: release qualification is the one caller that uses remote workers (opt-in); an
+		# operator's FULL_SUITE_REMOTE=0 still forces the local run.
 		env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB -u BEADS_DIR TMPDIR="$WORK" \
+			FULL_SUITE_REMOTE="${FULL_SUITE_REMOTE:-1}" \
 			sh "$tree/scripts/full-suite-verdict.sh" --repo "$ROOT" --commit "$sha" --judge-role main </dev/null || rc=$?
 		substep_end verdict.main-judge "$rv_substep_t0"
 	fi
