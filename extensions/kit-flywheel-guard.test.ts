@@ -1697,9 +1697,12 @@ describe("RETIREGUARD1 legitimate work", () => {
 			const controller = new AbortController();
 			const cancellation = new Error("RETIREGUARD1 owning-session cancellation");
 			let pids: number[] = [];
-			const pending = run(["/bin/sh", "-c", 'sleep 3 & echo "$$ $!"; if [ "$1" = failure ]; then exit 7; fi; wait', "retire-plant", mode], {
+			// Stock CI deliberately omits sleep from PATH. Keep that constraint here too:
+			// a missing background command makes `wait` return 0 and cleanup plants vacuous.
+			const pending = run(["/bin/sh", "-c", '/bin/sleep 3 & echo "$$ $!"; if [ "$1" = failure ]; then exit 7; fi; wait', "retire-plant", mode], {
 				deadline_s: mode === "deadline" ? fixtureDeadlineS(0.2) : fixtureDeadlineS(10),
 				grace_s: 0.05, max_output_bytes: 1024, signal: controller.signal,
+				env: { ...process.env, PATH: join(base, "no-tools") },
 				on_output: (stream, chunk) => {
 					if (stream !== "stdout") return;
 					pids = new TextDecoder().decode(chunk).trim().split(" ").map(Number);
@@ -1712,6 +1715,7 @@ describe("RETIREGUARD1 legitimate work", () => {
 				expect(result.rc).not.toBe(0);
 				expect(result.rc).not.toBeNull();
 				expect(result.timed_out).toBe(mode === "deadline");
+				expect(new TextDecoder().decode(result.stderr)).toBe("");
 				if (mode === "failure") expect(result.rc).toBe(7);
 			}
 			expect(pids).toHaveLength(2);
