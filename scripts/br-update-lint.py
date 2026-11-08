@@ -64,7 +64,7 @@ the latest matching version-2 observation needs integer rc=0 and complete
 evidence. HANDOFFREPO1 consumes ~/.claude's own storegate-pass marker, keyed
 by tree, first parent, current hook blob and suite-metrics runtime. Queue
 success, JSON verdicts and skipped gates are not GREEN. Other repositories
-without a supported declared gate fail closed; evidence is never borrowed.
+use their own complete fresh-gate observation; evidence is never borrowed.
 
 Reads are live (`br show`, `br list`); no JSONL flush is involved, so a
 fixed bead passes immediately (LINTGATE1 acceptance 2).
@@ -497,9 +497,9 @@ def _handoff_claim(repo: str, subject: str, request: list[str]) -> int:
         rc, out, _ = run(["git", "-C", repo, "rev-parse", "--verify", f"{subject}^{{commit}}"], repo, 10)
         if rc == 0:
             commit = out.strip()
-    kind = _handoff_kind(repo)
-    if commit and ((kind == "companion" and _fresh_green(repo, commit))
-                   or (kind == "storegate" and _storegate_green(repo, commit))):
+    if commit and (_storegate_green(repo, commit)
+                   if repo == os.path.realpath(Path.home() / ".claude")
+                   else _fresh_green(repo, commit)):
         return 0
     target = commit or subject or "<sha>"
     remedy = _handoff_remedy(repo, target)

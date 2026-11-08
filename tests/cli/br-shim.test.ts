@@ -496,7 +496,6 @@ test("HANDOFFREPO1 unknown repo refuses without mutation and never borrows a com
 	const f = await handoffRepo();
 	try {
 		const before = await f.comments();
-		f.ledger();
 		const result = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
 		const out = decoder.decode(result.stderr);
 		expect(result.rc).toBe(4);
@@ -505,6 +504,26 @@ test("HANDOFFREPO1 unknown repo refuses without mutation and never borrows a com
 		expect(out).toContain(`${f.code}@${f.commit}`);
 		expect(await f.status()).toBe("in_progress");
 		expect(await f.comments()).toEqual(before);
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1_000);
+
+test("HANDOFFREPO1 any repo admits only its own exact complete GREEN fresh-gate observation", async () => {
+	const f = await handoffRepo();
+	try {
+		const before = await f.comments();
+		for (const [rc, commit, complete] of [
+			[1, f.commit, true], [0, f.commit, false], [0, "0".repeat(40), true],
+		] as const) {
+			f.ledger(rc, commit, complete);
+			const refused = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
+			expect(refused.rc, decoder.decode(refused.stderr)).toBe(4);
+			expect(await f.status()).toBe("in_progress");
+			expect(await f.comments()).toEqual(before);
+		}
+		f.ledger();
+		const admitted = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
+		expect(admitted.rc, decoder.decode(admitted.stderr)).toBe(0);
+		expect(await f.status()).toBe("in_review");
 	} finally { f.scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1_000);
 
@@ -532,6 +551,9 @@ test("HANDOFFREPO1 native storegate requires the exact current marker, not queue
 		expect(decoder.decode(missing.stderr)).toContain(`python3 .githooks/hooks.d/pre-push/storegate-verdict.py queue ${f.commit}`);
 		await f.checked(["python3", ".githooks/hooks.d/pre-push/storegate-verdict.py", "queue", f.commit], f.code);
 		f.ledger();
+		const ledgerOnly = await handoff();
+		expect(ledgerOnly.rc, decoder.decode(ledgerOnly.stderr)).toBe(4);
+		expect(await f.status()).toBe("in_progress");
 		const dir = join(f.code, ".git/omp-kit/storegate-pass");
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, "verdict.json"), '{"verdict":"PASS"}\n');
