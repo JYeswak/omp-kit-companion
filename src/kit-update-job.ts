@@ -189,24 +189,30 @@ export async function pollPublishedRelease(prefix: string, stateRoot: string, pl
 	const dir = join(stateRoot, `poll-${version}`);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	const indexPath = join(dir, "release-index.json");
-	const indexDownload = await exec(["gh", "release", "download", `v${version}`, "--repo", repo, "--pattern", "release-index.json", "--dir", dir, "--clobber"]);
-	if (indexDownload.exit !== 0) throw new Error("KIT_UPDATE_POLL_FAILED: " + indexDownload.stderr.trim().slice(0, 200));
-	let asset: string;
-	try {
+	const stem = `omp-kit-v${version}-${target}`;
+	const readAsset = (): string => {
 		if (!lstatSync(indexPath).isFile()) throw new Error("index is not a regular file");
 		const index = parseReleaseIndexJson(readFileSync(indexPath, "utf8"));
-		asset = index.assets[target]!.filename;
-		const stem = `omp-kit-v${version}-${target}`;
+		const asset = index.assets[target]!.filename;
 		if (index.version !== version || index.source_tag !== `v${version}` ||
 			asset.length > 255 || !asset.startsWith(stem) || !/^[A-Za-z0-9_.-]+\.tar(\.gz)?$/.test(asset))
 			throw new Error("invalid asset filename");
-	} catch { throw new Error("KIT_UPDATE_POLL_UNVERIFIED: published index or asset filename is invalid"); }
-	const archivePath = join(dir, asset);
-	if (resolve(indexPath) !== indexPath || dirname(indexPath) !== dirname(archivePath)) throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded tuple failed the same-directory file check");
-	if (!pollTupleVerified(indexPath, archivePath, version, target)) {
-		const dl = await exec(["gh", "release", "download", `v${version}`, "--repo", repo, "--pattern", asset, "--dir", dir, "--clobber"]);
+		return asset;
+	};
+	let asset: string | undefined;
+	try { asset = readAsset(); } catch { /* Replace incomplete indexes left by an interrupted poll. */ }
+	if (!asset || !pollTupleVerified(indexPath, join(dir, asset), version, target)) {
+		const indexDownload = await exec(["gh", "release", "download", `v${version}`, "--repo", repo,
+			"--pattern", "release-index.json", "--dir", dir, "--clobber"]);
+		if (indexDownload.exit !== 0) throw new Error("KIT_UPDATE_POLL_FAILED: " + indexDownload.stderr.trim().slice(0, 200));
+		try { asset = readAsset(); }
+		catch { throw new Error("KIT_UPDATE_POLL_UNVERIFIED: published index or asset filename is invalid"); }
+		const dl = await exec(["gh", "release", "download", `v${version}`, "--repo", repo,
+			"--pattern", asset, "--dir", dir, "--clobber"]);
 		if (dl.exit !== 0) throw new Error("KIT_UPDATE_POLL_FAILED: " + dl.stderr.trim().slice(0, 200));
 	}
+	const archivePath = join(dir, asset);
+	if (resolve(indexPath) !== indexPath || dirname(indexPath) !== dirname(archivePath)) throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded tuple failed the same-directory file check");
 	if (!pollTupleVerified(indexPath, archivePath, version, target))
 		throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded archive does not match published index");
 	// Bundles are published in GitHub's attestation store, not necessarily release assets.

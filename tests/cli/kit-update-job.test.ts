@@ -509,7 +509,7 @@ test("poll downloads a newer published release into one directory", async () => 
 			if (argv[1] === "api") return { exit: 0, stdout: '{"fixture":true}\n', stderr: "" };
 			const dir = argv[argv.indexOf("--dir") + 1]!;
 			mkdirSync(dir, { recursive: true });
-			writeFileSync(join(dir, "release-index.json"), "{}");
+			writePolledIndex(dir, "archive");
 			writeFileSync(join(dir, "omp-kit-v1.2.4-darwin-arm64-none.tar"), "archive");
 			return { exit: 0, stdout: "", stderr: "" };
 		} });
@@ -517,9 +517,9 @@ test("poll downloads a newer published release into one directory", async () => 
 		expect(tuple!.indexPath).toBe(join(value.stateRoot, "poll-1.2.4", "release-index.json"));
 		expect(tuple!.archivePath).toBe(join(value.stateRoot, "poll-1.2.4", "omp-kit-v1.2.4-darwin-arm64-none.tar"));
 		expect(readFileSync(`${tuple!.archivePath}.sigstore.json`, "utf8")).toBe('{"fixture":true}\n');
-		expect(calls[2]).toContain("api");
+		expect(calls.find(argv => argv[1] === "api")).toContain(`repos/o/r/attestations/sha256:${sha("archive")}`);
 		expect(calls[0]).toContain("view");
-		expect(calls[1]).not.toContain("--clobber");
+		expect(calls.filter(argv => argv[2] === "download").map(argv => argv[argv.indexOf("--pattern") + 1])).toEqual(["release-index.json", POLLED_ASSET]);
 	});
 });
 
@@ -576,8 +576,8 @@ test("planted: a corrupted archive in an interrupted poll directory is re-downlo
 		const calls: string[][] = [];
 		const tuple = await pollPublishedRelease(value.prefix, value.stateRoot, value.platform, { exec: publishedGh(calls, "archive") });
 		const downloads = calls.filter(argv => argv[2] === "download");
-		expect(downloads).toHaveLength(1);
-		expect(downloads[0]).toContain("--clobber");
+		expect(downloads.map(argv => argv[argv.indexOf("--pattern") + 1])).toEqual(["release-index.json", POLLED_ASSET]);
+		expect(downloads.every(argv => argv.includes("--clobber"))).toBe(true);
 		expect(tuple?.archivePath).toBe(archivePath);
 		expect(readFileSync(archivePath, "utf8")).toBe("archive");
 		// The bundle is fetched for the published bytes, never for the corrupted ones.
@@ -593,7 +593,7 @@ test("published archive without retrievable provenance refuses before planning o
 			if (argv[1] === "api") return { exit: 1, stdout: "", stderr: "attestation unavailable" };
 			const dir = argv[argv.indexOf("--dir") + 1]!;
 			mkdirSync(dir, { recursive: true });
-			writeFileSync(join(dir, "release-index.json"), "{}");
+			writePolledIndex(dir, "archive");
 			writeFileSync(join(dir, "omp-kit-v1.2.4-darwin-arm64-none.tar"), "archive");
 			return { exit: 0, stdout: "", stderr: "" };
 		} })).rejects.toThrow("KIT_ATTESTATION_BUNDLE_UNAVAILABLE");
@@ -660,7 +660,7 @@ test("poll-only install uses the published tuple when the static fallback is nul
 				if (argv[1] === "api") return { exit: 0, stdout: '{"fixture":true}\n', stderr: "" };
 				const dir = argv[argv.indexOf("--dir") + 1]!;
 				mkdirSync(dir, { recursive: true });
-				writeFileSync(join(dir, "release-index.json"), "{}");
+				writePolledIndex(dir, "archive");
 				writeFileSync(join(dir, "omp-kit-v1.2.4-darwin-arm64-none.tar"), "archive");
 				return { exit: 0, stdout: "", stderr: "" };
 			},
