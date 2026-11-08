@@ -1,0 +1,1 @@
+- Published-release updates now fetch the release index first and download its platform archive, supporting both `.tar` and `.tar.gz` while refusing archives whose bytes do not match the indexed digest. Release packaging continues to emit `.tar` during the compatibility rollout.

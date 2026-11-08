@@ -6,7 +6,7 @@ import { runIsolatedShell } from "../../src/runtime.ts";
 import { activeConcurrentWriterPaths, compareWatched, operatorWatchedPaths, snapshotWatched } from "../../src/operator-snapshot.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import { applyKitUpdate, judgeKitPostcheck, kitPostcheckDetail, kitUpdateEnvelope, planKitUpdate, runKitPostcheck, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
-import { kitUpdateJobOverall } from "../../src/kit-update-job.ts";
+import { kitUpdateJobOverall, pollPublishedRelease } from "../../src/kit-update-job.ts";
 import { serviceLabel } from "../../src/service.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { run as runBounded } from "../../src/kitlib/run";
@@ -16,6 +16,51 @@ import { sha, binary, manifest, tar, fixture, input, RECONCILE_PROFILES,
  buildCompiledReleaseFixture, hostPlatform, runCandidateFullTest, scratch } from "./kit-update-fixture.ts";
 import type { CompiledReleaseFixture } from "./kit-update-fixture.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
+import { gzipSync } from "node:zlib";
+
+for (const compressed of [false, true]) test(`DRAFTGZIP1: published ${compressed ? ".tar.gz" : ".tar"} is downloaded, authenticated and extracted`, async () => fixture(async ctx => {
+	const index = JSON.parse(readFileSync(ctx.indexPath, "utf8"));
+	const asset = Object.values(index.assets)[0] as { filename: string; sha256: string };
+	const bytes = compressed ? gzipSync(readFileSync(ctx.archivePath)) : readFileSync(ctx.archivePath);
+	if (compressed) asset.filename += ".gz";
+	asset.sha256 = sha(bytes);
+	const previous = { poll: process.env.OMP_KIT_UPDATE_POLL, repo: process.env.OMP_KIT_UPDATE_REPO };
+	process.env.OMP_KIT_UPDATE_POLL = "github";
+	process.env.OMP_KIT_UPDATE_REPO = "fixture/kit";
+	const patterns: string[] = [];
+	try {
+		const tuple = await pollPublishedRelease(ctx.prefix, ctx.stateRoot, ctx.platform, { exec: async argv => {
+			if (argv[1] === "release" && argv[2] === "view") return { exit: 0, stdout: `v${ctx.nextVersion}`, stderr: "" };
+			if (argv[1] === "release" && argv[2] === "download") {
+				const pattern = argv[argv.indexOf("--pattern") + 1]!;
+				patterns.push(pattern);
+				const dir = argv[argv.indexOf("--dir") + 1]!;
+				writeFileSync(join(dir, pattern), pattern === "release-index.json" ? JSON.stringify(index) : bytes);
+				return { exit: 0, stdout: "", stderr: "" };
+			}
+			return { exit: 0, stdout: JSON.stringify({ fixture: true }), stderr: "" };
+		} });
+		expect(patterns).toEqual(["release-index.json", asset.filename]);
+		expect(tuple).not.toBeNull();
+		const plan = await planKitUpdate({ ...input(ctx), ...tuple });
+		const result = await applyKitUpdate(plan);
+		expect(result.status).toBe("PARTIAL");
+		expect(result.provenance).toBe("SIGSTORE_VERIFIED");
+		expect(existsSync(join(ctx.prefix, "releases", ctx.nextVersion, "bin", "omp-kit"))).toBe(true);
+		// Planted: preserve the index's digest but replace the published asset's bytes.
+		rmSync(tuple!.archivePath!);
+		await expect(pollPublishedRelease(join(ctx.root, "uninstalled"), ctx.stateRoot, ctx.platform, { exec: async argv => {
+			if (argv[2] === "view") return { exit: 0, stdout: `v${ctx.nextVersion}`, stderr: "" };
+			const pattern = argv[argv.indexOf("--pattern") + 1]!;
+			const dir = argv[argv.indexOf("--dir") + 1]!;
+			writeFileSync(join(dir, pattern), pattern === "release-index.json" ? JSON.stringify(index) : Buffer.from("planted wrong bytes"));
+			return { exit: 0, stdout: "", stderr: "" };
+		} })).rejects.toThrow("KIT_UPDATE_POLL_UNVERIFIED");
+	} finally {
+		if (previous.poll === undefined) delete process.env.OMP_KIT_UPDATE_POLL; else process.env.OMP_KIT_UPDATE_POLL = previous.poll;
+		if (previous.repo === undefined) delete process.env.OMP_KIT_UPDATE_REPO; else process.env.OMP_KIT_UPDATE_REPO = previous.repo;
+	}
+}), fixtureDeadlineS(60) * 1000);
 
 test("KITUPDATELOAD1: a candidate scenario that cannot pass names its FAIL line in postcheck_detail; a passing run has none", async () => {
 	const owned = ownedTmp("kit-update-fail-lines", { root: scratch });
