@@ -311,7 +311,7 @@ export interface CiWaitData {
 	last_row: CiRunRow | null;
 }
 
-/** Directory watching survives the poller's atomic rename. The sole timer is the deadline. */
+/** Directory watching survives atomic rename; timers only cover startup settling and the deadline. */
 export function waitForCi(path: string, options: CiWaitOptions): Promise<CiWaitData> {
 	const { promise, resolve } = Promise.withResolvers<CiWaitData>();
 		let lastRow: CiRunRow | null = null;
@@ -319,11 +319,13 @@ export function waitForCi(path: string, options: CiWaitOptions): Promise<CiWaitD
 		let settled = false;
 		let watcher: FSWatcher | undefined;
 		let deadline: NodeJS.Timeout | undefined;
+		let startupSettle: NodeJS.Timeout | undefined;
 		const finish = (overall: CiWaitData["overall"]) => {
 			if (settled) return;
 			settled = true;
 			watcher?.close();
 			clearTimeout(deadline);
+			clearTimeout(startupSettle);
 			const stamp = checkedAt === null ? Number.NaN : Date.parse(checkedAt);
 			resolve({ overall, repo: options.repo, sha: options.sha, workflow: options.workflow,
 				cache_age_ms: Number.isFinite(stamp) ? Date.now() - stamp : null, last_row: lastRow });
@@ -345,6 +347,9 @@ export function waitForCi(path: string, options: CiWaitOptions): Promise<CiWaitD
 				if (filename === null || filename.toString() === basename(path)) read();
 			});
 			watcher.on("error", () => { watcher?.close(); });
+			// macOS fs.watch may return before its stream is live and lose the first rename.
+			// One startup reconciliation closes that race; never rearm it as polling.
+			startupSettle = setTimeout(read, 1000); // product-deadline: one-second watcher startup reconciliation, not a polling interval
 		} catch {
 			// A missing/unwatchable state root is reported at the same deadline.
 		}

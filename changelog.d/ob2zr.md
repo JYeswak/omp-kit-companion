@@ -1,1 +1,2 @@
 - Add `omp-kit ci wait --repo OWNER/REPO --sha SHA` to await completed workflow runs using shared-cache filesystem events, without GitHub requests or polling; supports workflow, since and deadline filters and reports cache age and the last matching run on timeout.
+- Reconcile the CI cache once after watcher startup so macOS cannot strand a wait when its first rename event is lost; this one-shot read is not a polling loop.
