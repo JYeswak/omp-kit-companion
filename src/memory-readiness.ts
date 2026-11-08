@@ -11,6 +11,9 @@ export interface MemoryReadinessInput {
 	project?: string;
 	profile?: string;
 	ompPath?: string;
+	/** Package root and exact launcher version already verified by the caller's OMP identity resolver. */
+	packageRoot?: string;
+	ompVersion?: string;
 	/** Resolved CASS executable for read-only status metadata; null means unavailable. */
 	cassPath?: string | null;
 	/** CASS status deadline in milliseconds; callers default to the production 2000 ms bound. */
@@ -286,6 +289,22 @@ function installedPackage(ompPath?: string): { root: string; version: string } |
 		return record(manifest) && manifest.name === PACKAGE_NAME && typeof manifest.version === "string" ? { root, version: manifest.version } : null;
 	} catch { return null; }
 }
+type MemoryPackage = { root: string; version: string };
+type MemoryPackageResolution = MemoryPackage | { reason: string };
+function memoryPackage(input: MemoryReadinessInput): MemoryPackageResolution {
+	if (input.packageRoot === undefined) return installedPackage(input.ompPath) ?? { reason: "Installed OMP package is unavailable" };
+	if (!input.ompVersion) return { reason: "Resolved OMP launcher version is unavailable" };
+	if (!isAbsolute(input.packageRoot)) return { reason: "Resolved OMP package root must be absolute" };
+	try {
+		const root = realpathSync(input.packageRoot);
+		const manifest: unknown = JSON.parse(readSafeFile(join(root, "package.json")).toString("utf8"));
+		if (!record(manifest) || manifest.name !== PACKAGE_NAME || typeof manifest.version !== "string")
+			return { reason: "Resolved OMP package metadata is unavailable" };
+		if (manifest.version !== input.ompVersion)
+			return { reason: `OMP package version mismatch: launcher ${input.ompVersion}, package ${manifest.version}` };
+		return { root, version: manifest.version };
+	} catch { return { reason: "Resolved OMP package metadata is unavailable" }; }
+}
 type MemoryConfigSourceReview = { reviewed: true; source_refs: string[] } | { reviewed: false; reason: string; source_refs: string[] };
 function memoryConfigSourcesReviewed(root: string, version: string): MemoryConfigSourceReview {
 	const source_refs: string[] = [];
@@ -314,9 +333,7 @@ function memoryConfigSourcesReviewed(root: string, version: string): MemoryConfi
 		: `unreviewed source fingerprint combination: ${MEMORY_CONFIG_SOURCE_FILES.map((source, index) => `${source} sha256=${hashes[index]}`).join(", ")}`;
 	return { reviewed: false, reason: `OMP ${version} memory config ${detail}`, source_refs };
 }
-function installedRedactor(ompPath?: string): { bytes: Buffer; version: string; source: string; sha256: string } | null {
-	const pkg = installedPackage(ompPath);
-	if (!pkg) return null;
+function installedRedactor(pkg: MemoryPackage): { bytes: Buffer; version: string; source: string; sha256: string } | null {
 	try {
 		const source = join(pkg.root, "src", "memory-backend", "redact.ts");
 		if (!safeDirectories(pkg.root, ["src", "memory-backend"]) || state(source) !== "file") return null;
@@ -325,8 +342,9 @@ function installedRedactor(ompPath?: string): { bytes: Buffer; version: string; 
 		return { bytes, version: pkg.version, source: "src/memory-backend/redact.ts", sha256: sha };
 	} catch { return null; }
 }
-async function probeRedactor(ompPath?: string): Promise<MemoryRedactorReport> {
-	const pinned = installedRedactor(ompPath);
+async function probeRedactor(pkg: MemoryPackageResolution): Promise<MemoryRedactorReport> {
+	if ("reason" in pkg) return { status: "UNVERIFIED", version: null, coverage: "NOT_PROBED", missed: [], reason: pkg.reason };
+	const pinned = installedRedactor(pkg);
 	if (!pinned) return { status: "UNVERIFIED", version: null, coverage: "NOT_PROBED", missed: [], reason: "Installed OMP redactor source unavailable: src/memory-backend/redact.ts (SHA-256 unavailable)" };
 	if (pinned.sha256 !== REDACTOR_SOURCE_SHA256) return { status: "UNVERIFIED", version: pinned.version, coverage: "NOT_PROBED", missed: [],
 		reason: `OMP ${pinned.version} redactor source hash is unreviewed: ${pinned.source} sha256=${pinned.sha256}` };
@@ -364,13 +382,13 @@ export async function inspectMemoryReadiness(input: MemoryReadinessInput): Promi
 		`CASS status: ${cass.source_ref ?? "unavailable"} (${cass.first_required_command})`,
 		...scheduler.source_refs,
 	];
-	const redactor = await probeRedactor(input.ompPath);
+	const ompPackage = memoryPackage(input);
+	const redactor = await probeRedactor(ompPackage);
 	const base = { auto_retain: null, auto_recall: null, scoping: null, model: "UNVERIFIED" as const,
 		embedding: "UNVERIFIED" as const, runtime: "NOT_PROBED" as const, retrieval_qualified: false as const, source_refs: sourceRefs, cass, scheduler, redactor };
 	const unknown = (reason: string, action: string): MemoryReadinessReport => ({ ...base, status: "UNVERIFIED", backend: "UNVERIFIED", configured: false,
 		store: "UNVERIFIED", source_refs: [...sourceRefs], reason, recommended_action: action });
-	const ompPackage = installedPackage(input.ompPath);
-	if (!ompPackage) return unknown("Installed OMP package is unavailable", "Verify the installed OMP package path before relying on this report.");
+	if ("reason" in ompPackage) return unknown(ompPackage.reason, "Verify the installed OMP package path and exact launcher version before relying on this report.");
 	const sourceReview = memoryConfigSourcesReviewed(ompPackage.root, ompPackage.version);
 	sourceRefs.push(...sourceReview.source_refs);
 	if (!sourceReview.reviewed) return unknown(sourceReview.reason, "Review the exact OMP source path and SHA-256 named in this report.");

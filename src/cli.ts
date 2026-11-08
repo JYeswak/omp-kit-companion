@@ -932,7 +932,9 @@ async function memoryInventory(request: ParsedCommand): Promise<CliResult> {
 	if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(selected) || selected.endsWith(".")) {
 		return refusal("INVALID_PROFILE", "Selected profile name is not a safe OMP profile name", "Use a simple existing OMP profile name without path separators.");
 	}
-	const report = await inspectMemoryReadiness({ home, project: process.cwd(), profile: selected, ompPath: omp.location, xdgStateHome });
+	const report = await inspectMemoryReadiness({ home, project: process.cwd(), profile: selected, ompPath: omp.location, xdgStateHome,
+		...(typeof omp.source === "string" && typeof omp.version === "string"
+			? { packageRoot: dirname(omp.source), ompVersion: omp.version } : {}) });
 	const profileObservation = { selected, source: typeof requested === "string" ? "NAMED_ON_DISK" : "DEFAULT_ON_DISK", effective_active_profile: "UNVERIFIED" };
 	const finding: Finding = { component: "memory", status: report.status, reason: report.reason,
 		recommended_action: report.recommended_action, evidence: { ...report, profile_observation: profileObservation } };
@@ -1148,7 +1150,9 @@ async function privateMemoryAudit(request: ParsedCommand): Promise<CliResult> {
 			remediation: "Install a supported OMP package; unknown versions cannot yield a clean audit.",
 		}], verification: "UNVERIFIED" };
 	const report = await auditMemoryAtRest({ consent: "AUDIT_PRIVATE_MEMORY", home, project: process.cwd(),
-		storeRoot, ompPath: omp.location });
+		storeRoot, ompPath: omp.location,
+		...(typeof omp.source === "string" && typeof omp.version === "string"
+			? { packageRoot: dirname(omp.source), ompVersion: omp.version } : {}) });
 	// Never return source identity paths, scanned rows, snippets, or hashes.
 	const audit = { status: report.status, reason: report.reason, version: report.version,
 		coverage: report.coverage, categories: report.categories };

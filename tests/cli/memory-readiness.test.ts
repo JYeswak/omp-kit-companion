@@ -20,6 +20,13 @@ function fixture(version: string = INSTALLED_OMP_VERSION) {
 	const inspect = (installedPath = ompPath) => inspectMemoryReadiness({ home, project, ompPath: installedPath, cassPath: null });
 	return { root, home, project, agent, config, ompPath, ompRoot: pkg, inspect };
 }
+function compiledLauncher(root: string) {
+	const launcher = join(root, "Tern", "omp", "versions", INSTALLED_OMP_VERSION);
+	mkdirSync(dirname(launcher), { recursive: true });
+	writeFileSync(launcher, "#!/bin/sh\nprintf invoked > \"$0.invoked\"\nexit 91\n");
+	chmodSync(launcher, 0o755);
+	return launcher;
+}
 function snapshot(dir: string, prefix = ""): string[] {
 	return readdirSync(dir).sort().flatMap(name => {
 		const path = join(dir, name), rel = join(prefix, name), stat = lstatSync(path);
@@ -47,6 +54,42 @@ test("reviewed source hashes, not package version, govern memory inspection", as
 	expect(report.backend).toBe("off");
 	expect(report.redactor.status).toBe("MISSES");
 	expect(report.redactor.version).toBe("99.0.0");
+});
+
+test("compiled Tern launcher uses the resolved same-version package without executing or writing", async () => {
+	const f = fixture();
+	const ompPath = compiledLauncher(f.root);
+	writeFileSync(f.config, "memory:\n  backend: off\n");
+	const before = snapshot(f.root);
+	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath,
+		packageRoot: f.ompRoot, ompVersion: INSTALLED_OMP_VERSION, cassPath: null });
+	expect(report).toMatchObject({ backend: "off", status: "DEGRADED", runtime: "NOT_PROBED" });
+	expect(report.source_refs.some(source => source.startsWith("src/config/settings.ts sha256="))).toBe(true);
+	expect(report.redactor).toMatchObject({ status: "MISSES", version: INSTALLED_OMP_VERSION, coverage: "SYNTHETIC_ONLY" });
+	expect(snapshot(f.root)).toEqual(before);
+});
+
+test("a resolved package with a different launcher version is refused before source review or redaction", async () => {
+	const f = fixture("99.0.0");
+	const ompPath = compiledLauncher(f.root);
+	writeFileSync(f.config, "memory:\n  backend: off\n");
+	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath,
+		packageRoot: f.ompRoot, ompVersion: INSTALLED_OMP_VERSION, cassPath: null });
+	expect(report).toMatchObject({ status: "UNVERIFIED", backend: "UNVERIFIED" });
+	expect(report.reason).toContain("version mismatch");
+	expect(report.reason).toContain(INSTALLED_OMP_VERSION);
+	expect(report.reason).toContain("99.0.0");
+	expect(report.source_refs.some(source => source.startsWith("src/"))).toBe(false);
+	expect(report.redactor).toMatchObject({ status: "UNVERIFIED", version: null, coverage: "NOT_PROBED", missed: [] });
+});
+
+test("a resolved package without a verified launcher version cannot authorize source inspection", async () => {
+	const f = fixture();
+	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath,
+		packageRoot: f.ompRoot, cassPath: null });
+	expect(report.status).toBe("UNVERIFIED");
+	expect(report.reason).toContain("launcher version");
+	expect(report.redactor.coverage).toBe("NOT_PROBED");
 });
 
 test("one changed redactor source byte refuses the synthetic probe", async () => {

@@ -12,6 +12,9 @@ export interface MemoryAuditInput {
 	/** Absolute directory containing mnemopi.db and optional banks/<name>/mnemopi.db. */
 	storeRoot: string;
 	ompPath: string;
+	/** Package root and exact launcher version already verified by the caller's OMP identity resolver. */
+	packageRoot?: string;
+	ompVersion?: string;
 	/** If supplied, must match *all* discovered banks exactly; never restrict scanning to this subset. */
 	expectedBanks?: readonly string[];
 }
@@ -235,11 +238,11 @@ function matchesReviewedSourcePins(agent: string, mnemopi: string): boolean {
 		pins.every(([pkg, source, sha]) => hashes.get(pkg + ":" + source) === sha));
 }
 
-function sourceVersion(ompPath: string): string | null {
+function sourceVersion(input: MemoryAuditInput): string | null {
 	try {
-		if (!isAbsolute(ompPath)) return null;
-		const launcher = realpathSync(ompPath);
-		const agent = dirname(dirname(launcher));
+		if (!isAbsolute(input.ompPath) || (input.packageRoot !== undefined && (!isAbsolute(input.packageRoot) || !input.ompVersion))) return null;
+		const launcher = realpathSync(input.ompPath);
+		const agent = input.packageRoot === undefined ? dirname(dirname(launcher)) : realpathSync(input.packageRoot);
 		let dependencyBase = agent;
 		let mnemopi: string | undefined;
 		for (;;) {
@@ -253,6 +256,7 @@ function sourceVersion(ompPath: string): string | null {
 		const manifest = JSON.parse(safeFile(join(agent, "package.json")).toString("utf8"));
 		const engine = JSON.parse(safeFile(join(mnemopi, "package.json")).toString("utf8"));
 		if (manifest.name !== "@oh-my-pi/pi-coding-agent" || typeof manifest.version !== "string" || !manifest.version ||
+			(input.packageRoot !== undefined && manifest.version !== input.ompVersion) ||
 			engine.name !== "@oh-my-pi/pi-mnemopi" || engine.version !== manifest.version || !lstatSync(launcher).isFile()) return null;
 		return matchesReviewedSourcePins(agent, mnemopi) ? manifest.version : null;
 	} catch { return null; }
@@ -327,14 +331,16 @@ function requireNoSidecars(paths: readonly string[]): void {
  * A no-match result is NOT an all-store, all-field, or universal secret-freedom certificate. */
 export async function auditMemoryAtRest(input: MemoryAuditInput): Promise<MemoryAuditReport> {
 	if (input.consent !== "AUDIT_PRIVATE_MEMORY") return denied("CONSENT_REQUIRED", null);
-	const version = sourceVersion(input.ompPath);
+	const version = sourceVersion(input);
 	if (!version) return denied("UNSUPPORTED_SOURCE", null);
 	try { validateRoots(input.home, input.project, input.storeRoot); }
 	catch { return denied("UNSAFE_STORE", version); }
 	// Readiness keeps an independent content-hash gate; its redactor result does not certify historical rows.
 	let redactor: MemoryRedactorReport | undefined;
 	try {
-		redactor = (await inspectMemoryReadiness({ home: input.home, project: input.project, ompPath: input.ompPath })).redactor;
+		redactor = (await inspectMemoryReadiness({ home: input.home, project: input.project, ompPath: input.ompPath,
+			...(input.packageRoot !== undefined ? { packageRoot: input.packageRoot } : {}),
+			...(input.ompVersion !== undefined ? { ompVersion: input.ompVersion } : {}) })).redactor;
 	} catch { /* The local redactor diagnostic is optional; it cannot certify historical rows. */ }
 	try {
 		const { paths, banks } = stores(input.storeRoot);
