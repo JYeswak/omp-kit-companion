@@ -1,1 +1,0 @@
-- Remove the separate pregrade record and opt-in requirement for review admission (Joshua J-2026-11-07-08). Acceptance ticks and native non-author close checks remain; native child reservations keep their own identities.

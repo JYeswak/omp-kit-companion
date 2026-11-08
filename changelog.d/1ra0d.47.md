@@ -1,4 +1,0 @@
-- Remove the release minimum-run qualification and retired-test ledger; historical verdicts remain readable.
-- Remove automatic per-failure culprit reruns and bisection from release qualification.
-- Replace the release-card grammar gate with a one-paragraph human release card.
-- Run every deferred manifest suite inside the one main-role qualification; release readiness and cuts no longer require a separate CI-only verdict.

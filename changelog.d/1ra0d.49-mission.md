@@ -1,1 +1,0 @@
-- Run the mission doctor contract against the candidate CLI instead of requiring an unrelated installed omp-kit executable.

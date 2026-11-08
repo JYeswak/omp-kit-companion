@@ -1,1 +1,0 @@
-- Update the installed schema-1 baseline regression pin for six removed fleet-restart raw-spawn allowances (17 sites); preserve the single-rule schema and all remaining allowance limits.

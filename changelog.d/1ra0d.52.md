@@ -1,1 +1,0 @@
-- Atomic file replacement keeps the staged inode open through validation, final identity checks, and refusal cleanup, preventing Linux inode reuse from admitting a swapped file or deleting the attacker's replacement.

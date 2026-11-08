@@ -4,6 +4,55 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.100] - 2026-11-08
+
+### Changed
+
+- Update the installed schema-1 baseline regression pin for six removed fleet-restart raw-spawn allowances (17 sites); preserve the single-rule schema and all remaining allowance limits.
+- Retire timed goal re-arming, the kit seat-lifecycle daemon and fleet respawn/composer reconstruction. Tern owns session persistence and OMP owns goal continuation, pause, resume and drop; an owner pause is never implicitly resumed.
+- Keep release-verdict event subscriptions and read-only release profile alignment without starting turns or restarting seats. Applied service installation unloads retired installed lifecycle definitions, verifies they stopped, and backs them up; a still-loaded job refuses migration.
+- Run the external-app restart canary with `OMP_KIT_TERN_LIVE=1 bun test extensions/kit-goal-keepalive.test.ts -t NATIVESESSION1`. Its working directory must fit Darwin's 104-byte Unix socket path limit; it does not run from long export roots. Default/hermetic tests cover the owner decision and timer mutant, not native restart proof.
+- Remove the release minimum-run qualification and retired-test ledger; historical verdicts remain readable.
+- Remove automatic per-failure culprit reruns and bisection from release qualification.
+- Replace the release-card grammar gate with a one-paragraph human release card.
+- Run every deferred manifest suite inside the one main-role qualification; release readiness and cuts no longer require a separate CI-only verdict.
+- Remove obsolete pregrade-admission tests after pregrade retirement; retain handoff refusal, unchanged native state, exact source check, and GREEN-ledger coverage.
+- Remove the separate pregrade record and opt-in requirement for review admission (Joshua J-2026-11-07-08). Acceptance ticks and native non-author close checks remain; native child reservations keep their own identities.
+- Run the mission doctor contract against the candidate CLI instead of requiring an unrelated installed omp-kit executable.
+- Exercise the current failure-capture stdin/stderr contract so successful journal writes retain duplicate suppression in extension tests.
+- Discover the optional DCG adapter on the caller's PATH instead of requiring a machine-local executable path; retain fail-closed decisions when the adapter is present.
+- Discover the optional failure-capture adapter on PATH and keep command details on stdin, without requiring a particular user's home directory.
+- Run the pre-push regex checker with the gate's existing python3 interpreter instead of requiring an unrelated Python minor version.
+- Keep capability contracts hermetic by exposing only explicitly supplied fixture tools, without assuming every fleet binary is installed on the host.
+- Give concurrent gate-load fixtures their own real Bun executable under the synthetic HOME so fixed environment reconstruction works on Linux.
+- Give history-transform fixture repositories their own Git author identity so commit-tree controls cannot inherit or require operator configuration.
+- Verify restored hook permissions with the portable filesystem API rather than mixing incompatible BSD and GNU stat output.
+- Preserve the stock OS Python in the isolated extension-test PATH so portable process cleanup works while fleet tools remain absent.
+- Run parallel live-test cases from a caller-owned workspace scratch root instead of the runner's system temporary directory.
+- Include native low-filesystem refusal output in failing CI assertions without changing their required exit codes or disk-floor checks.
+- Make the live Git lock-holder fixture preserve Git's exact PID across Linux shell execution.
+- Use a job-control-capable shell for detached seat fixtures on Linux while keeping scratch ownership and capability checks intact.
+- Preserve shared land/save fixture templates until their Bun process exits, even when another test suite cleans its own temporary registry.
+- Keep the resolved OMP source-cache location available to packaged-runtime fixtures after they replace HOME with protected canaries.
+- Build and execute the host-native official release artifact in the runtime replay smoke instead of attempting a macOS executable on Linux.
+- Check the same OMP package watch path in each platform's native fleet service definition, including Linux systemd path units.
+- Scope fleet-guard scratch-write quiet controls to their own owned TMPDIR rather than the runner's ambient temporary directory.
+- Configure task/smol model roles through OMP's supported fixture configuration so the native spawn smoke reaches its real child without unsupported per-call model arguments.
+- Allow the matching advisory commit-preflight reminder in the no-verify live scenario while still requiring its blocking rule and the absence of the forbidden marker.
+- Execute the selected OMP launcher directly through the bounded 30-second runner in custom live checks, supporting compiled Tern releases without treating their binary bytes as JavaScript or inheriting Bun's interpreter override.
+- Preserve exact hook-member permissions on rollback on Linux as well as macOS, without mixing failed BSD-stat stdout into the saved mode.
+- Preserve early focused-gate refusal codes and record zero executed tests by initializing the fixture's counters exactly like the production gate.
+- Keep the actual Bun executable available in the package fixture's private HOME so pinned runtime identity works on Linux without relying on a system-wide Bun.
+- Include the blocked-service child's typed stdout, stderr and signal identity when its unchanged exit-code assertion fails in CI, without treating diagnostics as a fix.
+- Make the live runtime's private Bun command enter interpreter mode only when invoked, supporting native, shell-to-Bun and Bun-shebang OMP launchers without leaking that override to native executables.
+- Validate daemon install plans against the native scheduler artifact: launchd KeepAlive on macOS and systemd Restart=on-failure on Linux.
+- Keep the physical disk-floor test aligned with its immediate typed refusal: exit 1, no command run and no queue waiting or retryable deferral.
+- Make the blocked-worker concurrency fixture's initial admission deterministic without changing its real lock exclusion, timeout, cleanup or deadline assertions.
+- Keep export-layout parity tests independent of a cached ShellCheck image while retaining real repository-root, source-stamp, overlay and wrong-stamp refusal checks.
+- Keep daemon single-instance locks held on Linux: SQLite now owns existing lock-file descriptors, so validation and rejected local contenders cannot silently release the kernel reservation. Preserve private-file, no-symlink and inode-identity checks, and verify overlap without racing the scheduled worker's deadline.
+- CPU-limited TypeScript and Python commands now receive SIGXCPU at their requested soft limit before the hard limit can send SIGKILL on Linux. Runner memory checks sample current resident memory while queues are retained, rather than subtracting inherited process high-water marks.
+- Atomic file replacement keeps the staged inode open through validation, final identity checks, and refusal cleanup, preventing Linux inode reuse from admitting a swapped file or deleting the attacker's replacement.
+
 ## [0.2.99] - 2026-11-07
 
 ### Added
