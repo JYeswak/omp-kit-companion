@@ -118,7 +118,7 @@ test("modern and fleet-guard owner files parse strictly", () => {
   expect(parseOwnerFile(good.replace("label=a", "label="))).toBeNull();
   expect(parseOwnerFile(good.replace(/pid=\d+/, "pid=0"))).toBeNull();
   expect(parseOwnerFile(good.replace(/pid=\d+/, "pid=abc"))).toBeNull();
-  expect(parseOwnerFile(good.replace(/pid=\d+/, "pid=1234567"))).toBeNull();
+  expect(parseOwnerFile(good.replace(/pid=\d+/, "pid=12345678"))).toBeNull(); // LINUXPID1: 7 digits are valid Linux pids
   expect(parseOwnerFile("owner=x\npurpose=y\ncreated=z\n")).toBeNull();
   expect(parseOwnerFile(good.split("\n").slice(0, 5).join("\n"))).toBeNull();
 });
