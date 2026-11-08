@@ -165,8 +165,19 @@ function interruptedToolFailures(project, scenario, messages) {
 	if (stops.length !== 1 || stops[0].reason !== "aborted" || stops[0].error !== `TTSR matched rule: ${scenario.rule}`) {
 		return ["tool interruption lacks the matching call's native TTSR abort"];
 	}
-	if (events.some(row => row.id === call.id && (row.event === "execution" || row.event === "result")) ||
-		messages.some(message => message.role === "tool" && message.tool_call_id === call.id)) {
+	const isSyntheticAbort = result => {
+		const content = result.content;
+		const text = typeof content === "string" ? content :
+			Array.isArray(content) && content.every(block => block.type === "text" && typeof block.text === "string")
+				? content.map(block => block.text).join("\n") : undefined;
+		return result.isError === true && result.details?.__synthetic === true &&
+			result.details.executed === false && result.details.source === "assistant_stop_aborted" &&
+			text === `Tool execution was aborted: TTSR matched rule: ${scenario.rule}`;
+	};
+	if (events.some(row => row.id === call.id && (row.event === "execution" ||
+			(row.event === "result" && !isSyntheticAbort(row)))) ||
+		messages.some(message => message.role === "tool" && message.tool_call_id === call.id &&
+			!isSyntheticAbort(message))) {
 		return ["tool interruption failed: the call executed or returned content"];
 	}
 	return [];

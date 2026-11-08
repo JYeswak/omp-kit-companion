@@ -1,0 +1,1 @@
+- Live interruption verdicts recognize call-bound native synthetic TTSR abort results without mistaking them for execution; real execution and unclassified results still fail.

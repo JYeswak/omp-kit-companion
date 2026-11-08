@@ -29,7 +29,7 @@ export default function admissionExtension(pi) {
 		if (message.role === "assistant" && message.stopReason === "aborted") {
 			record(context, { event: "stop", timestamp: message.timestamp, reason: message.stopReason, error: message.errorMessage });
 		} else if (message.role === "toolResult") {
-			record(context, { event: "result", id: message.toolCallId });
+			record(context, { event: "result", id: message.toolCallId, content: message.content, isError: message.isError, details: message.details });
 		}
 	});
 	pi.on("agent_end", (_event, context) => record(context, { event: "end" }));
