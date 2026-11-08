@@ -21,6 +21,11 @@ import kitlib_tmp  # noqa: E402  (owned temp dirs: removed on exit and HUP/INT/T
 PLATFORMS = ("darwin-arm64-none", "darwin-x64-none", "linux-arm64-gnu", "linux-x64-gnu")
 # Intel macOS remains a CI-only probe; release candidates ship these three targets.
 RELEASE_PLATFORMS = ("darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu")
+LSP_POSITIVE_CHECKS = ("lsp_tool_advertised", "only_lsp_tool_enabled", "read_only_action_arguments",
+                       "all_tool_results_present", "selected_server_configured", "initialized_capabilities",
+                       "known_positive_reference", "absent_symbol_control", "server_ready_after_request",
+                       "profile_template_unchanged", "fixture_project_unchanged", "protected_inputs_unchanged",
+                       "lsp_mux_stopped", "mock_model_clean", "process_output_complete")
 
 
 def digest(path):
@@ -776,17 +781,12 @@ def native(args):
 
             positive_project, positive_file = lsp_project("positive")
             positive, lsp_pass = lsp_call(positive_project, positive_file, "PASS")
-            positive_checks = ("lsp_tool_advertised", "only_lsp_tool_enabled", "read_only_action_arguments",
-                               "all_tool_results_present", "selected_server_configured", "initialized_capabilities",
-                               "known_positive_reference", "absent_symbol_control", "server_ready_after_request",
-                               "profile_template_unchanged", "fixture_project_unchanged", "protected_inputs_unchanged",
-                               "lsp_mux_stopped", "mock_model_clean", "process_output_complete")
             calls = lsp_pass["calls"]
             call_actions = [call.get("action") for call in calls]
             reference_call = next((call for call in calls if call.get("action") == "references"), None)
             absent_call = next((call for call in calls if call.get("action") == "symbols"), None)
             status_calls = [call for call in calls if call.get("action") == "status"]
-            if (any(lsp_pass["checks"].get(key) is not True for key in positive_checks)
+            if (any(lsp_pass["checks"].get(key) is not True for key in LSP_POSITIVE_CHECKS)
                     or lsp_pass["checks"].get("has_failed_checks") is not False
                     or lsp_pass["timed_out"] is not False or lsp_pass["omp_rc"] != 0
                     or len(calls) < 5 or not call_actions or call_actions[0] != "status"

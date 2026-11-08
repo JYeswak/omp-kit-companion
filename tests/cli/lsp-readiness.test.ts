@@ -3,10 +3,11 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 import { availableParallelism } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
 import { inspectLspReadiness, planLspSetup, resolveOmpDefaults, type LspReadinessReport } from "../../src/lsp-readiness.ts";
-import { buildLspJsonRpcReceipt, classifyLspProbeOutcome, collectReadinessWaits, nextLspReadinessDecision, probeLspReadiness, type LspProbeReport } from "../../src/lsp-probe.ts";
+import { buildLspJsonRpcReceipt, classifyLspProbeOutcome, collectReadinessWaits, initialLspStatusChecks, nextLspReadinessDecision, probeLspReadiness, type LspProbeReport } from "../../src/lsp-probe.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { run } from "../../src/kitlib/run.ts";
 import { cachedOmpPackage } from "../../src/omp-source-cache.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 const fixtures: string[] = [];
@@ -261,7 +262,7 @@ test("deep LSP refuses a server from another checkout without executing it", asy
 
 const installedOmp = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
 const nativeLspTest = installedOmp && Bun.which("typescript-language-server") && Bun.which("node") && Bun.which("git") ? test : test.skip;
-nativeLspTest("one alternative root marker permits a real cold request under controlled contention and preserves absent alternatives", async () => {
+nativeLspTest("native contract: one alternative root marker permits a real cold request under controlled contention and preserves absent alternatives", async () => {
 	if (!installedOmp) throw new Error("installed OMP required");
 	const node = Bun.which("node");
 	if (!node) throw new Error("Node required");
@@ -327,6 +328,13 @@ process.stdout.write(String(state));`;
 	}
 	if (report.status !== "PASS") console.error("B10_LSP_CONTENTION_FAILURE " + JSON.stringify(report));
 	expect(report.status).toBe("PASS");
+	const contract = await run(["python3", "-c",
+		"import importlib.util,json,sys; spec=importlib.util.spec_from_file_location('native_candidate',sys.argv[1]); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); print(json.dumps(module.LSP_POSITIVE_CHECKS))",
+		join(import.meta.dir, "../../scripts/native-candidate.py")], { deadline_s: fixtureDeadlineS(), max_output_bytes: 4096 });
+	expect(contract.rc).toBe(0);
+	const requiredChecks: string[] = JSON.parse(contract.stdout);
+	expect(requiredChecks.length).toBeGreaterThan(0);
+	for (const key of requiredChecks) expect(report.checks[key], `native contract: ${key}`).toBe(true);
 	expect(report.elapsed_ms).toBeGreaterThan(0);
 	expect(report.checks.known_positive_reference).toBe(true);
 	expect(report.checks.server_ready_after_request).toBe(true);
@@ -388,6 +396,12 @@ process.stdout.write(String(state));`;
 test("planted: slow-to-ready and never-ready servers record elapsed per readiness attempt", () => {
 	const notReady = "Language servers: typescript-language-server (configured, not started)";
 	const ready = "Language servers: typescript-language-server (ready)";
+	expect(initialLspStatusChecks(notReady).selected_server_configured).toBe(true);
+	for (const firstStatus of [ready, "", "Language servers: marksman (configured, not started)"]) {
+		const checks = initialLspStatusChecks(firstStatus);
+		expect(checks.selected_server_configured).toBe(false);
+		expect(classifyLspProbeOutcome({ timed_out: false, server_missing: false, wrong_marker: false, immediate_exit: false, checks_passed: Object.values(checks).every(Boolean) })).toBe("INCOMPLETE");
+	}
 	const slowCalls = [
 		{ action: "status", elapsed_ms: 18.4, result: notReady },
 		{ action: "capabilities", elapsed_ms: 1094.1, result: "typescript-language-server: referencesProvider=true" },

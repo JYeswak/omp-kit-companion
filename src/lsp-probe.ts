@@ -24,6 +24,9 @@ export function buildLspJsonRpcReceipt(state: LspProbeState, calls: readonly { a
 	const start = Math.max(0, calls.length - MAX_JSON_RPC_TRACE_ENTRIES);
 	return calls.slice(start).map((call, index) => ({ method: "lsp/" + call.action, id: String(start + index), elapsed_ms: call.elapsed_ms ?? null, result_bytes: Buffer.byteLength(call.result, "utf8") }));
 }
+export function initialLspStatusChecks(statusBefore: string): { selected_server_configured: boolean } {
+	return { selected_server_configured: statusBefore.includes("Language servers: typescript-language-server (configured, not started)") };
+}
 // l9kv: every issued `status` call is one readiness attempt; the wait stage polls the real
 // server at READINESS_POLL_INTERVAL_MS intervals, capped at MAX_READINESS_WAIT_MS and
 // MAX_READINESS_POLL_RETRIES. Elapsed per attempt is recorded in the B10 report.
@@ -729,6 +732,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 			private_git_initialized: fixtureGitRc === 0,
 			read_only_action_arguments: actionArgumentsMatch,
 			all_tool_results_present: resultsPresent,
+			...initialLspStatusChecks(statusBefore),
 			readiness_waits_elapsed_bounded: readinessWaits.every(wait => typeof wait.elapsed_ms === "number" && wait.elapsed_ms >= 0),
 			initialized_capabilities: capabilities.includes("typescript-language-server:") && capability?.referencesProvider === true && capability.workspaceSymbolProvider === true && !/failed to start|Server failures:/i.test(capabilities),
 			known_positive_reference: /Found\s+[1-9]\d* reference\(s\)/.test(references) && references.includes("src/uses.ts") && !/Server failures:/i.test(references),
