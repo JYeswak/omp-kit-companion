@@ -149,7 +149,10 @@ export function makeEeRunner(
   return async (argv, cwd) => {
     let child: SpawnedChild;
     try {
-      child = spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      // INDEXLOCKHELD1 (ompkit-fp72.120.16.149): ee's fast orient runs `git status` and this runner kills it at the
+      // deadline, so git never removes the index.lock that optional-lock refresh takes; read-only status must not
+      // take that lock at all.
+      child = spawn(argv, { cwd, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     } catch {
       return { exitCode: 1, stdout: "", stderr: "", timedOut: false };
     }
