@@ -106,7 +106,7 @@ test("message (fleet): the three self-restart steps in order, each with its exac
 	expect(msg).toContain("omp-kit 0.2.58 is installed; this seat runs 0.2.57; upgrade now");
 	const save = msg.indexOf("Then save your work: `git commit --only");
 	const run = msg.indexOf("2. Run the self-restart helper: `python3 ~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py`");
-	const end = msg.indexOf("3. End your turn now with no further tool call.");
+	const end = msg.indexOf("3. Leave that command running:");
 	expect(save).toBeGreaterThan(-1);
 	expect(run).toBeGreaterThan(save);
 	expect(end).toBeGreaterThan(run);
@@ -121,19 +121,18 @@ test("message (fleet): the three self-restart steps in order, each with its exac
 	expect(msg).not.toContain("handoff");
 });
 
-test("LIVEAGENTS1: the notice restarts the seat only after every background agent has returned and its result is collected", () => {
+test("LIVEAGENTS1 (J-2026-11-08-02): step 1 keeps agents running on omp >= 18.18.1 and collects them first on older omp", () => {
 	// ompkit-fp72.120.16.243 (J-2026-11-05-01): CrimsonHorizon self-restarted on this notice while two background
-	// agents ran; both were aborted mid-work.
+	// agents ran on an older omp; both were aborted mid-work. omp 18.18.1's /restart keeps them.
 	const msg = upgradeNoticeMessage("0.2.91", "0.2.90", true);
-	const wait = msg.indexOf(
-		"1. Restart only after every background task agent has returned and its result is collected",
-	);
+	const wait = msg.indexOf("1. On omp 18.18.1 or later, running background task agents keep working across the restart.");
+	const older = msg.indexOf("On an older omp, first collect each running agent's result");
 	const save = msg.indexOf("Then save your work:");
 	const run = msg.indexOf("2. Run the self-restart helper:");
 	expect(wait).toBeGreaterThan(-1);
-	expect(save).toBeGreaterThan(wait);
+	expect(older).toBeGreaterThan(wait);
+	expect(save).toBeGreaterThan(older);
 	expect(run).toBeGreaterThan(save);
-	expect(msg).toContain("Collect each running agent's result (or message it to wrap up and wait for its report)");
 	expect(msg).toContain("REFUSED_LIVE_AGENTS");
 	// Control: a paused seat never self-restarts, so it gets no wrap-up step.
 	expect(upgradeNoticeMessage("0.2.91", "0.2.90", true, true)).not.toContain("REFUSED_LIVE_AGENTS");
