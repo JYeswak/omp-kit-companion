@@ -149,36 +149,49 @@ function admissionFailures(messages, scenario) {
 }
 
 function interruptedToolFailures(project, scenario, messages) {
+	let call;
+	let stops = [];
+	let native = [];
+	let wire = [];
+	const fail = reason => {
+		console.error("INTERRUPT_DIAG " + JSON.stringify({ call, stops, native, wire }));
+		return [reason];
+	};
 	const expected = expectedInterruptedTool(scenario);
-	if (!expected) return ["tool interruption must select exactly one scripted tool call"];
+	if (!expected) return fail("tool interruption must select exactly one scripted tool call");
 	let events;
 	try {
 		events = fs.readFileSync(path.join(project, ".omp-kit-tool-events.jsonl"), "utf8").trim().split("\n").map(row => JSON.parse(row));
-	} catch { return ["tool interruption native capture is missing or invalid"]; }
-	if (events.at(-1)?.event !== "end") return ["tool interruption native capture is incomplete"];
+	} catch { return fail("tool interruption native capture is missing or invalid"); }
+	if (events.at(-1)?.event !== "end") return fail("tool interruption native capture is incomplete");
 	const matching = events.filter(row => row.event === "call" && row.name === expected.name && isDeepStrictEqual(row.args, expected.args));
 	const calls = new Map(matching.map(call => [call.id, call]));
-	if (calls.size !== 1) return ["tool interruption did not match the original tool and arguments exactly once"];
-	const call = [...calls.values()][0];
-	if (typeof call.id !== "string" || !call.id || !Number.isFinite(call.timestamp)) return ["tool interruption has no native call identity"];
-	const stops = events.filter(row => row.event === "stop" && row.timestamp === call.timestamp);
+	if (calls.size !== 1) return fail("tool interruption did not match the original tool and arguments exactly once");
+	call = [...calls.values()][0];
+	if (typeof call.id !== "string" || !call.id || !Number.isFinite(call.timestamp)) return fail("tool interruption has no native call identity");
+	stops = events.filter(row => row.event === "stop" && row.timestamp === call.timestamp);
+	native = events.filter(row => row.id === call.id && (row.event === "execution" || row.event === "result"));
+	wire = messages.filter(message => message.role === "tool" && message.tool_call_id === call.id);
 	if (stops.length !== 1 || stops[0].reason !== "aborted" || stops[0].error !== `TTSR matched rule: ${scenario.rule}`) {
-		return ["tool interruption lacks the matching call's native TTSR abort"];
+		return fail("tool interruption lacks the matching call's native TTSR abort");
 	}
-	const isSyntheticAbort = result => {
+	const resultText = result => {
 		const content = result.content;
-		const text = typeof content === "string" ? content :
+		return typeof content === "string" ? content :
 			Array.isArray(content) && content.every(block => block.type === "text" && typeof block.text === "string")
 				? content.map(block => block.text).join("\n") : undefined;
+	};
+	const isSyntheticAbort = result => {
+		const text = resultText(result);
 		return result.isError === true && result.details?.__synthetic === true &&
 			result.details.executed === false && result.details.source === "assistant_stop_aborted" &&
 			text === `Tool execution was aborted: TTSR matched rule: ${scenario.rule}`;
 	};
-	if (events.some(row => row.id === call.id && (row.event === "execution" ||
-			(row.event === "result" && !isSyntheticAbort(row)))) ||
-		messages.some(message => message.role === "tool" && message.tool_call_id === call.id &&
-			!isSyntheticAbort(message))) {
-		return ["tool interruption failed: the call executed or returned content"];
+	const authenticated = native.filter(row => row.event === "result" && isSyntheticAbort(row));
+	if (native.some(row => row.event === "execution" || !isSyntheticAbort(row)) ||
+		wire.some(message => typeof message.content !== "string" ||
+			!authenticated.some(row => message.content === resultText(row)))) {
+		return fail("tool interruption failed: the call executed or returned content");
 	}
 	return [];
 }

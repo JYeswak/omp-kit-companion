@@ -30,7 +30,7 @@ function verdict(rows: unknown[], messages: unknown[] = []): string {
 }
 test("coalesced SSE synthetic abort is not tool execution", () => {
 	expect(verdict([call, stop, result])).toBe("ok");
-	expect(verdict([call, stop, result], [{ ...result, role: "tool", tool_call_id: call.id }])).toBe("ok");
+	expect(verdict([call, stop, result], [{ role: "tool", tool_call_id: call.id, content: result.content[0].text }])).toBe("ok");
 });
 test("abort prose cannot disguise real or unclassified results", () => {
 	for (const planted of [
@@ -43,7 +43,8 @@ test("abort prose cannot disguise real or unclassified results", () => {
 		{ ...result, content: [...result.content, { type: "image", data: "unclassified" }] },
 	]) expect(verdict([call, stop, planted])).toMatch(/^FAIL:.*interruption/);
 	expect(verdict([call, stop, result, { event: "execution", id: call.id }])).toMatch(/^FAIL:.*interruption/);
-	expect(verdict([call, stop, result], [{ role: "tool", tool_call_id: call.id, content: result.content }])).toMatch(/^FAIL:.*interruption/);
+	expect(verdict([call, stop], [{ role: "tool", tool_call_id: call.id, content: result.content[0].text }])).toMatch(/^FAIL:.*interruption/);
+	expect(verdict([call, stop, result], [{ role: "tool", tool_call_id: call.id, content: result.content[0].text + " changed" }])).toMatch(/^FAIL:.*interruption/);
 	expect(verdict([call, stop, { ...result, id: "other" }, { event: "result", id: call.id }])).toMatch(/^FAIL:.*interruption/);
 });
 afterAll(() => cleanupAllOwnedTmp());

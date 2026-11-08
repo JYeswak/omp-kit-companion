@@ -1,0 +1,1 @@
+- Accept metadata-less provider abort messages only when their call identity and exact text match an authenticated native synthetic abort; retain execution rejection and print call-scoped interruption diagnostics.
