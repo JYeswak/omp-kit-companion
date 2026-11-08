@@ -319,6 +319,7 @@ jobs:
       source_sha: ${{ needs.prepare.outputs.sha }}
     permissions:
       contents: read
+      attestations: read
 
   publish:
     needs: [detect, prepare, suites]

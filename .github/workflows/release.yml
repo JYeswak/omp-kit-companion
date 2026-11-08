@@ -283,6 +283,7 @@ jobs:
       defer_signed_consumers: true
     permissions:
       contents: read
+      attestations: read
 
   developer-id:
     # DEVID-SIGN-V1: nothing is attested until the locally signed darwin archive is proved to be the qualified

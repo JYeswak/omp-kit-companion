@@ -3,6 +3,15 @@
 How any fleet repo cuts a versioned release (PUB1c). The companion repo is
 the reference implementation; uds adopts this same procedure next.
 
+The daily `real-home-journey` is a published-pair regression: it installs the
+greatest stable predecessor of GitHub's latest stable release, then upgrades to
+that latest release. Drafts and prereleases are excluded. Both release indexes
+must authenticate to the release signer and their tag commits, and both archives
+must have genuine provenance bundles; missing inputs fail before the journey.
+This does not qualify source HEAD. `native-certification` separately qualifies
+the source-built candidate; release signing and signed-consumer gates remain
+responsible for qualifying the final signed bytes before publication.
+
 ## End-to-end contract: published, installed, selected, and loaded are different
 
 The release environment is complete only when a substantive source change reaches

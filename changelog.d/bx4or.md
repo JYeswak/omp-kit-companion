@@ -1,0 +1,1 @@
+- Run the daily real-HOME install and upgrade regression on the latest stable published release and its greatest stable predecessor, authenticating both release indexes and fetching genuine archive provenance instead of building unsigned journey inputs.

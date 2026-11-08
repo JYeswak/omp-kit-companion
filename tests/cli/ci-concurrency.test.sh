@@ -12,6 +12,7 @@ bun --no-env-file --config=/dev/null run - "$ROOT" "$TMP" <<'JS'
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
+const { runFixture } = await import(join(process.argv[2], "tests/cli/fixture-process.ts"));
 const [root, tmp] = process.argv.slice(2);
 const ci = Bun.YAML.parse(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8"));
 const release = Bun.YAML.parse(readFileSync(join(root, ".github/workflows/release.yml"), "utf8"));
@@ -167,6 +168,91 @@ check("serial jobs do not inflate the concurrent ceiling", () => {
 check("signing and local-attest do not overlap qualification", () => {
   assert.ok(ceiling(ci, release, { ...qualification, signing: true }).total <= 5);
   assert.equal(ceiling(ci, release, { ...qualification, mode: "local-attest" }).total, 0);
+});
+const journey = ci.jobs["real-home-journey"];
+const pair = journey.steps.find(step => step.id === "published-pair");
+check("published pair retains authentication permissions and job-wide updater token", () => {
+  assert.equal(journey.permissions.attestations, "read");
+  assert.equal(journey.env.GH_TOKEN, "${{ github.token }}");
+  assert.equal(release.jobs["native-candidate"].permissions.attestations, "read");
+  const certify = Bun.YAML.parse(readFileSync(join(root, ".github/workflows/omp-certify.yml"), "utf8"));
+  assert.equal(certify.jobs.suites.permissions.attestations, "read");
+  assert.ok(!pair.run.includes("package-release.sh"));
+});
+const releaseRow = (tag_name, extra = {}) => ({ tag_name, draft: false, prerelease: false, ...extra });
+const fixtureShell = `
+gh() {
+  printf '%s\\n' "$*" >> "$CALLS"
+  if [ "$1" = api ]; then
+    case "$2" in
+      */releases/latest) printf '%s\\n' "$LATEST";;
+      --paginate) printf '%s\\n' "$RELEASES";;
+      */commits/*) printf '%s\\n' 0123456789012345678901234567890123456789;;
+      *) return 91;;
+    esac
+  elif [ "$1" = attestation ]; then
+    [ "$FAILURE" != provenance ] || return 92
+    [[ "$*" == *"--cert-oidc-issuer https://token.actions.githubusercontent.com"* ]] || return 93
+    [[ "$*" == *"--signer-workflow JYeswak/omp-kit-companion/.github/workflows/release.yml"* ]] || return 94
+    [[ "$*" == *"--source-digest 0123456789012345678901234567890123456789"* ]] || return 95
+    [[ "$*" == *"--predicate-type https://slsa.dev/provenance/v1"* ]] || return 96
+  elif [ "$1" = release ]; then
+    local pattern="" dir=""
+    shift 3
+    while [ "$#" -gt 0 ]; do
+      case "$1" in --pattern) pattern=$2;; --dir) dir=$2;; esac
+      shift
+    done
+    printf '{}\\n' > "$dir/$pattern"
+  else return 97
+  fi
+}
+python3() {
+  printf '%s\\n' "$*" >> "$CALLS"
+  if [ "$2" = inspect ]; then
+    [ "$FAILURE" != platform ] || return 98
+    printf 'omp-kit-%s-%s.tar.gz\\n' "$4" "$5"
+  elif [ "$2" = bundle ]; then
+    [ "$FAILURE" != bundle ] || return 99
+    printf '{}\\n' > "$3.sigstore.json"
+  else return 100
+  fi
+}
+`;
+function runPair(name, rows, failure = "", latest = releaseRow("v1.10.0")) {
+  const base = join(tmp, name);
+  const result = runFixture(["bash", "-eu", "-c", fixtureShell + pair.run], {
+    cwd: root, env: { ...process.env, RUNNER_TEMP: base, GITHUB_OUTPUT: `${base}.out`,
+      CALLS: `${base}.calls`, TARGET: "linux-x64-gnu", FAILURE: failure,
+      LATEST: JSON.stringify(latest), RELEASES: JSON.stringify([rows]) },
+  });
+  return { result, calls: readFileSync(`${base}.calls`, "utf8"), base };
+}
+check("latest candidate and greatest numeric stable predecessor exclude drafts and prereleases", () => {
+  const { result, calls, base } = runPair("selection", [
+    releaseRow("v1.9.0"), releaseRow("v1.2.0"), releaseRow("v1.11.0"),
+    releaseRow("v1.10.0"), releaseRow("v1.9.9", { draft: true }),
+    releaseRow("v1.9.8", { prerelease: true }), releaseRow("v1.9.7-rc.1"),
+  ]);
+  assert.equal(result.rc, 0, new TextDecoder().decode(result.stderr));
+  assert.match(calls, /release download v1\.9\.0 /);
+  assert.match(calls, /release download v1\.10\.0 /);
+  assert.equal((calls.match(/attestation verify/g) ?? []).length, 2);
+  assert.equal((calls.match(/installer\/install.py bundle/g) ?? []).length, 2);
+  assert.match(readFileSync(`${base}.out`, "utf8"), /candidate_archive=omp-kit-1.10.0-linux-x64-gnu.tar.gz/);
+});
+for (const [name, rows, failure, latest] of [
+  ["no-predecessor", [releaseRow("v1.10.0")], ""],
+  ["missing-platform", [releaseRow("v1.9.0")], "platform"],
+  ["missing-provenance", [releaseRow("v1.9.0")], "provenance"],
+  ["missing-bundle", [releaseRow("v1.9.0")], "bundle"],
+  ["draft-latest", [releaseRow("v1.9.0")], "", releaseRow("v1.10.0", { draft: true })],
+  ["prerelease-latest", [releaseRow("v1.9.0")], "", releaseRow("v1.10.0", { prerelease: true })],
+]) check(`${name} fails the input step before journey execution`, () => {
+  const { result, calls } = runPair(name, rows, failure, latest);
+  assert.notEqual(result.rc, 0);
+  assert.ok(!calls.includes("real-home-journey.sh"));
+  if (failure === "provenance") assert.ok(!calls.includes("installer/install.py inspect"));
 });
 console.log(`${pass} tests passed, 0 failed`);
 JS
