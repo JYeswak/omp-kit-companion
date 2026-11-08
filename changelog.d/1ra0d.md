@@ -1,1 +1,0 @@
-- `br update --status in_review --append-notes 'DONE /absolute/source/repo@commit: evidence'` now checks the named source repository's complete GREEN fresh-gate observation instead of losing the source and checking the tracker checkout. Both `--append-notes TEXT` and `--append-notes=TEXT` work; missing, RED, incomplete, or wrong-commit observations still refuse the transition.

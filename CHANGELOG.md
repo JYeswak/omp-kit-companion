@@ -4,6 +4,19 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.101] - 2026-11-08
+
+### Changed
+
+- Add retirement regression plants for incompatible consumer acceptance, foreign-reservation write denial, and failed, timed-out or cancelled child process cleanup; each plant detects a process-local disabled enforcement mechanism. Human-only secret, spend and legal authority remains uncovered by these tests; no new authorization enforcement is claimed.
+- Skip the optional live-checkout brief integration test in source archives without Git metadata; checkout runs retain the existing admission assertion and fixture coverage remains enabled.
+- CI stock-extensions has no `ps` on PATH; the reaping plants call /bin/ps (macOS and Ubuntu 24.04 both ship it).
+- Keep descendant-cleanup regression plants effective under stock CI's minimal PATH by invoking /bin/sleep directly and exercising the plants without PATH tools; missing sleep no longer short-circuits the deadline or hides disabled cleanup.
+- Remove the obsolete pregrade module and test paths while retaining native close authorship and reservation checks under native-close. Cover refusal of a non-author close without a verification record and admission with its independent PASS record.
+- Live interruption verdicts recognize call-bound native synthetic TTSR abort results without mistaking them for execution; real execution and unclassified results still fail.
+- `br update --status in_review --append-notes 'DONE /absolute/source/repo@commit: evidence'` now checks the named source repository's complete GREEN fresh-gate observation instead of losing the source and checking the tracker checkout. Both `--append-notes TEXT` and `--append-notes=TEXT` work; missing, RED, incomplete, or wrong-commit observations still refuse the transition.
+- Prepare release metadata and the next development version through commit preflight before committing, preserving commit-gate admission and the existing advance-only recovery command. (ompkit-d8qic)
+
 ## [0.2.100] - 2026-11-08
 
 ### Changed
