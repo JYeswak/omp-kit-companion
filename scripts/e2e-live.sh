@@ -499,6 +499,9 @@ finish_batch() {
         transcript="$EVIDENCE_RUN/log-$name.jsonl"
       fi
       fail=$((fail+1)); echo "FAIL  $name :: $verdict (omp exit $rc; transcript: $transcript)"
+      # These captures contain only the isolated mock conversation, never env.
+      # Put OMP last so its error survives even an outer stage's stderr tail.
+      "$OMP_KIT_BUN" "$LIB" failure-tail "$T/log-$name.jsonl" "$T/out-$name.txt"
       if [ "$MODE" = full ]; then report_test_case "$name" FAIL; fi
     fi
   done

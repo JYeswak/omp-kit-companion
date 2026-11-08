@@ -270,6 +270,7 @@ test("LIVEEVAL1: a failing scenario's transcript is copied into OMP_KIT_E2E_EVID
 			"port=$(sed -n 's#.*baseUrl: http://127.0.0.1:\\([0-9]*\\)/v1#\\1#p' \"$HOME/.omp/agent/models.yml\")",
 			'curl -sS -o /dev/null -X POST -H "content-type: application/json" "http://127.0.0.1:$port/v1/chat/completions" \\',
 			"  -d '{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"bash\"}}],\"messages\":[{\"role\":\"user\",\"content\":\"LIVEEVAL1 planted transcript\"}]}'",
+			'printf "MOCK_OMP_ERROR: planted stderr tail\\n" >&2',
 			"",
 		].join("\n"));
 		chmodSync(stub, 0o755);
@@ -282,6 +283,10 @@ test("LIVEEVAL1: a failing scenario's transcript is copied into OMP_KIT_E2E_EVID
 		expect(result.rc, stdout + stderr).toBe(1);
 		const failure = /^FAIL {2}unsafe-router-near :: .*transcript: (\S+)\)$/m.exec(stdout);
 		expect(failure, stdout + stderr).not.toBeNull();
+		expect(stderr).toContain("LIVE_FAILURE_TAIL out-unsafe-router-near.txt");
+		expect(stderr).toContain("MOCK_OMP_ERROR: planted stderr tail");
+		expect(stderr).toContain("LIVE_FAILURE_TAIL log-unsafe-router-near.jsonl");
+		expect(stderr).toContain("LIVEEVAL1 planted transcript");
 		const copy = failure![1]!;
 		const runDir = /^failure evidence kept: (\S+)$/m.exec(stdout)?.[1];
 		expect(runDir).toBe(join(evidenceRoot, readdirSync(evidenceRoot)[0]!));

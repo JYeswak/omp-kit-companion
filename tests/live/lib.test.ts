@@ -47,4 +47,19 @@ test("abort prose cannot disguise real or unclassified results", () => {
 	expect(verdict([call, stop, result], [{ role: "tool", tool_call_id: call.id, content: result.content[0].text + " changed" }])).toMatch(/^FAIL:.*interruption/);
 	expect(verdict([call, stop, { ...result, id: "other" }, { event: "result", id: call.id }])).toMatch(/^FAIL:.*interruption/);
 });
+test("failure tails include mock OMP stderr and transcript within fixed bounds", () => {
+	const output = join(project, "out-failed.txt");
+	const log = join(project, "log-failed.jsonl");
+	mkdirSync(project, { recursive: true });
+	writeFileSync(output, "old output\n".repeat(2000) + "MOCK_OMP_ERROR: connection closed\n");
+	writeFileSync(log, Array.from({ length: 100 }, (_, n) => JSON.stringify({ mock_request: n })).join("\n") + "\n");
+	const run = runFixture([process.execPath, join(import.meta.dir, "lib.mjs"), "failure-tail", log, output], { cwd: root, label: "live-failure-tail" });
+	expect(run.rc).toBe(0);
+	const diagnostic = Buffer.from(run.stderr).toString();
+	expect(diagnostic).toContain("MOCK_OMP_ERROR: connection closed");
+	expect(diagnostic).toContain('"mock_request":99');
+	expect(diagnostic).not.toContain('"mock_request":0}');
+	expect(diagnostic.length).toBeLessThan(3400);
+	expect(diagnostic.split("\n").length).toBeLessThanOrEqual(85);
+});
 afterAll(() => cleanupAllOwnedTmp());

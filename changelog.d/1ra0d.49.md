@@ -1,1 +1,2 @@
 - Accept metadata-less provider abort messages only when their call identity and exact text match an authenticated native synthetic abort; retain execution rejection and print call-scoped interruption diagnostics.
+- Include bounded mock transcript and OMP output tails in live-scenario failure logs, preserving runtime error details when private CI captures are not uploaded.

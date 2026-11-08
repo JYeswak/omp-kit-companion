@@ -5,6 +5,7 @@
 //   bun lib.mjs name <i>                     scenario id
 //   bun lib.mjs prep <i> <outFile>           write the mock's {turns, chunk} file
 //   bun lib.mjs verdict <i> <log> <proj> <ompExit>   print "ok" or "FAIL: ..."
+//   bun lib.mjs failure-tail <log> <output>  bounded mock-only failure evidence on stderr
 //   bun lib.mjs probe <i> <log>              print PROBE omp-late-interrupt: continued|aborted (never fails)
 //   bun lib.mjs config <policy.json> <out>   isolated-HOME config.yml
 //   bun lib.mjs models <port> <out>          isolated-HOME models.yml pointing at the mock
@@ -29,6 +30,26 @@ function strings(v, out = []) {
 	return out;
 }
 const isSystem = m => m.role === "system" || m.role === "developer";
+
+function failureTail(files) {
+	// Keep both captures inside the full-test stage's 4 KiB stderr tail. Read a
+	// bounded suffix even when a provider request occupies one enormous line.
+	for (const file of files) {
+		let fd;
+		try {
+			fd = fs.openSync(file, "r");
+			const size = fs.fstatSync(fd).size;
+			const buffer = Buffer.alloc(Math.min(size, 1536));
+			const count = fs.readSync(fd, buffer, 0, buffer.length, Math.max(0, size - buffer.length));
+			const lines = buffer.subarray(0, count).toString("utf8").trimEnd().split("\n").slice(-40);
+			console.error(`LIVE_FAILURE_TAIL ${path.basename(file)} (last <=40 lines, <=1536 bytes)\n${lines.join("\n")}`);
+		} catch {
+			console.error(`LIVE_FAILURE_TAIL ${path.basename(file)} unavailable`);
+		} finally {
+			if (fd !== undefined) fs.closeSync(fd);
+		}
+	}
+}
 
 function expectedInterruptedTool(scenario) {
 	const name = scenario.expect.tool_not_executed;
@@ -270,6 +291,9 @@ function verdict(i, log, proj, ompExit) {
 }
 
 switch (cmd) {
+	case "failure-tail":
+		failureTail(args);
+		break;
 	case "coverage":
 		await coverage(args);
 		break;
