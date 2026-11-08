@@ -716,7 +716,7 @@ done
 
 # --------------------------------------------------------------------------------------------------- 3. sign
 stage sign
-DARWIN="omp-kit-v$VERSION-darwin-arm64-none.tar"
+DARWIN="omp-kit-v$VERSION-darwin-arm64-none.tar.gz"
 UNSIGNED_DARWIN="$WORK/build/darwin-arm64-none/$DARWIN"
 ENTITLEMENTS="$SRC/packaging/macos/omp-kit.entitlements.plist"
 plutil -lint "$ENTITLEMENTS" >/dev/null || die "the source's entitlements plist is invalid"
@@ -760,13 +760,13 @@ DIST="$WORK/dist"
 mkdir "$DIST"
 cp "$WORK/out/release-index.json" "$DIST/release-index.json"
 cp "$WORK/out/$DARWIN" "$DIST/$DARWIN"
-for platform in linux-arm64-gnu linux-x64-gnu; do cp "$WORK/build/$platform/omp-kit-v$VERSION-$platform.tar" "$DIST/"; done
+for platform in linux-arm64-gnu linux-x64-gnu; do cp "$WORK/build/$platform/omp-kit-v$VERSION-$platform.tar.gz" "$DIST/"; done
 for platform in "${SHIP[@]}"; do
 	python3 -I "$SRC/installer/install.py" inspect "$DIST/release-index.json" "$VERSION" "$platform" >/dev/null || die "final index refuses $platform"
 	python3 "$SRC/scripts/release_reuse.py" verify-archive --index "$DIST/release-index.json" --platform "$platform" --archive-dir "$DIST" >/dev/null ||
 		die "final $platform archive differs from the final index"
 done
-(cd "$DIST" && shasum -a 256 release-index.json omp-kit-v"$VERSION"-*.tar >SHA256SUMS && shasum -a 256 -c SHA256SUMS >/dev/null) || die "SHA256SUMS failed"
+(cd "$DIST" && shasum -a 256 release-index.json omp-kit-v"$VERSION"-*.tar.gz >SHA256SUMS && shasum -a 256 -c SHA256SUMS >/dev/null) || die "SHA256SUMS failed"
 cat "$DIST/SHA256SUMS"
 (cd "$ROOT" && bounded 300 sh "$SRC/scripts/release-notes.sh" source --base-tag "$BASE_TAG" --head "$SOURCE" --version "$VERSION" \
 	--output "$WORK/release-notes.md") || die "release-notes.sh source failed"
@@ -991,7 +991,7 @@ import json, re, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
 version = sys.argv[2]
 required = ["SHA256SUMS", "release-index.json"] + [
-    f"omp-kit-v{version}-{platform}.tar"
+    f"omp-kit-v{version}-{platform}.tar.gz"
     for platform in ("darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu")]
 if doc.get("tagName") != "v" + version or doc.get("isDraft") is not False or doc.get("isPrerelease") is not False:
     raise SystemExit("release is not public and stable")
@@ -1000,7 +1000,7 @@ for name in required:
     matches = [asset for asset in assets if asset.get("name") == name]
     if len(matches) != 1 or not re.fullmatch(r"sha256:[0-9a-f]{64}", matches[0].get("digest", "")):
         raise SystemExit(f"missing or ambiguous published asset digest: {name}")
-    if name.endswith(".tar"):
+    if name.endswith(".tar.gz"):
         print(matches[0]["digest"])
 ' "$WORK/published.json" "$VERSION" >"$WORK/published-digests" ||
 		die "ADVANCE_ONLY_NOT_PUBLISHED: incomplete release assets; retry: $resume"
@@ -1103,7 +1103,7 @@ URL="https://github.com/$REPO/releases/tag/v$VERSION"
 # transport failure; per-operation write-out identifies the failing asset.
 substep verify.public-downloads
 download_args=(--parallel --parallel-max 5 --fail-early)
-for name in SHA256SUMS release-index.json "$DARWIN" "omp-kit-v$VERSION-linux-arm64-gnu.tar" "omp-kit-v$VERSION-linux-x64-gnu.tar"; do
+for name in SHA256SUMS release-index.json "$DARWIN" "omp-kit-v$VERSION-linux-arm64-gnu.tar.gz" "omp-kit-v$VERSION-linux-x64-gnu.tar.gz"; do
 	[ "${#download_args[@]}" -eq 4 ] || download_args+=(--next)
 	download_args+=(-fsSL --retry 3 -o "$PUB/$name" --write-out "$name"$'\t''%{time_total}'$'\t''%{exitcode}\n'
 		"https://github.com/$REPO/releases/download/v$VERSION/$name")

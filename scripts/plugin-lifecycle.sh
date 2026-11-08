@@ -275,7 +275,7 @@ if [ -n "${ARCHIVE_VERSION:-}" ]; then
   mkdir -p "$HERE/$S/archive"
   need_rc archive-build 0 sh "$HERE/scripts/package-release.sh" --version "$ARCHIVE_VERSION" \
     --platform "${ARCHIVE_PLATFORM:-darwin-arm64-none}" --out "$HERE/$S/archive"
-  tar -tf "$HERE/$S"/archive/*.tar | sort >"$HERE/$S/logs/archive-contents.txt"
+  tar -tf "$HERE/$S"/archive/*.tar.gz | sort >"$HERE/$S/logs/archive-contents.txt"
   for want in package.json rules/bash-pipe-exit.md extensions/kit-guard-optin.ts; do
     grep -qx "$want" "$HERE/$S/logs/archive-contents.txt" || { echo "FAIL archive: missing $want" >&2; exit 1; }
   done

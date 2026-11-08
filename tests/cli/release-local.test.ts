@@ -257,7 +257,7 @@ const stagePrelude = `set -euo pipefail
 die() { echo "release-local: refused: $*" >&2; exit 4; }
 say() { echo "== $*"; }
 WORK=$1; DIST="$WORK/dist"; VERSION=0.0.0; REPO=fixture/release
-DARWIN="omp-kit-v$VERSION-darwin-arm64-none.tar"
+DARWIN="omp-kit-v$VERSION-darwin-arm64-none.tar.gz"
 STAGE_LOG="$WORK/stages"; : >"$STAGE_LOG"
 ${helperScript}`;
 
@@ -471,7 +471,7 @@ receipt installed fixture fixture
 			expect(result.rc, stderr).toBe(successful ? 0 : 4);
 			const calls = readFileSync(join(work, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
 			expect(calls[0]).toEqual(["update", "--apply", "--yes", "--version", "0.0.0", "--index", join(work, "public/release-index.json"),
-				"--archive", join(work, "public/omp-kit-v0.0.0-darwin-arm64-none.tar"), "--json"]);
+				"--archive", join(work, "public/omp-kit-v0.0.0-darwin-arm64-none.tar.gz"), "--json"]);
 			expect(calls.filter(args => args.includes("--reconcile")).length).toBe(["browser-partial", "reconcile-refused", "writer-partial"].includes(scenario) || scenario.startsWith("reconciled-") ? 1 : 0);
 			if (scenario === "writer-partial") {
 				expect(calls.find(args => args.includes("--reconcile"))).toEqual(["update", "--reconcile", "cd03799d-67fd", "--yes", "--json"]);
@@ -749,7 +749,7 @@ for (const failure of ["none", "http", "bytes"] as const) {
 		const dist = join(work, "dist");
 		const bin = join(work, "bin");
 		mkdirSync(dist); mkdirSync(bin);
-		const names = ["release-index.json", ...["darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu"].map(platform => `omp-kit-v0.0.0-${platform}.tar`)];
+		const names = ["release-index.json", ...["darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu"].map(platform => `omp-kit-v0.0.0-${platform}.tar.gz`)];
 		const payloads = new Map(names.map(name => [name, `published bytes for ${name}\n`]));
 		payloads.set("SHA256SUMS", names.map(name => `${new Bun.CryptoHasher("sha256").update(payloads.get(name)!).digest("hex")}  ${name}\n`).join(""));
 		for (const [name, bytes] of payloads) writeFileSync(join(dist, name), bytes);
@@ -760,7 +760,7 @@ for (const failure of ["none", "http", "bytes"] as const) {
 			hostname: "127.0.0.1", port: Number(process.env.KIT_TEST_LOOPBACK_PORT ?? 0),
 			async fetch(request) {
 				const name = new URL(request.url).pathname.split("/").at(-1)!;
-				if (name.endsWith(".tar")) {
+				if (name.endsWith(".tar.gz")) {
 					archives.add(name);
 					if (archives.size === 3) releaseDownloads();
 					// A serial implementation cannot pass this control. No timing assertion
@@ -991,7 +991,7 @@ ROOT=$1; WORK=$2; STAGE_LOG="$WORK/stages"; : >"$STAGE_LOG"; CHILD=''
 ${helperScript}
 ${advanceFunction}
 VERSION=1.2.4; SOURCE=${source}; INSTALL=1; INSTALLED=0; INSTALL_PREFIX=${JSON.stringify(prefix)}
-PUB="$WORK/public"; mkdir "$PUB"; DARWIN="omp-kit-v$VERSION-darwin-arm64-none.tar"; : >"$PUB/release-index.json"; : >"$PUB/$DARWIN"
+PUB="$WORK/public"; mkdir "$PUB"; DARWIN="omp-kit-v$VERSION-darwin-arm64-none.tar.gz"; : >"$PUB/release-index.json"; : >"$PUB/$DARWIN"
 ${tail}
 advance_next_version
 echo "unreachable: the install refusal must exit"
@@ -1525,9 +1525,9 @@ for (const failure of (surface === "public" ? ["none", "fetch", "verify"] : ["no
 			const bytes = Buffer.from(platform);
 			const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
 			digests.set(platform, digest);
-			writeFileSync(join(dist, `omp-kit-v0.0.0-${platform}.tar`), bytes);
+			writeFileSync(join(dist, `omp-kit-v0.0.0-${platform}.tar.gz`), bytes);
 		}
-		writeFileSync(join(dist, "SHA256SUMS"), platforms.map(platform => `${digests.get(platform)}  omp-kit-v0.0.0-${platform}.tar\n`).join(""));
+		writeFileSync(join(dist, "SHA256SUMS"), platforms.map(platform => `${digests.get(platform)}  omp-kit-v0.0.0-${platform}.tar.gz\n`).join(""));
 		writeFileSync(join(dist, "release-index.json"), "{}\n");
 		for (const name of readdirSync(dist)) cpSync(join(dist, name), join(pub, name));
 		symlinkSync(join(ROOT, "scripts"), join(work, "scripts"));

@@ -118,9 +118,9 @@ if [ -z "$install_cmd" ]; then
 	assets="$HOME/.local/opt/omp-kit/update-assets/$version"
 	mkdir -p "$assets" || die "cannot create $assets"
 	gh release download "v$version" --repo "$REPO_SLUG" --dir "$assets" --clobber \
-		--pattern release-index.json --pattern "omp-kit-v$version-darwin-arm64-none.tar" >&2 || die "downloading v$version assets failed"
+		--pattern release-index.json --pattern "omp-kit-v$version-darwin-arm64-none.tar.gz" >&2 || die "downloading v$version assets failed"
 	omp-kit update --apply --yes --version "$version" --index "$assets/release-index.json" \
-		--archive "$assets/omp-kit-v$version-darwin-arm64-none.tar" --json >&2 || die "omp-kit update --apply refused v$version"
+		--archive "$assets/omp-kit-v$version-darwin-arm64-none.tar.gz" --json >&2 || die "omp-kit update --apply refused v$version"
 	installed=$(omp-kit --version | awk '{print $2}')
 else
 	# shellcheck disable=SC2086

@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { gzipSync } from "node:zlib";
 import { releaseComponents, spdxSbom, sbomFromArchive } from "../../scripts/package-release.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const input = {
-	version: "1.2.3", key: "darwin-arm64-none", filename: "omp-kit-v1.2.3-darwin-arm64-none.tar",
+	version: "1.2.3", key: "darwin-arm64-none", filename: "omp-kit-v1.2.3-darwin-arm64-none.tar.gz",
 	archiveSha: "a".repeat(64), binarySha: "b".repeat(64), bunVersion: Bun.version,
 	files: [{ path: "bin/omp-kit", sha256: "b".repeat(64) }],
 };
@@ -61,7 +62,7 @@ test("archive SBOM uses the packaged builder inventory, binds final archive byte
 	const components = releaseComponents(root).map(component => component.name === "sqlite" ? { ...component, version: "3.50.0" } : component);
 	const files = { "bin/omp-kit": "binary fixture", "release-components.json": JSON.stringify({ bunVersion: Bun.version, components }),
 		"release-manifest.json": JSON.stringify({ schema_version: 1, version: "1.2.3", source_tag: "v1.2.3", files: input.files }) };
-	const archive = await new Bun.Archive(files).bytes();
+	const archive = gzipSync(await new Bun.Archive(files).bytes(), { level: 6 });
 	const document = await sbomFromArchive(archive, input.filename);
 	expect(document.packages).toContainEqual(expect.objectContaining({ name: "sqlite", versionInfo: "3.50.0" }));
 	expect(document.packages[0]?.checksums?.[0]?.checksumValue).toBe(new Bun.CryptoHasher("sha256").update(archive).digest("hex"));

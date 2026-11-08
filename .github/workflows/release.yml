@@ -452,7 +452,7 @@ jobs:
           VERSION: ${{ needs.validate-tag.outputs.version }}
         run: |
           set -euo pipefail
-          bun scripts/package-release.ts --sbom-archive "candidate/omp-kit-v$VERSION-$PLATFORM.tar" --sbom-output "sbom-$PLATFORM.spdx.json"
+          bun scripts/package-release.ts --sbom-archive "candidate/omp-kit-v$VERSION-$PLATFORM.tar.gz" --sbom-output "sbom-$PLATFORM.spdx.json"
           cp "sbom-$PLATFORM.spdx.json" "sbom-$PLATFORM-attempt-${{ github.run_attempt }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -464,12 +464,12 @@ jobs:
         if: inputs.certified_run_id != '' && !inputs.rehearsal
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
         with:
-          subject-path: candidate/*.tar
+          subject-path: candidate/*.tar.gz
       - name: Attest the SBOM at the final tag ref
         if: inputs.certified_run_id != '' && !inputs.rehearsal
         uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b
         with:
-          subject-path: candidate/*.tar
+          subject-path: candidate/*.tar.gz
           sbom-path: ${{ github.workspace }}/sbom-${{ matrix.platform }}.spdx.json
 
   attest-index:
@@ -678,7 +678,7 @@ jobs:
           [[ "$(jq length releases.json)" == 1 && "$(jq -r '.[0].draft' releases.json)" == true ]] || { echo "v$VERSION must have exactly one draft release" >&2; exit 4; }
           ship=(darwin-arm64-none linux-arm64-gnu linux-x64-gnu)
           want=(SHA256SUMS release-index.json)
-          for platform in "${ship[@]}"; do want+=("omp-kit-v$VERSION-$platform.tar"); done
+          for platform in "${ship[@]}"; do want+=("omp-kit-v$VERSION-$platform.tar.gz"); done
           # A rerun may find SBOMs an earlier attempt attached; they are never re-downloaded, compared or clobbered.
           [[ "$(jq -r '[.[0].assets[].name | select((startswith("sbom-") and endswith(".spdx.json")) | not)] | sort | join(" ")' releases.json)" == "$(printf '%s\n' "${want[@]}" | sort | paste -sd ' ' -)" ]] \
             || { echo "draft assets are not exactly: ${want[*]} (plus optional SBOMs)" >&2; exit 4; }
@@ -705,28 +705,28 @@ jobs:
         run: |
           set -euo pipefail
           for platform in darwin-arm64-none linux-arm64-gnu linux-x64-gnu; do
-            bun scripts/package-release.ts --sbom-archive "dist/omp-kit-v$VERSION-$platform.tar" --sbom-output "sbom/sbom-$platform.spdx.json"
+            bun scripts/package-release.ts --sbom-archive "dist/omp-kit-v$VERSION-$platform.tar.gz" --sbom-output "sbom/sbom-$platform.spdx.json"
           done
       - name: Attest build provenance for the archives and the index at the tag ref
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
         with:
           subject-path: |
-            dist/*.tar
+            dist/*.tar.gz
             dist/release-index.json
       - name: Attest the darwin SBOM
         uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b
         with:
-          subject-path: dist/omp-kit-v${{ inputs.version }}-darwin-arm64-none.tar
+          subject-path: dist/omp-kit-v${{ inputs.version }}-darwin-arm64-none.tar.gz
           sbom-path: ${{ github.workspace }}/sbom/sbom-darwin-arm64-none.spdx.json
       - name: Attest the linux-arm64 SBOM
         uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b
         with:
-          subject-path: dist/omp-kit-v${{ inputs.version }}-linux-arm64-gnu.tar
+          subject-path: dist/omp-kit-v${{ inputs.version }}-linux-arm64-gnu.tar.gz
           sbom-path: ${{ github.workspace }}/sbom/sbom-linux-arm64-gnu.spdx.json
       - name: Attest the linux-x64 SBOM
         uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b
         with:
-          subject-path: dist/omp-kit-v${{ inputs.version }}-linux-x64-gnu.tar
+          subject-path: dist/omp-kit-v${{ inputs.version }}-linux-x64-gnu.tar.gz
           sbom-path: ${{ github.workspace }}/sbom/sbom-linux-x64-gnu.spdx.json
       - name: Verify every archive with the consumer's own verifier, as omp-kit update fetches it
         run: |

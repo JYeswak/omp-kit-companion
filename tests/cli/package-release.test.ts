@@ -27,6 +27,9 @@ test("native release refuses a drifted or duplicate policy import before staging
 	}
 });
 test("native release derives the rule manifest from rules, covers it in archive integrity, and refuses corrupted bytes", async () => {
+	expect(asset.filename).toBe(`omp-kit-v1.2.3-${key}.tar.gz`);
+	expect([...bytes.subarray(0, 2)]).toEqual([0x1f, 0x8b]);
+	expect(asset.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
 	const plan = await previewKitRelease({ currentVersion: "1.2.2", platform, sourceTag: "v1.2.3", fetchIndex: async () => index });
 	expect(plan.exitCode).toBe(0);
 	const staged = await stageKitRelease({ archive: bytes, plan, stagingParent: output, probeBinaryInfo: async (binary) => {

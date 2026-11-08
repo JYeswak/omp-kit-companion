@@ -190,7 +190,7 @@ if [ "$MODE" = full ]; then
     KIT_RELEASE="$KIT_PREFIX/releases/v$KIT_VERSION"
     mkdir -p "$KIT_RELEASE" "$KIT_PREFIX/bin"
     sh "$HERE/scripts/package-release.sh" --version "$KIT_VERSION" --platform "$KIT_PLATFORM" --out "$WORK_ROOT" || { package_rc=$?; KEEP_WORK=1; echo "live candidate package producer_rc=$package_rc" >&2; exit "$package_rc"; }
-    tar -xf "$WORK_ROOT/omp-kit-v$KIT_VERSION-$KIT_PLATFORM.tar" -C "$KIT_RELEASE" || { tar_rc=$?; KEEP_WORK=1; echo "live candidate extract producer_rc=$tar_rc" >&2; exit "$tar_rc"; }
+    tar -xf "$WORK_ROOT/omp-kit-v$KIT_VERSION-$KIT_PLATFORM.tar.gz" -C "$KIT_RELEASE" || { tar_rc=$?; KEEP_WORK=1; echo "live candidate extract producer_rc=$tar_rc" >&2; exit "$tar_rc"; }
     ln -s "../releases/v$KIT_VERSION/bin/omp-kit" "$KIT_PREFIX/bin/omp-kit"
     KIT_EXECUTABLE="$KIT_PREFIX/bin/omp-kit"
   fi

@@ -123,7 +123,7 @@ export function advanceOnly(f: Fixture, version = "1.2.4") {
 
 export function publishEvidence(f: Fixture, missing = "") {
 	const assets = ["SHA256SUMS", "release-index.json",
-		...["darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu"].map(p => `omp-kit-v1.2.4-${p}.tar`)]
+		...["darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu"].map(p => `omp-kit-v1.2.4-${p}.tar.gz`)]
 		.filter(name => name !== missing).map(name => ({ name, digest: `sha256:${"a".repeat(64)}` }));
 	writeFileSync(join(f.work, "release.json"), JSON.stringify({ tagName: "v1.2.4", isDraft: false, isPrerelease: false, assets }));
 	writeFileSync(join(f.work, "bin/gh"), `#!/bin/sh

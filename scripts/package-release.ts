@@ -384,7 +384,7 @@ async function run(): Promise<void> {
 	const sourcePackage = safeSource("package.json");
 	const initialSourceRevision = packageSourceRevision(root, sourcePackage);
 	const components = releaseComponents(root);
-	const filename = `omp-kit-v${version}-${key}.tar`;
+	const filename = `omp-kit-v${version}-${key}.tar.gz`;
 	const output = join(out, filename);
 	try { lstatSync(output); fail("RELEASE_ARCHIVE_EXISTS"); } catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -478,9 +478,12 @@ async function run(): Promise<void> {
 			writeAll(fd, Buffer.alloc(1024));
 			fsyncSync(fd);
 		} finally { closeSync(fd); }
+		const compressed = await runBounded(["gzip", "-6", "-n", draft],
+			{ deadline_s: 300, grace_s: 2, max_output_bytes: 64 * 1024 });
+		if (compressed.rc !== 0 || compressed.timed_out || compressed.truncated) fail("RELEASE_GZIP_FAILED");
 		// Publishing via hard link cannot overwrite an existing candidate, even if another build raced us.
-		linkSync(draft, output);
-		unlinkSync(draft);
+		linkSync(`${draft}.gz`, output);
+		unlinkSync(`${draft}.gz`);
 		const archiveBytes = readFileSync(output);
 		const archiveSha = sha(archiveBytes);
 		const sbomFilename = `${filename}.sbom.spdx.json`;
@@ -667,7 +670,7 @@ export async function sbomFromArchive(archive: Uint8Array, filename: string) {
 	if (!manifestFile) fail("SBOM_MANIFEST_MISSING");
 	const manifest = validateReleaseManifest(JSON.parse(await manifestFile.text()));
 	const prefix = `omp-kit-v${manifest.version}-`;
-	const key = filename.startsWith(prefix) && filename.endsWith(".tar") ? filename.slice(prefix.length, -4) : "";
+	const key = filename.startsWith(prefix) && filename.endsWith(".tar.gz") ? filename.slice(prefix.length, -7) : "";
 	if (!platformTargets[key]) fail("SBOM_PLATFORM_INVALID");
 	const binary = members.get(RELEASE_BINARY_NAME);
 	if (!binary) fail("SBOM_BINARY_MISSING");

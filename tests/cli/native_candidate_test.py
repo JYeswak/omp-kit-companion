@@ -88,7 +88,7 @@ class CandidateReceiptTests(unittest.TestCase):
         for platform in PLATFORMS:
             os_name, arch, libc = platform.split("-")
             directory = self.assets / ("candidate-" + platform)
-            filename = f"omp-kit-v{self.version}-{platform}.tar"
+            filename = f"omp-kit-v{self.version}-{platform}.tar.gz"
             archive = ("fixture archive " + platform).encode()
             (directory / filename).parent.mkdir(parents=True, exist_ok=True)
             (directory / filename).write_bytes(archive)

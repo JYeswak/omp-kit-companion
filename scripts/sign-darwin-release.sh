@@ -124,7 +124,7 @@ if [ -z "$selected" ]; then
 	exit 0
 fi
 read -r RUN_ID VERSION SOURCE TRAIN <<<"$selected"
-FILENAME="omp-kit-v$VERSION-$PLATFORM.tar"
+FILENAME="omp-kit-v$VERSION-$PLATFORM.tar.gz"
 say "cut v$VERSION source $SOURCE qualification $RUN_ID train $TRAIN"
 
 # 3. Fetch the qualified artifacts; each zip must hash to the digest GitHub recorded at upload.

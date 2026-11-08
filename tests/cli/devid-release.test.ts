@@ -2,6 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { gzipSync, gunzipSync } from "node:zlib";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 // DEVID-SIGN-V1 (docs/release-signing.md): CI attests the locally signed darwin archive only after
@@ -12,7 +13,7 @@ const ROOT = join(import.meta.dir, "..", "..");
 const TOOL = join(ROOT, "scripts", "devid_release.py");
 const VERSION = "1.2.3";
 const PLATFORM = "darwin-arm64-none";
-const FILENAME = `omp-kit-v${VERSION}-${PLATFORM}.tar`;
+const FILENAME = `omp-kit-v${VERSION}-${PLATFORM}.tar.gz`;
 const owned = ownedTmp("devid-release");
 const work = owned.path;
 afterAll(() => owned.cleanup());
@@ -89,7 +90,7 @@ function archive(files: Files, manifestFiles: Files = files): { tar: Buffer; man
 		if (bytes) parts.push(bytes, Buffer.alloc((512 - bytes.length % 512) % 512));
 	}
 	parts.push(Buffer.alloc(1024));
-	return { tar: Buffer.concat(parts), manifest };
+	return { tar: gzipSync(Buffer.concat(parts), { level: 6 }), manifest };
 }
 function index(tar: Buffer, manifest: Buffer): Buffer {
 	const asset = { arch: "arm64", filename: FILENAME, libc: "none", manifest_sha256: sha(manifest), os: "darwin", sha256: sha(tar) };
@@ -131,8 +132,8 @@ test("prepare, repack and verify derive a signed archive whose index changes onl
 	const repacked = tool(["repack", "--archive", q.archive, "--index", q.index, "--version", VERSION, "--signed-dir", join(dir, "signed"),
 		"--out-archive", signed, "--out-index", join(dir, "repack-index.json")]);
 	expect(repacked.code, repacked.stderr).toBe(0);
-	// Byte-for-byte what package-release.ts would emit for the signed binary.
-	expect(readFileSync(signed)).toEqual(archive(baseFiles(DEVID)).tar);
+	// Repacking preserves the same USTAR content as packaging; gzip headers may differ by runtime.
+	expect(gunzipSync(readFileSync(signed))).toEqual(gunzipSync(archive(baseFiles(DEVID)).tar));
 	const verified = verify(q, signed, ["--structural-only", "--signed-sha256", sha(readFileSync(signed)), "--index-out", join(dir, "final-index.json")]);
 	expect(verified.code, verified.stderr).toBe(0);
 	expect(JSON.parse(verified.stdout)).toMatchObject({ verified: "structural", archive_sha256: sha(readFileSync(signed)), signed: ["bin/omp-kit"] });

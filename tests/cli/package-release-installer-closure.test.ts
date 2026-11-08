@@ -78,7 +78,7 @@ beforeAll(async () => {
 		{ cwd: repo, env: { ...process.env, TMPDIR: out, OMP_KIT_TEST_WORK_ROOT: scratch.path, OMP_KIT_CASE_CWD: caseCwd }, deadline_s: fixtureDeadlineS(240) });
 	const decoder = new TextDecoder();
 	expect(packed.rc, decoder.decode(packed.stdout) + decoder.decode(packed.stderr)).toBe(0);
-	const archive = readdirSync(out).find(name => name.endsWith(".tar"))!;
+	const archive = readdirSync(out).find(name => name.endsWith(".tar.gz"))!;
 	extracted = join(scratch.path, "release");
 	mkdirSync(extracted);
 	expect(runSync(["tar", "-xf", join(out, archive), "-C", extracted], { cwd: scratch.path, deadline_s: fixtureDeadlineS(60) }).rc).toBe(0);

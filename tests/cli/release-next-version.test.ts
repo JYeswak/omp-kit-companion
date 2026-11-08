@@ -43,7 +43,7 @@ test("advance-only makes the same single advance commit as the full release stag
 test("advance-only unpublished tag or missing release asset or attestation refuses without metadata or ref writes", () => {
 	for (const missing of ["tag", "release", "linux-asset", "attestation"]) {
 		const { f, before } = publishedFixture(`advance-only-unpublished-${missing}`);
-		publishEvidence(f, missing === "linux-asset" ? "omp-kit-v1.2.4-linux-x64-gnu.tar" : "");
+		publishEvidence(f, missing === "linux-asset" ? "omp-kit-v1.2.4-linux-x64-gnu.tar.gz" : "");
 		if (missing === "tag") f.git(f.repo, "push", "-q", "origin", ":refs/tags/v1.2.4");
 		if (missing === "release") writeFileSync(join(f.work, "release.json"), '{"tagName":"v1.2.4","isDraft":true,"assets":[]}');
 		if (missing === "attestation") {

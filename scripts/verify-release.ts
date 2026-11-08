@@ -8,6 +8,7 @@
 //   verify-release.sh --sbom ARCHIVE.TAR.sbom.spdx.json --archive ARCHIVE.TAR
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 
 const fail = (reason: string): never => { throw new Error(reason); };
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -40,6 +41,10 @@ function verifySignature(pubkeyPath: string, filePath: string, sigPath: string):
 }
 
 function tarFiles(archive: Buffer): { path: string; bytes: Buffer }[] {
+	if (archive[0] === 0x1f && archive[1] === 0x8b) {
+		try { archive = gunzipSync(archive, { maxOutputLength: 256 * 1024 * 1024 }); }
+		catch { fail("TAR_UNREADABLE"); }
+	}
 	const members: { path: string; bytes: Buffer }[] = [];
 	for (let offset = 0; offset + 512 <= archive.length;) {
 		const block = archive.subarray(offset, offset + 512);

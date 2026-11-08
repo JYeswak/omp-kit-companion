@@ -376,7 +376,7 @@ def verified_source(source_sha):
 def asset_for(path, platform, version, directory):
     asset = load(path)
     os_name, arch, libc = platform.split("-")
-    expected = f"omp-kit-v{version}-{platform}.tar"
+    expected = f"omp-kit-v{version}-{platform}.tar.gz"
     if (set(asset) != {"os", "arch", "libc", "filename", "sha256", "manifest_sha256"}
             or (asset["os"], asset["arch"], asset["libc"], asset["filename"]) != (os_name, arch, libc, expected)
             or any(not isinstance(asset[key], str) or re.fullmatch("[0-9a-f]{64}", asset[key]) is None

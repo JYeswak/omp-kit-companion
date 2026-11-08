@@ -15,6 +15,7 @@ signature, and only the darwin digests of the release index change.
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -23,6 +24,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +78,12 @@ def installer_check(archive: Path, index: Path, version: str) -> tuple[dict[str,
 
 def tar_entries(data: bytes) -> tuple[list[tuple[bytes, str, bytes]], bytes]:
     """(header, name, body) per member in archive order, plus the terminator; headers are kept verbatim."""
+    if data.startswith(b"\x1f\x8b"):
+        decoder = zlib.decompressobj(31)
+        data = decoder.decompress(data, install.MAX_ARCHIVE + 1)
+        if len(data) > install.MAX_ARCHIVE or not decoder.eof or decoder.unused_data:
+            raise Refused("compressed archive exceeds limit or has trailing data")
+        data += decoder.flush(install.MAX_ARCHIVE + 1 - len(data))
     entries: list[tuple[bytes, str, bytes]] = []
     cursor = 0
     while cursor + 512 <= len(data):
@@ -289,6 +297,8 @@ def repack(args: argparse.Namespace) -> dict[str, Any]:
             header, body = header_with_size(header, len(replacement)), replacement
         output += header + body + bytes((512 - len(body) % 512) % 512)
     output += trailer
+    if args.out_archive.endswith(".tar.gz"):
+        output = gzip.compress(output, compresslevel=6, mtime=0)
     with open(args.out_archive, "xb") as stream:
         stream.write(output)
     index = derived_index(Path(args.index).read_bytes(), sha256(bytes(output)), sha256(new_manifest))

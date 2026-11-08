@@ -1,0 +1,2 @@
+- Release archives now use `.tar.gz` (gzip level 6), reducing upload and update download sizes; checksums, signing verification, SBOMs and provenance attest the compressed bytes actually published.
+- Installations on 0.2.101 or older must update through 0.2.102 or 0.2.103 before consuming gzip-only releases; the managed fleet already shares the 0.2.102 installation.

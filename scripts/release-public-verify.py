@@ -16,7 +16,7 @@ import pysafe
 
 def verify_archive(public: Path, platform: str, version: str, repo: str,
                    installer: str, cancelled: threading.Event) -> tuple[bool, str, str]:
-    archive = public / f"omp-kit-v{version}-{platform}.tar"
+    archive = public / f"omp-kit-v{version}-{platform}.tar.gz"
     output: list[str] = []
     errors: list[str] = []
 
