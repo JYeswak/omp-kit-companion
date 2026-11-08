@@ -55,7 +55,8 @@ stalelock_find_owner() {
 	return 1
 }
 # shellcheck disable=SC2317,SC2329 # reached through the EXIT/signal traps
-stalelock_ident() { stat -f '%i %z %m' "$1" 2>/dev/null || stat -c '%i %s %Y' "$1" 2>/dev/null; }
+# GNU stat first: on GNU, `stat -f` is filesystem status and succeeds with the wrong fields; BSD stat refuses -c.
+stalelock_ident() { stat -c '%i %s %Y' "$1" 2>/dev/null || stat -f '%i %z %m' "$1" 2>/dev/null; }
 # shellcheck disable=SC2317,SC2329 # reached through the EXIT/signal traps
 stalelock_reap_one() {
 	lf=$1
@@ -162,7 +163,7 @@ kitlib_tmp metadata_dir stale-worktree-facts || exit 1
 mtime_of() {
 	# $1 = worktree path; prints epoch mtime, or nothing when absent.
 	[ -e "$1" ] || return 0
-	stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || return 0
+	stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || return 0
 }
 
 # Capture the producer status before interpreting its output. A partial diff

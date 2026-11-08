@@ -215,8 +215,9 @@ function validateOwnerFieldsEx(seen: Record<string, string>): OwnerParseResult {
 		const missing = want.find(field => seen[field] === undefined) ?? "pid";
 		return { failure: { field: missing, problem: "is missing from the owner record" } };
 	}
-	if (!/^[1-9][0-9]{0,5}$/.test(seen.pid!))
-		return { failure: { field: "pid", problem: `is '${seen.pid}', want 1-6 digits with no leading zero` } };
+	// Linux pid_max reaches 4194304 (7 digits); macOS stays below 100000.
+	if (!/^[1-9][0-9]{0,6}$/.test(seen.pid!))
+		return { failure: { field: "pid", problem: `is '${seen.pid}', want 1-7 digits with no leading zero` } };
 	if (seat.length === 2 && (!AGENT_PATTERN.test(seen.agent!) || !SESSION_PATTERN.test(seen.session!))) {
 		const bad = !AGENT_PATTERN.test(seen.agent!) ? "agent" : "session";
 		return { failure: { field: bad, problem: `is '${seen[bad]}', want 1-64 chars of A-Za-z0-9._-` } };

@@ -131,7 +131,7 @@ def owner_fields(text: str) -> dict[str, str] | None:
         return None
     if keys - OPTIONAL not in (BASE, LEGACY):
         return None
-    if re.fullmatch(r"[1-9][0-9]{0,5}", fields["pid"]) is None:
+    if re.fullmatch(r"[1-9][0-9]{0,6}", fields["pid"]) is None:  # Linux pid_max reaches 4194304
         return None
     if SEAT <= keys and (re.fullmatch(NAME, fields["agent"]) is None
                         or re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z-]{7,63}", fields["session"]) is None):
