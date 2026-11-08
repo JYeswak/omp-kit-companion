@@ -1,0 +1,1 @@
+- A seat that Tern restores without `AGENT_NAME` (for example after a Tern daemon restart) now takes its name from its own pane's Agent Mail identity file when the plugin loads, so its writes are no longer refused with WRITE_OWN_NO_IDENTITY and no respawn is needed. A name that is already set is never replaced, and a pane bound to two names gets none.

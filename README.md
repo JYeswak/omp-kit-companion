@@ -16,7 +16,7 @@
 Current release: v0.2.102
 <!-- kit-release:end -->
 
-A tested rule pack, 12 guard extensions, five skills, and a guarded CLI for an
+A tested rule pack, 13 guard extensions, five skills, and a guarded CLI for an
 existing OMP install.
 
 ```sh
@@ -148,10 +148,11 @@ command it runs.
 
 ### Guard extensions
 
-The repo is an OMP plugin. `package.json` declares 12 extensions:
+The repo is an OMP plugin. `package.json` declares 13 extensions:
 
 | Extension | Hooks | Behavior |
 |---|---|---|
+| `kit-seat-identity.ts` | load | Sets unset `AGENT_NAME` from its pane identity |
 | `kit-guard-optin.ts` | `tool_call` | Loads the guard from `KIT_GUARD_SRC` for repos with `.omp/kit-guard.json`; a missing guard blocks every tool call |
 | `fleet-guard.ts` | `tool_call` | Always refuses in-place `plutil` and system-temp writes. Opt-in: home writes, source copies, branches/worktrees, writes without exclusive reservations, mail-guard bypasses and overlong reservations |
 | `kit-save-guard.ts` | session and tool hooks | Opt-in only: tracks session writes, reprompts at most twice for unsaved work, then warns. Never commits, stashes or pushes |
@@ -162,7 +163,6 @@ The repo is an OMP plugin. `package.json` declares 12 extensions:
 | `kit-callback.ts` | `agent_end` | Sends worker `DONE`/`BLOCKED` lines to the coordinator via `ntm send`; never blocks |
 | `secret-output-guard.ts` | `tool_call`, `tool_execution_end` | Redacts secret-shaped output; preserves safe metadata byte-identical |
 
-Installing the plugin loads the extensions declared in `package.json`.
 `omp-kit apply extensions` installs the defaults from `policy/extensions.json`
 into the profiles you select:
 
