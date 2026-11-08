@@ -4,6 +4,22 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.102] - 2026-11-08
+
+### Changed
+
+- Accept metadata-less provider abort messages only when their call identity and exact text match an authenticated native synthetic abort; retain execution rejection and print call-scoped interruption diagnostics.
+- Include bounded mock transcript and OMP output tails in live-scenario failure logs, preserving runtime error details when private CI captures are not uploaded.
+- The fleet upgrade notice now describes the native restart: the helper waits for the seat to go idle, restarts omp in place with `/restart` (same session and launch flags), and resumes the goal once if it was active; it no longer claims to press Esc.
+- Author handoff now accepts ~/.claude's own exact storegate GREEN marker, bound to the current hook and runtime; missing or pruned observations name its native verdict producer instead of a nonexistent companion command. Other repositories cannot borrow companion evidence.
+- Restored author handoff for repositories with their own complete GREEN fresh-gate observation for the exact source commit, even without a committed companion gate script; ~/.claude still requires its native storegate marker and rejects fresh-gate-only evidence.
+- The ~/.claude storegate handoff fixture gives its private HOME a `.bun/bin/bun` entry, because the storegate key's runtime check rebuilds PATH from `scripts/fixed-env.sh` under that HOME; on Linux CI bun lives under the runner's real HOME, so the fixture failed there.
+- Add `omp-kit ci wait --repo OWNER/REPO --sha SHA` to await completed workflow runs using shared-cache filesystem events, without GitHub requests or polling; supports workflow, since and deadline filters and reports cache age and the last matching run on timeout.
+- Reconcile the CI cache once after watcher startup so macOS cannot strand a wait when its first rename event is lost; this one-shot read is not a polling loop.
+- Published-release updates now fetch the release index first and download its platform archive, supporting both `.tar` and `.tar.gz` while refusing archives whose bytes do not match the indexed digest. Release packaging continues to emit `.tar` during the compatibility rollout.
+- Interrupted published-release polls reuse a verified index/archive pair without downloading it again, refresh its provenance bundle, and replace incomplete downloads using GitHub's overwrite flag.
+- Restore the cold-server configured check required by native LSP certification while preserving elapsed-bounded readiness checks; test the real probe against certification's required checks.
+
 ## [0.2.101] - 2026-11-08
 
 ### Changed
