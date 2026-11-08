@@ -217,6 +217,7 @@ omp-kit fleet respawn --json                 # plan: stale-plugin panes
 omp-kit scratch plan --json                  # reap report over scratch roots
 omp-kit scratch index-lock --repo DIR --json  # plan: stale index.lock verdict
 omp-kit ci status --json                     # cached CI, never calls GitHub
+omp-kit ci wait --repo OWNER/REPO --sha abc1234 --json # cache events; CI, since now, 3600 s
 omp-kit heavy --label cli-tests -- bun test tests/cli   # load-admitted, nice 10
 ```
 
@@ -502,6 +503,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit tern-ref` | `tern-ref build\|query\|validate\|drift [--root DIR]` | Version-pinned local Tern Plugin SDK reference: crawl docs, chunk `tern.d.luau` per member, index nomic+qwen, blind-label eval, isolated serve checks, drift re-index | `omp-kit tern-ref query --query 'restyle without rebuild'` |
 | `omp-kit infra` | `infra pin\|check\|promote\|undo\|upgrade-plan\|upgrade-verify` | Pin, test, promote toolchain; gate machine upgrades | `omp-kit infra pin --json` |
 | `omp-kit ci` | `ci status` | Cached CI status per repo; `UNAVAILABLE` when the cache is older than 180 s | `omp-kit ci status --json` |
+| `omp-kit ci wait` | `ci wait --repo OWNER/REPO --sha SHA [--workflow NAME] [--since ISO8601] [--timeout-s N]` | Cache events only; exits 0 success, 1 failure, 3 timeout with age and last row | `omp-kit ci wait --repo owner/repo --sha abc1234 --json` |
 | `omp-kit examples` | `examples [memory-off\|mnemopi-manual\|model-roles\|mcp\|omp-watch\|skill-set --from-history DAYS]` | Read-only profile recipes; never activates a profile | `omp-kit examples skill-set --from-history 7 --json` |
 | `omp-kit quickstart` | `quickstart` | Safe first commands and their limits | `omp-kit quickstart` |
 | `omp-kit help` | `help [TOPIC]` | Grammar for a command | `omp-kit help update` |

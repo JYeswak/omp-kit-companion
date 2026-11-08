@@ -1066,6 +1066,17 @@ export const COMMANDS: readonly Command[] = [
 	], example: "omp-kit fleet flush-pending --json", runnable: false, dataSchema: flushPendingData },
 	{ name: "ci", description: "Read-only CI status over tracked repos; never dispatches or reruns", usage: "ci status", flags: [], subcommands: [
 		{ name: "status", description: "Show cached CI status per repo; UNAVAILABLE when the cache is missing or stale", usage: "ci status", flags: [], example: "omp-kit ci status --json", runnable: false, dataSchema: ciStatusData },
+		{ name: "wait", description: "Wait for completed CI from shared cache filesystem events, never GitHub; exits 0 success, 1 non-success, 3 deadline with cache age and last row", usage: "ci wait --repo OWNER/REPO --sha SHA [--workflow NAME] [--since ISO8601] [--timeout-s N]", flags: [
+			{ name: "--repo", value: "OWNER/REPO", description: "Exact cached GitHub repository" },
+			{ name: "--sha", value: "SHA", description: "Commit SHA or hexadecimal prefix of at least 7 characters" },
+			{ name: "--workflow", value: "NAME", description: "Workflow name (default CI)" },
+			{ name: "--since", value: "ISO8601", description: "Minimum run updated_at (default command start)" },
+			{ name: "--timeout-s", value: "N", description: "Positive deadline in seconds (default 3600)" },
+		], example: "omp-kit ci wait --repo owner/repo --sha abc1234 --json", runnable: false,
+			dataSchema: { type: "object", required: ["overall", "repo", "sha", "workflow", "cache_age_ms", "last_row"], properties: {
+				overall: { enum: ["PASS", "FAIL", "UNAVAILABLE"] }, repo: { type: "string" }, sha: { type: "string" },
+				workflow: { type: "string" }, cache_age_ms: { type: ["number", "null"] }, last_row: { type: ["object", "null"] },
+			} } },
 	], example: "omp-kit ci status --json", runnable: false, dataSchema: ciStatusData },
 	{ name: "help", description: "Show grammar for a topic", usage: "help [TOPIC]", argument: "TOPIC", flags: [], example: "omp-kit help update", runnable: true, dataSchema: textData },
 	{ name: "completion", description: "Generate shell completion for documented grammar", usage: "completion bash|zsh|fish", flags: [], subcommands: [

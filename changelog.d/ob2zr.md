@@ -1,0 +1,1 @@
+- Add `omp-kit ci wait --repo OWNER/REPO --sha SHA` to await completed workflow runs using shared-cache filesystem events, without GitHub requests or polling; supports workflow, since and deadline filters and reports cache age and the last matching run on timeout.

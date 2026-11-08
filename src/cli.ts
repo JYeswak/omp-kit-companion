@@ -71,7 +71,7 @@ import { ExternalPackInputError, readExternalPackSnapshot, runExternalPackTest }
 import { runInstalledRuleReview } from "./rule-review-runner.ts";
 import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { matchesBounded } from "./regex-guards.ts";
- import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
+import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, waitForCi, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
 import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, fleetWatchLogPath, jobCodePrefix, launchdLoaded, resolveOperatorCommand, type OperatorCommand, type ServiceProgram } from "./service.ts";
@@ -4239,6 +4239,25 @@ registerCommandHandler("scratch index-lock", scratchIndexLockCommand);
 	return { code: data.overall === "OK" ? 0 : 3, data: { overall: data.overall, stale_after_ms: data.stale_after_ms, repos: data.repos }, verification: "UNVERIFIED" };
  }
  registerCommandHandler("ci status", ciStatusCommand);
+registerCommandHandler("ci wait", async (request) => {
+	const startedAt = Date.now();
+	const repo = request.flags.get("--repo");
+	const sha = request.flags.get("--sha");
+	const workflow = request.flags.get("--workflow") ?? "CI";
+	const since = request.flags.get("--since");
+	const timeout = request.flags.get("--timeout-s") ?? "3600";
+	if (typeof repo !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ||
+		typeof sha !== "string" || !/^[a-fA-F0-9]{7,40}$/.test(sha) ||
+		typeof workflow !== "string" || workflow.trim() === "" ||
+		typeof timeout !== "string" || !/^[0-9]+$/.test(timeout) || Number(timeout) <= 0 || Number(timeout) > 2147483 ||
+		(since !== undefined && (typeof since !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(since) || !Number.isFinite(Date.parse(since)))))
+		return refusal("INVALID_CI_WAIT", "ci wait requires --repo OWNER/REPO, --sha HEX (7–40), valid --since ISO8601 and positive --timeout-s (at most 2147483)", "Run omp-kit help ci.");
+	const stateRoot = receiptStateRoot();
+	if (stateRoot === null) return refusal("CI_STATE_UNAVAILABLE", "ci wait needs a canonical absolute HOME/state root", "Set canonical HOME and XDG_STATE_HOME.");
+	const data = await waitForCi(join(stateRoot, CACHE_NAME), { repo, sha, workflow,
+		sinceMs: typeof since === "string" ? Date.parse(since) : startedAt, timeoutMs: Number(timeout) * 1000 });
+	return { code: data.overall === "PASS" ? 0 : data.overall === "FAIL" ? 1 : 3, data, verification: "UNVERIFIED" };
+});
 async function fleetCommand(request: ParsedCommand): Promise<CliResult> {
 	if (request.command.name !== "flush-pending") return refusal("UNKNOWN_FLEET_COMMAND", `Unknown fleet subcommand: ${request.command.name}`, "Run omp-kit help fleet for exact grammar.");
 	const report = flushPending(liveFleetIo(), request.flags.has("--apply"));

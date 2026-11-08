@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
+import { mkdirSync, watch, type FSWatcher } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { basename, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 /**
  * ci-cache.ts — one shared CI poller and its cache (GH2).
@@ -290,4 +292,63 @@ export function readStatus(cache: CiCacheFile | null, nowMs: number): CiStatusDa
 	}
 	const overall = Object.values(repos).some(repo => repo.status === "UNAVAILABLE") ? "UNAVAILABLE" : "OK";
 	return { overall, stale_after_ms: STALE_AFTER_MS, repos };
+}
+
+export interface CiWaitOptions {
+	repo: string;
+	sha: string;
+	workflow: string;
+	sinceMs: number;
+	timeoutMs: number;
+}
+
+export interface CiWaitData {
+	overall: "PASS" | "FAIL" | "UNAVAILABLE";
+	repo: string;
+	sha: string;
+	workflow: string;
+	cache_age_ms: number | null;
+	last_row: CiRunRow | null;
+}
+
+/** Directory watching survives the poller's atomic rename. The sole timer is the deadline. */
+export function waitForCi(path: string, options: CiWaitOptions): Promise<CiWaitData> {
+	const { promise, resolve } = Promise.withResolvers<CiWaitData>();
+		let lastRow: CiRunRow | null = null;
+		let checkedAt: string | null = null;
+		let settled = false;
+		let watcher: FSWatcher | undefined;
+		let deadline: NodeJS.Timeout | undefined;
+		const finish = (overall: CiWaitData["overall"]) => {
+			if (settled) return;
+			settled = true;
+			watcher?.close();
+			clearTimeout(deadline);
+			const stamp = checkedAt === null ? Number.NaN : Date.parse(checkedAt);
+			resolve({ overall, repo: options.repo, sha: options.sha, workflow: options.workflow,
+				cache_age_ms: Number.isFinite(stamp) ? Date.now() - stamp : null, last_row: lastRow });
+		};
+		const read = () => {
+			const entry = readCacheFile(path)?.repos[options.repo];
+			if (entry === undefined) return;
+			checkedAt = entry.last_checked_at === undefined ? entry.fetched_at : entry.last_checked_at;
+			const rows = entry.runs.filter(row => row.sha.toLowerCase().startsWith(options.sha.toLowerCase()) && row.name === options.workflow);
+			const row = rows.sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0];
+			if (row === undefined) return;
+			lastRow = row;
+			if (row.status === "completed" && Date.parse(row.updated_at) >= options.sinceMs)
+				finish(row.conclusion === "success" ? "PASS" : "FAIL");
+		};
+		try {
+			mkdirSync(dirname(path), { recursive: true });
+			watcher = watch(dirname(path), (_event, filename) => {
+				if (filename === null || filename.toString() === basename(path)) read();
+			});
+			watcher.on("error", () => { watcher?.close(); });
+		} catch {
+			// A missing/unwatchable state root is reported at the same deadline.
+		}
+		deadline = setTimeout(() => finish("UNAVAILABLE"), options.timeoutMs);
+		read();
+	return promise;
 }
