@@ -122,12 +122,12 @@ gate_no_auto_flush=0; gate_no_auto_import=0; gate_unsafe_export_mode=0
  				--db) gate_db="next" ;;
  			esac ;;
 		-s) gate_status="next" ;;
-		-d|--description|--body|--description-file|--design|--acceptance-criteria|--acceptance|--prerequisites|--check-acceptance|--uncheck-acceptance|--add-acceptance|--append-notes|-p|--priority|-t|--type|--assignee|--owner|--if-unchanged|--due|--defer|--estimate|--add-label|--remove-label|--set-labels|--labels|--parent|--external-ref|--source-repo|--source-repo-path|--agent-context|--session|--agent-name|--harness|--model)
+		-d|--description|--body|--description-file|--design|--acceptance-criteria|--acceptance|--prerequisites|--check-acceptance|--uncheck-acceptance|--add-acceptance|-p|--priority|-t|--type|--assignee|--owner|--if-unchanged|--due|--defer|--estimate|--add-label|--remove-label|--set-labels|--labels|--parent|--external-ref|--source-repo|--source-repo-path|--agent-context|--session|--agent-name|--harness|--model)
 			gate_skip=1 ;;
-		--actor|--author|--lock-timeout|-m|--message|--content|--comment|--reason|-r|--transition-comment|--notes|--title|-f|--file)
+		--actor|--author|--lock-timeout|-m|--message|--content|--comment|--reason|-r|--transition-comment|--notes|--append-notes|--title|-f|--file)
  			gate_skip=1
  			case "$gate_arg" in
-				-m|--message|--content|--comment|--reason|-r|--notes) gate_want_reason=1 ;;
+				-m|--message|--content|--comment|--reason|-r|--notes|--append-notes) gate_want_reason=1 ;;
 				-f|--file) gate_want_file=1 ;;
  				--transition-comment) gate_want_tcomment=1 ;;
  			esac ;;
@@ -137,12 +137,12 @@ gate_no_auto_flush=0; gate_no_auto_import=0; gate_unsafe_export_mode=0
 				--file=*) gate_file_form="--file="; gate_file_path=${gate_arg#--file=} ;;
 				*) gate_file_form="-f"; gate_file_path=${gate_arg#-f} ;;
 			esac ;;
-		--actor=*|--author=*|--lock-timeout=*|--db=*|--status=*|-m*|--message=*|--content=*|--comment=*|--reason=*|--notes=*|--transition-comment=*)
+		--actor=*|--author=*|--lock-timeout=*|--db=*|--status=*|-m*|--message=*|--content=*|--comment=*|--reason=*|--notes=*|--append-notes=*|--transition-comment=*)
  			case "$gate_arg" in
  				--status=*) gate_status="${gate_arg#--status=}" ;;
  				--db=*) gate_db="${gate_arg#--db=}" ;;
  				--transition-comment=*) gate_tcomment="${gate_arg#--transition-comment=}" ;;
-				-m*|--message=*|--content=*|--comment=*|--reason=*|--notes=*) gate_reason="${gate_arg#*=}"; gate_reason="${gate_reason#-m}" ;;
+				-m*|--message=*|--content=*|--comment=*|--reason=*|--notes=*|--append-notes=*) gate_reason="${gate_arg#*=}"; gate_reason="${gate_reason#-m}" ;;
  			esac ;;
  		--claim) gate_claim=1 ;;
 		--no-auto-flush) gate_no_auto_flush=1 ;;

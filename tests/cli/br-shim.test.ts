@@ -459,8 +459,8 @@ esac
 		}));
 		writeFileSync(join(tracker, ".beads/issues.jsonl"), beads.map(b => JSON.stringify(b)).join("\n") + "\n");
 		await br(["sync", "--import-only", "--actor", "HandoffAuthor"]);
-		const shim = (args: string[], input?: string) => run(["sh", join(root, "scripts/br-shim.sh"), "--db", db, ...args], {
-			cwd: code, env, deadline_s: fixtureDeadlineS(30), max_output_bytes: 4 << 20,
+		const shim = (args: string[], input?: string, cwd = code) => run(["sh", join(root, "scripts/br-shim.sh"), "--db", db, ...args], {
+			cwd, env, deadline_s: fixtureDeadlineS(30), max_output_bytes: 4 << 20,
 			...(input === undefined ? {} : { stdin: input }),
 		});
 		const status = async (id = "hh-owned") => {
@@ -468,14 +468,14 @@ esac
 			return (Array.isArray(values) ? values[0] : values).status;
 		};
 		const comments = async () => JSON.parse(await br(["comments", "list", "hh-owned", "--json"]));
-		const green = () => {
+		const ledger = (rc = 0, observedCommit = commit, complete = true) => {
 			const dir = join(code, ".git/omp-kit");
 			mkdirSync(dir, { recursive: true });
 			writeFileSync(join(dir, "fresh-gate-runs.jsonl"), JSON.stringify({
-				version: 2, commit, rc: 0, evidence: { complete: true },
+				version: 2, commit: observedCommit, rc, evidence: { complete },
 			}) + "\n");
 		};
-		return { scratch, tracker, code, commit, shim, status, comments, green, checked, br, env,
+		return { scratch, tracker, code, commit, shim, status, comments, ledger, checked, br, env,
 			done: `DONE ${code}@${commit}: exact native source observation` };
 	} catch (error) {
 		scratch.cleanup();
@@ -506,10 +506,54 @@ test("HANDOFFREPO1 companion still requires its ledger even if its committed scr
 		expect(refused.rc).toBe(4);
 		expect(decoder.decode(refused.stderr)).toContain("sh scripts/fresh-gate.sh");
 		expect(await f.status()).toBe("in_progress");
-		f.green();
+		f.ledger();
 		const control = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
 		expect(control.rc, decoder.decode(control.stderr)).toBe(0);
 		expect(await f.status()).toBe("in_review");
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1_000);
+
+test.each(["separate", "equals"] as const)(
+	"HANDOFFSOURCE1 tracker-cwd review reads the %s append-notes DONE source and requires its exact complete GREEN row",
+	async (form: "separate" | "equals") => {
+		const f = await handoffRepo(true);
+		try {
+			const notes = form === "separate" ? ["--append-notes", f.done] : [`--append-notes=${f.done}`];
+			const handoff = () => f.shim(["update", "hh-owned", "--status", "in_review", ...notes], undefined, f.tracker);
+			const before = await f.comments();
+			const missing = await handoff();
+			expect(decoder.decode(missing.stderr)).toContain(`${f.code}@${f.commit}`);
+			expect(missing.rc).toBe(4);
+			expect(await f.status()).toBe("in_progress");
+			for (const [rc, observedCommit, complete] of [
+				[1, f.commit, true], [0, "f".repeat(40), true], [0, f.commit, false],
+			] as const) {
+				f.ledger(rc, observedCommit, complete);
+				const refused = await handoff();
+				expect(refused.rc, decoder.decode(refused.stderr)).toBe(4);
+				expect(decoder.decode(refused.stderr)).toContain(`${f.code}@${f.commit}`);
+				expect(await f.status()).toBe("in_progress");
+			}
+			expect(await f.comments()).toEqual(before);
+			f.ledger();
+			const admitted = await handoff();
+			expect(admitted.rc, decoder.decode(admitted.stderr)).toBe(0);
+			expect(await f.status()).toBe("in_review");
+			const bead = JSON.parse(await f.br(["show", "hh-owned", "--json"]));
+			expect((Array.isArray(bead) ? bead[0] : bead).notes).toContain(f.done);
+		} finally { f.scratch.cleanup(); }
+	}, fixtureDeadlineS(120) * 1_000,
+);
+
+test("HANDOFFSOURCE1 a GREEN source ledger cannot admit review without a DONE source", async () => {
+	const f = await handoffRepo(true);
+	try {
+		f.ledger();
+		const result = await f.shim(["update", "hh-owned", "--status", "in_review", "--append-notes",
+			"Implementation evidence without a source claim"], undefined, f.tracker);
+		expect(result.rc).toBe(4);
+		expect(decoder.decode(result.stderr)).toContain("HANDOFF_UNGATED");
+		expect(await f.status()).toBe("in_progress");
 	} finally { f.scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1_000);
 
