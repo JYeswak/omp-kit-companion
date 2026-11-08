@@ -1489,7 +1489,8 @@ describe("BRIEFREPOWORD1 pasted brief text never names a target", () => {
 		expect(briefTargets(input.context, cfs).sort()).toEqual([cfs, companion].sort());
 	});
 
-	test("BRIEFREPOWORD1 planted: the live CFS and companion briefs are admitted when those checkouts exist", async () => {
+	// This operator-checkout integration requires a source checkout, not a git archive export.
+	test.skipIf(!existsSync(join(import.meta.dir, "..", ".git")))("BRIEFREPOWORD1 planted: the live CFS and companion briefs are admitted when those checkouts exist", async () => {
 		const live = ["/Users/josh/Developer/clutterfreespaces.ios", "/Users/josh/Developer/omp-kit-companion"].filter(path => existsSync(join(path, ".git")));
 		if (live.length < 2) return;
 		const briefs = await Promise.all(live.map(async path => renderBrief(await briefContract(path))));
