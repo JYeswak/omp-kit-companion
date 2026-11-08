@@ -1,14 +1,23 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { COMMANDS } from "../../src/commands.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { CACHE_NAME, STALE_AFTER_MS, pollRepos, readStatus, type CiCacheFile, type CiFetchResponse } from "../../src/ci-cache.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const roots: string[] = [];
 const savedApi = process.env.OMP_KIT_GITHUB_API;
 const savedRepos = process.env.OMP_KIT_CI_REPOS;
+const credentialEnv = ["GITHUB_TOKEN", "GH_TOKEN", "PATH"] as const;
+const savedCredentialEnv = Object.fromEntries(credentialEnv.map(key => [key, process.env[key]]));
+beforeEach(() => { process.env.GITHUB_TOKEN = "ci-poller-fixture-token"; });
 afterEach(() => {
+	for (const key of credentialEnv) {
+		if (savedCredentialEnv[key] === undefined) delete process.env[key];
+		else process.env[key] = savedCredentialEnv[key];
+	}
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 	if (savedApi === undefined) delete process.env.OMP_KIT_GITHUB_API;
 	else process.env.OMP_KIT_GITHUB_API = savedApi;
@@ -39,6 +48,64 @@ function fakeFetch(plan: FakePlan, nowMs: number) {
 		return { status: 200, headers: { etag: plan.etag }, json: async () => jsonBody };
 	} };
 }
+
+function fakeGh(exitCode: number) {
+	const root = ownedTmp("ci-auth", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
+	roots.push(root);
+	const bin = join(root, "bin");
+	mkdirSync(bin);
+	const token = "ciauth-fake-only";
+	writeFileSync(join(bin, "gh"), `#!/bin/sh\n[ "$1 $2" = "auth token" ] || exit 2\nprintf '%s\\n' '${token}'\nexit ${exitCode}\n`);
+	chmodSync(join(bin, "gh"), 0o755);
+	delete process.env.GITHUB_TOKEN;
+	delete process.env.GH_TOKEN;
+	process.env.PATH = `${bin}:${savedCredentialEnv.PATH ?? ""}`;
+	return { root, token };
+}
+
+test("gh credential authenticates every poll without leaking into persisted cache or result", async () => {
+	const { root, token } = fakeGh(0);
+	const cache: CiCacheFile = { version: 1, repos: {} };
+	let requests = 0;
+	const result = await pollRepos({ nowMs: 1_000_000, fetch: async (_url, headers) => {
+		// Boolean assertion keeps even failure diagnostics free of the credential.
+		expect(headers.Authorization === `Bearer ${token}`).toBe(true);
+		requests++;
+		return { status: 200, headers: {}, json: async () => ({ workflow_runs: [] }) };
+	} }, cache, ["o/private", "o/public"]);
+	expect(requests).toBe(2);
+	const path = join(root, CACHE_NAME);
+	writeFileSync(path, JSON.stringify(cache));
+	expect(readFileSync(path, "utf8").includes(token)).toBe(false);
+	expect(JSON.stringify(result).includes(token)).toBe(false);
+	const failed = await pollRepos({ nowMs: 2_000_000, fetch: async () => {
+		throw new Error(`request rejected: Bearer ${token}`);
+	} }, cache, ["o/private"]);
+	writeFileSync(path, JSON.stringify(cache));
+	expect(readFileSync(path, "utf8").includes(token)).toBe(false);
+	expect(JSON.stringify(failed).includes(token)).toBe(false);
+	expect(cache.repos["o/private"]?.source).toContain("[REDACTED]");
+}, fixtureDeadlineS() * 1000);
+
+test("missing gh credential makes zero requests and names the remedy for every repository", async () => {
+	fakeGh(1);
+	const cache: CiCacheFile = { version: 1, repos: {} };
+	let requests = 0;
+	const result = await pollRepos({ nowMs: 1_000_000, fetch: async () => {
+		requests++;
+		return { status: 200, headers: {}, json: async () => ({ workflow_runs: [] }) };
+	} }, cache, ["o/private", "o/public"]);
+	expect(requests).toBe(0);
+	expect(result.requestsMade).toBe(0);
+	expect(result.backoffUntilMs).toBeNull();
+	for (const repo of ["o/private", "o/public"]) {
+		expect(result.repos[repo]?.status).toBe("UNAVAILABLE");
+		expect(readStatus(cache, 1_000_000).repos[repo]?.status).toBe("UNAVAILABLE");
+		expect(cache.repos[repo]?.source).toContain("missing GitHub credential");
+		expect(cache.repos[repo]?.source).toContain("gh auth login or set GH_TOKEN");
+		expect(cache.repos[repo]?.backoff_until_ms).toBeNull();
+	}
+}, fixtureDeadlineS() * 1000);
 
 test("a 200 stores rows with fetched_at and source, and the etag is reused", async () => {
 	const plan: FakePlan = { etag: '"v1"', seen: [] };

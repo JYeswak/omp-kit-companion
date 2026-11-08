@@ -1,0 +1,1 @@
+- Shared CI polling now uses your `gh auth login` credential when token environment variables are absent. Without credentials it reports UNAVAILABLE with a login remedy instead of making anonymous requests or consuming rate-limit backoff.

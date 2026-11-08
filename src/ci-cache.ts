@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { basename, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
+import { run } from "./kitlib/run.ts";
 /**
  * ci-cache.ts — one shared CI poller and its cache (GH2).
  *
@@ -117,11 +118,22 @@ export function ciApiBase(): string {
 	return "https://api.github.com";
 }
 
-export function ciToken(): string | null {
+export async function ciToken(): Promise<string | null> {
 	for (const key of ["GITHUB_TOKEN", "GH_TOKEN"]) {
 		const value = process.env[key];
 		if (value !== undefined && value !== "") return value;
 	}
+	try {
+		const gh = Bun.which("gh", { PATH: process.env.PATH ?? "" });
+		if (gh === null) return null;
+		const credential = await run([gh, "auth", "token"], {
+			deadline_s: 5, max_output_bytes: 4096, env: { ...process.env },
+		});
+		if (credential.rc === 0 && !credential.truncated && !credential.timed_out) {
+			const token = new TextDecoder().decode(credential.stdout).trim();
+			if (token !== "") return token;
+		}
+	} catch { /* Missing gh or unavailable credentials: never expose command output. */ }
 	return null;
 }
 
@@ -178,7 +190,7 @@ export function readCacheFile(path: string): CiCacheFile | null {
 export async function pollRepos(deps: CiPollDeps, cache: CiCacheFile, repos: readonly (string | CiRepoTarget)[]): Promise<CiPollResult> {
 	const nowMs = deps.nowMs ?? Date.now();
 	const nowIso = new Date(nowMs).toISOString();
-	const token = ciToken();
+	const token = await ciToken();
 	const base = ciApiBase();
 	const result: CiPollResult = { requestsMade: 0, backoffUntilMs: null, repos: {} };
 	for (const input of repos) {
@@ -192,6 +204,14 @@ export async function pollRepos(deps: CiPollDeps, cache: CiCacheFile, repos: rea
 			continue;
 		}
 		const previous = cache.repos[repo];
+		if (token === null) {
+			cache.repos[repo] = { etag: previous?.etag ?? null, fetched_at: previous?.fetched_at ?? nowIso,
+				last_checked_at: preservedLastCheckedAt(previous),
+				source: "error:missing GitHub credential; run gh auth login or set GH_TOKEN",
+				backoff_until_ms: null, backoff_reason: null, runs: previous?.runs ?? [] };
+			result.repos[repo] = { status: "UNAVAILABLE", runs: cache.repos[repo].runs.length };
+			continue;
+		}
 		if (previous?.backoff_until_ms !== null && previous?.backoff_until_ms !== undefined && previous.backoff_until_ms > nowMs) {
 			result.repos[repo] = { status: "BACKOFF", runs: previous.runs.length };
 			result.backoffUntilMs = Math.max(result.backoffUntilMs ?? 0, previous.backoff_until_ms);
@@ -206,7 +226,7 @@ export async function pollRepos(deps: CiPollDeps, cache: CiCacheFile, repos: rea
 		} catch (error) {
 			cache.repos[repo] = { etag: previous?.etag ?? null, fetched_at: previous?.fetched_at ?? nowIso,
 				last_checked_at: preservedLastCheckedAt(previous),
-				source: `error:${error instanceof Error ? error.message : String(error)}`, backoff_until_ms: null, backoff_reason: null, runs: previous?.runs ?? [] };
+				source: `error:${(error instanceof Error ? error.message : String(error)).replaceAll(token, "[REDACTED]")}`, backoff_until_ms: null, backoff_reason: null, runs: previous?.runs ?? [] };
 			result.repos[repo] = { status: "ERROR", runs: cache.repos[repo].runs.length };
 			continue;
 		}
