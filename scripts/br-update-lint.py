@@ -61,7 +61,10 @@ is already decoded here; no eval or recovery is performed. Review entry needs
 a source claim; positional, flag, file and stdin DONE comments are gated too.
 Repositories that declare fresh-gate.sh keep the bounded ledger requirement:
 the latest matching version-2 observation needs integer rc=0 and complete
-evidence. Missing or invalid proof fails closed.
+evidence. HANDOFFREPO1 consumes ~/.claude's own storegate-pass marker, keyed
+by tree, first parent, current hook blob and suite-metrics runtime. Queue
+success, JSON verdicts and skipped gates are not GREEN. Other repositories
+without a supported declared gate fail closed; evidence is never borrowed.
 
 Reads are live (`br show`, `br list`); no JSONL flush is involved, so a
 fixed bead passes immediately (LINTGATE1 acceptance 2).
@@ -431,13 +434,60 @@ def _fresh_green(repo: str, commit: str) -> bool:
 def handoff_gate(argv: list[str]) -> int:
     if len(argv) < 3 or argv[0] not in ("0", "1"):
         print("br-shim: HANDOFF_UNGATED incomplete admission request; "
-              "run in the source checkout: sh scripts/fresh-gate.sh --commit <sha>", file=sys.stderr)
+              "identify the source checkout with: git rev-parse --show-toplevel", file=sys.stderr)
         return 4
     return _handoff_check(argv[0] == "1", argv[1:3], argv[3:])
 
 
+def _handoff_kind(repo: str) -> str:
+    if repo == os.path.realpath(Path.home() / ".claude"):
+        return "storegate"
+    rc, _, _ = run(["git", "-C", repo, "cat-file", "-e",
+                    "HEAD:scripts/fresh-gate.sh"], repo, 10)
+    return "companion" if rc == 0 else "unknown"
+
+
+def _storegate_green(repo: str, commit: str) -> bool:
+    """Consume only the native marker, with exactly the producer's current key."""
+    hook = Path(repo) / ".githooks/hooks.d/pre-push/10-pre-push"
+    metrics = Path.home() / "Developer/omp-kit-companion/scripts/suite-metrics.py"
+    inputs = [
+        ["git", "-C", repo, "rev-parse", "--absolute-git-dir"],
+        ["git", "-C", repo, "rev-parse", "-q", "--verify", f"{commit}^{{tree}}"],
+        ["git", "-C", repo, "rev-parse", "-q", "--verify", f"{commit}^"],
+        ["git", "-C", repo, "hash-object", "--", str(hook)],
+        ["python3", str(metrics), "runtime"],
+    ]
+    values = []
+    for cmd in inputs:
+        rc, out, _ = run(cmd, repo, 10)
+        if rc != 0 or not out.strip():
+            return False
+        values.append(out.strip())
+    directory, tree, parent, hook_id, runtime = values
+    payload = f"storegate-v2\n{tree}\n{parent}\n{hook_id}\n{runtime}\n".encode()
+    result = kitlib_run.run(["git", "-C", repo, "hash-object", "--stdin"],
+                            cwd=repo, deadline_s=10, stdin=payload,
+                            max_output_bytes=4096)
+    if result.rc != 0 or result.timed_out or result.truncated:
+        return False
+    key = result.stdout.decode().strip()
+    return bool(key) and (Path(directory) / "omp-kit/storegate-pass" / key).is_file()
+
+
 def _handoff_remedy(repo: str, target: str) -> str:
-    return f"cd {shlex.quote(repo)} && sh scripts/fresh-gate.sh --commit {target}"
+    kind = _handoff_kind(repo)
+    if kind == "storegate":
+        command = "python3 .githooks/hooks.d/pre-push/storegate-verdict.py"
+        if (Path(repo) / ".githooks/hooks.d/pre-push/storegate-verdict.py").is_file():
+            return f"cd {shlex.quote(repo)} && {command} queue {shlex.quote(target)}"
+    elif kind == "companion" and (Path(repo) / "scripts/fresh-gate.sh").is_file():
+        return f"cd {shlex.quote(repo)} && sh scripts/fresh-gate.sh --commit {shlex.quote(target)}"
+    for hook in (".githooks/hooks.d/pre-push/10-pre-push", ".githooks/pre-push"):
+        if (Path(repo) / hook).is_file():
+            return (f"no supported GREEN observation; declared gate: "
+                    f"cd {shlex.quote(repo)} && bash {shlex.quote(hook)}")
+    return "no declared gate exists in this repository"
 
 
 def _handoff_claim(repo: str, subject: str, request: list[str]) -> int:
@@ -447,7 +497,9 @@ def _handoff_claim(repo: str, subject: str, request: list[str]) -> int:
         rc, out, _ = run(["git", "-C", repo, "rev-parse", "--verify", f"{subject}^{{commit}}"], repo, 10)
         if rc == 0:
             commit = out.strip()
-    if commit and _fresh_green(repo, commit):
+    kind = _handoff_kind(repo)
+    if commit and ((kind == "companion" and _fresh_green(repo, commit))
+                   or (kind == "storegate" and _storegate_green(repo, commit))):
         return 0
     target = commit or subject or "<sha>"
     remedy = _handoff_remedy(repo, target)
@@ -506,7 +558,7 @@ def handoff_file(argv: list[str]) -> int:
             return rc
     except (OSError, UnicodeError, ValueError) as error:
         print(f"br-shim: HANDOFF_UNGATED comment input could not be verified: {error}; "
-              "run in the source checkout: sh scripts/fresh-gate.sh --commit <sha>", file=sys.stderr)
+              "identify the source checkout with: git rev-parse --show-toplevel", file=sys.stderr)
         return 4
 
 

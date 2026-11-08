@@ -398,10 +398,10 @@ esac
 const HANDOFF_AC = "- [x] [a] [build] preserve the source payload; reject a missing payload `sh tests/replay.sh` -> rc 0";
 
 /** Native Git and tracker state; only the optional external mail transport is a protocol fixture. */
-async function handoffRepo(companion = false) {
+async function handoffRepo(companion = false, storegate = false) {
 	const scratch = ownedTmp("handoff-repo-native");
 	const tracker = join(scratch.path, "tracker");
-	const code = join(scratch.path, "source @ quoted'path");
+	const code = join(scratch.path, storegate ? ".claude" : "source @ quoted'path");
 	const bin = join(scratch.path, "bin");
 	const origin = join(scratch.path, "origin.git");
 	const backend = nativeBr();
@@ -440,6 +440,15 @@ esac
 		if (companion) {
 			mkdirSync(join(code, "scripts"));
 			writeFileSync(join(code, "scripts/fresh-gate.sh"), "#!/bin/sh\nexit 97\n");
+		}
+		if (storegate) {
+			mkdirSync(join(scratch.path, "Developer"));
+			symlinkSync(root, join(scratch.path, "Developer/omp-kit-companion"));
+			mkdirSync(join(code, ".githooks/hooks.d/pre-push"), { recursive: true });
+			writeFileSync(join(code, ".githooks/hooks.d/pre-push/10-pre-push"), "#!/bin/bash\nexit 0\n");
+			writeFileSync(join(code, ".githooks/hooks.d/pre-push/storegate-verdict.py"), "raise SystemExit(0)\n");
+			await checked(["git", "-C", code, "commit", "--allow-empty", "-qm", "source parent"]);
+			await checked(["git", "-C", code, "add", ".githooks"]);
 		}
 		await checked(["git", "-C", code, "add", "payload.txt", "tests", ...(companion ? ["scripts"] : [])]);
 		await checked(["git", "-C", code, "commit", "-qm", "owned source fixture", "-m", "Agent: HandoffAuthor"]);
@@ -483,15 +492,16 @@ esac
 	}
 }
 
-test("HANDOFFREPO1 missing observation refuses without mutation and names the exact source fresh-gate check", async () => {
+test("HANDOFFREPO1 unknown repo refuses without mutation and never borrows a companion ledger", async () => {
 	const f = await handoffRepo();
 	try {
 		const before = await f.comments();
+		f.ledger();
 		const result = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
 		const out = decoder.decode(result.stderr);
 		expect(result.rc).toBe(4);
 		expect(out).toContain("HANDOFF_UNGATED");
-		expect(out).toContain(`sh scripts/fresh-gate.sh --commit ${f.commit}`);
+		expect(out).toContain("no declared gate exists");
 		expect(out).toContain(`${f.code}@${f.commit}`);
 		expect(await f.status()).toBe("in_progress");
 		expect(await f.comments()).toEqual(before);
@@ -504,11 +514,47 @@ test("HANDOFFREPO1 companion still requires its ledger even if its committed scr
 		unlinkSync(join(f.code, "scripts/fresh-gate.sh"));
 		const refused = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
 		expect(refused.rc).toBe(4);
-		expect(decoder.decode(refused.stderr)).toContain("sh scripts/fresh-gate.sh");
+		expect(decoder.decode(refused.stderr)).toContain("no declared gate exists");
 		expect(await f.status()).toBe("in_progress");
 		f.ledger();
 		const control = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
 		expect(control.rc, decoder.decode(control.stderr)).toBe(0);
+		expect(await f.status()).toBe("in_review");
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1_000);
+
+test("HANDOFFREPO1 native storegate requires the exact current marker, not queue success or JSON PASS", async () => {
+	const f = await handoffRepo(false, true);
+	try {
+		const handoff = () => f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
+		const missing = await handoff();
+		expect(missing.rc).toBe(4);
+		expect(decoder.decode(missing.stderr)).toContain(`python3 .githooks/hooks.d/pre-push/storegate-verdict.py queue ${f.commit}`);
+		await f.checked(["python3", ".githooks/hooks.d/pre-push/storegate-verdict.py", "queue", f.commit], f.code);
+		f.ledger();
+		const dir = join(f.code, ".git/omp-kit/storegate-pass");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "verdict.json"), '{"verdict":"PASS"}\n');
+		expect((await handoff()).rc).toBe(4);
+		const tree = await f.checked(["git", "-C", f.code, "rev-parse", `${f.commit}^{tree}`]);
+		const parent = await f.checked(["git", "-C", f.code, "rev-parse", `${f.commit}^`]);
+		const hook = await f.checked(["git", "-C", f.code, "hash-object", ".githooks/hooks.d/pre-push/10-pre-push"]);
+		const runtime = await f.checked(["python3", join(root, "scripts/suite-metrics.py"), "runtime"]);
+		const payload = `storegate-v2\n${tree}\n${parent}\n${hook}\n${runtime}\n`;
+		const hashed = await run(["git", "-C", f.code, "hash-object", "--stdin"], {
+			env: f.env, stdin: payload, deadline_s: fixtureDeadlineS(30), max_output_bytes: 4096,
+		});
+		expect(hashed.rc).toBe(0);
+		const marker = join(dir, decoder.decode(hashed.stdout).trim());
+		writeFileSync(marker, "");
+		writeFileSync(join(f.code, ".githooks/hooks.d/pre-push/10-pre-push"), "#!/bin/bash\nexit 0\n# changed\n");
+		expect((await handoff()).rc).toBe(4);
+		writeFileSync(join(f.code, ".githooks/hooks.d/pre-push/10-pre-push"), "#!/bin/bash\nexit 0\n");
+		unlinkSync(marker);
+		expect((await handoff()).rc).toBe(4);
+		writeFileSync(marker, "");
+		const green = await handoff();
+		expect(green.rc, decoder.decode(green.stderr)).toBe(0);
 		expect(await f.status()).toBe("in_review");
 	} finally { f.scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1_000);
