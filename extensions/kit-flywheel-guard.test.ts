@@ -10,6 +10,8 @@ import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { run, runSync } from "../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "../tests/cli/fixture-process.ts";
 import { briefContract, briefTargets, checkTaskBrief, renderBrief } from "../src/brief.ts";
+import { check as checkRetiredTaskReservation, clearReservationCache } from "../src/fleet-guard/reservations.ts";
+import { judge } from "../src/verify.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -1689,6 +1691,38 @@ describe("RETIREGUARD1 legitimate work", () => {
 		const failed = await run([process.execPath, "-e", "process.exit(7)"], { deadline_s: 10, max_output_bytes: 1024 });
 		expect(failed.rc).toBe(7);
 	});
+	for (const mode of ["failure", "deadline", "cancel"] as const) {
+		test(`owned job FAIL plant: ${mode} is terminal and reaps its descendants`, async () => {
+			const controller = new AbortController();
+			const cancellation = new Error("RETIREGUARD1 owning-session cancellation");
+			let pids: number[] = [];
+			const pending = run(["/bin/sh", "-c", 'sleep 3 & echo "$$ $!"; if [ "$1" = failure ]; then exit 7; fi; wait', "retire-plant", mode], {
+				deadline_s: mode === "deadline" ? fixtureDeadlineS(0.2) : fixtureDeadlineS(10),
+				grace_s: 0.05, max_output_bytes: 1024, signal: controller.signal,
+				on_output: (stream, chunk) => {
+					if (stream !== "stdout") return;
+					pids = new TextDecoder().decode(chunk).trim().split(" ").map(Number);
+					if (mode === "cancel") controller.abort(cancellation);
+				},
+			});
+			if (mode === "cancel") await expect(pending).rejects.toBe(cancellation);
+			else {
+				const result = await pending;
+				expect(result.rc).not.toBe(0);
+				expect(result.rc).not.toBeNull();
+				expect(result.timed_out).toBe(mode === "deadline");
+				if (mode === "failure") expect(result.rc).toBe(7);
+			}
+			expect(pids).toHaveLength(2);
+			for (const pid of pids) {
+				expect(Number.isSafeInteger(pid) && pid > 1).toBe(true);
+				// A reparented zombie has terminated; a live descendant is an orphan.
+				const ps = await runFixtureAsync(["ps", "-o", "stat=", "-p", String(pid)], { cwd: base });
+				const states = new TextDecoder().decode(ps.stdout).trim();
+				expect(states === "" || states.startsWith("Z")).toBe(true);
+			}
+		});
+	}
 	test("prior art is not a close password; incomplete acceptance still refuses", async () => {
 		const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Verifier" }, respond: brTable({
 			"kit-fix": { code: 0, stdout: JSON.stringify([{ id: "kit-fix", status: "in_review",
@@ -1696,6 +1730,24 @@ describe("RETIREGUARD1 legitimate work", () => {
 		}) });
 		expect(await toolCall(h, base, 'br close kit-fix --reason "bun test -> 8 passed"')).toBeUndefined();
 		expect((await toolCall(h, base, 'br close kit-fix --reason "acceptance not run"'))?.reason).toContain("NARROW_CLOSE_REFUSED");
+	});
+	test("prior art FAIL plant: incompatible copied implementation fails real consumer acceptance", async () => {
+		const project = freshDir(base, "retired-consumer-");
+		const implementation = join(project, "implementation.ts");
+		writeFileSync(join(project, "consumer.test.ts"), `import { expect, test } from "bun:test";
+import { convert } from "./implementation";
+test("consumer requires cents, not copied whole-dollar semantics", () => expect(convert(125)).toBe("1.25"));
+`);
+		for (const [source, accepted] of [
+			['export const convert = (cents: number) => (cents / 100).toFixed(2);', true],
+			['export const convert = (dollars: number) => dollars.toFixed(2);', false],
+		] as const) {
+			writeFileSync(implementation, source);
+			const result = await runFixtureAsync([process.execPath, "test", "consumer.test.ts"], { cwd: project });
+			const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
+			expect(judge("0 fail", result.rc, output).pass).toBe(accepted);
+			expect(result.rc).toBe(accepted ? 0 : 1);
+		}
 	});
 	test("bounded task context: authorized build launches without a citation password", async () => {
 		const project = stockRepo();
@@ -1708,7 +1760,68 @@ describe("RETIREGUARD1 legitimate work", () => {
 		} }, h.ctx(project));
 		expect((verdict as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
 	});
+	test("bounded task FAIL plant: foreign reservation denies the peer-byte write", async () => {
+		const project = stockRepo();
+		const peer = join(project, "peer.ts");
+		writeFileSync(peer, "peer bytes\n");
+		const context = { cwd: project, repoRoot: project, agentName: "RetireTask",
+			isTrackedPath: () => true,
+			lookupReservations: async ({ path }: { path: string }) => ({
+				covered: path === "owned.ts", conflicts: path === "peer.ts" ? [{ agent: "Peer", path }] : [],
+			}) };
+		clearReservationCache();
+		expect(await checkRetiredTaskReservation({ toolName: "write", input: { path: "owned.ts" } }, context)).toBeUndefined();
+		const denied = await checkRetiredTaskReservation({ toolName: "write", input: { path: "peer.ts", content: "unauthorized replacement" } }, context);
+		expect(denied?.block).toBe(true);
+		expect(denied?.reason).toContain("fleet-guard reservations");
+		expect(readFileSync(peer, "utf8")).toBe("peer bytes\n");
+		clearReservationCache();
+	});
 });
+
+for (const [label, target, site, replacement, selected] of [
+	["consumer", "/src/verify.ts",
+		'export function judge(expected: string, rc: number | null, out: string): { pass: boolean; detail: string } {',
+		'export function judge(expected: string, rc: number | null, out: string): { pass: boolean; detail: string } { return { pass: true, detail: "disabled acceptance judgment" };',
+		"prior art FAIL plant:"],
+	["reservation", "/src/fleet-guard/reservations.ts",
+		'export async function check(event: ReservationEvent, context: ReservationCheckContext): Promise<ReservationBlock | undefined> {',
+		'export async function check(event: ReservationEvent, context: ReservationCheckContext): Promise<ReservationBlock | undefined> { return undefined;',
+		"bounded task FAIL plant:"],
+	...["failure", "deadline", "cancel"].map(mode => [
+		`reaping-${mode}`, "/src/kitlib/run.ts",
+		'try { process.kill(-pgid, name); return true; } catch { return false; }',
+		'return false; // disabled owned group termination',
+		`owned job FAIL plant: ${mode}`,
+	]),
+]) {
+	test(`RETIREGUARD1 disabled ${label} mechanism kills its FAIL plant`, async () => {
+		const allocation = ownedTmp("retire-plant-mutant", { root: base });
+		try {
+			const preload = join(allocation.path, "disable-mechanism.ts");
+			writeFileSync(preload, `
+Bun.plugin({ name: "disable-retire-plant-mechanism", setup(build) {
+	build.onLoad({ filter: /[.]ts$/ }, async ({ path }) => {
+		const source = await Bun.file(path).text();
+		if (!path.endsWith(${JSON.stringify(target)})) return { contents: source, loader: "ts" };
+		const site = ${JSON.stringify(site)};
+		if (source.split(site).length !== 2) throw new Error("MUTATION_SITE_NOT_UNIQUE");
+		return { contents: source.replace(site, ${JSON.stringify(replacement)}), loader: "ts" };
+	});
+} });
+`);
+			const result = await run([process.execPath, "test", "--preload", preload, import.meta.path, "-t", selected!], {
+				deadline_s: fixtureDeadlineS(30), max_output_bytes: 65536,
+				cwd: import.meta.dir, env: { ...process.env, TMPDIR: allocation.path },
+			});
+			const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
+			expect(result.timed_out).toBe(false);
+			expect(result.rc).toBe(1);
+			expect(output).toContain("(fail) RETIREGUARD1 legitimate work");
+			expect(output).not.toContain("MUTATION_SITE_NOT_UNIQUE");
+		} finally { allocation.cleanup(); }
+	});
+}
 
 test("RETIREGUARD1 restored wait veto kills the owned-job PASS control", async () => {
 	const allocation = ownedTmp("retired-wait-mutant", { root: base });

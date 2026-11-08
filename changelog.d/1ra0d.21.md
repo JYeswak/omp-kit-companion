@@ -1,0 +1,1 @@
+- Add retirement regression plants for incompatible consumer acceptance, foreign-reservation write denial, and failed, timed-out or cancelled child process cleanup; each plant detects a process-local disabled enforcement mechanism. Human-only secret, spend and legal authority remains uncovered by these tests; no new authorization enforcement is claimed.
