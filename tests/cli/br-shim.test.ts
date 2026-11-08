@@ -1,6 +1,6 @@
 import { expect, test as bunTest } from "bun:test";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createHash } from "node:crypto";
@@ -408,7 +408,7 @@ async function handoffRepo(companion = false, storegate = false) {
 	for (const path of [tracker, code, bin]) mkdirSync(path);
 	const env: Record<string, string> = {
 		HOME: scratch.path, TMPDIR: scratch.path, XDG_STATE_HOME: join(scratch.path, "state"),
-		XDG_CONFIG_HOME: join(scratch.path, "config"), PATH: `${bin}:${dirname(process.execPath)}:${process.env.PATH ?? ""}`,
+		XDG_CONFIG_HOME: join(scratch.path, "config"), PATH: `${bin}:${process.env.PATH ?? ""}`,
 		AGENT_NAME: "HandoffAuthor", BR_REAL: backend, PYTHONDONTWRITEBYTECODE: "1",
 		GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_COUNT: "0",
 	};
@@ -421,6 +421,12 @@ async function handoffRepo(companion = false, storegate = false) {
 	};
 	try {
 		symlinkSync(backend, join(bin, "br"));
+		// suite-metrics.py runtime (called here and by the shim's storegate key) ignores the caller's PATH:
+		// it rebuilds PATH from scripts/fixed-env.sh under this fixture's HOME, where bun is found only at
+		// fixed system paths or $HOME/.bun/bin. CI installs bun under the runner's real HOME, so the fixture
+		// HOME carries its own entry for the running bun.
+		mkdirSync(join(scratch.path, ".bun", "bin"), { recursive: true });
+		symlinkSync(process.execPath, join(scratch.path, ".bun", "bin", "bun"));
 		writeFileSync(join(bin, "am"), `#!/bin/sh
 case "$1:$2" in
   agents:show) printf '{"name":"HandoffAuthor"}\\n' ;;
