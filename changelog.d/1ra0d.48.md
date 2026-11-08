@@ -1,0 +1,1 @@
+- Remove the obsolete pregrade module and test paths while retaining native close authorship and reservation checks under native-close. Cover refusal of a non-author close without a verification record and admission with its independent PASS record.

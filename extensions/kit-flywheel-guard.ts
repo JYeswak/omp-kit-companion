@@ -20,7 +20,7 @@ import { classifyMineResult } from "../src/mine-cause.ts";
 import { briefHandbackRefusal, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
 import { mintNativeSpawn, nativeIdentity, type NativeContext } from "./native-identity.ts";
-import { checkNativeClose } from "../src/native-pregrade.ts";
+import { checkNativeClose } from "../src/native-close.ts";
 interface SpawnModelIdentity { provider: string; id: string }
 
 /**

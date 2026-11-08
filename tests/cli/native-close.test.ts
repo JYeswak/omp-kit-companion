@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { mintNativeSpawn, nativeReservationIdentity, type NativeContext } from "../../extensions/native-identity.ts";
 import kitAgentMailGuard from "../../extensions/kit-agent-mail-guard.ts";
-import { checkNativeClose } from "../../src/native-pregrade.ts";
+import { checkNativeClose } from "../../src/native-close.ts";
 import { type NativeExec } from "../../extensions/native-identity.ts";
 import { runFixtureAsync } from "./fixture-process.ts";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";

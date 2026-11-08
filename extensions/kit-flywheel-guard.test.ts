@@ -1789,6 +1789,16 @@ test("AGENTCLOSE1 native child closes a non-authored bead, not the inherited lea
 	expect((await f.call(f.child, f.close))?.block).not.toBe(true);
 });
 
+test("AGENTCLOSE1 non-author close requires a verification record", async () => {
+	const f = await nativeCloseFixture();
+	const records = f.row.comments.splice(0);
+	const refused = await f.call(f.child, f.close);
+	expect(refused?.block).toBe(true);
+	expect(refused?.reason).toContain("no verification record");
+	f.row.comments.push(...records);
+	expect((await f.call(f.child, f.close))?.block).not.toBe(true);
+});
+
 test("AGENTCLOSE1 planted: parent self-close and borrowed actors stay refused", async () => {
 	const f = await nativeCloseFixture();
 	const parent = await f.call(f.parent, f.close.replace("--actor NativeVerifier", "--actor Lead"));
