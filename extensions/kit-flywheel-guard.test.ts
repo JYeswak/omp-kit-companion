@@ -1717,8 +1717,9 @@ describe("RETIREGUARD1 legitimate work", () => {
 			expect(pids).toHaveLength(2);
 			for (const pid of pids) {
 				expect(Number.isSafeInteger(pid) && pid > 1).toBe(true);
-				// A reparented zombie has terminated; a live descendant is an orphan.
-				const ps = await runFixtureAsync(["ps", "-o", "stat=", "-p", String(pid)], { cwd: base });
+				// A reparented zombie has terminated; a live descendant is an orphan. Absolute path:
+				// CI's stock-extensions job runs with a PATH that has no ps (run 42439224579).
+				const ps = await runFixtureAsync(["/bin/ps", "-o", "stat=", "-p", String(pid)], { cwd: base });
 				const states = new TextDecoder().decode(ps.stdout).trim();
 				expect(states === "" || states.startsWith("Z")).toBe(true);
 			}
