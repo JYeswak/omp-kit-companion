@@ -122,8 +122,10 @@ PY
 [ "$(readlink "$WORK/prefix/bin/omp-kit")" = "../releases/1.2.3/bin/omp-kit" ]
 mkdir -m 700 "$WORK/badmanifest"
 python3 - "$ARCHIVE" "$WORK/badmanifest/$(basename "$ARCHIVE")" "$WORK/assets/release-index.json" "$WORK/badmanifest/index.json" <<'PY'
-import hashlib,json,sys
-content=bytearray(open(sys.argv[1],'rb').read())
+import gzip,hashlib,json,sys
+raw=open(sys.argv[1],'rb').read()
+packed=raw[:2]==b'\x1f\x8b'  # VPV8A: release archives are gzip; mutate the tar inside, then recompress
+content=bytearray(gzip.decompress(raw) if packed else raw)
 cursor=0
 found=False
 while cursor + 512 <= len(content):
@@ -141,6 +143,7 @@ while cursor + 512 <= len(content):
     break
   cursor=start+((size+511)//512)*512
 assert found, 'packaged MANIFEST.tsv missing'
+content=gzip.compress(bytes(content),mtime=0) if packed else bytes(content)
 with open(sys.argv[2],'wb') as out: out.write(content)
 index=json.load(open(sys.argv[3])); asset=next(iter(index['assets'].values()))
 asset['sha256']=hashlib.sha256(content).hexdigest()
@@ -157,11 +160,14 @@ PY
 [ ! -e "$WORK/badmanifest-prefix/bin/omp-kit" ]
 mkdir -m 700 "$WORK/badlink"
 python3 - "$ARCHIVE" "$WORK/badlink/$(basename "$ARCHIVE")" "$WORK/assets/release-index.json" "$WORK/badlink/index.json" <<'PY'
-import hashlib,json,sys
-content=bytearray(open(sys.argv[1],'rb').read())
+import gzip,hashlib,json,sys
+raw=open(sys.argv[1],'rb').read()
+packed=raw[:2]==b'\x1f\x8b'
+content=bytearray(gzip.decompress(raw) if packed else raw)
 content[156]=ord('2')  # A verified outer digest cannot authorize a symlink archive member.
 content[148:156]=b'        '
 content[148:156]=f'{sum(content[:512]):06o}\0 '.encode()
+content=gzip.compress(bytes(content),mtime=0) if packed else bytes(content)
 with open(sys.argv[2],'wb') as out: out.write(content)
 index=json.load(open(sys.argv[3])); asset=next(iter(index['assets'].values()))
 asset['sha256']=hashlib.sha256(content).hexdigest()
