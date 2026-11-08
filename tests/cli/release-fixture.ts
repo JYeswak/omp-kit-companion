@@ -42,6 +42,9 @@ export function fixture(label: string, mainVersion: string, fullTree = false): F
 	for (const dir of ["scripts", "changelog.d", ".github/workflows"]) mkdirSync(join(repo, dir), { recursive: true });
 	for (const name of ["release-notes.sh", "release-notes.ts", "release-train.sh", "stamp-release-line.sh", "kitlib-tmp.sh"])
 		copyFileSync(join(ROOT, "scripts", name), join(repo, "scripts", name));
+	// Execute the real preflight in the fixture cwd without maintaining a second dependency closure.
+	writeFileSync(join(repo, "scripts/commit-preflight.sh"),
+		`#!/bin/sh\nexec sh ${JSON.stringify(join(ROOT, "scripts/commit-preflight.sh"))} "$@"\n`);
 	// README states the latest published release (v1.2.3) while main states the next version.
 	writeFileSync(join(repo, "README.md"), readFileSync(join(ROOT, "README.md"), "utf8").replace(/^Current release: v\d+\.\d+\.\d+$/m, "Current release: v1.2.3"));
 	const pkg = (version: string) => `{\n  "name": "fixture",\n  "version": "${version}",\n  "omp": {\n    "version": "${version}"\n  }\n}\n`;

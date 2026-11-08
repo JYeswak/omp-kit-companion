@@ -1,0 +1,1 @@
+- Prepare release metadata and the next development version through commit preflight before committing, preserving commit-gate admission and the existing advance-only recovery command. (ompkit-d8qic)

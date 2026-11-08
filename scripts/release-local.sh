@@ -209,6 +209,16 @@ for sha, paths in rewrites.items():
 ' "$ROOT" "$@"
 }
 
+# Only the installed admission member needs an out-of-lock prepared record.
+# Other commit members continue to judge inline in repositories without it.
+release_commit_preflight() {
+	local message=$1 hooks
+	shift
+	hooks="$(git -C "$ROOT" rev-parse --path-format=absolute --git-path hooks)" || return
+	[ -x "$hooks/hooks.d/commit-msg/55-omp-kit-commit-gate" ] || return 0
+	(cd "$ROOT" && bounded 900 sh scripts/commit-preflight.sh --message "$message" --files "$@")
+}
+
 # No --source means prepare from this checkout. Never adopt foreign metadata edits,
 # even when their version happens to match. --only keeps unrelated staged work out.
 prepare_release() {
@@ -258,13 +268,18 @@ PY
 	[ "$fragment_absent" = 0 ] || git -C "$ROOT" add -- changelog.d/774u.md || die "cannot stage the new changelog.d/774u.md"
 	local agent="${AGENT_NAME:-$(git -C "$ROOT" config user.name)}" supersedes
 	supersedes="$(release_version_supersedes ompkit-774u)" || die "cannot attribute release prepare version lines"
-	bounded 900 git -C "$ROOT" commit --only \
-		-m "chore(release): prepare $VERSION ompkit-774u [test]" \
-		-m "Release metadata only; release-local requires a fresh main-role PASS on this exact exported tree before signing." \
-		-m "$supersedes" \
-		-m "Gap-Bead: none (release metadata)
+	local message="$WORK/prepare-commit-message"
+	printf '%s\n\n%s\n\n%s\n\n%s\n' \
+		"chore(release): prepare $VERSION ompkit-774u [test]" \
+		"Release metadata only; release-local requires a fresh main-role PASS on this exact exported tree before signing." \
+		"$supersedes" \
+		"Gap-Bead: none (release metadata)
 Bead: ompkit-774u
-Agent: $agent" -- "${paths[@]}" || die "release prepare commit failed; metadata left for inspection"
+Agent: $agent" >"$message"
+	if ! release_commit_preflight "$message" "${paths[@]}" ||
+		! bounded 900 git -C "$ROOT" commit --only -F "$message" -- "${paths[@]}"; then
+		die "release prepare commit failed; metadata left for inspection"
+	fi
 	SOURCE="$(git -C "$ROOT" rev-parse HEAD)"
 	if [ "$DRY_RUN" = 1 ]; then
 		say "dry run prepare: committed $SOURCE locally; no push"
@@ -917,14 +932,17 @@ PY
 	done
 	rm -rf "$export" "$WORK/next-head" "$WORK/next-residual"
 	supersedes="$(release_version_supersedes ompkit-d8qic ${fragments[@]+"${fragments[@]}"})" || die "v$VERSION is published; cannot attribute next-version rewrites; retry: $resume"
-	if ! bounded 900 git -C "$ROOT" commit -q --only \
-		-m "chore(release): next version $next after v$VERSION ompkit-d8qic [pending]" \
-		-m "NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE; README states v$VERSION, the latest published release." \
-		-m "[no-changelog] release next-version commit; its notes are the promoted CHANGELOG section" \
-		-m "$supersedes" \
-		-m "Gap-Bead: none (release metadata)
+	local message="$WORK/next-version-commit-message"
+	printf '%s\n\n%s\n\n%s\n\n%s\n\n%s\n' \
+		"chore(release): next version $next after v$VERSION ompkit-d8qic [pending]" \
+		"NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE; README states v$VERSION, the latest published release." \
+		"[no-changelog] release next-version commit; its notes are the promoted CHANGELOG section" \
+		"$supersedes" \
+		"Gap-Bead: none (release metadata)
 Bead: ompkit-d8qic
-Agent: $agent" -- "${paths[@]}"; then
+Agent: $agent" >"$message"
+	if ! release_commit_preflight "$message" "${paths[@]}" ||
+		! bounded 900 git -C "$ROOT" commit -q --only -F "$message" -- "${paths[@]}"; then
 		# Only this step's own bytes are put back: every path was clean before it wrote them.
 		git -C "$ROOT" checkout HEAD -- "${paths[@]}" || echo "release-local: WARNING: could not restore ${paths[*]} in $ROOT" >&2
 		die "v$VERSION is published; NEXT_VERSION_COMMIT_REFUSED: the commit member's diagnostic is above; once fixed, retry: $resume"
