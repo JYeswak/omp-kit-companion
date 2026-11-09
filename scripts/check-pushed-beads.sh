@@ -74,6 +74,10 @@ HOOK="$HOOKDIR/commit-msg-bead.sh"
 [ -f "$HOOKDIR/kitlib-tmp.sh" ] || { printf 'check-pushed-beads: kitlib-tmp.sh missing at %s\n' "$HOOKDIR" >&2; exit 2; }
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$HOOKDIR/kitlib-tmp.sh"
+if [ -f "$HOOKDIR/bead-verdict.sh" ]; then
+	# shellcheck source=scripts/bead-verdict.sh
+	. "$HOOKDIR/bead-verdict.sh" 2>/dev/null || true
+fi
 reviewed_witness() {
 	# prints the witness reader's directory when a reviewed plan copy exists; else fails fast with no python spawned
 	common=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
@@ -107,8 +111,21 @@ checked=0
 # shellcheck disable=SC2086
 for sha in $COMMITS; do
 	checked=$((checked + 1))
+	# HOOKDEDUP1: reuse the commit-time verdict when the commit-msg member (or
+	# the post-commit recorder) already recorded this exact sha or message.
+	# No `br` runs on this path; anything without a record takes today's live
+	# check below, so a commit-tree commit that bypassed commit-msg is still refused.
+	if command -v bead_verdict_lookup >/dev/null 2>&1 && bead_verdict_lookup "$REPO" "$sha" 2>/dev/null; then
+		continue
+	fi
 	git -C "$REPO" log --format=%B -n 1 "$sha" > "$TMPMSG" 2>/dev/null || { printf 'check-pushed-beads: cannot read %s\n' "$sha" >&2; exit 2; }
-	BEADS_DB="$DB" BR_BIN="$BRBIN" sh "$HOOK" "$TMPMSG" >/dev/null 2>&1 || { printf 'check-pushed-beads: refusing %s: no existing bead id in message\n' "$sha" >&2; exit 4; }
+	BEADS_DB="$DB" BR_BIN="$BRBIN" BEAD_VERDICT_PENDING=0 sh "$HOOK" "$TMPMSG" >/dev/null 2>&1 || { printf 'check-pushed-beads: refusing %s: no existing bead id in message\n' "$sha" >&2; exit 4; }
+	# Cache the live PASS for later pushes of the same sha (best-effort).
+	# Only a real tracker verdict is cached: without a tracker file the judge
+	# passes trivially and there is nothing worth reusing.
+	if [ -f "$DB" ] && command -v bead_verdict_note >/dev/null 2>&1; then
+		bead_verdict_note "$REPO" "$sha" 2>/dev/null || true
+	fi
 done
 if [ "$checked" = "0" ]; then
 	printf 'check-pushed-beads: no unpushed commits reachable from %s; nothing to check (base %s)\n' "$TIP" "$BASE" >&2

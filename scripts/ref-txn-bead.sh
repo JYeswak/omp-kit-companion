@@ -26,6 +26,10 @@ HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 CHECK="$HERE/commit-msg-bead.sh"
 READER="$HERE/ref-txn-witness.py"
 ZERO=0000000000000000000000000000000000000000
+if [ -f "$HERE/bead-verdict.sh" ]; then
+	# shellcheck source=scripts/bead-verdict.sh
+	. "$HERE/bead-verdict.sh" 2>/dev/null || true
+fi
 rc=0
 MSG=""
 TXN=$(cat) || exit 4
@@ -73,14 +77,27 @@ while read -r old new ref; do
 			kitlib_tmp msg_dir ref-txn-bead || exit 4
 			MSG=$msg_dir/msg
 		fi
+		if command -v bead_verdict_lookup >/dev/null 2>&1 && bead_verdict_lookup "$(git rev-parse --show-toplevel 2>/dev/null)" "$sha" 2>/dev/null; then
+			continue
+		fi
 		if ! git log --format=%B -n 1 "$sha" > "$MSG" 2>/dev/null; then
 			printf 'ref-txn-bead: cannot read commit %s; refusing the update\n' "$sha" >&2
 			rc=4
 			continue
 		fi
-		if ! sh "$CHECK" "$MSG" > /dev/null 2>&1; then
+		if ! BEAD_VERDICT_PENDING=0 sh "$CHECK" "$MSG" > /dev/null 2>&1; then
 			printf 'ref-txn-bead: refusing %s update: commit %s names no existing bead id; add your bead id to its message\n' "$ref" "$sha" >&2
 			rc=4
+			continue
+		fi
+		# Cache the live PASS for later pushes of the same sha (best-effort).
+		# Only a real tracker verdict is cached: without a tracker file the
+		# judge passes trivially and there is nothing worth reusing.
+		REF_TOP=$(git rev-parse --show-toplevel 2>/dev/null) || REF_TOP=""
+		REF_DB="$REF_TOP/.beads/beads.db"
+		if [ -n "${BEADS_DB:-}" ]; then REF_DB="$BEADS_DB"; fi
+		if [ -n "$REF_TOP" ] && [ -f "$REF_DB" ] && command -v bead_verdict_note >/dev/null 2>&1; then
+			bead_verdict_note "$REF_TOP" "$sha" 2>/dev/null || true
 		fi
 	done
 done <<EOF

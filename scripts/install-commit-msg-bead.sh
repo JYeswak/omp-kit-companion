@@ -248,8 +248,10 @@ EOF
 installation_manifest() {
 	cat <<'INSTALLATION_MANIFEST'
 commit_msg commit-msg 40-omp-kit-commit-msg-bead scripts/commit-msg-bead.sh +x
+commit_msg commit-msg bead-verdict.sh scripts/bead-verdict.sh -x
 pre_push pre-push check-pushed-beads.sh scripts/check-pushed-beads.sh -x
 pre_push pre-push commit-msg-bead.sh scripts/commit-msg-bead.sh -x
+pre_push pre-push bead-verdict.sh scripts/bead-verdict.sh -x
 on_main pre-push 30-omp-kit-on-main scripts/check-pushed-on-main.sh +x
 pushed_vlevel pre-push 41-omp-kit-pushed-vlevel scripts/pre-push-verification-level.sh +x
 affected_gate pre-push 42-omp-kit-affected-gate scripts/pre-push-affected-gate.sh +x
@@ -262,8 +264,12 @@ affected_gate pre-push kitlib_run.py scripts/kitlib_run.py -x
 affected_gate pre-push kitlib_tmp.py scripts/kitlib_tmp.py -x
 affected_gate pre-push pysafe.py scripts/pysafe.py -x
 commit_msg_vlevel commit-msg 41-omp-kit-commit-msg-vlevel scripts/commit-msg-verification-level.sh +x
+bead_record post-commit 50-omp-kit-bead-record scripts/bead-record.sh +x
+bead_record post-commit commit-msg-bead.sh scripts/commit-msg-bead.sh -x
+bead_record post-commit bead-verdict.sh scripts/bead-verdict.sh -x
 ref_txn reference-transaction 40-omp-kit-ref-txn-bead scripts/ref-txn-bead.sh +x
 ref_txn reference-transaction commit-msg-bead.sh scripts/commit-msg-bead.sh -x
+ref_txn reference-transaction bead-verdict.sh scripts/bead-verdict.sh -x
 ref_txn reference-transaction ref-txn-witness.py scripts/ref-txn-witness.py -x
 ref_txn reference-transaction pysafe.py scripts/pysafe.py -x
 staged_imports pre-commit check-commit-imports.sh scripts/check-commit-imports.sh -x
@@ -363,7 +369,7 @@ $(installation_manifest)
 EOF
 		[ "$PUSHED_BEADS" = 0 ] || printf '%s\n' hooks.d/pre-push/40-omp-kit-pushed-beads
 		[ "$NATIVE_PRESERVATION" = 0 ] || printf '%s\n' hooks.d/pre-commit/40-omp-kit-native-preserve
-		for runner_type in commit-msg pre-commit pre-push reference-transaction; do
+		for runner_type in commit-msg post-commit pre-commit pre-push reference-transaction; do
 			if grep -q 'chain runner: run every executable' "$HOOKS/$runner_type" 2>/dev/null; then
 				printf '%s\n' "$runner_type"
 			fi
@@ -429,6 +435,30 @@ retired_hook_members() {
 		[ -e "$retired" ] || [ -L "$retired" ] || continue
 		printf '%s\n' "$retired"
 	done
+	# The pre-canonical stamp pair lives in the bespoke slot, so it is listed
+	# only when its bytes match the retired pin: a live bespoke entry moved to
+	# the same 10- slot by ensure_chain is never touched or flagged.
+	for legacy in "$HOOKS/hooks.d/commit-msg/10-commit-msg" \
+		"$HOOKS/hooks.d/commit-msg/commit-msg-verification-level.sh"; do
+		[ -e "$legacy" ] || [ -L "$legacy" ] || continue
+		expected=$(legacy_stamp_sha "$legacy") || continue
+		[ "$(shasum -a 256 "$legacy" 2>/dev/null | cut -d' ' -f1)" = "$expected" ] || continue
+		printf '%s\n' "$legacy"
+	done
+}
+
+# legacy_stamp_sha <path>: the retired pin for the pre-canonical stamp pair
+# (HOOKDEDUP1 ompkit-1ra0d.60): the bespoke-slot wrapper
+# hooks.d/commit-msg/10-commit-msg, which execs the sibling impl
+# hooks.d/commit-msg/commit-msg-verification-level.sh. Both predate the
+# canonical member 41 (VLEVELGAP1), which keeps enforcing the same rule with
+# the same refusal text and code. Fails for any other basename.
+legacy_stamp_sha() {
+	case "$1" in
+		*/10-commit-msg) printf '%s' '420af8f6d4af0c520cafa22e94c9c573fafe39adfe02358827698a1f7cc70ce1' ;;
+		*/commit-msg-verification-level.sh) printf '%s' 'c325a40aee77ea1118a106eadea5b233f94b8c318d1aef4ca9f467a7d47300b8' ;;
+		*) return 1 ;;
+	esac
 }
 
 retire_hook_members() {
@@ -438,6 +468,8 @@ retire_hook_members() {
 		case "$retired" in
 			*-omp-kit-gap-mention) expected=8aa0bc9c7404110f27a5b9fdd84efdb028d8d3a84e0cb996dd9661bf6b008762 ;;
 			*-omp-kit-staged-sources) expected=0d971b18f6a686b7993d3eb6a6445d100802e9a53e032f763a67e184856b2d30 ;;
+			*/10-commit-msg) expected=$(legacy_stamp_sha "$retired") ;;
+			*/commit-msg-verification-level.sh) expected=$(legacy_stamp_sha "$retired") ;;
 		esac
 		if [ -L "$HOOKS/hooks.d" ] || [ -L "$(dirname -- "$retired")" ] ||
 			[ -L "$retired" ] || [ ! -f "$retired" ] ||
@@ -797,7 +829,7 @@ EOF
 		fi
 	fi
 	# Chain runners judged by the installer's own upgrade predicate; bespoke runners are skipped.
-	for runner_type in pre-commit commit-msg pre-push reference-transaction; do
+	for runner_type in post-commit pre-commit commit-msg pre-push reference-transaction; do
 		if runner_stale "$HOOKS/$runner_type"; then
 			printf 'install-commit-msg-bead: STALE chain runner: %s lacks %s; rerun %s\n' "$HOOKS/$runner_type" "$RUNNER_GENERATION" "$0" >&2
 			stale=1
@@ -850,6 +882,18 @@ install_ref_txn() {
 	member="$dir/40-omp-kit-ref-txn-bead"
 	install_manifest_group ref_txn
 	printf 'installed ref-update bead guard: %s\n' "$member"
+}
+
+# install_bead_record: the post-commit verdict recorder (HOOKDEDUP1
+# ompkit-1ra0d.60). The commit-time bead verdict is copied to a record keyed
+# by the exact commit sha under <git-common-dir>/omp-kit/bead-verdicts/, so
+# the pre-push and reference-transaction members reuse it instead of
+# re-running `br` per commit. The member never refuses (see bead-record.sh).
+install_bead_record() {
+	dir=$(chain_dir post-commit)
+	member="$dir/50-omp-kit-bead-record"
+	install_manifest_group bead_record
+	printf 'installed post-commit bead recorder: %s\n' "$member"
 }
 
 # install_staged_imports: the pre-commit member judges the staged tree; its
@@ -1077,6 +1121,8 @@ install_manifest_group affected_gate
 [ "$PUSHED_BEADS" = 0 ] || install_pre_push
 ensure_chain reference-transaction
 install_ref_txn
+ensure_chain post-commit
+install_bead_record
 ensure_chain pre-commit
 install_kitlib_tmp
 install_gate_event
@@ -1166,6 +1212,10 @@ if [ "$NATIVE_PRESERVATION" = 1 ]; then
 		rollback "native-preservation member refused the actual candidate in $TARGET"
 	fi
 fi
+# ensure_chain may have moved a git-template commit-msg hook into the 10- slot (Leg 1 above proved it
+# still behaves); when its bytes are the retired stamp pin (HOOKDEDUP1), retire it now so a fresh
+# install passes its own --check. Member 41 enforces the same rule with the same text.
+retire_hook_members
 write_exclude_block || rollback "cannot list the installer-owned hook members in $TARGET's info/exclude"
 # shellcheck disable=SC2086
 for path in $UNDO_RESTORE; do rm -f -- "$(dirname -- "$path")/.undo.$$.$(basename -- "$path")" "$(dirname -- "$path")/.undo.$$.$(basename -- "$path").mode"; done
