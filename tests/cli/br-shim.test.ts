@@ -631,19 +631,22 @@ test("HANDOFFSOURCE1 a GREEN source ledger cannot admit review without a DONE so
 	} finally { f.scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1_000);
 
-test("HANDOFFTREE1 a GREEN candidate differing from the landed commit only in committer time admits the handoff; other parent, tree, message, author/committer email or rc 1 refuse", async () => {
+test("HANDOFFTREE1 a GREEN candidate differing from the landed commit only in author and committer time admits the handoff; other parent, tree, message, author/committer email or rc 1 refuse", async () => {
 	const f = await handoffRepo(true);
 	try {
 		const tree = await f.checked(["git", "-C", f.code, "rev-parse", `${f.commit}^{tree}`]);
 		const parents = (await f.checked(["git", "-C", f.code, "rev-parse", `${f.commit}^@`])).split("\n").filter(Boolean);
 		const authorDate = await f.checked(["git", "-C", f.code, "log", "-1", "--format=%ad", "--date=raw", f.commit]);
 		const laterCommitterDate = `${Number(authorDate.split(" ")[0]) + 21} +0000`;
+		// FULLHANDOFF1: the commit gate builds its candidate with commit-tree when judging starts, so its
+		// author time precedes the landed commit's by the gate's duration (139 s on e67c648bae).
+		const earlierAuthorDate = `${Number(authorDate.split(" ")[0]) - 139} +0000`;
 		const commitTree = async (treeId: string, parentIds: string[], extra: Record<string, string> = {},
 			message = "owned source fixture") => {
 			const result = await run(["git", "-C", f.code, "commit-tree", treeId, ...parentIds.flatMap(p => ["-p", p]),
 				"-m", message, "-m", "Agent: HandoffAuthor"], {
 				cwd: f.code, deadline_s: fixtureDeadlineS(30), max_output_bytes: 1 << 20,
-				env: { ...f.env, GIT_COMMITTER_DATE: laterCommitterDate, GIT_AUTHOR_DATE: authorDate, ...extra },
+				env: { ...f.env, GIT_COMMITTER_DATE: laterCommitterDate, GIT_AUTHOR_DATE: earlierAuthorDate, ...extra },
 			});
 			expect(result.rc, decoder.decode(result.stderr)).toBe(0);
 			return decoder.decode(result.stdout).trim();

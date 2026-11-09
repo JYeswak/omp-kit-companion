@@ -367,10 +367,12 @@ def publication_citations(argv: list[str]) -> int:
 
 
 def _commit_identity(repo: str, commit: object, cache: dict) -> str | None:
-    """The repo's own commit object minus only the committer's `<epoch> <tz>`; None when unresolvable.
+    """The repo's own commit object minus only the author's and committer's `<epoch> <tz>`; None when unresolvable.
 
-    Fresh-gate judges tree, parents, author, committer identity, signatures and message, so only
-    the committer time the commit gate's candidate cannot share with the landed commit is dropped.
+    Fresh-gate judges tree, parents, author, committer identity, signatures and message. The commit
+    gate builds its candidate with commit-tree when judging starts and git commit writes the landed
+    commit when judging ends, so both timestamps differ once the gate spans a second (FULLHANDOFF1:
+    a 139 s gate on e67c648bae); only those two stamps are dropped.
     """
     if (not isinstance(commit, str) or len(commit) not in (40, 64)
             or not set(commit) <= set("0123456789abcdef")):
@@ -380,13 +382,19 @@ def _commit_identity(repo: str, commit: object, cache: dict) -> str | None:
         identity = None
         headers, separator, message = body.partition("\n\n")
         lines = headers.split("\n")
-        committers = [i for i, line in enumerate(lines) if line.startswith("committer ")]
+        stamped = [i for i, line in enumerate(lines) if line.startswith(("author ", "committer "))]
         # A lossy decode could make distinct bytes compare equal, so it is never admitted.
         if (rc == 0 and separator and "\ufffd" not in body and lines[0].startswith("tree ")
-                and len(committers) == 1):
-            name, _, stamp = lines[committers[0]].rpartition("> ")
-            if name and len(stamp.split(" ")) == 2:
-                lines[committers[0]] = name + ">"
+                and sum(lines[i].startswith("author ") for i in stamped) == 1
+                and sum(lines[i].startswith("committer ") for i in stamped) == 1):
+            identity = ""
+            for i in stamped:
+                name, _, stamp = lines[i].rpartition("> ")
+                if not name or len(stamp.split(" ")) != 2:
+                    identity = None
+                    break
+                lines[i] = name + ">"
+            if identity is not None:
                 identity = "\n".join(lines) + separator + message
         cache[commit] = identity
     return cache[commit]

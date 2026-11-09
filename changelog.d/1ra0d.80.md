@@ -1,1 +1,2 @@
 - A commit that changes shared runtime, and is therefore admitted by its full-suite pass, can now record its `DONE <repo>@<sha>` handoff: the gate's run log marks that run's evidence complete and names the tree the full-suite pass covered.
+- A `DONE <repo>@<sha>` handoff for a commit whose gate took longer than a second is no longer refused: the handoff check now ignores the author time as well as the committer time when it matches the landed commit to the commit the gate judged.
