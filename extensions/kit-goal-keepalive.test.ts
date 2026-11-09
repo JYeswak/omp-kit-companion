@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import kitGoalKeepalive, { type GoalKeepaliveContext } from "./kit-goal-keepalive.ts";
+import kitGoalKeepalive, { heartbeatMessage, IDLE_HEARTBEAT_MS, type GoalKeepaliveContext } from "./kit-goal-keepalive.ts";
 import { incarnationSync, isDead, probeIncarnationSync, safePid, type Incarnation } from "../src/kitlib/proc.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixture, runFixtureAsync } from "../tests/cli/fixture-process.ts";
@@ -16,27 +16,55 @@ const root = resolve(import.meta.dir, "..");
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 
 type Observer = typeof kitGoalKeepalive;
-async function timerCount(observer: Observer): Promise<number> {
+type Sent = { customType: string; content: string };
+/** Drives one seat: the given events in order, then fires every armed timer. Returns timers armed and messages sent. */
+async function drive(observer: Observer, events: [string, unknown][], opts: { env?: Record<string, string>; idle?: boolean } = {}) {
 	const handlers = new Map<string, (event: never, ctx: GoalKeepaliveContext) => unknown>();
-	let timers = 0;
-	const ctx = { setTimeout() { timers++; }, clearTimer() {}, sessionManager: { getBranch: () => [] } };
-	await observer({ on(name, handler) { handlers.set(name, handler); } }, { env: { AGENT_NAME: "NativeOwner" } });
-	for (const name of ["session_start", "goal_updated", "agent_end", "session_stop"]) {
-		await handlers.get(name)?.({ goal: { status: "active" }, state: { enabled: true } } as never, ctx);
-	}
-	return timers;
+	const armed: { fn: () => void; ms: number; cleared: boolean }[] = [];
+	const sent: Sent[] = [];
+	const ctx: GoalKeepaliveContext = {
+		isIdle: () => opts.idle ?? true,
+		setTimeout(fn, ms) { const t = { fn, ms, cleared: false }; armed.push(t); return t; },
+		clearTimer(t) { (t as { cleared: boolean }).cleared = true; },
+		sessionManager: { getBranch: () => [] },
+	};
+	await observer({ on(name, handler) { handlers.set(name, handler); }, sendMessage(m) { sent.push(m); } }, { env: opts.env ?? { AGENT_NAME: "IdleSeat" } });
+	for (const [name, event] of events) await handlers.get(name)?.(event as never, ctx);
+	for (const t of armed) if (!t.cleared) t.fn();
+	return { armed, sent };
 }
+const ACTIVE: [string, unknown] = ["goal_updated", { goal: { status: "active" }, state: { enabled: true } }];
+const PAUSED: [string, unknown] = ["goal_updated", { goal: { status: "active" }, state: { enabled: false } }];
+const END: [string, unknown] = ["agent_end", {}];
 
-test("NATIVESESSION1: no kit timer re-arms a seat; a planted re-arm timer is killed", async () => {
-	expect(await timerCount(kitGoalKeepalive)).toBe(0);
-	const dir = ownedTmp("native-session-mutant").path;
+// IDLEWAKE1 (J-2026-11-09-03): the 30-minute idle-wake heartbeat is restored; f21234edc8 had retired every kit timer.
+test("IDLEWAKE1: an idle active-goal seat gets one heartbeat at 30 min; paused, unnamed, busy and resumed seats get none", async () => {
+	const woken = await drive(kitGoalKeepalive, [ACTIVE, END]);
+	expect(woken.armed.map(t => t.ms)).toEqual([IDLE_HEARTBEAT_MS]);
+	expect(woken.sent).toEqual([{ customType: "kit-goal-keepalive", content: heartbeatMessage("IdleSeat"), display: true } as Sent]);
+	expect(woken.sent[0]!.content).toContain("IdleSeat: goal active, idle 30m");
+	// Quiet controls: a paused goal, no seat identity, a busy seat, a turn that started, a continuation omp scheduled.
+	expect((await drive(kitGoalKeepalive, [PAUSED, END])).sent).toEqual([]);
+	expect((await drive(kitGoalKeepalive, [ACTIVE, END], { env: {} })).sent).toEqual([]);
+	expect((await drive(kitGoalKeepalive, [ACTIVE, END], { idle: false })).sent).toEqual([]);
+	expect((await drive(kitGoalKeepalive, [ACTIVE, END, ["turn_start", {}]])).sent).toEqual([]);
+	expect((await drive(kitGoalKeepalive, [ACTIVE, ["agent_end", { willContinue: true }]])).armed).toEqual([]);
+	expect((await drive(kitGoalKeepalive, [ACTIVE, END, PAUSED])).sent).toEqual([]);
+	expect((await drive(kitGoalKeepalive, [ACTIVE, END, ["session_switch", {}]])).sent).toEqual([]);
+	// Repeated idle turns re-arm one timer each, never stack two live ones.
+	const twice = await drive(kitGoalKeepalive, [ACTIVE, END, END]);
+	expect(twice.armed.filter(t => !t.cleared)).toHaveLength(1);
+	expect(twice.sent).toHaveLength(1);
+});
+
+test("IDLEWAKE1 planted: an observer that never arms the heartbeat leaves the idle seat unwoken", async () => {
+	const dir = ownedTmp("idle-wake-mutant").path;
 	const source = readFileSync(join(import.meta.dir, "kit-goal-keepalive.ts"), "utf8");
-	const mutant = source.replace('pi.on("agent_end", (_event, ctx) => {', 'pi.on("agent_end", (_event, ctx) => {\n(ctx as unknown as { setTimeout(fn: () => void, ms: number): unknown }).setTimeout(() => {}, 120000);');
+	const mutant = source.replace("timer = ctx.setTimeout?.(fire, IDLE_HEARTBEAT_MS) ?? null;", "timer = null;");
 	expect(mutant).not.toBe(source);
 	writeFileSync(join(dir, "mutant.ts"), mutant.replace('"../src/release-verdict-mail.ts"', JSON.stringify(join(root, "src/release-verdict-mail.ts"))));
 	const loaded = await import(join(dir, "mutant.ts")) as { default: Observer };
-	// The exact same no-rearm oracle rejects the old behavior, not a source-string approximation.
-	expect(await timerCount(loaded.default)).toBeGreaterThan(0);
+	expect((await drive(loaded.default, [ACTIVE, END])).sent).toEqual([]);
 });
 
 type RestoreIntent = { id: string; active: boolean };

@@ -1,0 +1,1 @@
+- A seat with an active goal that goes idle now gets one wake every 30 minutes, so a lost mail, job result or verdict can no longer leave it idle until someone types. A paused goal, a seat without an agent name, a busy seat or a new turn gets no wake.
