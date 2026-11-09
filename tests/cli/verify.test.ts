@@ -1369,6 +1369,28 @@ test("CLOSEPASS1.live planted: a failing live box reopens the parent with REWORK
 	expect(JSON.stringify((await row(t, id)).dependents ?? [])).not.toContain("parent-child");
 }, fixtureDeadlineS(120) * 1_000);
 
+test("ALLLIVE1: an open bead whose every open box is live is read back directly; a bead with an open build box is not; a failure leaves it open with REWORK", async () => {
+	const code = await repo("alllive");
+	const t = await policyTracker("alllive-t");
+	const env = trackerEnv(t);
+	const make = async (title: string, acceptance: string) => {
+		const id = await createBead(t, title);
+		expect((await brun(["update", id, "--acceptance", acceptance], t.dir, env)).rc).toBe(0);
+		return id;
+	};
+	const live = await make("alllive pass", "- [ ] [a] [live] on the installed kit `sh scripts/t.sh` -> 16 pass");
+	const mixed = await make("alllive mixed", "- [ ] [a] [build] built `sh scripts/t.sh` -> 16 pass\n- [ ] [b] [live] live `sh scripts/t.sh` -> 16 pass");
+	const failing = await make("alllive fail", "- [ ] [a] [live] on the installed kit `sh scripts/bad.sh` -> prints PASS");
+	expect((await liveReadback({ bead: mixed, repo: code.dir, actor: "Peer", env, lesson: "mixed fixture" })).code).toBe("NOT_LIVE_READBACK");
+	const res = await liveReadback({ bead: live, repo: code.dir, actor: "Peer", env, family: "same (bun)", lesson: "all-live fixture" });
+	expect(res.code).toBe("CLOSED");
+	expect(await row(t, live)).toMatchObject({ status: "closed", acceptance_criteria: "- [x] [a] [live] on the installed kit `sh scripts/t.sh` -> 16 pass" });
+	const bad = await liveReadback({ bead: failing, repo: code.dir, actor: "Peer", env, family: "same (bun)", lesson: "all-live fail fixture" });
+	expect(bad.code).toBe("REWORK");
+	expect((await row(t, failing)).status).toBe("open");
+	expect((await brun(["comments", "list", failing], t.dir, env)).out).toContain(`REWORK ${failing}: live readback failed [a]`);
+}, fixtureDeadlineS(120) * 1_000);
+
 test("CLOSEPASS1.all: --live-readback --all visits exactly the open live-readback children, and no others", async () => {
 	const code = await repo("closepass-all");
 	const t = await policyTracker("closepass-all-t");

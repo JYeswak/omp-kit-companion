@@ -632,13 +632,16 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 	const refuse = (code: VerifyResult["code"], why: string): VerifyResult => ({ ok: false, code, bead: input.bead, export: "installed", replays: [], log: log.concat(why).join("\n"), acts });
 	const child = await showBead(input.bead, input.repo, env);
 	if (child === null) return refuse("NOT_LIVE_READBACK", `br shows no bead ${input.bead}`);
-	if (child.status !== "open" || !child.labels.includes(LIVE_READBACK_LABEL)) return refuse("NOT_LIVE_READBACK", `${input.bead} is ${child.status || "unknown"} with labels [${child.labels.join(", ")}]; only an open ${LIVE_READBACK_LABEL} child is read back`);
-	// The verified bead is the child's one `related` link (its parent-child edge points at the active home bead).
-	const parent = child.related.length === 1 ? await showBead(child.related[0]!, input.repo, env) : null;
-	if (parent === null) return refuse("NOT_LIVE_READBACK", `${input.bead} needs exactly one readable related link to the bead it reads back; it has [${child.related.join(", ")}]`);
-	if (input.actor === parent.assignee || input.actor === child.assignee) return refuse("NON_AUTHOR_REQUIRED", `refused: ${input.actor} is the assignee of ${input.actor === parent.assignee ? parent.id : child.id}`);
 	const boxes = parseBoxes(child.acceptance);
 	const toRun = boxes.filter(b => b.letter !== "v" && !b.checked);
+	// ALLLIVE1: a bead whose every open box is [live]/[after] has nothing an export can replay, so verify can never
+	// close it (PENDING) and it never gets a child. It is read back directly, as its own readback child would be.
+	const direct = !child.labels.includes(LIVE_READBACK_LABEL) && toRun.length > 0 && toRun.every(b => b.phase === "live" || b.phase === "after");
+	if (child.status !== "open" || !(direct || child.labels.includes(LIVE_READBACK_LABEL))) return refuse("NOT_LIVE_READBACK", `${input.bead} is ${child.status || "unknown"} with labels [${child.labels.join(", ")}]; only an open ${LIVE_READBACK_LABEL} child, or an open bead whose every open box is [live]/[after], is read back`);
+	// The verified bead is the child's one `related` link (its parent-child edge points at the active home bead).
+	const parent = direct ? child : child.related.length === 1 ? await showBead(child.related[0]!, input.repo, env) : null;
+	if (parent === null) return refuse("NOT_LIVE_READBACK", `${input.bead} needs exactly one readable related link to the bead it reads back; it has [${child.related.join(", ")}]`);
+	if (input.actor === parent.assignee || input.actor === child.assignee) return refuse("NON_AUTHOR_REQUIRED", `refused: ${input.actor} is the assignee of ${input.actor === parent.assignee ? parent.id : child.id}`);
 	const bad = toRun.filter(b => unreplayableReason(b) !== null);
 	if (bad.length > 0) return refuse("ACCEPTANCE_NOT_REPLAYABLE", `not replayable: ${bad.map(b => `${tag(b)} ${unreplayableReason(b)}`).join("; ")}`);
 	const lesson = await closeLesson(input.lesson, child, input.repo, env);
@@ -663,7 +666,9 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 	const failed = replays.filter(r => r.pass === false);
 	const family = input.family ?? "unknown (set --family)";
 	if (failed.length > 0) {
-		acts.push(["br", "reopen", parent.id, "--reason", `REWORK ${parent.id}: live readback ${child.id} failed ${failed.map(f => `${tag(f)} ${f.detail}`).join("; ")}\n${log.join("\n")}`, "--actor", input.actor]);
+		acts.push(direct
+			? ["br", "comments", "add", parent.id, `REWORK ${parent.id}: live readback failed ${failed.map(f => `${tag(f)} ${f.detail}`).join("; ")}\n${log.join("\n")}`, "--actor", input.actor]
+			: ["br", "reopen", parent.id, "--reason", `REWORK ${parent.id}: live readback ${child.id} failed ${failed.map(f => `${tag(f)} ${f.detail}`).join("; ")}\n${log.join("\n")}`, "--actor", input.actor]);
 	} else {
 		const ticks = boxes.filter(b => !b.checked).map(b => b.item);
 		if (ticks.length > 0) acts.push(["br", "update", child.id, "--check-acceptance", ticks.join(","), "--actor", input.actor]);
