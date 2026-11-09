@@ -1,7 +1,7 @@
 diff --git b/scripts/suite-metrics.py a/scripts/suite-metrics.py
 --- b/scripts/suite-metrics.py
 +++ a/scripts/suite-metrics.py
-@@ -26,12 +26,20 @@ from typing import Sequence
+@@ -26,12 +26,21 @@ from typing import Sequence
  
  sys.path.insert(0, str(Path(__file__).resolve().parent))
  from kitlib_run import run
@@ -13,6 +13,7 @@ diff --git b/scripts/suite-metrics.py a/scripts/suite-metrics.py
 -    "scripts/fresh-gate.sh", "scripts/suite-metrics.py", "scripts/fixed-env.sh",
 -    "scripts/kitlib_run.py", "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
 +    "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
++    "scripts/fresh-gate-ledger.py",
 +    "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
 +    "scripts/fixed-env.sh",
 +    "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/kitlib-proc.sh", "scripts/kitlib-shimpath.sh",

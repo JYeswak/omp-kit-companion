@@ -252,6 +252,15 @@ pre_push pre-push check-pushed-beads.sh scripts/check-pushed-beads.sh -x
 pre_push pre-push commit-msg-bead.sh scripts/commit-msg-bead.sh -x
 on_main pre-push 30-omp-kit-on-main scripts/check-pushed-on-main.sh +x
 pushed_vlevel pre-push 41-omp-kit-pushed-vlevel scripts/pre-push-verification-level.sh +x
+affected_gate pre-push 42-omp-kit-affected-gate scripts/pre-push-affected-gate.sh +x
+affected_gate pre-push declared-affected-gate.py scripts/declared-affected-gate.py -x
+affected_gate pre-push fresh-gate-ledger.py scripts/fresh-gate-ledger.py -x
+affected_gate pre-push suite-metrics.py scripts/suite-metrics.py -x
+affected_gate pre-push suite-hermetic-env.sh scripts/suite-hermetic-env.sh -x
+affected_gate pre-push fixed-env.sh scripts/fixed-env.sh -x
+affected_gate pre-push kitlib_run.py scripts/kitlib_run.py -x
+affected_gate pre-push kitlib_tmp.py scripts/kitlib_tmp.py -x
+affected_gate pre-push pysafe.py scripts/pysafe.py -x
 commit_msg_vlevel commit-msg 41-omp-kit-commit-msg-vlevel scripts/commit-msg-verification-level.sh +x
 ref_txn reference-transaction 40-omp-kit-ref-txn-bead scripts/ref-txn-bead.sh +x
 ref_txn reference-transaction commit-msg-bead.sh scripts/commit-msg-bead.sh -x
@@ -1064,6 +1073,7 @@ ensure_chain pre-push
 install_on_main
 install_commit_msg_vlevel
 install_pushed_vlevel
+install_manifest_group affected_gate
 [ "$PUSHED_BEADS" = 0 ] || install_pre_push
 ensure_chain reference-transaction
 install_ref_txn

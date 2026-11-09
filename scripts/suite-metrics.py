@@ -32,6 +32,7 @@ JUDGE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 JUDGING_FILES = (
     "scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py",
     "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
+    "scripts/fresh-gate-ledger.py",
     "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
     "scripts/fixed-env.sh",
     "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/kitlib-proc.sh", "scripts/kitlib-shimpath.sh",

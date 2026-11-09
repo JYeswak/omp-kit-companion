@@ -338,6 +338,22 @@ class Stdin(Scratch):
         result = pysafe.run_bounded([sys.executable, "-c", code], 15.0, input=b"hello")
         self.assertEqual(result.text().split(), ["OK", "hell", "True"], result.text("stderr"))
 
+    def test_read_stdin_reads_file_stdin_without_timeout(self) -> None:
+        # The hook chain replays hook stdin from a temp file; a regular file
+        # always reaches EOF, so it must report OK, never TIMEOUT (KITGATE1).
+        src = self.tmp / "hook-input.replay"
+        src.write_bytes(b"refs/heads/main abc123 refs/heads/main def456\n")
+        saved = os.dup(0)
+        probe = os.open(src, os.O_RDONLY)
+        try:
+            os.dup2(probe, 0)
+            outcome, data, truncated = pysafe.read_stdin(5.0)
+        finally:
+            os.dup2(saved, 0)
+            os.close(saved)
+            os.close(probe)
+        self.assertEqual((outcome, data, truncated), ("OK", src.read_bytes(), False))
+
 
 class Output(Scratch):
     def test_flood_is_capped_and_drained(self) -> None:

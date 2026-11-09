@@ -80,6 +80,7 @@ import os
 import selectors
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -722,12 +723,30 @@ def read_stdin(timeout: float, cap_bytes: int = DEFAULT_CAP_BYTES) -> Tuple[str,
     Returns ``(outcome, data, truncated)``: OK at EOF, TIMEOUT when the writer
     neither writes nor closes in time (the 2026-10-18 gate wedge: fd 0 a pipe
     nobody wrote to). A terminal is never read: it returns ``(OK, b"", False)``,
-    so an unattended script cannot wait on a human.
+    so an unattended script cannot wait on a human. A regular file (the hook
+    chain replays hook stdin from one) always reaches EOF, so it is drained
+    directly instead of polled: polling it can stall past the deadline and
+    report TIMEOUT on complete input. The byte cap still bounds memory.
     """
     budget = _check_budget("timeout", timeout)
     fd = sys.stdin.fileno()
     if os.isatty(fd):
         return OK, b"", False
+    if stat.S_ISREG(os.fstat(fd).st_mode):
+        chunks = []
+        data_len = 0
+        file_truncated = False
+        while True:
+            piece = os.read(fd, _CHUNK)
+            if not piece:
+                break
+            if data_len < cap_bytes:
+                room = cap_bytes - data_len
+                chunks.append(piece if len(piece) <= room else piece[:room])
+            data_len += len(piece)
+            if data_len > cap_bytes:
+                file_truncated = True
+        return OK, b"".join(chunks), file_truncated
     deadline = time.monotonic() + budget
     buf = bytearray()
     truncated = False
