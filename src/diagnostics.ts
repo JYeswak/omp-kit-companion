@@ -2578,6 +2578,6 @@ export function health(findings: readonly Finding[]): "OK" | "DEGRADED" | "UNVER
 	if (judged.some((item) => item.status === "FAIL")) return "FAIL";
 	if (judged.some((item) => item.status === "UNVERIFIED" || item.status === "NOT_RUN")) return "UNVERIFIED";
 	if (judged.some((item) => item.status === "DEGRADED" || item.status === "DRIFT")) return "DEGRADED";
-	if (judged.length) return "OK";
-	return findings.length ? "OK" : "UNVERIFIED";
+	// Nothing judged (every row is a structural UNVERIFIED/NOT_RUN): nothing was proven, so never OK.
+	return judged.length ? "OK" : "UNVERIFIED";
 }

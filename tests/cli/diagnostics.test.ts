@@ -545,8 +545,10 @@ test("unknown profile takes precedence over optional deterioration without conce
 	expect(rows[0]?.status).toBe("UNVERIFIED");
 	expect(health([...rows, { component: "manifest", status: "FAIL", reason: "Bad source", recommended_action: "Replace release." }])).toBe("FAIL");
 	// DOCTORDEGRADED1 (ompkit-1ra0d.9): an unexercised matcher is structural: on-disk
-	// evidence can never promote it to OK, so it stays listed but does not set overall.
-	expect(health([{ component: "matcher", status: "NOT_RUN", reason: "Not tested", recommended_action: "Run test." }])).toBe("OK");
+	// evidence can never promote it to OK. It does not degrade a run that judged other rows,
+	// but a run whose only row is unexercised proved nothing, so it is never OK.
+	expect(health([{ component: "matcher", status: "NOT_RUN", reason: "Not tested", recommended_action: "Run test." }])).toBe("UNVERIFIED");
+	expect(health([{ component: "manifest", status: "OK", reason: "Verified", recommended_action: "None." }, { component: "matcher", status: "NOT_RUN", reason: "Not tested", recommended_action: "Run test." }])).toBe("OK");
 });
 
 test("matching installed bytes establish equality but an old record never confers ownership", async () => {
