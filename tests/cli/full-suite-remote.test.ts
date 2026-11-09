@@ -4,7 +4,7 @@
 // the worker-side commands full-suite-remote.py sends, so the shard, transfer and validation paths are
 // the real ones.
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -165,6 +165,14 @@ test("a shard whose connection drops leaves no verdict, never PASS", async () =>
 	expect(run.out).toContain("remote shards ended without complete evidence");
 	expect(existsSync(await recordPath(f))).toBe(false);
 	expect((await requirePass(f)).out).toBe("MISS");
+	// The shard that finished still records its files' times for the next split; the dropped one adds none.
+	const tables = readdirSync(f.cache, { recursive: true }).map(String).filter(path => path.endsWith(join("timings", "remote-linux.json")));
+	expect(tables.length).toBe(1);
+	const timed = Object.keys(JSON.parse(readFileSync(join(f.cache, tables[0]!), "utf8")).files);
+	const remoteFiles = ["tests/cli/alpha.test.ts", "tests/cli/beta.test.ts", "tests/cli/gamma.test.sh", "tests/scripts/delta_test.py"];
+	expect(timed.length).toBeGreaterThan(0);
+	expect(timed.length).toBeLessThan(remoteFiles.length);
+	for (const path of timed) expect(remoteFiles).toContain(path);
 }, CASE_MS);
 
 // Planted negatives on the reader: each edits one copy of the passing record; the log and filename stay.

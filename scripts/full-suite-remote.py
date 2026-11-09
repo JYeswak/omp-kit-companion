@@ -404,6 +404,9 @@ def run_plan(args: argparse.Namespace) -> int:
     with ThreadPoolExecutor(max_workers=len(shards)) as pool:
         outcomes = list(pool.map(one, shards))
     errors = [outcome["error"] for outcome in outcomes if "error" in outcome]
+    # Scheduling hints only: a shard that finished measured its files whatever another shard did, and
+    # dropping those times left the next split as uneven as the one that timed out.
+    record_timings(plan_doc, [outcome for outcome in outcomes if "error" not in outcome])
     if errors:
         for error in errors:
             say("INCOMPLETE " + error)
@@ -416,6 +419,14 @@ def run_plan(args: argparse.Namespace) -> int:
             log.write(f"full-suite: remote shard {outcome['summary']['worker']} "
                       f"({outcome['summary']['runtime']}) output follows\n".encode())
             log.write(outcome["log"])
+    say(f"all {len(outcomes)} shards complete")
+    return 0
+
+
+def record_timings(plan_doc: dict, outcomes: list) -> None:
+    """Fold completed shards' per-file times into the Linux timing table the scheduler splits by."""
+    if not outcomes:
+        return
     table = Path(plan_doc["cache_dir"]) / "timings" / "remote-linux.json"
     try:
         previous = json.loads(read_text(table)) if table.exists() else {"version": 1, "files": {}}
@@ -426,8 +437,6 @@ def run_plan(args: argparse.Namespace) -> int:
         os.replace(temporary, table)
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         say("timing hints were not updated (scheduling only; the evidence is unaffected)")
-    say(f"all {len(outcomes)} shards complete")
-    return 0
 
 
 def merge(args: argparse.Namespace) -> int:
