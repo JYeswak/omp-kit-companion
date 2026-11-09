@@ -52,7 +52,7 @@ import { defaultInventoryDeps, inventoryServices, ServicesInputError } from "./s
 import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, reconcilePendingUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
-import { KIT_UPDATE_REPO_PATTERN, kitUpdateJobOverall, relinkKitPlugin, runKitUpdateJob } from "./kit-update-job.ts";
+import { KIT_UPDATE_REPO_PATTERN, kitUpdateJobOverall, relinkKitPlugin, retainReleases, runKitUpdateJob, runningReleaseVersion } from "./kit-update-job.ts";
 import { claudeSaveJobEnabled, runClaudeSaveJob, runGitleaksScan, type GitleaksScanRequest } from "./claude-save-job.ts";
 import { ensureMutationStateRoot, writePrivate, type PendingInspection } from "./mutations.ts";
 import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
@@ -4456,8 +4456,22 @@ async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 			? await relinkKitPlugin(binary, store)
 			: { ok: false as const, detail: "updated release version is missing or invalid" };
 	if (!link.ok) return updatePostApplyEnvelope(envelope, link, null, store);
-	const manifest = await applyActivationManifest({ root: store, home, stateRoot, binary });
-	return updatePostApplyEnvelope(envelope, link, manifest, store);
+		const manifest = await applyActivationManifest({ root: store, home, stateRoot, binary });
+		const finished = updatePostApplyEnvelope(envelope, link, manifest, store);
+		if (finished.code !== 0 || outcome.activeVersion === null) return finished;
+		// STATERETAIN1 (ompkit-1ra0d.62): a manual update retains like the job does —
+		// active, last five, pinned and the still-running release survive; older
+		// release and poll dirs are pruned on the same path. A failed retention
+		// is FINDINGS, never a silent skip.
+		const retention = retainReleases(prefix, stateRoot, outcome.activeVersion, [runningReleaseVersion(prefix)]);
+		if (retention.status === "FAILED") {
+			return { code: 1, data: { ...finished.data, overall: "FINDINGS", retention }, errors: [...(finished.errors ?? []), {
+				code: "KIT_RETENTION_FAILED",
+				message: `Kit update applied, but release retention failed: ${retention.reason ?? "unknown"}`,
+				remediation: "Inspect the prefix releases/ and state poll-* dirs; rerun the update or prune manually after verifying the active link.",
+			}], verification: "UNVERIFIED" };
+		}
+		return { ...finished, data: { ...finished.data, retention } };
 	} catch (error) {
 		const code = error instanceof Error ? error.message : "";
 		if (code === "PENDING_RECOVERY") return { code: 1, data: { overall: "FAIL", scope, action: "PARTIAL" },

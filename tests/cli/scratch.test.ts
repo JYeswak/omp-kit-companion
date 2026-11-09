@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, lutimesSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectBunBuildFiles, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
 import { exportCommitToScratch, parseFreeOwner, parseTextOwner, releaseBudgetEntry, repoOfRoot } from "../../src/scratch.ts";
@@ -2273,4 +2273,89 @@ test("V261FREE: free owner with closed bead reaps via root repo", () => {
 	writeFileSync(join(dir, ".owner"), "BuildW12 (LavenderBeacon), bead cfs-j2wma.12\n");
 	const v = inspectSession(dir, vat, depsFor({ run: textRun(false, "closed") as never }));
 	expect(v).toMatchObject({ action: "REAP", reason: "text-owner-bead-closed-no-fds" });
+});
+
+test("STATERETAIN1: an expired entry with unreadable nested fixture dirs is deleted after owner-rwx restore", () => {
+	const home = useState();
+	// Hermetic TTL: the operator host sets quarantine_ttl_hours=1, which would
+	// make every fixture borderline-expired. Pin an empty config (24 h default).
+	const configHome = agentTmp("scratch-config-stateretain");
+	roots.push(configHome);
+	process.env.XDG_CONFIG_HOME = configHome;
+	const now = Date.now();
+	const past = new Date(now - 80 * 3600 * 1000);
+	const qt = quarantineDir(home);
+	mkdirSync(qt, { recursive: true });
+	const entry = join(qt, quarantineEntryFor("permreap.1", new Date(now - 80 * 3600 * 1000)));
+	mkdirSync(entry, { recursive: true });
+	const locked = join(entry, "locked");
+	mkdirSync(locked, { recursive: true });
+	writeFileSync(join(locked, "fixture"), "locked fixture\n");
+	writeFileSync(join(entry, "payload"), "payload\n");
+	// Backdate every mtime while the tree is still readable, then lock the
+	// nested dir: this mirrors the live 000 test-fixture dir that held one
+	// quarantine entry since 2026-10-14 behind idle-proof-unavailable.
+	utimesSync(join(locked, "fixture"), past, past);
+	utimesSync(locked, past, past);
+	utimesSync(join(entry, "payload"), past, past);
+	chmodSync(locked, 0);
+	utimesSync(entry, past, past);
+	const rows = applyQuarantineExpiry(home, { ...depsFor(), home, now });
+	expect(rows).toContainEqual(expect.objectContaining({ dir: entry, action: "DELETE", reason: "quarantine-expired" }));
+	expect(existsSync(entry)).toBe(false);
+});
+
+test("STATERETAIN1: a quarantine entry that is not expired is never deleted, even with unreadable nested dirs", () => {
+	const home = useState();
+	const configHome = agentTmp("scratch-config-stateretain");
+	roots.push(configHome);
+	process.env.XDG_CONFIG_HOME = configHome;
+	const now = Date.now();
+	const qt = quarantineDir(home);
+	mkdirSync(qt, { recursive: true });
+	const entry = join(qt, quarantineEntryFor("young-locked.1", new Date(now - 3600 * 1000)));
+	mkdirSync(entry, { recursive: true });
+	const locked = join(entry, "locked");
+	mkdirSync(locked, { recursive: true });
+	writeFileSync(join(locked, "fixture"), "young\n");
+	chmodSync(locked, 0);
+	try {
+		const rows = applyQuarantineExpiry(home, { ...depsFor(), home, now });
+		expect(rows.some(row => row.dir === entry && row.action === "DELETE")).toBe(false);
+		expect(existsSync(entry)).toBe(true);
+		// Planted negative: a young entry is skipped before any expiry repair,
+		// so its modes are untouched.
+		expect(lstatSync(locked).mode & 0o777).toBe(0);
+	} finally {
+		chmodSync(locked, 0o755);
+	}
+});
+
+test("STATERETAIN1: a symlink inside an expired entry is not followed on delete", () => {
+	const home = useState();
+	const configHome = agentTmp("scratch-config-stateretain");
+	roots.push(configHome);
+	process.env.XDG_CONFIG_HOME = configHome;
+	const now = Date.now();
+	const past = new Date(now - 80 * 3600 * 1000);
+	const outside = agentTmp("stateretain-outside");
+	roots.push(outside);
+	const sentinel = join(outside, "sentinel");
+	writeFileSync(sentinel, "do not touch\n");
+	const qt = quarantineDir(home);
+	mkdirSync(qt, { recursive: true });
+	const entry = join(qt, quarantineEntryFor("symlinked.1", new Date(now - 80 * 3600 * 1000)));
+	mkdirSync(entry, { recursive: true });
+	writeFileSync(join(entry, "payload"), "payload\n");
+	symlinkSync(sentinel, join(entry, "escape"));
+	// The link itself is newborn by creation; backdate it without following it
+	// so the idle proof sees only old mtimes.
+	lutimesSync(join(entry, "escape"), past, past);
+	utimesSync(join(entry, "payload"), past, past);
+	utimesSync(entry, past, past);
+	const rows = applyQuarantineExpiry(home, { ...depsFor(), home, now });
+	expect(rows).toContainEqual(expect.objectContaining({ dir: entry, action: "DELETE" }));
+	expect(existsSync(entry)).toBe(false);
+	// Planted negative: the link target outside the entry is untouched.
+	expect(readFileSync(sentinel, "utf8")).toBe("do not touch\n");
 });

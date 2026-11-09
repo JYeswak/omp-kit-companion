@@ -3222,6 +3222,15 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 			record({ dir: path, action: "SKIP", reason: "quarantine-symlink", owner: null, sizeBytes: 0 });
 			continue;
 		}
+		// STATERETAIN1 (ompkit-1ra0d.62): the entry is past its TTL and owned by
+		// this quarantine directory, but an unreadable test-fixture tree (000
+		// modes) under it makes every idle walk fail closed with
+		// idle-proof-unavailable, so the entry can never drain (one entry held
+		// since 2026-10-14). Restore owner rwx first — lstat only, symlinks
+		// never followed, nothing outside the entry touched — so the idle proof
+		// and any delete see the entry's real mtimes and modes. Held entries
+		// keep their bead/seat proofs; this only makes the walks truthful.
+		if (owner === null || malformed) grantOwnerWrite(path);
 		const released = readReleaseRecord(path);
 		const eligibility = quarantineExpiryDecision(path, home, owner, malformed, released !== null, deps);
 		if (eligibility.action !== "DELETE") {

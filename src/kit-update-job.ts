@@ -245,8 +245,33 @@ function retentionVersion(value: string): boolean {
 		value.split(".").every(part => Number.isSafeInteger(Number(part)));
 }
 
+/** A poll directory's release version: the exact semver or the leading semver of a suffixed name (poll-0.2.50.stale-interrupted-…). Null when no leading version parses. */
+function pollDirVersion(entry: string): string | null {
+	if (!entry.startsWith("poll-")) return null;
+	const match = /^(\d+\.\d+\.\d+)(?=[.-]|$)/.exec(entry.slice(5));
+	return match !== null && retentionVersion(match[1]!) ? match[1]! : null;
+}
+
+/** Operator-pinned releases survive retention: `<prefix>/releases/.pinned`, one X.Y.Z per line, `#` comments, anything else ignored. */
+export const PINNED_RELEASES_FILE = ".pinned";
+function readPinnedReleases(prefix: string): string[] {
+	let text: string;
+	try {
+		text = readFileSync(join(prefix, "releases", PINNED_RELEASES_FILE), "utf8");
+	} catch {
+		return [];
+	}
+	const pinned: string[] = [];
+	for (const line of text.split("\n")) {
+		const version = line.trim();
+		if (version === "" || version.startsWith("#")) continue;
+		if (retentionVersion(version)) pinned.push(version);
+	}
+	return pinned;
+}
+
 /** Capture the executable's physical release before activation can move the stable link. */
-function runningReleaseVersion(prefix: string): string | null {
+export function runningReleaseVersion(prefix: string): string | null {
 	const parts = relative(join(resolve(prefix), "releases"), realpathSync(process.execPath)).split(sep);
 	return parts.length === 3 && parts[1] === "bin" && parts[2] === "omp-kit" && retentionVersion(parts[0]!)
 		? parts[0]! : null;
@@ -259,8 +284,8 @@ function writableReleaseTree(path: string): void {
 	makeDirsWritable(path);
 }
 
-/** The updater lock protects the active link and rollback selection for the whole destructive pass. */
-function retainReleases(prefix: string, stateRoot: string, active: string, protectedVersions: readonly (string | null)[]): NonNullable<KitUpdateJobResult["retention"]> {
+/** STATERETAIN1 (ompkit-1ra0d.62): keep the active release, the last five before it, and any pinned or protected release; prune older release and poll dirs. Newer-than-active versions are never touched. The updater lock protects the active link and rollback selection for the whole destructive pass. */
+export function retainReleases(prefix: string, stateRoot: string, active: string, protectedVersions: readonly (string | null)[]): NonNullable<KitUpdateJobResult["retention"]> {
 	const report: NonNullable<KitUpdateJobResult["retention"]> = { status: "APPLIED", kept: [], removed: [], pollsRemoved: [] };
 	let lock: UpdateLockToken | undefined;
 	try {
@@ -271,8 +296,8 @@ function retainReleases(prefix: string, stateRoot: string, active: string, prote
 			!lstatSync(join(releases, active)).isDirectory()) throw new Error("KIT_RETENTION_ACTIVE_UNVERIFIED");
 		const versions = readdirSync(releases, { withFileTypes: true })
 			.filter(entry => entry.isDirectory() && retentionVersion(entry.name)).map(entry => entry.name);
-		const previous = versions.filter(version => compareSemver(version, active) < 0).sort(compareSemver).slice(-2);
-		const keep = new Set([active, ...previous]);
+		const previous = versions.filter(version => compareSemver(version, active) < 0).sort(compareSemver).slice(-5);
+		const keep = new Set([active, ...previous, ...readPinnedReleases(prefix)]);
 		for (const version of protectedVersions) if (version !== null && retentionVersion(version)) keep.add(version);
 		report.kept = versions.filter(version => keep.has(version) || compareSemver(version, active) > 0).sort(compareSemver);
 		for (const version of versions) {
@@ -283,9 +308,9 @@ function retainReleases(prefix: string, stateRoot: string, active: string, prote
 			report.removed.push(version);
 		}
 		for (const entry of readdirSync(stateRoot, { withFileTypes: true })) {
-			if (!entry.isDirectory() || !entry.name.startsWith("poll-")) continue;
-			const version = entry.name.slice(5);
-			if (!retentionVersion(version) || keep.has(version) || compareSemver(version, active) >= 0) continue;
+			if (!entry.isDirectory()) continue;
+			const version = pollDirVersion(entry.name);
+			if (version === null || keep.has(version) || compareSemver(version, active) >= 0) continue;
 			const path = join(stateRoot, entry.name);
 			writableReleaseTree(path);
 			rmSync(path, { recursive: true });
