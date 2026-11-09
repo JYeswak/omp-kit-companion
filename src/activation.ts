@@ -29,7 +29,7 @@ import { applyRulePlan, planRules } from "./apply-rules.ts";
 import { applyExtensions, planExtensions } from "./apply-extensions.ts";
 import { profilePluginRuleStatus, readManifest } from "./diagnostics.ts";
 import { extractImportSpecifiers } from "./extensions.ts";
-import { HOOK_MEMBER_PAIRS, censusHookFreshness, liveHookFreshnessIo, liveHookRefreshIo, refreshFleetHooks, type HookRefreshIo, type HookRepoRow } from "./hook-refresh.ts";
+import { censusHookFreshness, liveHookFreshnessIo, liveHookRefreshIo, refreshFleetHooks, type HookRefreshIo, type HookRepoRow } from "./hook-refresh.ts";
 import { KNOWN_JOBS } from "./service.ts";
 import { livePluginReleaseIo, type PluginLink } from "./plugin-release.ts";
 import { defaultInventoryDeps, inventoryServices, type ServiceRow } from "./services.ts";
@@ -72,7 +72,7 @@ export interface OptOut {
 /** Injectable seams: live wiring shells out (launchd, git); tests inject fakes. */
 export interface ActivationDeps {
 	services: (home: string) => ServiceRow[];
-	hookRows: () => HookRepoRow[];
+	hookRows: () => Promise<HookRepoRow[]>;
 	pluginLinks: () => PluginLink[];
 	readOptOuts: () => { optouts: OptOut[]; issue: string | null };
 }
@@ -296,7 +296,7 @@ export function liveActivationDeps(root: string, home: string): ActivationDeps {
 	};
 }
 
-export function inspectActivation(root: string, home: string, deps: ActivationDeps): ActivationReport {
+export async function inspectActivation(root: string, home: string, deps: ActivationDeps): Promise<ActivationReport> {
 	const items: ActivationItem[] = [];
 	let manifest_issue: string | null = null;
 	const optoutRead = deps.readOptOuts();
@@ -357,11 +357,17 @@ export function inspectActivation(root: string, home: string, deps: ActivationDe
 				on, row ? `launchd loaded=${String(row.loaded)} class=${row.class}` : "no launchd inventory row: job is not loaded");
 		}
 		const versionNote = `release baseline ${baseline}`;
-		for (const row of deps.hookRows()) {
-			if (row.members.length === 0) {
+		for (const row of await deps.hookRows()) {
+			if (row.state === "UNREADABLE") {
 				decide(`hook:${row.repo}::*`, "hook",
 					`sh <release>/scripts/install-commit-msg-bead.sh ${row.repo}`, "omp-kit doctor --scope hooks --json",
 					false, `hook members unreadable for this repo (state=${row.state})`);
+				continue;
+			}
+			if (row.members.length === 0) {
+				decide(`hook:${row.repo}::*`, "hook",
+					`sh <release>/scripts/install-commit-msg-bead.sh ${row.repo}`, "omp-kit doctor --scope hooks --json",
+					true, "installer --check clean: installed members match the release");
 				continue;
 			}
 			for (const member of row.members) {
@@ -478,7 +484,7 @@ export async function applyActivationManifest(input: { root: string; home: strin
 			if (report.failed > 0) failed.push({ item: "hooks", detail: `${report.failed} repo(s) failed` });
 		} else {
 			const io = input.hookIo ?? liveHookRefreshIo(home, root);
-			const census = censusHookFreshness(io);
+			const census = await censusHookFreshness(io);
 			const censusRepos = new Set(census.map((row) => resolve(row.repo)));
 			const staleRepos = new Set<string>();
 			for (const row of census) {

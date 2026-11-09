@@ -1,4 +1,4 @@
-// hook-refresh.ts — HOOKREFRESH1 (ompkit-v66l.22.3): kit-update refreshes the
+// hook-refresh.ts — HOOKREFRESHALL1 (ompkit-1ra0d.77): kit-update refreshes the
 // kit hook members installed in every fleet project.
 //
 // Background: kit-update relinked the plugin and services but never re-ran
@@ -8,85 +8,72 @@
 //
 // Contract:
 // - After a successful install, runKitUpdateJob re-runs the hook installer
-//   for every fleet-watch sessions[].repo with pullEnabled true, recording
-//   each member's before/after sha256. Installed members are deployment
-//   artifacts: in a hooks dir inside the work tree (core.hooksPath=.githooks,
-//   e.g. clutterfreespaces.ios) the installer lists them in the repo's
+//   for every fleet-watch sessions[].repo that already has kit hook members
+//   installed, whatever its pullEnabled. pullEnabled is a work-supply pause
+//   (it gates sends and pulls), not a hook-membership signal. A repo with no
+//   kit member installed is never written. Each member's before/after sha256
+//   is recorded. Installed members are deployment artifacts: in a hooks dir
+//   inside the work tree (core.hooksPath=.githooks, e.g.
+//   clutterfreespaces.ios) the installer lists them in the repo's
 //   info/exclude, so a refresh leaves nothing to commit. Only a refreshed
 //   member the repo still tracks records PENDING_COMMIT with its paths, for the
 //   repo's director to commit or untrack (owner route); kit-update never commits.
-// - `doctor --scope hooks` (via diagnose()) lists per repo the members whose
-//   digest differs from the active release (this checkout's scripts/).
-//
-// The member list mirrors scripts/install-commit-msg-bead.sh --check exactly;
-// when that script gains a member, this list gains it in the same change.
+// - `doctor --scope hooks` (via diagnose()) lists per repo the members the
+//   active release's scripts/install-commit-msg-bead.sh --check names as
+//   MISSING or STALE. The installer is the one member list; nothing here
+//   mirrors it by hand.
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { Finding } from "./diagnostics.ts";
 import { fleetWatchRepos } from "./scratch.ts";
 import { run } from "./kitlib/run.ts";
 
-/** [installed rel (under the hooks dir), source rel (under the kit root)]. */
-export const HOOK_MEMBER_PAIRS: ReadonlyArray<readonly [string, string]> = [
-	["hooks.d/commit-msg/40-omp-kit-commit-msg-bead", "scripts/commit-msg-bead.sh"],
-	["hooks.d/pre-push/30-omp-kit-on-main", "scripts/check-pushed-on-main.sh"],
-	["hooks.d/pre-push/41-omp-kit-pushed-vlevel", "scripts/pre-push-verification-level.sh"],
-	["hooks.d/pre-push/check-pushed-beads.sh", "scripts/check-pushed-beads.sh"],
-	["hooks.d/pre-push/commit-msg-bead.sh", "scripts/commit-msg-bead.sh"],
-	["hooks.d/reference-transaction/40-omp-kit-ref-txn-bead", "scripts/ref-txn-bead.sh"],
-	["hooks.d/reference-transaction/commit-msg-bead.sh", "scripts/commit-msg-bead.sh"],
-	["hooks.d/reference-transaction/ref-txn-witness.py", "scripts/ref-txn-witness.py"],
-	["hooks.d/reference-transaction/pysafe.py", "scripts/pysafe.py"],
-	["hooks.d/pre-commit/45-omp-kit-staged-imports", "scripts/check-staged-imports.sh"],
-	["hooks.d/pre-commit/check-commit-imports.sh", "scripts/check-commit-imports.sh"],
-	["hooks.d/commit-msg/46-omp-kit-commit-notes", "scripts/check-commit-notes.sh"],
-	["hooks.d/commit-msg/release-notes.ts", "scripts/release-notes.ts"],
-	["hooks.d/commit-msg/limit-process-tree.sh", "scripts/limit-process-tree.sh"],
-	["hooks.d/pre-commit/47-omp-kit-staged-fragments", "scripts/check-staged-fragments.sh"],
-	["hooks.d/commit-msg/49-omp-kit-stale-worktree", "scripts/check-stale-worktree.sh"],
-	["hooks.d/pre-commit/48-omp-kit-staged-regexploit", "scripts/check-staged-regexploit.sh"],
-	["hooks.d/pre-commit/49-omp-kit-staged-pysafe", "scripts/check-staged-pysafe.sh"],
-	["hooks.d/pre-commit/pysafe.py", "scripts/pysafe.py"],
-	["hooks.d/pre-commit/pysafe_check.py", "scripts/pysafe_check.py"],
-	["hooks.d/pre-commit/pysafe_inline.py", "scripts/pysafe_inline.py"],
-	["hooks.d/pre-commit/pysafe_inline_literals.py", "scripts/pysafe_inline_literals.py"],
-	["hooks.d/pre-commit/50-omp-kit-staged-tempsafe", "scripts/check-staged-tempsafe.sh"],
-	["hooks.d/pre-commit/tempsafe_check.py", "scripts/tempsafe_check.py"],
-	["hooks.d/pre-commit/kitlib_ratchet_core.py", "scripts/kitlib_ratchet_core.py"],
-	["hooks.d/pre-commit/51-omp-kit-staged-kitlib", "scripts/check-staged-kitlib.sh"],
-	["hooks.d/pre-commit/kitlib_ratchet.py", "scripts/kitlib_ratchet.py"],
-	["hooks.d/pre-commit/br_init_check.py", "scripts/br_init_check.py"],
-	["hooks.d/pre-commit/53-omp-kit-staged-br-init", "scripts/check-staged-br-init.sh"],
-	["hooks.d/pre-commit/kitlib_run.py", "scripts/kitlib_run.py"],
-	["hooks.d/pre-commit/kitlib_io.py", "scripts/kitlib_io.py"],
-	["hooks.d/commit-msg/gate-event.sh", "scripts/gate-event.sh"],
-	["hooks.d/pre-commit/kitlib-findings.sh", "scripts/kitlib-findings.sh"],
-	["hooks.d/commit-msg/kitlib-findings.sh", "scripts/kitlib-findings.sh"],
-	["hooks.d/pre-push/kitlib-findings.sh", "scripts/kitlib-findings.sh"],
-	["hooks.d/reference-transaction/kitlib-findings.sh", "scripts/kitlib-findings.sh"],
-	["hooks.d/commit-msg/kitlib_jsonl.py", "scripts/kitlib_jsonl.py"],
-	["hooks.d/commit-msg/kitlib_lock.py", "scripts/kitlib_lock.py"],
-	["hooks.d/pre-commit/kitlib_tmp.py", "scripts/kitlib_tmp.py"],
-	["hooks.d/pre-commit/kitlib-tmp.sh", "scripts/kitlib-tmp.sh"],
-	["hooks.d/commit-msg/kitlib-tmp.sh", "scripts/kitlib-tmp.sh"],
-	["hooks.d/pre-push/kitlib-tmp.sh", "scripts/kitlib-tmp.sh"],
-	["hooks.d/reference-transaction/kitlib-tmp.sh", "scripts/kitlib-tmp.sh"],
-	["hooks.d/pre-commit/46-omp-kit-staged-readme", "scripts/check-staged-readme.sh"],
-	["hooks.d/pre-commit/readme-check.ts", "scripts/readme-check.ts"],
-
-];
 /**
- * The two pushed-beads members are conditional in the installer
- * (--no-pushed-beads skips them). A missing optional member is not a finding;
- * a present-but-differing one is.
+ * One member the installer's --check names. The installer is the one member
+ * list (HOOKREFRESHALL1): the census and the refresh parse its
+ * `MISSING installed member: <dest>` and
+ * `STALE installed member: <dest> differs from <src>` lines, so a member the
+ * installer gains (e.g. KITGATE1's 42-omp-kit-affected-gate) is seen with no
+ * change here. Parsed with prefix/suffix string ops, not patterns.
  */
-const OPTIONAL_MEMBERS: Record<string, true> = {
-	"hooks.d/pre-push/check-pushed-beads.sh": true,
-	"hooks.d/pre-push/commit-msg-bead.sh": true,
-};
+export interface CheckMember { dest: string; src: string | null; kind: "MISSING" | "STALE"; }
+const MISSING_PREFIX = "install-commit-msg-bead: MISSING installed member: ";
+const STALE_PREFIX = "install-commit-msg-bead: STALE installed member: ";
+const STALE_MID = " differs from ";
+const RERUN_SUFFIX = "; rerun ";
+export function parseCheckMembers(output: string): CheckMember[] {
+	const found: CheckMember[] = [];
+	const seen = new Set<string>();
+	for (const line of output.split("\n")) {
+		if (line.startsWith(MISSING_PREFIX)) {
+			const dest = line.slice(MISSING_PREFIX.length).trim();
+			if (dest.length === 0 || seen.has(`M:${dest}`)) continue;
+			seen.add(`M:${dest}`);
+			found.push({ dest, src: null, kind: "MISSING" });
+		} else if (line.startsWith(STALE_PREFIX)) {
+			const rest = line.slice(STALE_PREFIX.length);
+			const rerunAt = rest.lastIndexOf(RERUN_SUFFIX);
+			const core = rerunAt >= 0 ? rest.slice(0, rerunAt) : rest;
+			const midAt = core.indexOf(STALE_MID);
+			if (midAt < 0) continue;
+			const dest = core.slice(0, midAt).trim();
+			const src = core.slice(midAt + STALE_MID.length).trim();
+			if (dest.length === 0 || src.length === 0 || seen.has(`S:${dest}`)) continue;
+			seen.add(`S:${dest}`);
+			found.push({ dest, src, kind: "STALE" });
+		}
+	}
+	return found;
+}
+/** Installer --check outcome for one repo: rc 0 is fresh, rc 3 names drift. */
+export interface HookCheckResult { rc: number | null; output: string; }
+/** A --check result the census can judge: it ran and either passed or named drift. */
+export function checkUsable(check: HookCheckResult): boolean {
+	return check.rc === 0 || check.rc === 3;
+}
 type HookMemberStatus = "FRESH" | "MISSING" | "STALE" | "SOURCE_MISSING";
 export interface HookMemberRow {
 	member: string;
@@ -102,7 +89,7 @@ export interface HookRepoRow {
 	/** True when the hooks dir holds git-tracked files (owner-route commit). */
 	tracked: boolean;
 	members: HookMemberRow[];
-	/** Installed rel paths that are STALE or (non-optional) MISSING. */
+	/** Installed rel paths (under the hooks dir) that are STALE or MISSING. */
 	stale: string[];
 	state: "FRESH" | "STALE" | "UNREADABLE" | "SOURCE_MISSING";
 }
@@ -112,14 +99,51 @@ export interface HookFreshnessIo {
 	kitRoot(): string;
 	digest(path: string): string | null;
 	hooksDir(repo: string): { dir: string | null; config: string | null; tracked: boolean };
+	/** Active release's install-commit-msg-bead.sh --check <repo> (bounded). */
+	check(repo: string): Promise<HookCheckResult>;
+	/** True when the hooks dir holds at least one installed kit member. */
+	hasKitMembers(dir: string): boolean;
 }
 
 export function digestBytes(bytes: Uint8Array): string {
 	return createHash("sha256").update(bytes).digest("hex");
 }
 
-/** sessions[].repo with pullEnabled true only: the refresh write set. */
-export function pullEnabledRepos(home: string): { repo: string; source: string }[] {
+/** The hooks dir git would use for repo (same command the installer uses). */
+function resolveHooksDir(repo: string): string | null {
+	const gitPath = gitOut(repo, ["rev-parse", "--git-path", "hooks"])?.trim() || null;
+	if (!gitPath) return null;
+	return isAbsolute(gitPath) ? gitPath : resolve(repo, gitPath);
+}
+/** True when dir holds a 40-/41-omp-kit-* member: proof the installer ran here. */
+export function dirHasKitMembers(dir: string): boolean {
+	const stack: string[] = [dir];
+	let seen = 0;
+	while (stack.length > 0) {
+		const cur = stack.pop() as string;
+		let entries;
+		try {
+			entries = readdirSync(cur, { withFileTypes: true });
+		} catch {
+			return false;
+		}
+		for (const entry of entries) {
+			seen += 1;
+			if (seen > 2000) return false;
+			if (entry.name === ".git") continue;
+			if (entry.isSymbolicLink()) continue;
+			if (entry.isFile() && (entry.name.startsWith("40-omp-kit-") || entry.name.startsWith("41-omp-kit-"))) return true;
+			if (entry.isDirectory() && stack.length < 64) stack.push(join(cur, entry.name));
+		}
+	}
+	return false;
+}
+/**
+ * sessions[].repo (absolute, existing) that already has kit hook members
+ * installed, whatever its pullEnabled: the refresh write set. A repo with no
+ * kit member installed is never written.
+ */
+export function installedHookRepos(home: string): { repo: string; source: string }[] {
 	let config: unknown;
 	try {
 		const path = process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
@@ -134,16 +158,39 @@ export function pullEnabledRepos(home: string): { repo: string; source: string }
 	for (const row of sessions) {
 		if (typeof row !== "object" || row === null) continue;
 		const record = row as Record<string, unknown>;
-		if (record.pullEnabled !== true) continue;
 		if (typeof record.repo !== "string" || !isAbsolute(record.repo)) continue;
+		try {
+			if (!statSync(record.repo).isDirectory()) continue;
+		} catch {
+			continue;
+		}
+		const dir = resolveHooksDir(record.repo);
+		if (dir === null) continue;
+		let present = false;
+		try {
+			present = dirHasKitMembers(dir);
+		} catch {
+			continue;
+		}
+		if (!present) continue;
 		const session = typeof record.session === "string" ? record.session : "unnamed";
 		found.push({ repo: record.repo, source: `fleet-watch:${session}` });
 	}
 	return found;
 }
 
-export function censusHookFreshness(io: HookFreshnessIo): HookRepoRow[] {
-	const kitRoot = io.kitRoot();
+/** Installed rel under the hooks dir when dest sits inside it, else the dest. */
+function memberName(hooksDir: string, dest: string): string {
+	const rel = relative(hooksDir, dest);
+	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel) ? rel : dest;
+}
+/**
+ * Per-repo freshness from the active release's
+ * scripts/install-commit-msg-bead.sh --check <repo>: each MISSING/STALE line
+ * becomes a member row. A repo whose check cannot run (or answers outside
+ * rc 0/3 with nothing parsed) is UNREADABLE, never FRESH.
+ */
+export async function censusHookFreshness(io: HookFreshnessIo): Promise<HookRepoRow[]> {
 	const seen = new Set<string>();
 	const rows: HookRepoRow[] = [];
 	for (const entry of io.repos()) {
@@ -155,39 +202,47 @@ export function censusHookFreshness(io: HookFreshnessIo): HookRepoRow[] {
 			rows.push({ repo, source: entry.source, hooks_dir: null, hooks_path_config: located.config, tracked: false, members: [], stale: [], state: "UNREADABLE" });
 			continue;
 		}
+		let checked: HookCheckResult;
+		try {
+			checked = await io.check(repo);
+		} catch {
+			checked = { rc: null, output: "" };
+		}
+		const problems = parseCheckMembers(checked.output);
+		if (!checkUsable(checked) && problems.length === 0) {
+			rows.push({ repo, source: entry.source, hooks_dir: located.dir, hooks_path_config: located.config, tracked: false, members: [], stale: [], state: "UNREADABLE" });
+			continue;
+		}
 		const members: HookMemberRow[] = [];
 		const stale: string[] = [];
 		let sourceMissing = false;
-		for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
-			const installedDigest = io.digest(join(located.dir, installedRel));
-			const sourceDigest = io.digest(join(kitRoot, sourceRel));
+		for (const problem of problems) {
+			const member = memberName(located.dir, problem.dest);
+			const installedDigest = io.digest(problem.dest);
+			const sourceDigest = problem.src === null ? null : io.digest(problem.src);
 			let status: HookMemberStatus;
-			if (sourceDigest === null) {
+			if (installedDigest === null) {
+				status = "MISSING";
+			} else if (sourceDigest === null) {
 				status = "SOURCE_MISSING";
 				sourceMissing = true;
-			} else if (installedDigest === null) {
-				status = OPTIONAL_MEMBERS[installedRel] ? "FRESH" : "MISSING";
-				if (status === "MISSING") stale.push(installedRel);
-			} else if (installedDigest === sourceDigest) {
-				status = "FRESH";
 			} else {
 				status = "STALE";
-				stale.push(installedRel);
 			}
-			// An absent optional member is fresh by definition: report nulls, no finding.
-			members.push({ member: installedRel, installed_sha256: installedDigest, source_sha256: sourceDigest, status });
+			if (status === "MISSING" || status === "STALE") stale.push(member);
+			members.push({ member, installed_sha256: installedDigest, source_sha256: sourceDigest, status });
 		}
 		rows.push({
 			repo, source: entry.source, hooks_dir: located.dir, hooks_path_config: located.config,
 			tracked: located.tracked, members, stale,
-			state: sourceMissing && stale.length === 0 ? "SOURCE_MISSING" : stale.length > 0 ? "STALE" : "FRESH",
+			state: stale.length > 0 ? "STALE" : sourceMissing ? "SOURCE_MISSING" : "FRESH",
 		});
 	}
 	return rows;
 }
 
-export function inspectHooks(io: HookFreshnessIo): Finding[] {
-	const rows = censusHookFreshness(io);
+export async function inspectHooks(io: HookFreshnessIo): Promise<Finding[]> {
+	const rows = await censusHookFreshness(io);
 	const staleRepos = rows.filter((row) => row.state === "STALE");
 	const unreadable = rows.filter((row) => row.state === "UNREADABLE");
 	const status = rows.length === 0 ? "UNVERIFIED" : staleRepos.length > 0 ? "DEGRADED" : unreadable.length > 0 ? "UNVERIFIED" : "OK";
@@ -269,6 +324,31 @@ function gitOut(repo: string, args: string[]): string | null {
 	}
 }
 
+/**
+ * Check one repo with the active release's installer through the bounded
+ * run() primitive (never spawnSync: the installer forks).
+ */
+async function liveCheck(kitRoot: string, repo: string): Promise<HookCheckResult> {
+	try {
+		const result = await run(["sh", join(kitRoot, "scripts/install-commit-msg-bead.sh"), "--check", repo], { deadline_s: 30, max_output_bytes: 64 * 1024 });
+		const output = `${Buffer.from(result.stdout).toString("utf8")}\n${Buffer.from(result.stderr).toString("utf8")}`;
+		return { rc: result.rc, output };
+	} catch {
+		return { rc: null, output: "" };
+	}
+}
+function liveFreshnessExtras(kitRoot: string): Pick<HookFreshnessIo, "check" | "hasKitMembers"> {
+	return {
+		check: (repo) => liveCheck(kitRoot, repo),
+		hasKitMembers: (dir) => {
+			try {
+				return dirHasKitMembers(dir);
+			} catch {
+				return false;
+			}
+		},
+	};
+}
 export function liveHookFreshnessIo(home: string, kitRoot: string): HookFreshnessIo {
 	const base = home || process.env.HOME || homedir();
 	return {
@@ -291,9 +371,8 @@ export function liveHookFreshnessIo(home: string, kitRoot: string): HookFreshnes
 		},
 		hooksDir: (repo) => {
 			const config = gitOut(repo, ["config", "--get", "core.hooksPath"])?.trim() || null;
-			const gitPath = gitOut(repo, ["rev-parse", "--git-path", "hooks"])?.trim() || null;
-			if (!gitPath) return { dir: null, config, tracked: false };
-			const dir = isAbsolute(gitPath) ? gitPath : resolve(repo, gitPath);
+			const dir = resolveHooksDir(repo);
+			if (dir === null) return { dir: null, config, tracked: false };
 			let tracked = false;
 			try {
 				const rel = relative(repo, dir);
@@ -306,6 +385,7 @@ export function liveHookFreshnessIo(home: string, kitRoot: string): HookFreshnes
 			}
 			return { dir, config, tracked };
 		},
+		...liveFreshnessExtras(kitRoot),
 	};
 }
 
@@ -342,6 +422,13 @@ export interface HookRefreshIo extends HookFreshnessIo {
 	runInstaller(repo: string): { ok: boolean; detail: string };
 }
 
+async function safeCheck(io: HookFreshnessIo, repo: string): Promise<HookCheckResult> {
+	try {
+		return await io.check(repo);
+	} catch {
+		return { rc: null, output: "" };
+	}
+}
 export async function refreshFleetHooks(io: HookRefreshIo): Promise<HookRefreshReport> {
 	const report: HookRefreshReport = { repos: 0, refreshed: 0, fresh: 0, pending_commit: 0, failed: 0, results: [] };
 	for (const entry of io.pullRepos()) {
@@ -352,27 +439,48 @@ export async function refreshFleetHooks(io: HookRefreshIo): Promise<HookRefreshR
 			report.results.push({ repo, source: entry.source, status: "FAILED", hooks_dir: null, tracked: false, paths: [], members: [], detail: "hooks dir unreadable (not a git repo?)" });
 			continue;
 		}
-		const before: Record<string, string | null> = {};
-		for (const [installedRel] of HOOK_MEMBER_PAIRS) before[installedRel] = io.digest(join(located.dir, installedRel));
+		let present = false;
+		try {
+			present = io.hasKitMembers(located.dir);
+		} catch {
+			present = false;
+		}
+		if (!present) {
+			report.fresh += 1;
+			report.results.push({ repo, source: entry.source, status: "FRESH", hooks_dir: located.dir, tracked: located.tracked, paths: [], members: [], detail: "no kit hook members installed; refresh never writes such a repo" });
+			continue;
+		}
+		const beforeCheck = await safeCheck(io, repo);
+		if (!checkUsable(beforeCheck)) {
+			report.failed += 1;
+			report.results.push({ repo, source: entry.source, status: "FAILED", hooks_dir: located.dir, tracked: located.tracked, paths: [], members: [], detail: "pre-install --check unreadable; refusing to write what cannot be verified" });
+			continue;
+		}
+		const before = new Map<string, string | null>();
+		for (const problem of parseCheckMembers(beforeCheck.output)) before.set(problem.dest, io.digest(problem.dest));
 		const ran = io.runInstaller(repo);
 		if (!ran.ok) {
 			report.failed += 1;
 			report.results.push({ repo, source: entry.source, status: "FAILED", hooks_dir: located.dir, tracked: located.tracked, paths: [], members: [], detail: ran.detail });
 			continue;
 		}
+		const afterCheck = await safeCheck(io, repo);
 		const members: HookMemberRefresh[] = [];
 		const changed: string[] = [];
 		const invalid: string[] = [];
-		for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
-			const after = io.digest(join(located.dir, installedRel));
-			const was = before[installedRel] ?? null;
-			const sourceDigest = io.digest(join(io.kitRoot(), sourceRel));
-			const optionalMissing = OPTIONAL_MEMBERS[installedRel] === true && was === null && after === null;
-			const matchesSource = optionalMissing || (sourceDigest !== null && after === sourceDigest);
-			const refreshed = was !== after && after !== null && matchesSource;
-			if (was !== after) changed.push(join(located.dir, installedRel));
-			if (!matchesSource) invalid.push(installedRel);
-			members.push({ member: installedRel, before_sha256: was, after_sha256: after, refreshed });
+		if (!checkUsable(afterCheck)) {
+			invalid.push("--check unreadable after install");
+		} else {
+			const afterSet = new Set(parseCheckMembers(afterCheck.output).map((problem) => problem.dest));
+			const dests = new Set<string>([...before.keys(), ...afterSet]);
+			for (const dest of dests) {
+				const was = before.has(dest) ? (before.get(dest) ?? null) : io.digest(dest);
+				const after = io.digest(dest);
+				const clean = !afterSet.has(dest) && after !== null;
+				if (was !== after && after !== null) changed.push(dest);
+				if (!clean) invalid.push(memberName(located.dir, dest));
+				members.push({ member: memberName(located.dir, dest), before_sha256: was, after_sha256: after, refreshed: was !== after && clean });
+			}
 		}
 		if (invalid.length > 0) {
 			report.failed += 1;
@@ -401,7 +509,7 @@ export function liveHookRefreshIo(home: string, kitRoot: string): HookRefreshIo 
 	const base = home || process.env.HOME || homedir();
 	return {
 		...fresh,
-		pullRepos: () => pullEnabledRepos(base).map((entry) => {
+		pullRepos: () => installedHookRepos(base).map((entry) => {
 			try {
 				return { repo: realpathSync(entry.repo), source: entry.source };
 			} catch {
@@ -422,7 +530,7 @@ export function liveHookRefreshIo(home: string, kitRoot: string): HookRefreshIo 
 	};
 }
 
-/** Production default for the kit-update job: refresh pull-enabled fleet repos. Never throws. */
+/** Production default for install paths: refresh repos with kit hooks installed. Never throws. */
 export async function refreshFleetHooksLive(store: string, home: string): Promise<HookRefreshReport> {
 	try {
 		return await refreshFleetHooks(liveHookRefreshIo(home, store));

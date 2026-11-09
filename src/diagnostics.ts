@@ -2485,7 +2485,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	// Keep the fleet census and add authoritative installer manifests for the
 	// selected project (the CLI defaults it to cwd), not a mirrored subset.
 	if (input.scope === "hooks") {
-		rows.push(...inspectHooks(liveHookFreshnessIo(home, root)));
+		rows.push(...await inspectHooks(liveHookFreshnessIo(home, root)));
 		rows.push(...await inspectHookInstallers(input.project ?? root, root));
 	}
 	if (wants("effective_rules") && input.inventoryOnly && !input.scope) {

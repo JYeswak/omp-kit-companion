@@ -1,43 +1,64 @@
-// hook-refresh.test.ts — HOOKREFRESH1 (ompkit-v66l.22.3): after an install,
-// kit-update re-runs the hook installer for every pull-enabled fleet repo and
-// records each member's before/after digest; doctor --scope hooks lists the
-// members whose digest differs from the active release.
+// hook-refresh.test.ts — HOOKREFRESHALL1 (ompkit-1ra0d.77): the refresh write
+// set is every fleet-watch session repo that already has kit hook members
+// installed, whatever its pullEnabled; the census reads the active release's
+// install-commit-msg-bead.sh --check output, so no hand-kept member list
+// exists in src/hook-refresh.ts.
 import { expect, test } from "bun:test";
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import {
-	HOOK_MEMBER_PAIRS,
 	censusHookFreshness,
+	dirHasKitMembers,
 	inspectHooks,
-	pullEnabledRepos,
+	installedHookRepos,
+	liveHookFreshnessIo,
+	parseCheckMembers,
 	refreshFleetHooks,
 } from "../../src/hook-refresh.ts";
-import type { HookFreshnessIo } from "../../src/hook-refresh.ts";
+import type { HookCheckResult, HookFreshnessIo, HookRefreshIo } from "../../src/hook-refresh.ts";
+import { applyActivationManifest } from "../../src/activation.ts";
 import { diagnose } from "../../src/diagnostics.ts";
 import { run } from "../../src/kitlib/run.ts";
-import { runFixture } from "./fixture-process.ts";
+import { runFixture, fixtureDeadlineS } from "./fixture-process.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
-const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+const sha = (text: string | Buffer) => createHash("sha256").update(text).digest("hex");
 
-/** Fixture kit with every source member plus one stale-target source. */
-function fixtureKit(): string {
-	const kit = mkdtempSync(join(tmpdir(), "hookrefresh-kit-"));
-	for (const [, sourceRel] of HOOK_MEMBER_PAIRS) {
-		const path = join(kit, sourceRel);
-		mkdirSync(join(path, ".."), { recursive: true });
-		writeFileSync(path, `# source ${sourceRel}\n`);
-	}
-	return kit;
+const MEMBER_A = "hooks.d/pre-commit/40-omp-kit-probe-a";
+const MEMBER_B = "hooks.d/commit-msg/41-omp-kit-probe-b";
+
+const FRESH_OUT = (repo: string) => `install-commit-msg-bead: hooks fresh in ${repo}\n`;
+const staleOut = (dest: string, src: string) =>
+	`install-commit-msg-bead: STALE installed member: ${dest} differs from ${src}; rerun install-commit-msg-bead.sh\n`;
+
+const gitEnv = (base: string) => ({ ...process.env, GIT_CEILING_DIRECTORIES: base, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" });
+
+function fixtureSources(kit: string): { srcA: string; srcB: string } {
+	const srcA = join(kit, "scripts", "probe-a.sh");
+	const srcB = join(kit, "scripts", "probe-b.sh");
+	mkdirSync(join(kit, "scripts"), { recursive: true });
+	writeFileSync(srcA, "# probe-a source\n");
+	writeFileSync(srcB, "# probe-b source\n");
+	return { srcA, srcB };
 }
-function memIo(kit: string, repos: { repo: string; hooksDir: string; tracked: boolean }[]): HookFreshnessIo {
+
+function installMember(hooksDir: string, rel: string, bytes: string): string {
+	const dest = join(hooksDir, rel);
+	mkdirSync(join(dest, ".."), { recursive: true });
+	writeFileSync(dest, bytes);
+	return dest;
+}
+
+function memIo(kit: string, repos: { repo: string; hooksDir: string; tracked: boolean }[], opts?: {
+	checks?: Record<string, HookCheckResult | HookCheckResult[]>;
+	present?: (dir: string) => boolean;
+}): HookFreshnessIo {
 	// No digest cache: refresh reads before AND after the installer, so each
 	// read must hit the filesystem live (the production io has no cache).
 	const digest = (path: string): string | null => {
 		try {
-			return sha(readFileSync(path, "utf8"));
+			return sha(readFileSync(path));
 		} catch {
 			return null;
 		}
@@ -48,199 +69,367 @@ function memIo(kit: string, repos: { repo: string; hooksDir: string; tracked: bo
 		digest,
 		hooksDir: (repo) => {
 			const found = repos.find((row) => resolve(row.repo) === resolve(repo));
-			return found ? { dir: found.hooksDir, config: found.tracked ? ".githooks" : null, tracked: found.tracked } : { dir: null, config: null, tracked: false };
+			return found ? { dir: found.hooksDir, config: null, tracked: found.tracked } : { dir: null, config: null, tracked: false };
 		},
+		check: async (repo) => {
+			const canned = opts?.checks?.[resolve(repo)];
+			if (Array.isArray(canned)) return canned.length > 0 ? canned.shift() as HookCheckResult : { rc: 0, output: FRESH_OUT(repo) };
+			return canned ?? { rc: 0, output: FRESH_OUT(repo) };
+		},
+		hasKitMembers: opts?.present ?? (() => true),
 	};
 }
 
-function fixtureHooksDir(kit: string, staleMember: string | null): string {
-	const dir = mkdtempSync(join(tmpdir(), "hookrefresh-hooks-"));
-	for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
-		const path = join(dir, installedRel);
-		mkdirSync(join(path, ".."), { recursive: true });
-		writeFileSync(path, installedRel === staleMember ? "# OLD member from v0.2.37\n" : readFileSync(join(kit, sourceRel), "utf8"));
+test("installer --check output drives the census: a stale member is STALE, a clean repo is FRESH", async () => {
+	const scratch = ownedTmp("hookrefresh-census", { bead: "ompkit-1ra0d.77" });
+	try {
+		const kit = join(scratch.path, "kit");
+		const { srcA, srcB } = fixtureSources(kit);
+		const staleDir = join(scratch.path, "stale-hooks");
+		const freshDir = join(scratch.path, "fresh-hooks");
+		const destA = installMember(staleDir, MEMBER_A, "# OLD probe-a\n");
+		installMember(staleDir, MEMBER_B, readFileSync(srcB, "utf8"));
+		installMember(freshDir, MEMBER_A, readFileSync(srcA, "utf8"));
+		installMember(freshDir, MEMBER_B, readFileSync(srcB, "utf8"));
+		const io = memIo(kit, [
+			{ repo: "/stale", hooksDir: staleDir, tracked: false },
+			{ repo: "/fresh", hooksDir: freshDir, tracked: false },
+		], {
+			checks: {
+				[resolve("/stale")]: { rc: 3, output: staleOut(destA, srcA) },
+				[resolve("/fresh")]: { rc: 0, output: FRESH_OUT("/fresh") },
+			},
+		});
+		const rows = await censusHookFreshness(io);
+		const stale = rows.find((row) => row.repo === resolve("/stale"))!;
+		const fresh = rows.find((row) => row.repo === resolve("/fresh"))!;
+		expect(stale.state).toBe("STALE");
+		expect(stale.stale).toEqual([MEMBER_A]);
+		expect(fresh.state).toBe("FRESH");
+		expect(fresh.members).toEqual([]);
+		const findings = await inspectHooks(io);
+		expect(findings[0]!.status).toBe("DEGRADED");
+		expect(findings[0]!.reason).toContain(MEMBER_A);
+	} finally {
+		scratch.cleanup();
 	}
-	return dir;
-}
-
-test("an old member is reported stale; a fresh repo has nothing to report", () => {
-	const kit = fixtureKit();
-	const staleDir = fixtureHooksDir(kit, "hooks.d/commit-msg/49-omp-kit-stale-worktree");
-	const freshDir = fixtureHooksDir(kit, null);
-	const io = memIo(kit, [
-		{ repo: "/stale", hooksDir: staleDir, tracked: false },
-		{ repo: "/fresh", hooksDir: freshDir, tracked: false },
-	]);
-	const rows = censusHookFreshness(io);
-	const stale = rows.find((row) => row.repo === resolve("/stale"))!;
-	const fresh = rows.find((row) => row.repo === resolve("/fresh"))!;
-	expect(stale.state).toBe("STALE");
-	expect(stale.stale).toEqual(["hooks.d/commit-msg/49-omp-kit-stale-worktree"]);
-	expect(fresh.state).toBe("FRESH");
-	expect(fresh.stale).toEqual([]);
-	const findings = inspectHooks(io);
-	expect(findings[0]!.status).toBe("DEGRADED");
-	expect(findings[0]!.reason).toContain("49-omp-kit-stale-worktree");
-	rmSync(kit, { recursive: true, force: true });
-	rmSync(staleDir, { recursive: true, force: true });
-	rmSync(freshDir, { recursive: true, force: true });
-});
+}, fixtureDeadlineS() * 1000);
 
 test("planted: refresh copies the source over the old member; the fresh member keeps its digest", async () => {
-	const kit = fixtureKit();
-	const staleDir = fixtureHooksDir(kit, "hooks.d/commit-msg/49-omp-kit-stale-worktree");
-	const freshDir = fixtureHooksDir(kit, null);
-	const freshBefore = sha(readFileSync(join(freshDir, "hooks.d/commit-msg/40-omp-kit-commit-msg-bead"), "utf8"));
-	const base = memIo(kit, [
-		{ repo: "/stale", hooksDir: staleDir, tracked: false },
-		{ repo: "/fresh", hooksDir: freshDir, tracked: false },
-	]);
-	// The installer seam: copy every source byte over the installed member.
-	const runInstaller = (repo: string) => {
-		const dir = repo === resolve("/stale") ? staleDir : freshDir;
-		for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
-			writeFileSync(join(dir, installedRel), readFileSync(join(kit, sourceRel)));
-		}
-		return { ok: true, detail: "seam copied sources" };
-	};
-	const report = await refreshFleetHooks({ ...base, pullRepos: () => [{ repo: "/stale", source: "t:s" }, { repo: "/fresh", source: "t:f" }], runInstaller });
-	expect(report.refreshed).toBe(1);
-	expect(report.fresh).toBe(1);
-	const staleResult = report.results.find((row) => row.repo === resolve("/stale"))!;
-	const staleMember = staleResult.members.find((row) => row.member === "hooks.d/commit-msg/49-omp-kit-stale-worktree")!;
-	expect(staleMember.before_sha256).not.toBe(staleMember.after_sha256);
-	expect(staleMember.after_sha256).toBe(sha(readFileSync(join(kit, "scripts/check-stale-worktree.sh"), "utf8")));
-	const freshMember = report.results.find((row) => row.repo === resolve("/fresh"))!
-		.members.find((row) => row.member === "hooks.d/commit-msg/40-omp-kit-commit-msg-bead")!;
-	expect(freshMember.before_sha256).toBe(freshBefore);
-	expect(freshMember.after_sha256).toBe(freshBefore);
-	expect(freshMember.refreshed).toBe(false);
-	rmSync(kit, { recursive: true, force: true });
-	rmSync(staleDir, { recursive: true, force: true });
-	rmSync(freshDir, { recursive: true, force: true });
-});
+	const scratch = ownedTmp("hookrefresh-refresh", { bead: "ompkit-1ra0d.77" });
+	try {
+		const kit = join(scratch.path, "kit");
+		const { srcA, srcB } = fixtureSources(kit);
+		const staleDir = join(scratch.path, "stale-hooks");
+		const freshDir = join(scratch.path, "fresh-hooks");
+		const destA = installMember(staleDir, MEMBER_A, "# OLD probe-a\n");
+		installMember(staleDir, MEMBER_B, readFileSync(srcB, "utf8"));
+		const freshDestA = installMember(freshDir, MEMBER_A, readFileSync(srcA, "utf8"));
+		installMember(freshDir, MEMBER_B, readFileSync(srcB, "utf8"));
+		const beforeA = sha(readFileSync(destA, "utf8"));
+		const freshBefore = sha(readFileSync(freshDestA, "utf8"));
+		const base = memIo(kit, [
+			{ repo: "/stale", hooksDir: staleDir, tracked: false },
+			{ repo: "/fresh", hooksDir: freshDir, tracked: false },
+		], {
+			checks: {
+				[resolve("/stale")]: [{ rc: 3, output: staleOut(destA, srcA) }, { rc: 0, output: FRESH_OUT("/stale") }],
+				[resolve("/fresh")]: [{ rc: 0, output: FRESH_OUT("/fresh") }, { rc: 0, output: FRESH_OUT("/fresh") }],
+			},
+		});
+		// The installer seam: copy every source byte over the installed member.
+		const runInstaller = (repo: string) => {
+			const dir = resolve(repo) === resolve("/stale") ? staleDir : freshDir;
+			writeFileSync(join(dir, MEMBER_A), readFileSync(srcA));
+			writeFileSync(join(dir, MEMBER_B), readFileSync(srcB));
+			return { ok: true, detail: "seam copied sources" };
+		};
+		const report = await refreshFleetHooks({ ...base, pullRepos: () => [{ repo: "/stale", source: "t:s" }, { repo: "/fresh", source: "t:f" }], runInstaller });
+		expect(report.refreshed).toBe(1);
+		expect(report.fresh).toBe(1);
+		const staleResult = report.results.find((row) => row.repo === resolve("/stale"))!;
+		const staleMember = staleResult.members.find((row) => row.member === MEMBER_A)!;
+		expect(staleMember.before_sha256).toBe(beforeA);
+		expect(staleMember.after_sha256).toBe(sha(readFileSync(srcA, "utf8")));
+		expect(staleMember.refreshed).toBe(true);
+		const freshMember = report.results.find((row) => row.repo === resolve("/fresh"))!
+			.members.find((row) => row.member === MEMBER_A)!;
+		expect(freshMember).toBeUndefined();
+		expect(freshBefore).toBe(sha(readFileSync(freshDestA, "utf8")));
+	} finally {
+		scratch.cleanup();
+	}
+}, fixtureDeadlineS() * 1000);
 
 test("a tracked hooks path records PENDING_COMMIT and leaves the commit to the director", async () => {
-	const kit = fixtureKit();
-	const repo = mkdtempSync(join(tmpdir(), "hookrefresh-tracked-"));
-	const run = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe", timeout: 30_000 });
-	run(["init", "-q"]);
-	run(["config", "user.email", "test@example.com"]);
-	run(["config", "user.name", "test"]);
-	run(["config", "core.hooksPath", ".githooks"]);
-	const githooks = join(repo, ".githooks");
-	for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
-		const path = join(githooks, installedRel);
-		mkdirSync(join(path, ".."), { recursive: true });
-		writeFileSync(path, readFileSync(join(kit, sourceRel)));
+	const scratch = ownedTmp("hookrefresh-tracked", { bead: "ompkit-1ra0d.77" });
+	try {
+		const kit = join(scratch.path, "kit");
+		const { srcA } = fixtureSources(kit);
+		const repo = join(scratch.path, "repo");
+		const env = gitEnv(scratch.path);
+		expect(runFixture(["git", "init", "-q", repo], { cwd: scratch.path, env }).rc).toBe(0);
+		expect(runFixture(["git", "-C", repo, "config", "user.email", "test@example.com"], { cwd: scratch.path, env }).rc).toBe(0);
+		expect(runFixture(["git", "-C", repo, "config", "user.name", "test"], { cwd: scratch.path, env }).rc).toBe(0);
+		expect(runFixture(["git", "-C", repo, "config", "core.hooksPath", ".githooks"], { cwd: scratch.path, env }).rc).toBe(0);
+		const githooks = join(repo, ".githooks");
+		const destA = installMember(githooks, MEMBER_A, "# OLD probe-a\n");
+		expect(runFixture(["git", "-C", repo, "add", "."], { cwd: scratch.path, env }).rc).toBe(0);
+		expect(runFixture(["git", "-C", repo, "commit", "-qm", "track probe member"], { cwd: scratch.path, env }).rc).toBe(0);
+		const text = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
+		const headBefore = text(runFixture(["git", "-C", repo, "rev-parse", "HEAD"], { cwd: scratch.path, env }).stdout).trim();
+		expect(headBefore).toMatch(/^[0-9a-f]{40}$/);
+		const base = memIo(kit, [{ repo, hooksDir: githooks, tracked: true }], {
+			checks: { [resolve(repo)]: [{ rc: 3, output: staleOut(destA, srcA) }, { rc: 0, output: FRESH_OUT(repo) }] },
+		});
+		const report = await refreshFleetHooks({
+			...base,
+			pullRepos: () => [{ repo, source: "t:tracked" }],
+			runInstaller: () => { writeFileSync(destA, readFileSync(srcA)); return { ok: true, detail: "seam refreshed the member" }; },
+		});
+		expect(report.pending_commit).toBe(1);
+		expect(report.results[0]!.status).toBe("PENDING_COMMIT");
+		expect(report.results[0]!.paths).toEqual([destA]);
+		// The refresh never commits: HEAD is unchanged and the refreshed tracked member is left for its owner.
+		expect(text(runFixture(["git", "-C", repo, "rev-parse", "HEAD"], { cwd: scratch.path, env }).stdout).trim()).toBe(headBefore);
+		expect(text(runFixture(["git", "-C", repo, "status", "--porcelain"], { cwd: scratch.path, env }).stdout)).toContain(".githooks/");
+	} finally {
+		scratch.cleanup();
 	}
-	writeFileSync(join(githooks, "hooks.d/commit-msg/49-omp-kit-stale-worktree"), "# OLD member\n");
-	run(["add", "."]);
-	run(["commit", "-qm", "track hooks"]);
-	const headBefore = run(["rev-parse", "HEAD"]).stdout.toString().trim();
-	const base = memIo(kit, [{ repo, hooksDir: join(repo, ".githooks"), tracked: true }]);
-	const report = await refreshFleetHooks({
-		...base,
-		pullRepos: () => [{ repo, source: "t:cfs" }],
-		runInstaller: (target) => {
-			for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
-				writeFileSync(join(target, ".githooks", installedRel), readFileSync(join(kit, sourceRel)));
-			}
-			return { ok: true, detail: "seam refreshed all members" };
-		},
-	});
-	expect(report.pending_commit).toBe(1);
-	expect(report.results[0]!.status).toBe("PENDING_COMMIT");
-	expect(report.results[0]!.paths.length).toBeGreaterThan(0);
-	// Owner route: the working tree is dirty but HEAD did not move.
-	expect(run(["rev-parse", "HEAD"]).stdout.toString().trim()).toBe(headBefore);
-	expect(run(["status", "--porcelain"]).stdout.toString()).toContain("49-omp-kit-stale-worktree");
-	rmSync(kit, { recursive: true, force: true });
-	rmSync(repo, { recursive: true, force: true });
-});
+}, fixtureDeadlineS() * 1000);
 
 test("a tracked hooks dir whose refreshed members are untracked is REFRESHED, not PENDING_COMMIT", async () => {
-	const kit = fixtureKit();
-	const scratch = ownedTmp("hookrefresh-ignored", { bead: "ompkit-v66l.22.3" });
-	const repo = scratch.path;
-	const run = (args: string[]) => runFixture(["git", ...args], { cwd: repo, floor_s: 30 });
-	run(["init", "-q"]);
-	run(["config", "user.email", "test@example.com"]);
-	run(["config", "user.name", "test"]);
-	run(["config", "core.hooksPath", ".githooks"]);
-	const githooks = join(repo, ".githooks");
-	// Only a repo-owned member is tracked; the kit members are installer-owned deployment artifacts.
-	mkdirSync(join(githooks, "hooks.d/pre-commit"), { recursive: true });
-	writeFileSync(join(githooks, "hooks.d/pre-commit/10-repo-owned"), "#!/bin/sh\nexit 0\n");
-	run(["add", "."]);
-	run(["commit", "-qm", "track repo-owned member"]);
-	for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
-		const path = join(githooks, installedRel);
-		mkdirSync(join(path, ".."), { recursive: true });
-		writeFileSync(path, readFileSync(join(kit, sourceRel)));
+	const scratch = ownedTmp("hookrefresh-ignored", { bead: "ompkit-1ra0d.77" });
+	try {
+		const kit = join(scratch.path, "kit");
+		const { srcA, srcB } = fixtureSources(kit);
+		const repo = join(scratch.path, "repo");
+		const env = gitEnv(scratch.path);
+		expect(runFixture(["git", "init", "-q", repo], { cwd: scratch.path, env }).rc).toBe(0);
+		expect(runFixture(["git", "-C", repo, "config", "user.email", "test@example.com"], { cwd: scratch.path, env }).rc).toBe(0);
+		expect(runFixture(["git", "-C", repo, "config", "user.name", "test"], { cwd: scratch.path, env }).rc).toBe(0);
+		expect(runFixture(["git", "-C", repo, "config", "core.hooksPath", ".githooks"], { cwd: scratch.path, env }).rc).toBe(0);
+		const githooks = join(repo, ".githooks");
+		// Only a repo-owned member is tracked; the kit members are installer-owned deployment artifacts.
+		mkdirSync(join(githooks, "hooks.d/pre-commit"), { recursive: true });
+		writeFileSync(join(githooks, "hooks.d/pre-commit/10-repo-owned"), "#!/bin/sh\nexit 0\n");
+		expect(runFixture(["git", "-C", repo, "add", "."], { cwd: scratch.path, env }).rc).toBe(0);
+		expect(runFixture(["git", "-C", repo, "commit", "-qm", "track repo-owned member"], { cwd: scratch.path, env }).rc).toBe(0);
+		const destA = installMember(githooks, MEMBER_A, "# OLD probe-a\n");
+		installMember(githooks, MEMBER_B, readFileSync(srcB, "utf8"));
+		const base = memIo(kit, [{ repo, hooksDir: githooks, tracked: true }], {
+			checks: { [resolve(repo)]: [{ rc: 3, output: staleOut(destA, srcA) }, { rc: 0, output: FRESH_OUT(repo) }] },
+		});
+		const report = await refreshFleetHooks({
+			...base,
+			pullRepos: () => [{ repo, source: "t:ignored" }],
+			runInstaller: () => {
+				writeFileSync(destA, readFileSync(srcA));
+				return { ok: true, detail: "seam refreshed all members" };
+			},
+		});
+		expect(report.pending_commit).toBe(0);
+		expect(report.refreshed).toBe(1);
+		expect(report.results[0]!.status).toBe("REFRESHED");
+		expect(report.results[0]!.paths).toEqual([destA]);
+	} finally {
+		scratch.cleanup();
 	}
-	writeFileSync(join(githooks, "hooks.d/commit-msg/49-omp-kit-stale-worktree"), "# OLD member\n");
-	const base = memIo(kit, [{ repo, hooksDir: githooks, tracked: true }]);
-	const report = await refreshFleetHooks({
-		...base,
-		pullRepos: () => [{ repo, source: "t:ignored" }],
-		runInstaller: (target) => {
-			for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
-				writeFileSync(join(target, ".githooks", installedRel), readFileSync(join(kit, sourceRel)));
-			}
-			return { ok: true, detail: "seam refreshed all members" };
-		},
-	});
-	expect(report.pending_commit).toBe(0);
-	expect(report.refreshed).toBe(1);
-	expect(report.results[0]!.status).toBe("REFRESHED");
-	expect(report.results[0]!.paths).toEqual([join(githooks, "hooks.d/commit-msg/49-omp-kit-stale-worktree")]);
-	rmSync(kit, { recursive: true, force: true });
-	scratch.cleanup();
-});
+}, fixtureDeadlineS() * 1000);
 
 test("planted negative: an installer that leaves stale bytes is FAILED, never reported refreshed", async () => {
-	const kit = fixtureKit();
-	const staleDir = fixtureHooksDir(kit, "hooks.d/commit-msg/49-omp-kit-stale-worktree");
-	const before = sha(readFileSync(join(staleDir, "hooks.d/commit-msg/49-omp-kit-stale-worktree"), "utf8"));
-	const base = memIo(kit, [{ repo: "/stale", hooksDir: staleDir, tracked: false }]);
-	const report = await refreshFleetHooks({
-		...base,
-		pullRepos: () => [{ repo: "/stale", source: "t:stale" }],
-		runInstaller: () => ({ ok: true, detail: "planted no-op installer" }),
-	});
-	expect(report.failed).toBe(1);
-	expect(report.refreshed).toBe(0);
-	expect(report.results[0]!.status).toBe("FAILED");
-	expect(report.results[0]!.detail).toContain("49-omp-kit-stale-worktree");
-	const stale = report.results[0]!.members.find((row) => row.member === "hooks.d/commit-msg/49-omp-kit-stale-worktree")!;
-	expect(stale.before_sha256).toBe(before);
-	expect(stale.after_sha256).toBe(before);
-	expect(stale.refreshed).toBe(false);
-	rmSync(kit, { recursive: true, force: true });
-	rmSync(staleDir, { recursive: true, force: true });
-});
-
-test("only pullEnabled sessions refresh; doctor still sees every fleet repo", () => {
-	const home = mkdtempSync(join(tmpdir(), "hookrefresh-home-"));
-	const config = {
-		sessions: [
-			{ session: "cfsios", repo: "/Users/josh/Developer/clutterfreespaces.ios", pullEnabled: true },
-			{ session: "jev", repo: "/Users/josh/Developer/jev", pullEnabled: false },
-			{ session: "unflagged", repo: "/Users/josh/Developer/zestroku" },
-		],
-	};
-	writeFileSync(join(home, "fleet-watch.json"), JSON.stringify(config));
-	const previous = process.env.OMP_KIT_FLEET_WATCH_CONFIG;
-	process.env.OMP_KIT_FLEET_WATCH_CONFIG = join(home, "fleet-watch.json");
+	const scratch = ownedTmp("hookrefresh-failed", { bead: "ompkit-1ra0d.77" });
 	try {
-		expect(pullEnabledRepos(home).map((row) => row.repo)).toEqual(["/Users/josh/Developer/clutterfreespaces.ios"]);
+		const kit = join(scratch.path, "kit");
+		const { srcA, srcB } = fixtureSources(kit);
+		const staleDir = join(scratch.path, "stale-hooks");
+		const destA = installMember(staleDir, MEMBER_A, "# OLD probe-a\n");
+		installMember(staleDir, MEMBER_B, readFileSync(srcB, "utf8"));
+		const before = sha(readFileSync(destA, "utf8"));
+		const base = memIo(kit, [{ repo: "/stale", hooksDir: staleDir, tracked: false }], {
+			checks: { [resolve("/stale")]: [{ rc: 3, output: staleOut(destA, srcA) }, { rc: 3, output: staleOut(destA, srcA) }] },
+		});
+		const report = await refreshFleetHooks({
+			...base,
+			pullRepos: () => [{ repo: "/stale", source: "t:stale" }],
+			runInstaller: () => ({ ok: true, detail: "planted no-op installer" }),
+		});
+		expect(report.failed).toBe(1);
+		expect(report.refreshed).toBe(0);
+		expect(report.results[0]!.status).toBe("FAILED");
+		expect(report.results[0]!.detail).toContain(MEMBER_A);
+		const stale = report.results[0]!.members.find((row) => row.member === MEMBER_A)!;
+		expect(stale.before_sha256).toBe(before);
+		expect(stale.after_sha256).toBe(before);
+		expect(stale.refreshed).toBe(false);
 	} finally {
-		if (previous === undefined) delete process.env.OMP_KIT_FLEET_WATCH_CONFIG;
-		else process.env.OMP_KIT_FLEET_WATCH_CONFIG = previous;
-		rmSync(home, { recursive: true, force: true });
+		scratch.cleanup();
 	}
+}, fixtureDeadlineS() * 1000);
+
+test("parseCheckMembers reads only the member lines the installer names", () => {
+	const dest = "/r/.git/hooks/hooks.d/pre-push/42-omp-kit-affected-gate";
+	const src = "/kit/scripts/pre-push-affected-gate.sh";
+	const output = [
+		"install-commit-msg-bead: STALE chain runner: /r/.git/hooks/pre-commit lacks gen9; rerun x",
+		`install-commit-msg-bead: MISSING installed member: ${dest}`,
+		`install-commit-msg-bead: STALE installed member: ${dest} differs from ${src}; rerun x`,
+		"install-commit-msg-bead: MISSING or STALE pushed-beads member: /r/.git/hooks/hooks.d/pre-push/40-omp-kit-pushed-beads; rerun x",
+		"install-commit-msg-bead: hooks fresh in /r",
+	].join("\n");
+	expect(parseCheckMembers(output)).toEqual([
+		{ dest, src: null, kind: "MISSING" },
+		{ dest, src, kind: "STALE" },
+	]);
 });
+test("HOOKREFRESHALL1: a pullEnabled:false session repo with installed members is refreshed; a session repo with no kit members is left untouched", async () => {
+	const scratch = ownedTmp("hookrefresh-all1", { bead: "ompkit-1ra0d.77" });
+	const home = join(scratch.path, "home");
+	mkdirSync(home, { recursive: true });
+	const withHooks = join(scratch.path, "with-hooks");
+	const noHooks = join(scratch.path, "no-hooks");
+	const env = gitEnv(scratch.path);
+	try {
+		for (const repo of [withHooks, noHooks]) {
+			expect(runFixture(["git", "init", "-q", repo], { cwd: scratch.path, env }).rc).toBe(0);
+		}
+		const hooksDir = join(withHooks, ".git", "hooks");
+		const memberDest = installMember(hooksDir, "hooks.d/pre-commit/40-omp-kit-probe", "# stale probe\n");
+		const srcFile = join(scratch.path, "probe.sh");
+		writeFileSync(srcFile, "# fresh probe\n");
+		writeFileSync(join(home, "fleet-watch.json"), JSON.stringify({
+			sessions: [
+				{ session: "with", repo: withHooks, pullEnabled: false },
+				{ session: "without", repo: noHooks, pullEnabled: false },
+			],
+		}));
+		const previous = process.env.OMP_KIT_FLEET_WATCH_CONFIG;
+		process.env.OMP_KIT_FLEET_WATCH_CONFIG = join(home, "fleet-watch.json");
+		try {
+			// The old pullEnabled filter drops both repos: neither opts into supply.
+			const sessions = [
+				{ session: "with", repo: withHooks, pullEnabled: false },
+				{ session: "without", repo: noHooks, pullEnabled: false },
+			];
+			expect(sessions.filter((row) => row.pullEnabled === true)).toEqual([]);
+			const selected = installedHookRepos(home);
+			expect(selected.map((row) => row.repo)).toEqual([withHooks]);
+			expect(dirHasKitMembers(join(noHooks, ".git", "hooks"))).toBe(false);
+			const digest = (path: string): string | null => {
+				try {
+					return sha(readFileSync(path));
+				} catch {
+					return null;
+				}
+			};
+			const written: string[] = [];
+			let checks = 0;
+			const io: HookRefreshIo = {
+				repos: () => selected,
+				kitRoot: () => scratch.path,
+				digest,
+				hooksDir: (repo) => resolve(repo) === resolve(withHooks)
+					? { dir: hooksDir, config: null, tracked: false }
+					: { dir: null, config: null, tracked: false },
+				check: async (repo) => {
+					if (resolve(repo) !== resolve(withHooks)) return { rc: 0, output: FRESH_OUT(repo) };
+					checks += 1;
+					return checks === 1
+						? { rc: 3, output: staleOut(memberDest, srcFile) }
+						: { rc: 0, output: FRESH_OUT(repo) };
+				},
+				hasKitMembers: (dir) => dirHasKitMembers(dir),
+				pullRepos: () => installedHookRepos(home),
+				runInstaller: (target) => {
+					written.push(resolve(target));
+					writeFileSync(memberDest, readFileSync(srcFile));
+					return { ok: true, detail: "seam refreshed the probe" };
+				},
+			};
+			const report = await refreshFleetHooks(io);
+			expect(written).toEqual([resolve(withHooks)]);
+			expect(report.refreshed).toBe(1);
+			expect(report.results[0]!.status).toBe("REFRESHED");
+			expect(readFileSync(memberDest, "utf8")).toBe("# fresh probe\n");
+			expect(existsSync(join(noHooks, ".git", "hooks", "hooks.d"))).toBe(false);
+		} finally {
+			if (previous === undefined) delete process.env.OMP_KIT_FLEET_WATCH_CONFIG;
+			else process.env.OMP_KIT_FLEET_WATCH_CONFIG = previous;
+		}
+	} finally {
+		scratch.cleanup();
+	}
+}, fixtureDeadlineS() * 1000);
+
+test("HOOKREFRESHALL1 install path: update --apply manifest invokes the same fleet refresh once", async () => {
+	const scratch = ownedTmp("hookrefresh-install-path", { bead: "ompkit-1ra0d.77" });
+	try {
+		const root = join(scratch.path, "root");
+		const home = join(scratch.path, "home");
+		mkdirSync(join(root, "rules"), { recursive: true });
+		mkdirSync(join(root, "rules-fleet"), { recursive: true });
+		mkdirSync(join(root, "policy"), { recursive: true });
+		mkdirSync(join(root, "retired"), { recursive: true });
+		mkdirSync(join(root, "extensions"), { recursive: true });
+		mkdirSync(home, { recursive: true });
+		const rule = "# Foo rule\n";
+		const fleetRule = "# Bar fleet rule\n";
+		writeFileSync(join(root, "policy", "extensions.json"), JSON.stringify({ extensions: [], skipProfiles: [] }));
+		writeFileSync(join(root, "rules", "foo.md"), rule);
+		writeFileSync(join(root, "MANIFEST.tsv"), `name\tsha256\tclass\tpack\nfoo\t${sha(rule)}\treminder\t1234567\n`);
+		writeFileSync(join(root, "rules-fleet", "bar.md"), fleetRule);
+		writeFileSync(join(root, "MANIFEST.fleet.tsv"), `name\tsha256\tclass\tpack\nbar\t${sha(fleetRule)}\treminder\t1234567\n`);
+		writeFileSync(join(root, "package.json"), JSON.stringify({ version: "9.9.9", omp: { extensions: [], notLoadedExtensions: {} } }));
+		const stateRoot = join(home, ".local", "state", "omp-kit");
+		const repo = join(scratch.path, "fleet-repo");
+		const hooksDir = join(scratch.path, "hooks");
+		const written: string[] = [];
+		const hookIo: HookRefreshIo = {
+			repos: () => [{ repo, source: "t:install-path" }],
+			kitRoot: () => root,
+			digest: () => "k",
+			hooksDir: () => ({ dir: hooksDir, config: null, tracked: false }),
+			check: async () => ({ rc: 0, output: FRESH_OUT(repo) }),
+			hasKitMembers: () => true,
+			pullRepos: () => [{ repo, source: "t:install-path" }],
+			runInstaller: (target) => { written.push(target); return { ok: true, detail: "stub installer" }; },
+		};
+		const exec = async (_argv: readonly string[]) => ({ exit: 0, stdout: JSON.stringify({ code: 0, data: {} }), stderr: "" });
+		const result = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit", exec, hookIo });
+		expect(written).toEqual([repo]);
+		expect(result.hooksRepos).toBe(1);
+		expect(result.hooksFailed).toBe(0);
+	} finally {
+		scratch.cleanup();
+	}
+}, fixtureDeadlineS() * 1000);
+
+test("HOOKCENSUS1: the census reports a missing 42-omp-kit-affected-gate member from the installer's own --check", async () => {
+	const root = resolve(import.meta.dir, "../..");
+	const scratch = ownedTmp("hookrefresh-census1", { bead: "ompkit-1ra0d.77" });
+	try {
+		const repo = join(scratch.path, "repo");
+		const env = gitEnv(scratch.path);
+		expect(runFixture(["git", "init", "-q", repo], { cwd: scratch.path, env }).rc).toBe(0);
+		const installed = await run(["sh", join(root, "scripts/install-commit-msg-bead.sh"), repo], { deadline_s: fixtureDeadlineS(120) });
+		expect(installed.rc).toBe(0);
+		const rev = runFixture(["git", "-C", repo, "rev-parse", "--git-path", "hooks"], { cwd: scratch.path, env });
+		expect(rev.rc).toBe(0);
+		const hooksDir = resolve(repo, Buffer.from(rev.stdout).toString("utf8").trim());
+		const gate = join(hooksDir, "hooks.d/pre-push/42-omp-kit-affected-gate");
+		expect(existsSync(gate)).toBe(true);
+		rmSync(gate);
+		const live = liveHookFreshnessIo(scratch.path, root);
+		const io: HookFreshnessIo = { ...live, repos: () => [{ repo, source: "t:census1" }] };
+		const rows = await censusHookFreshness(io);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]!.state).toBe("STALE");
+		expect(rows[0]!.stale).toContain("hooks.d/pre-push/42-omp-kit-affected-gate");
+		expect(rows[0]!.members.find((row) => row.member === "hooks.d/pre-push/42-omp-kit-affected-gate")?.status).toBe("MISSING");
+	} finally {
+		scratch.cleanup();
+	}
+}, fixtureDeadlineS(120) * 1000);
 
 test("hooks doctor runs both installer checks: fresh, stale, missing and restored", async () => {
 	const root = resolve(import.meta.dir, "../..");
@@ -263,7 +452,6 @@ test("hooks doctor runs both installer checks: fresh, stale, missing and restore
 		expect(stale.reason).toContain(`STALE installed member: ${push}`);
 		expect(stale.recommended_action).toContain("sh scripts/install-pre-push-gate.sh");
 		copyFileSync(join(root, "scripts/pre-push-gate.sh"), push);
-		// This member is omitted by the legacy HOOK_MEMBER_PAIRS mirror.
 		const commit = join(repo, ".git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate");
 		const original = readFileSync(commit);
 		writeFileSync(commit, "# stale installed commit-gate member\n");
@@ -282,4 +470,4 @@ test("hooks doctor runs both installer checks: fresh, stale, missing and restore
 	} finally {
 		rmSync(repo, { recursive: true, force: true });
 	}
-}, 120_000);
+}, fixtureDeadlineS(120) * 1000);

@@ -1079,7 +1079,7 @@ async function servicesInventory(request: ParsedCommand): Promise<CliResult> {
 		recommended_actions: [finding.recommended_action] }, verification: "UNVERIFIED" };
 }
 
-function activationDoctor(): CliResult {
+async function activationDoctor(): Promise<CliResult> {
 	const kit = kitIdentity();
 	const home = process.env.HOME;
 	if (!kit.release.root || !home || !isAbsolute(home)) {
@@ -1088,7 +1088,7 @@ function activationDoctor(): CliResult {
 			remediation: "Run an installed omp-kit executable with an absolute HOME; no safeguard was inspected.",
 		}], verification: "UNVERIFIED" };
 	}
-	const report = inspectActivation(kit.release.root, home, liveActivationDeps(kit.release.root, home));
+	const report = await inspectActivation(kit.release.root, home, liveActivationDeps(kit.release.root, home));
 	const finding: Finding = { component: "activation", status: report.overall === "PASS" ? "OK" : "FAIL",
 		reason: report.manifest_issue ? `Activation manifest unreadable: ${report.manifest_issue}`
 			: report.overall === "PASS"

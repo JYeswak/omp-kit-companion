@@ -39,6 +39,8 @@ function hookIo(record: string[]): HookRefreshIo {
 		kitRoot: () => "/nonexistent-kit",
 		digest: () => null,
 		hooksDir: () => ({ dir: null, config: null, tracked: false }),
+		check: async () => ({ rc: 0, output: "" }),
+		hasKitMembers: () => false,
 		pullRepos: () => [],
 		runInstaller: (repo: string) => { record.push(repo); return { ok: true, detail: "fake" }; },
 	};

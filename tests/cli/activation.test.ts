@@ -104,14 +104,14 @@ function freshHookRows(): HookRepoRow[] {
 function deps(f: F, overrides?: Partial<ActivationDeps>): ActivationDeps {
 	return {
 		services: () => serviceRows({}),
-		hookRows: freshHookRows,
+		hookRows: async () => freshHookRows(),
 		pluginLinks: () => farmLink(f.home, f.root, "9.9.9"),
 		readOptOuts: () => ({ optouts: [] as OptOut[], issue: null }),
 		...overrides,
 	};
 }
 
-function fixture(run: (f: F) => void, opts?: { brokenExtension?: boolean; staleLink?: boolean; noLink?: boolean; noPkg?: boolean }): void {
+async function fixture(run: (f: F) => void | Promise<void>, opts?: { brokenExtension?: boolean; staleLink?: boolean; noLink?: boolean; noPkg?: boolean }): Promise<void> {
 	const owned = ownedTmp("activation", { root: scratch });
 	const root = join(owned.path, "release");
 	const home = join(owned.path, "home");
@@ -130,15 +130,15 @@ function fixture(run: (f: F) => void, opts?: { brokenExtension?: boolean; staleL
 		linkFarm(home, root);
 	}
 	try {
-		run({ root, home, oldRoot });
+		await run({ root, home, oldRoot });
 	} finally {
 		owned.cleanup();
 	}
 }
 
-test("control: every safeguard on gives PASS with the full manifest", () => fixture(f => {
+test("control: every safeguard on gives PASS with the full manifest", () => fixture(async f => {
 	installRule(f.home, "fleet", "fleet protocol\n");
-	const report = inspectActivation(f.root, f.home, deps(f));
+	const report = await inspectActivation(f.root, f.home, deps(f));
 	expect(report.overall).toBe("PASS");
 	expect(report.manifest_issue).toBeNull();
 	expect(report.off_no_reason).toBe(0);
@@ -161,9 +161,9 @@ test("control: every safeguard on gives PASS with the full manifest", () => fixt
 	}
 }));
 
-test("planted: a profile on an older release reports its plugin rules STALE/OFF", () => fixture(f => {
+test("planted: a profile on an older release reports its plugin rules STALE/OFF", () => fixture(async f => {
 	installRule(f.home, "fleet", "fleet protocol\n");
-	const report = inspectActivation(f.root, f.home, deps(f, {
+	const report = await inspectActivation(f.root, f.home, deps(f, {
 		pluginLinks: () => farmLink(f.home, f.oldRoot, "9.9.8"),
 	}));
 	const rule = report.items.find(entry => entry.item === "rule:rules/alpha");
@@ -173,9 +173,9 @@ test("planted: a profile on an older release reports its plugin rules STALE/OFF"
 	expect(report.off_no_reason).toBeGreaterThanOrEqual(1);
 }, { staleLink: true }));
 
-test("planted: a linked release with no readable version reads UNVERIFIED/OFF", () => fixture(f => {
+test("planted: a linked release with no readable version reads UNVERIFIED/OFF", () => fixture(async f => {
 	installRule(f.home, "fleet", "fleet protocol\n");
-	const report = inspectActivation(f.root, f.home, deps(f, {
+	const report = await inspectActivation(f.root, f.home, deps(f, {
 		pluginLinks: () => farmLink(f.home, f.oldRoot, null),
 	}));
 	const rule = report.items.find(entry => entry.item === "rule:rules/alpha");
@@ -184,18 +184,18 @@ test("planted: a linked release with no readable version reads UNVERIFIED/OFF", 
 	expect(report.overall).toBe("FAIL");
 }, { noPkg: true }));
 
-test("planted: a rules-fleet rule removed with no opt-out is OFF-NO-REASON and FAIL", () => fixture(f => {
-	const report = inspectActivation(f.root, f.home, deps(f));
+test("planted: a rules-fleet rule removed with no opt-out is OFF-NO-REASON and FAIL", () => fixture(async f => {
+	const report = await inspectActivation(f.root, f.home, deps(f));
 	const fleet = report.items.find(entry => entry.item === "rule:rules-fleet/fleet");
 	expect(fleet?.status).toBe("OFF_NO_REASON");
 	expect(report.overall).toBe("FAIL");
 	expect(report.off_no_reason).toBeGreaterThanOrEqual(1);
 }));
 
-test("control: the same removal with an opt-out reason is OFF-WITH-REASON and PASS", () => fixture(f => {
+test("control: the same removal with an opt-out reason is OFF-WITH-REASON and PASS", () => fixture(async f => {
 	const record = recordOptOut(f.home, "rule:rules-fleet/fleet", "fleet pool not enrolled yet", { by: "test", at: "2026-10-27T00:00:00.000Z" });
 	expect(record).toEqual({ item: "rule:rules-fleet/fleet", reason: "fleet pool not enrolled yet", by: "test", at: "2026-10-27T00:00:00.000Z" });
-	const fromDisk = inspectActivation(f.root, f.home, deps(f, { readOptOuts: () => ({ optouts: [record], issue: null }) }));
+	const fromDisk = await inspectActivation(f.root, f.home, deps(f, { readOptOuts: () => ({ optouts: [record], issue: null }) }));
 	const fleet = fromDisk.items.find(entry => entry.item === "rule:rules-fleet/fleet");
 	expect(fleet?.status).toBe("OFF_WITH_REASON");
 	expect(fleet?.opt_out?.reason).toBe("fleet pool not enrolled yet");
@@ -208,18 +208,18 @@ test("planted: an opt-out with an empty reason is refused", () => fixture(f => {
 	expect(() => recordOptOut(f.home, "rule:rules-fleet/fleet", "   ")).toThrow(/OPT_OUT_REASON_REQUIRED/);
 }));
 
-test("planted: an unloaded service is OFF-NO-REASON and FAIL", () => fixture(f => {
+test("planted: an unloaded service is OFF-NO-REASON and FAIL", () => fixture(async f => {
 	installRule(f.home, "fleet", "fleet protocol\n");
-	const report = inspectActivation(f.root, f.home, deps(f, { services: () => serviceRows({ "omp-watch": false }) }));
+	const report = await inspectActivation(f.root, f.home, deps(f, { services: () => serviceRows({ "omp-watch": false }) }));
 	const job = report.items.find(entry => entry.item === "service:omp-watch");
 	expect(job?.status).toBe("OFF_NO_REASON");
 	expect(report.overall).toBe("FAIL");
 }));
 
-test("control: the unloaded service with an opt-out reason is OFF-WITH-REASON and PASS", () => fixture(f => {
+test("control: the unloaded service with an opt-out reason is OFF-WITH-REASON and PASS", () => fixture(async f => {
 	installRule(f.home, "fleet", "fleet protocol\n");
 	const record = recordOptOut(f.home, "service:omp-watch", "no watch needed on this host", { by: "test", at: "2026-10-27T00:00:00.000Z" });
-	const report = inspectActivation(f.root, f.home, deps(f, {
+	const report = await inspectActivation(f.root, f.home, deps(f, {
 		services: () => serviceRows({ "omp-watch": false }),
 		readOptOuts: () => ({ optouts: [record], issue: null }),
 	}));
@@ -227,27 +227,27 @@ test("control: the unloaded service with an opt-out reason is OFF-WITH-REASON an
 	expect(report.overall).toBe("PASS");
 }));
 
-test("planted: a stale hook member is OFF-NO-REASON", () => fixture(f => {
+test("planted: a stale hook member is OFF-NO-REASON", () => fixture(async f => {
 	installRule(f.home, "fleet", "fleet protocol\n");
 	const rows = freshHookRows();
 	rows[0]!.members[0]!.status = "STALE";
-	const report = inspectActivation(f.root, f.home, deps(f, { hookRows: () => rows }));
+	const report = await inspectActivation(f.root, f.home, deps(f, { hookRows: async () => rows }));
 	expect(report.items.find(entry => entry.item === "hook:/fixture/repo-a::hooks.d/pre-commit/45-x")?.status).toBe("OFF_NO_REASON");
 	expect(report.overall).toBe("FAIL");
 }));
 
 test("planted: an extension with an unresolvable import is OFF-NO-REASON", () => {
-	fixture(f => {
+	fixture(async f => {
 		installRule(f.home, "fleet", "fleet protocol\n");
-		const report = inspectActivation(f.root, f.home, deps(f));
+		const report = await inspectActivation(f.root, f.home, deps(f));
 		expect(report.items.find(entry => entry.item === "extension:extensions/broken.ts")?.status).toBe("OFF_NO_REASON");
 		expect(report.overall).toBe("FAIL");
 	}, { brokenExtension: true });
 });
 
-test("planted: an absent plugin link is OFF-NO-REASON", () => fixture(f => {
+test("planted: an absent plugin link is OFF-NO-REASON", () => fixture(async f => {
 	installRule(f.home, "fleet", "fleet protocol\n");
-	const report = inspectActivation(f.root, f.home, deps(f, {
+	const report = await inspectActivation(f.root, f.home, deps(f, {
 		pluginLinks: () => farmLink(f.home, null, null),
 	}));
 	expect(report.items.find(entry => entry.item === "profile-link:default")?.status).toBe("OFF_NO_REASON");
@@ -255,22 +255,22 @@ test("planted: an absent plugin link is OFF-NO-REASON", () => fixture(f => {
 	expect(report.overall).toBe("FAIL");
 }, { noLink: true }));
 
-test("planted: a corrupt opt-out record fails closed", () => fixture(f => {
+test("planted: a corrupt opt-out record fails closed", () => fixture(async f => {
 	installRule(f.home, "fleet", "fleet protocol\n");
 	mkdirSync(join(f.home, ".config", "omp-kit"), { recursive: true });
 	writeFileSync(join(f.home, ".config", "omp-kit", "activation-optouts.json"), "{nope");
 	const read = readOptOutFile(f.home);
 	expect(read.optouts).toEqual([]);
 	expect(read.issue).toMatch(/not JSON/);
-	const report = inspectActivation(f.root, f.home, deps(f, { readOptOuts: () => read }));
+	const report = await inspectActivation(f.root, f.home, deps(f, { readOptOuts: () => read }));
 	expect(report.optouts_issue).toMatch(/not JSON/);
 	expect(report.overall).toBe("FAIL");
 }));
 
-test("planted: an unlisted extension file breaks the manifest", () => fixture(f => {
+test("planted: an unlisted extension file breaks the manifest", () => fixture(async f => {
 	installRule(f.home, "fleet", "fleet protocol\n");
 	writeFileSync(join(f.root, "extensions", "stowaway.ts"), "export const s = 1;\n");
-	const report = inspectActivation(f.root, f.home, deps(f));
+	const report = await inspectActivation(f.root, f.home, deps(f));
 	expect(report.manifest_issue).toMatch(/unlisted/);
 	expect(report.overall).toBe("FAIL");
 }));
