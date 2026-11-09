@@ -1,2 +1,0 @@
-- CI-only: the full-suite remote-shard fixture now links the real bun into each fixture worker's own `.bun/bin`, the same place a real suite worker carries it. Before, a worker shell rebuilt `PATH` from its fixture `HOME`, so on a stock Linux runner `bun` was not on `PATH` and every remote shard ended without a verdict while this Mac's Homebrew `bun` masked the gap.
-- CI-only: the no-adapter fallback case links bun into its own fixture `HOME` too, so a stock Linux runner finds `bun` there while `rch` stays absent.

@@ -1,1 +1,0 @@
-- A refused act now writes one gate-events row: the block is recorded under its gate name and the derived guard-friction class lives in the miners' outputs instead of a second row. Tool failures that used to land in tool-error:unclassified are now named (agent input mistakes, timeouts, validation and check answers, gate-shaped error text), so false refusals stay measurable.

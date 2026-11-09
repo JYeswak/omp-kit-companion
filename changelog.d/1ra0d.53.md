@@ -1,2 +1,0 @@
-- Repositories can declare affected Python selftests in `.omp-kit/affected-tests.json`. Installed push hooks run those tests on the exact pushed commit at reduced priority, including sibling `*_selftest.py` suites, and reuse the existing complete GREEN ledger for author handoff. Failed or untested code is refused; documentation-only pushes create no GREEN.
-- The legacy-judge fixture patch tracks the declared ledger file, and the affected gate no longer mistakes the harness's exported `BEADS_DB` for caller authority, so reviewed pushes land instead of being refused.

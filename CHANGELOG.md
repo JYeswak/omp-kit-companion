@@ -4,6 +4,27 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.105] - 2026-11-09
+
+### Changed
+
+- Test-only: the owned-job reap plants wait up to 1 s for each killed descendant to disappear instead of reading the process table once right after the call returns. Under heavy load the kernel had not yet torn down a process that had already been sent SIGKILL, so the check failed 61 ms later even though the process was being killed. The bound stays under the plant's own 3 s lifetime, so turning off group termination still fails the test.
+- A native task child can again write a path its parent seat holds. Since 0.2.103, such a write was refused with WRITE_OWN_LOOKUP_UNAVAILABLE whenever the child's own name was not registered in Agent Mail, because the failed lookup for the child replaced the seat's cover.
+- A commit whose selected tests had all already passed on the same tree is now admitted with `VERDICT REUSED`. Before, the commit gate removed the already-green tests, found nothing left to run, and refused with NO_AFFECTED_TESTS ("no test reaches it"), even though the changed code's own tests had just passed.
+- CI-only: the full-suite remote-shard fixture now links the real bun into each fixture worker's own `.bun/bin`, the same place a real suite worker carries it. Before, a worker shell rebuilt `PATH` from its fixture `HOME`, so on a stock Linux runner `bun` was not on `PATH` and every remote shard ended without a verdict while this Mac's Homebrew `bun` masked the gap.
+- CI-only: the no-adapter fallback case links bun into its own fixture `HOME` too, so a stock Linux runner finds `bun` there while `rch` stays absent.
+- Repositories can declare affected Python selftests in `.omp-kit/affected-tests.json`. Installed push hooks run those tests on the exact pushed commit at reduced priority, including sibling `*_selftest.py` suites, and reuse the existing complete GREEN ledger for author handoff. Failed or untested code is refused; documentation-only pushes create no GREEN.
+- The legacy-judge fixture patch tracks the declared ledger file, and the affected gate no longer mistakes the harness's exported `BEADS_DB` for caller authority, so reviewed pushes land instead of being refused.
+- A seat with an active goal that goes idle now gets one wake every 30 minutes, so a lost mail, job result or verdict can no longer leave it idle until someone types. A paused goal, a seat without an agent name, a busy seat or a new turn gets no wake.
+- A build task that lacks its repo's gate contract is no longer refused with BRIEF_CONTRACT_REFUSED: the fleet guard appends the current contract to the task's context and reports AUTO_COMPLETED. Only the 1 MB inspection limits still refuse.
+- A task call whose shared context declares READ-ONLY (or analysis-only) at the start of a line needs no contract, unless the task itself has a Change section or reserves paths.
+- `omp-kit brief` prints one row per topic (reservations, commit message, release notes, safety primitives, tests, ...) instead of one row per hook member: the companion's contract drops from 48 rows to 13, with no empty or "read and satisfy" rows.
+- `omp-kit scratch apply` now restores owner write permission on its own expired quarantine entries before the idle proof, so entries holding unreadable test-fixture directories (000 modes) drain instead of being kept forever behind idle-proof-unavailable. Young, held and live entries are untouched.
+- `omp-kit update --apply` now prunes old kit releases and poll directories the same way the update job does: the active release, the last five before it, any release pinned in `releases/.pinned` and the still-running release survive; older `releases/<v>` and `poll-<v>` directories are removed. A failed pruning reports FINDINGS, never a silent skip.
+- A refused act now writes one gate-events row: the block is recorded under its gate name and the derived guard-friction class lives in the miners' outputs instead of a second row. Tool failures that used to land in tool-error:unclassified are now named (agent input mistakes, timeouts, validation and check answers, gate-shaped error text), so false refusals stay measurable.
+- `omp-kit land --patch` now commits the reconstructed hunks on local main and publishes main itself, exactly like `land --paths`, so the installed shared-main pre-push member admits the push instead of refusing every patch publication.
+- `omp-kit verify BEAD --export SHA` now admits `open` and `in_progress` beads as well as `in_review`: the non-author replay of every box on the exact export is the proof the handoff gate stands in for, so `in_review` stays a queue, never a precondition. Unticked boxes are ticked on `PASS`; the author's own run is still refused before replay and a failing box still leaves the bead unclosed with the `REWORK` comment.
+
 ## [0.2.104] - 2026-11-09
 
 ### Changed
