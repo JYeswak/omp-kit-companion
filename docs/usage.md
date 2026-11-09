@@ -412,3 +412,23 @@ of the JSON; add `--out ABS_FILE` to keep the report. `corpus --plan`
 prints the session schema fields read before reading anything, and an
 unknown schema version refuses with no partial counts. A fire rate is
 not precision: precision needs human labels.
+
+## Convert a plan into native beads
+
+`planning convert --apply --tracker-root DIR --actor ACTOR --yes` writes only the
+selected native tracker. `ACTOR` is the actual writer supplied explicitly for
+native audit attribution, **not** verified pane identity; native policy refusals
+remain failures. Every native invocation passes `--no-auto-import --no-auto-flush`:
+apply never exports JSONL, commits tracker changes, or writes a foreign tracker.
+An authorized export/publication is a separate owner operation. `--mission M`
+scopes parent epic identity, `M:<slug>` contributions and source references; each
+block must label that mission. Optional `parent: EXISTING_LOCAL_ID` on a new block
+creates its parent-child link in the same native create after checking the parent
+is present, nonterminal and has no open native `blocks` prerequisite. Open
+parent-child rollups alone are not code prerequisites; a closed blocker is satisfied.
+Without an explicit parent, new blocks use the selected mission epic.
+An amendment's explicit parent must match its historical parent, never move it.
+Amendments preserve existing acceptance, external refs, parents and dependencies;
+reapplying the same contributions adds nothing. Dry-run materializes all items
+under an isolated mission epic and retains declared live parent IDs as metadata;
+it does not certify those IDs exist in an apply tracker.

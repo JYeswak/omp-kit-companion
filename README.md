@@ -22,7 +22,7 @@ existing OMP install.
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
 # Requires `gh` authenticated (run `gh auth login` first; in automation export
-# GH_TOKEN): attestation fetch and verification refuse without it. See
+# `GH_TOKEN`): attestation refuses without it. See
 # [Installation](#installation) for the canonical block.
 KIT_VERSION=$(curl -fsSL https://api.github.com/repos/JYeswak/omp-kit-companion/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].removeprefix("v"))')
 if [ -z "$KIT_VERSION" ]; then
@@ -36,6 +36,7 @@ KIT_RAW="https://raw.githubusercontent.com/JYeswak/omp-kit-companion/v${KIT_VERS
 KIT_INSTALLER=$(mktemp -d "${TMPDIR:-/tmp}/omp-kit-installer.XXXXXXXX")
 curl -fsSL -o "$KIT_INSTALLER/install.sh" "$KIT_RAW/install.sh"
 curl -fsSL -o "$KIT_INSTALLER/install.py" "$KIT_RAW/install.py"
+export GH_TOKEN="$(gh auth token)" # same shell: no auth refuses KIT_ATTESTATION_BUNDLE_UNAVAILABLE (exit 2)
 sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit" --dry-run
 sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit"
 export PATH="$HOME/.local/opt/omp-kit/bin:$PATH"
@@ -132,8 +133,8 @@ Read-only findings: `OK|DEGRADED|DRIFT|UNVERIFIED|FAIL|NOT_RUN`; next steps in t
 tokenizes files under your shell rc files, LaunchAgents, `~/.config`,
 `~/.local/bin`, `~/.codex`, `~/.claude`, `~/.omp`, `~/.local/share` and the
 tmux environment, and reports the file and the vault NAME of any match. Values
-are never printed. When Infisical is unreachable the result is `UNVERIFIED`,
-never `PASS`.
+are never printed. The result is `UNVERIFIED`, never `PASS`, when Infisical is
+unreachable or infisical-helpers `lib.sh` is missing (`files_scanned` 0).
 
 ```sh
 omp-kit doctor --scope secrets --json
@@ -247,14 +248,16 @@ Install previews a diff first, keeps a backup, and retires installed lifecycle d
 
 ```sh
 omp-kit service list --json
+mkdir -p "$HOME/.local/bin" && cp "$HOME/.local/opt/omp-kit/bin/omp-kit" "$HOME/.local/bin/omp-kit" && chmod +x "$HOME/.local/bin/omp-kit"
 omp-kit service install kit-update --dry-run --json
-omp-kit update --plan --version X.Y.Z --index /absolute/release-index.json --archive /absolute/omp-kit.tar --json
 ```
 
-`update` never infers "latest": it takes an exact version and absolute local
-index and archive paths, then reruns the matcher and live post-checks after
-applying. The `kit-update` service is the path that follows new releases
-automatically; see [Release and update flow](#how-it-works).
+`service install` needs that stable launcher, else `LAUNCHER_UNAVAILABLE`.
+`update` never infers "latest": download the release index and matching
+archive side by side first (example in the table below). A missing file is
+refused naming the path (`LOCAL_SOURCE_REQUIRED`). The `kit-update` service
+follows new releases automatically; see
+[Release and update flow](#how-it-works).
 
 A `PARTIAL` update keeps its receipt-bound `undo` command even if interruption
 prevents a full postcheck. `postcheck_detail` keeps the original cause and any
@@ -322,6 +325,7 @@ KIT_RAW="https://raw.githubusercontent.com/JYeswak/omp-kit-companion/v${KIT_VERS
 KIT_INSTALLER=$(mktemp -d "${TMPDIR:-/tmp}/omp-kit-installer.XXXXXXXX")
 curl -fsSL -o "$KIT_INSTALLER/install.sh" "$KIT_RAW/install.sh"
 curl -fsSL -o "$KIT_INSTALLER/install.py" "$KIT_RAW/install.py"
+export GH_TOKEN="$(gh auth token)" # same shell: no auth refuses KIT_ATTESTATION_BUNDLE_UNAVAILABLE (exit 2)
 sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit" --dry-run
 sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit"
 export PATH="$HOME/.local/opt/omp-kit/bin:$PATH"
@@ -468,10 +472,10 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit undo` | `undo RUN_ID [--yes]` | Restore one verified receipt | `omp-kit undo RUN_ID --yes` |
 | `omp-kit audit` | `audit` | Receipt chronology | `omp-kit audit --json` |
 | `omp-kit why` | `why RUN_ID` | Explain one recorded run | `omp-kit why RUN_ID --json` |
-| `omp-kit update` | `update [--plan\|--apply] --version X.Y.Z --index PATH --archive PATH` or `update --reconcile RECEIPT --yes [--prefix PATH]` | Guarded kit update from local index and archive; never infers latest | `omp-kit update --plan --version X.Y.Z --index /abs/release-index.json --archive /abs/omp-kit.tar --json` |
+| `omp-kit update` | `update [--plan\|--apply] --version X.Y.Z --index PATH --archive PATH` or `update --reconcile RECEIPT --yes [--prefix PATH]` | Guarded update from a side-by-side local index + archive; never infers latest; missing files refused naming the path (`LOCAL_SOURCE_REQUIRED`) | `omp-kit update --plan --version X.Y.Z --index /abs/release-index.json --archive /abs/omp-kit.tar --json` |
 | `omp-kit review` | `review rules\|reduce` | Compare two rule versions on the union of their witnesses, or minimize a reproduced false fire | `omp-kit review rules --incumbent-rules /old/rules --incumbent-cases /old/cases.tsv --candidate-rules /new/rules --candidate-cases /new/cases.tsv --json` |
-| `omp-kit corpus` | `corpus --sessions ABS_DIR [--out ABS_FILE] [--plan]` | Per-rule fire rates over local session transcripts; never uploads | `omp-kit corpus --sessions /absolute/sessions --json` |
-| `omp-kit lsp` | `lsp setup --plan [--project PATH] [--file PATH]` | Language-server readiness; never installs or starts servers | `omp-kit lsp setup --plan --json` |
+| `omp-kit corpus` | `corpus --sessions ABS_DIR [--out ABS_FILE] [--plan]` | Per-rule fire rates over transcripts; never uploads; `--sessions` must exist (fresh HOMEs have none) | `omp-kit corpus --sessions /absolute/sessions --json` |
+| `omp-kit lsp` | `lsp setup --plan [--project PATH] [--file PATH]` | Readiness only, never installs; stock brew OMP covers defaults, full readiness needs a source-backed OMP | `omp-kit lsp setup --plan --json` |
 | `omp-kit memory` | `memory audit --store-root PATH --yes` | Separately consented audit of a Mnemopi store | `omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json` |
 | `omp-kit planning` | `planning score\|convert` | Score planning evidence; convert a plan into native beads (dry run into a fresh `--db`, or `--apply` to a tracker) | `omp-kit planning score --fleet --json` |
 | `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and check hashes; `anchor` compares the live-doc Mission statement with the record (`AGREE`/`DRIFT`) | `omp-kit mission anchor --json` |
@@ -483,12 +487,12 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit heavy` | `heavy [--label LABEL] [--lane NAME] [--no-wait] [--max-runtime S] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 124 over budget, 69 when no disk observer is available | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
 | `omp-kit next` | `next --role worker\|director [--repo PATH] [--agent NAME]` | Read-only next action and applicable skills ([docs/next.md](docs/next.md)) | `omp-kit next --role worker --json` |
 | `omp-kit grader next` | `grader next [--repo PATH] [--agent NAME]` | Select one prioritized grader action (`OMP_KIT_GRADE_WAVE` = `grade_wave.py` path); unavailable queue sources read UNKNOWN, never empty | `OMP_KIT_GRADE_WAVE=/path/to/grade_wave.py omp-kit grader next --repo . --agent "$AGENT_NAME" --json` |
-| `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
+| `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan; needs native `rch` on PATH (else `RCH_UNAVAILABLE`) | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
 | `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or resolve shared-main convergence; keeps peer staged/worktree state, refuses owner conflicts, never force-pushes | `omp-kit converge --repo . --json` |
 | `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit reserved paths, pass `commit-msg` and the [push check](docs/land.md), publish without force: `PUSHED`/`REFUSED`/`UNRUN` | `omp-kit land --paths src/a.ts --message 'fix: x [pending]' --apply --yes --json` |
 | `omp-kit ovnfs-land` | `ovnfs-land --repo PATH --checkout PATH --base SHA --apply --yes` | Serialize a committed worker checkout into main | `omp-kit help ovnfs-land` |
 | `omp-kit save` | `save -m MSG -- PATH...` | `land --apply --yes` in one step; one `SAVED`/`REFUSED` line | `omp-kit save -m 'fix: x [pending]' -- src/a.ts` |
-| `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |
+| `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them; even with a fresh HOME these inspect the real launchd domain (read-only) | `omp-kit service list --json` |
 | `omp-kit send` | `send SESSION PANE MESSAGE [--no-bead-reason TEXT] [--drop-dir PATH]` | Tags agent text; bare slash commands; refuses forgeries | `omp-kit send s %1 "status" --json` |
 | `omp-kit brief` | `brief --repo PATH [--paths PATH...]` | Gate contract/digest; landed-line deletion candidates require author review | `omp-kit brief --repo . --json` |
 | `omp-kit sha` | `sha SHA [--repo PATH]...` | Which fleet repos hold a commit; exit 0 found, 1 absent everywhere | `omp-kit sha dd82fb4e --json` |
@@ -519,14 +523,12 @@ Use repeatable `--done` for explicit reports.
 | `apply rules` | Install or update kit-owned rules | `omp-kit apply rules --apply --yes` |
 | `apply policy` | Per-profile TTSR keys via native `omp config set`, with profile backup and read-back; `--profiles NAMES\|all`, `--include-default` | `omp-kit apply policy --plan --json` |
 | `apply extensions` | Install portable defaults into selected profiles; `--fleet` selects the external-tool fleet integrations instead | `omp-kit apply extensions --plan --profiles all --json` |
-| `apply plugin` | Link the installed kit package into covered profiles; `--regex-budget-report` disables slow rules in named profiles only | `omp-kit apply plugin --plan --store /abs/kit-release --regex-budget-report /abs/regex-budget.out --profiles all --include-default --json` |
-| `apply mcp` | Import MCP servers from claude, cursor, codex, project or a file into profiles' `mcp.json`, or edit servers already there (`--env-command`, `--enable`) | `omp-kit apply mcp --from claude --servers z3-prover --profiles all --plan --json` |
+| `apply mcp` | Import MCP servers from claude, cursor, codex, project or a file into profiles' `mcp.json`, or edit servers already there (`--env-command`, `--enable`); needs an existing source (see `doctor --scope mcp --sources`), else `SOURCE_UNAVAILABLE` | `omp-kit apply mcp --from claude --servers z3-prover --profiles all --plan --json` |
 | `activation opt-out` | Record an opt-out with a reason; empty reasons are refused and nothing is written | `omp-kit activation opt-out --item service:kit-update --reason 'no launchd' --json` |
-| `repair --scope rules` / `policy` / `extensions` | Reversible repair of that component | `omp-kit repair --scope policy --plan --json` |
+| `repair --scope rules` / `policy` / `extensions` | Reversible repair (`github` unsupported: `UNSUPPORTED_REPAIR_SCOPE`) | `omp-kit repair --scope policy --plan --json` |
 | `repair --scope state` | Restore the private state root to mode 0700, nothing else | `omp-kit repair --scope state --plan --json` |
-| `repair --scope github` | Rewrite `hosts.yml` from the Infisical fine-grained token | `omp-kit repair --scope github --plan --json` |
 | `service list` / `status [JOB\|--all]` | Known jobs with installed and loaded state | `omp-kit service status --all --json` |
-| `service install JOB` | Render, diff, back up, bootstrap, verify; `--replace` takes over a label loaded from another plist | `omp-kit service install omp-watch --dry-run --json` |
+| `service install JOB` | Render, diff, back up, bootstrap, verify; `--replace` takes over a label loaded from another plist; needs `$HOME/.local/bin/omp-kit` first (copied from the installed kit as above), else `LAUNCHER_UNAVAILABLE` | `omp-kit service install omp-watch --dry-run --json` |
 | `service uninstall JOB` | Bootout and move the plist to backup; `--purge-logs` deletes logs | `omp-kit service uninstall omp-watch --apply --yes --json` |
 | `service doctor [JOB\|--all]` | Read-only checks; `--fix --apply --yes` reinstalls drifted jobs and rotates logs | `omp-kit service doctor --all --json` |
 | `service logs JOB` | Print out or err logs (`--errors`, `-n N`) | `omp-kit service logs omp-watch -n 50` |
@@ -537,26 +539,8 @@ Use repeatable `--done` for explicit reports.
 | `infra undo` | Restore the pin file from a promote backup | `omp-kit infra undo --receipt PATH --apply --yes` |
 | `scratch plan` / `release DIR` / `apply` | Finish tasks; legacy: `--legacy-owner --reason TEXT --yes` | `omp-kit scratch release DIR --bin throwaway --now --json` |
 | `examples memory-off` / `mnemopi-manual` / `model-roles` / `mcp` / `omp-watch` / `skill-set` | Versioned, unverified recipes for manual use; `omp-watch` renders the service file without installing it | `omp-kit examples omp-watch --json` |
-| `planning convert` | Fenced Markdown plan to native beads: dry-run uses a fresh isolated DB; apply requires `--tracker-root DIR --actor ACTOR --yes`, always disables native auto-import/export | `omp-kit planning convert --plan PLAN.md --mission M --dry-run --db var/agent-tmp/plan-run --json` |
+| `planning convert` | Fenced Markdown plan to native beads: dry-run uses a fresh isolated DB; `--apply` needs `--tracker-root DIR --actor ACTOR --yes`; needs native `br` on PATH (else `BR_UNAVAILABLE`) | `omp-kit planning convert --plan PLAN.md --mission M --dry-run --db var/agent-tmp/plan-run --json` |
 | `review reduce` | Minimize a public-synthetic false fire without weakening its benign context | `omp-kit review reduce --rules /abs/rules --fixture /abs/fixture.json --json` |
-
-`planning convert --apply --tracker-root DIR --actor ACTOR --yes` writes only the
-selected native tracker. `ACTOR` is the actual writer supplied explicitly for
-native audit attribution, **not** verified pane identity; native policy refusals
-remain failures. Every native invocation passes `--no-auto-import --no-auto-flush`:
-apply never exports JSONL, commits tracker changes, or writes a foreign tracker.
-An authorized export/publication is a separate owner operation. `--mission M`
-scopes parent epic identity, `M:<slug>` contributions and source references; each
-block must label that mission. Optional `parent: EXISTING_LOCAL_ID` on a new block
-creates its parent-child link in the same native create after checking the parent
-is present, nonterminal and has no open native `blocks` prerequisite. Open
-parent-child rollups alone are not code prerequisites; a closed blocker is satisfied.
-Without an explicit parent, new blocks use the selected mission epic.
-An amendment's explicit parent must match its historical parent, never move it.
-Amendments preserve existing acceptance, external refs, parents and dependencies;
-reapplying the same contributions adds nothing. Dry-run materializes all items
-under an isolated mission epic and retains declared live parent IDs as metadata;
-it does not certify those IDs exist in an apply tracker.
 
 ### Doctor scopes
 
@@ -688,6 +672,18 @@ Turn on automatic updates (the environment is captured into the job file):
 OMP_KIT_UPDATE_ENABLED=1 OMP_KIT_UPDATE_POLL=github OMP_KIT_UPDATE_REPO=JYeswak/omp-kit-companion \
   omp-kit service install kit-update --apply --yes
 ```
+
+Warning: `service install --apply` reaches the real per-user launchd domain
+whatever `HOME` is; never use a scratch `HOME`.
+
+## Removal
+
+Undo in reverse: `omp-kit undo RUN_ID --yes`, then
+`omp-kit service uninstall JOB --apply --yes` bootouts each job and moves its
+plist to backup (`--purge-logs` deletes logs). Then `rm -rf
+"$HOME/.local/opt/omp-kit"` and the `$HOME/.local/bin/omp-kit` copy if
+present. Receipts stay under the state root (`$XDG_STATE_HOME/omp-kit`, else
+`~/.local/state/omp-kit`) unless removed too; uninstall never touches it.
 
 ## Troubleshooting
 

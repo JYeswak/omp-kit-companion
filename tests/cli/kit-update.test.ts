@@ -272,8 +272,24 @@ test("plan reads the archive and refuses bytes that differ from the index digest
 
 test("plan refuses a missing archive as an incomplete local source", async () => fixture(async ctx => {
  rmSync(ctx.archivePath);
- expect(await planKitUpdate(input(ctx))).toMatchObject({ exitCode: 2, status: "REFUSED", reason: "LOCAL_SOURCE_REQUIRED" });
+ const refused = await planKitUpdate(input(ctx));
+ expect(refused).toMatchObject({ exitCode: 2, status: "REFUSED", provenance: "UNVERIFIED" });
+ const reason = refused.status === "REFUSED" ? refused.reason : "";
+ expect(reason.startsWith("LOCAL_SOURCE_REQUIRED")).toBe(true);
+ expect(reason).toContain(ctx.archivePath);
  expect(existsSync(ctx.stateRoot)).toBe(false);
+}));
+
+test("OUTSIDERDOCS1: a missing --archive path is refused naming the path", async () => fixture(async ctx => {
+ const missing = join(ctx.source, "omp-kit-absent.tar");
+ const refused = await planKitUpdate({ ...input(ctx), archivePath: missing });
+ expect(refused).toMatchObject({ exitCode: 2, status: "REFUSED", provenance: "UNVERIFIED" });
+ const reason = refused.status === "REFUSED" ? refused.reason : "";
+ expect(reason.startsWith("LOCAL_SOURCE_REQUIRED")).toBe(true);
+ expect(reason).toContain(missing);
+ expect(existsSync(ctx.stateRoot)).toBe(false);
+ // Control: the fixture's real paths still plan, so the refusal above is the missing path, not the fixture.
+ expect(await planKitUpdate(input(ctx))).toMatchObject({ exitCode: 0, status: "UPDATE_AVAILABLE", provenance: "INTEGRITY_ONLY" });
 }));
 
 // A failed matcher/live post-check stays RED even when guarded compensation restores the prior link.

@@ -141,6 +141,10 @@ async function currentInstallation(prefix: string, platform: ReleasePlatform): P
 function localIndex(input: KitUpdateInput): { raw: string; archivePath: string } {
  if (!VERSION.test(input.version) || input.sourceTag !== `v${input.version}` ||
   !isAbsolute(input.indexPath) || !isAbsolute(input.archivePath)) throw new Error("LOCAL_SOURCE_REQUIRED");
+ // A missing file is an incomplete local source, not an unverified install: name the absent path.
+ for (const path of [input.indexPath, input.archivePath]) {
+  if (!lstatSync(path, { throwIfNoEntry: false })) throw new Error(`LOCAL_SOURCE_REQUIRED: missing kit source file ${path}`);
+ }
  const raw = regular(input.indexPath).toString("utf8");
  const index = parseReleaseIndexJson(raw);
  const asset = index.assets[`${input.platform.os}-${input.platform.arch}-${input.platform.libc}`];
@@ -169,7 +173,9 @@ export async function planKitUpdate(input: KitUpdateInput): Promise<KitUpdatePre
   return { ...input, current, release, status: release.status, exitCode: 0, provenance: "INTEGRITY_ONLY" };
  } catch (error) {
   const message = error instanceof Error ? error.message : "KIT_STATE_UNVERIFIED";
-  const reason = /^[A-Z][A-Z_]+$/.test(message) ? message : "KIT_STATE_UNVERIFIED";
+  // A bare code passes through; so does the one coded refusal that names its evidence (LOCAL_SOURCE_REQUIRED: <path>).
+  // Anything else, including Node errors shaped "ENOENT: ...", stays KIT_STATE_UNVERIFIED.
+  const reason = /^[A-Z][A-Z_]+$/.test(message) || message.startsWith("LOCAL_SOURCE_REQUIRED: ") ? message : "KIT_STATE_UNVERIFIED";
   return { status: "REFUSED", exitCode: 2, reason, provenance: "UNVERIFIED" };
  }
 }
