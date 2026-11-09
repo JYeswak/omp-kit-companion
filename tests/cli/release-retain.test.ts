@@ -52,13 +52,15 @@ function fixture(versions = ["1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5
 	return { prefix, stateRoot, config, dependencies };
 }
 
-test("successful update retires older read-only releases and matching polls, preserving two predecessors", async () => {
-	const f = fixture();
+test("successful update retires older read-only releases and matching polls, preserving five predecessors", async () => {
+	const versions = ["1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5", "1.0.6", "1.0.7", "1.1.0"];
+	const f = fixture(versions, "1.0.7");
 	const result = await runKitUpdateJob(f.config, f.dependencies);
 	expect(result.status).toBe("UPDATED");
-	expect(readdirSync(join(f.prefix, "releases")).sort()).toEqual(["1.0.3", "1.0.4", "1.0.5", "1.1.0"]);
-	for (const version of ["1.0.0", "1.0.1", "1.0.2"]) expect(existsSync(join(f.stateRoot, `poll-${version}`))).toBe(false);
-	for (const version of ["1.0.3", "1.0.4", "1.0.5", "1.1.0"]) {
+	const kept = ["1.0.2", "1.0.3", "1.0.4", "1.0.5", "1.0.6", "1.0.7", "1.1.0"];
+	expect(readdirSync(join(f.prefix, "releases")).sort()).toEqual(kept);
+	for (const version of ["1.0.0", "1.0.1"]) expect(existsSync(join(f.stateRoot, `poll-${version}`))).toBe(false);
+	for (const version of kept) {
 		expect(readFileSync(join(f.prefix, "releases", version, "bin", "omp-kit"), "utf8")).toBe(version);
 		expect(readFileSync(join(f.stateRoot, `poll-${version}`, "archive.tar"), "utf8")).toBe(version);
 	}
@@ -115,8 +117,8 @@ test("old poll orphans are removed but unrelated names and symlink targets are u
 	}
 });
 
-test("the actual running executable survives even when older than the two rollback releases", async () => {
-	const f = fixture();
+test("the actual running executable survives even when older than the five rollback releases", async () => {
+	const f = fixture(["1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5", "1.0.6", "1.0.7", "1.0.8", "1.1.0"], "1.0.8");
 	const executable = join(f.prefix, "releases", "1.0.0", "bin", "omp-kit");
 	chmodSync(executable, 0o755);
 	copyFileSync(realpathSync(process.execPath), executable);
@@ -136,8 +138,8 @@ const result = await runKitUpdateJob({ ...config, pollRelease: async () => sourc
 	plan: async () => plan,
 	apply: async () => {
 		const stable = join(config.prefix, "bin", "omp-kit");
-		unlinkSync(stable); symlinkSync("../releases/1.0.5/bin/omp-kit", stable);
-		return { status: "UPDATED", exitCode: 0, receiptId: "running-fixture", activeVersion: "1.0.5",
+		unlinkSync(stable); symlinkSync(\`../releases/\${source.version}/bin/omp-kit\`, stable);
+		return { status: "UPDATED", exitCode: 0, receiptId: "running-fixture", activeVersion: source.version,
 			postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY" };
 	},
 	relink: async () => ({ ok: true, detail: "fixture", receiptId: "plugin-fixture", undoCommand: "fixture undo" }),
@@ -160,15 +162,15 @@ console.log(JSON.stringify({ executable: process.execPath, result }));
 	expect(existsSync(join(f.prefix, "releases", "1.0.1"))).toBe(false);
 	expect(existsSync(join(f.prefix, "releases", "1.0.2"))).toBe(false);
 	expect(observed.result.retention.status).toBe("APPLIED");
-	expect(observed.result.retention.kept).toEqual(["1.0.0", "1.0.3", "1.0.4", "1.0.5", "1.1.0"]);
+	expect(observed.result.retention.kept).toEqual(["1.0.0", "1.0.3", "1.0.4", "1.0.5", "1.0.6", "1.0.7", "1.0.8", "1.1.0"]);
 }, 45_000);
 
 test("the original 49-release and 28-poll accumulation is pruned in numeric version order", async () => {
 	const versions = Array.from({ length: 49 }, (_, patch) => `1.0.${patch}`);
 	const f = fixture(versions, "1.0.48", versions.slice(0, 28));
 	const result = await runKitUpdateJob(f.config, f.dependencies);
-	expect(readdirSync(join(f.prefix, "releases")).sort()).toEqual(["1.0.46", "1.0.47", "1.0.48"]);
+	expect(readdirSync(join(f.prefix, "releases")).sort()).toEqual(["1.0.43", "1.0.44", "1.0.45", "1.0.46", "1.0.47", "1.0.48"]);
 	expect(readdirSync(f.stateRoot).filter(name => name.startsWith("poll-"))).toEqual([]);
 	expect(result.retention?.status).toBe("APPLIED");
-	expect(result.retention?.removed.sort()).toEqual(versions.slice(0, 46).sort());
+	expect(result.retention?.removed.sort()).toEqual(versions.slice(0, 43).sort());
 });
