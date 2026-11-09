@@ -395,7 +395,9 @@ def _commit_identity(repo: str, commit: object, cache: dict) -> str | None:
                     break
                 lines[i] = name + ">"
             if identity is not None:
-                identity = "\n".join(lines) + separator + message
+                # TRAILBLANK1: git commit's message cleanup strips trailing blank lines that commit-tree (the
+                # gate's candidate) keeps, so only those are dropped; every other message byte must match.
+                identity = "\n".join(lines) + separator + message.rstrip("\n") + "\n"
         cache[commit] = identity
     return cache[commit]
 
