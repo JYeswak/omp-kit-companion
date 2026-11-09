@@ -32,6 +32,19 @@ Use `reality-check-for-project`: "Where are we REALLY on this project? Does the 
 ### 2. Write the plan (loose first)
 One markdown plan per mission, in the repo: `PLAN_<MISSION>.md` at the root by default. A repo with an existing plan of record sets `[missions.<m>] plan = "<path>"` in `.omp/planning-score.toml`; the configured path overrides the default. Start from: goals and intent; user workflows; tech stack; architecture decisions; and the WHY. Don't over-constrain the first draft. Jeff: "when coming up with your plan, don't be too prescriptive to give the model flexibility so that you get the best possible plan." Commit: `plan(<mission>): draft`.
 
+### 2b. Verb inventory **[fleet]**
+Before the review rounds, the plan gets a `## Verbs` table: every command an agent, a service or Joshua will run against what the plan builds. Reason (J-2026-10-25-17/18): on 2026-10-25 the lead hand-built five workarounds in one session (publish-when-the-verdict-is-green, cc source forensics, READYEVAL per-seat parsing, a scratch model launcher, a per-bead status loop). None of the four planning skills mentioned verbs. Fill the table from four sweeps; each is cheap because it reads the plan, not the code:
+
+1. **Nouns × lifecycle.** For every resource the plan creates or stores (a store, spool, cache, verdict, lease, seat, release, scratch dir), list its states and one verb for each transition, plus get and list. A state with no exit verb, or a resource with no delete/retire verb, is a gap. Sources: SSADM entity life histories and the CRUD completeness check ([TMAP](https://www.tmap.net/wiki/crud)); Google's resource-oriented design, standard plus custom methods ([AIP-121](https://google.aip.dev/121), [AIP-136](https://google.aip.dev/136)).
+2. **Actor walk.** For each actor (worker, director, chief, Joshua, launchd service), walk the plan's workflow left to right, as a story-map backbone ([Patton](https://jpattonassociates.com/the-new-backlog)). Every step must be a command. A step that reads "inspect", "check" or "parse" with no named command is a gap.
+3. **Day-2 ladder.** Every component gets install, configure, upgrade, health/doctor, explain (why is it red), repair, backup/restore and rollback, or a written "not needed because …". Source: Operator capability levels ([operatorframework.io](https://operatorframework.io/operator-capabilities/)); the kit's doctor/health/repair triad (`canonical-cli-scoping`).
+4. **Failure modes.** For each way the component can fail (stale, starved, wedged, partial write, wrong identity), name the verb that detects it, the verb that explains it, and the verb that recovers it. A failure that only stat, lsof or ad-hoc SQL can find is a gap.
+
+| Verb | Noun | Actor | Sweep | Exists? (command, or the bead that builds it) |
+|---|---|---|---|---|
+
+Each missing row becomes a bead when you convert (step 4), parented with the feature it serves. One-off admin tasks ship with the code as commands, never as scratch scripts ([12-factor XII](https://12factor.net/admin-processes)). The runtime backstop is the toil miner (VERBMINE1, ompkit-za0xp): a scratch script run twice, or an ad-hoc pipeline repeated across seats, is a missing verb that planning failed to catch, so it gets a bead ([Google SRE, toil](https://sre.google/sre-book/eliminating-toil/)).
+
 ### 3. Review the plan: 4–5 rounds, in place
 Each round, in a **fresh conversation**, a different model than the owner reviews the whole plan with this exact prompt:
 
@@ -68,6 +81,8 @@ The plan is the oracle. Jeff's exact prompt, from his slb session:
 ```
 ok now I want you to go back over the entire long markdown plan document and verify that we truly have captured ALL features, functionality, requirements, detailed, rationale, etc from the plan document in our beads. Use ultrathink. Also make sure that you have really correctly overlaid the entire dependency structure in all its nuanced complexity across all the beads.
 ```
+
+**[fleet]** Same pass: every `## Verbs` row marked missing has a bead, and every bead that adds a resource names its lifecycle, day-2 and failure-mode verbs.
 
 Commit: `beads(<mission>): coverage check N`.
 
@@ -113,6 +128,7 @@ Run on every `br` write, as reports, never as a review round: cycles and edge di
 | Restating acceptance in the description | The two copies drift. Acceptance lives only in the `acceptance_criteria` field; coverage still checks beads against the plan |
 | Hold reservations or uncommitted edits for hours ("holding reservations too long") | Reserve, edit, commit, push, release in minutes; split the bead if it can't |
 | Build a commit from a tree older than origin/main | Pull latest before every edit; check `git show --stat` deletes only what you meant to |
+| Discover a missing command at 3am and hand-build a pipeline or scratch script, then rerun it | Enumerate verbs in the plan (step 2b); a workaround used once becomes a bead in the same turn (J-2026-10-25-17) |
 
 ## Scoring: `omp-kit planning score`
 Reads the repo's git history, plan file and tracker; prints one JSON line per mission and an overall score. Thresholds and weights live in one file, so tuning means editing one number: kit defaults in `omp-kit/config/planning-score.toml`, with an optional repo override in `.omp/planning-score.toml`.

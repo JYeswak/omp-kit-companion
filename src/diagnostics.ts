@@ -215,6 +215,33 @@ export function readManifest(root: string): { rules: ManifestRule[]; sourceUnver
 		return { rules: [], sourceUnverified: false, error: errorText(error) };
 	}
 }
+
+/**
+ * DOCTORDEGRADED1 (ompkit-1ra0d.9): the fleet pack manifest. Fleet rules applied
+ * by `apply rules --fleet` live in the same installed directory as default rules;
+ * an installed file whose name and bytes match a fleet row is managed, not unknown.
+ * Any fleet-manifest problem (missing, unparseable, shipped bytes disagree) yields
+ * an empty managed set: unknown extras stay DEGRADED rather than being trusted
+ * against an unverified manifest.
+ */
+export function readFleetManifest(root: string): { rules: ManifestRule[]; error?: string } {
+	try {
+		if (directoryPath(root, ["rules-fleet"]) !== "directory") throw new Error("rules-fleet directory is missing or unsafe");
+		const rules = parseRuleManifest(fileBytes(join(root, "MANIFEST.fleet.tsv")).toString("utf8"));
+		const seen = new Set<string>();
+		for (const rule of rules) {
+			seen.add(rule.name);
+			const file = join(root, "rules-fleet", rule.name + ".md");
+			if (pathState(file) !== "file" || digest(fileBytes(file)) !== rule.sha256) throw new Error("shipped fleet rule hash or file type disagrees with manifest: " + rule.name);
+		}
+		for (const entry of readdirSync(join(root, "rules-fleet"))) {
+			if (entry.endsWith(".md") && !seen.has(entry.slice(0, -3))) throw new Error("shipped fleet rule omitted from MANIFEST.fleet.tsv: " + entry);
+		}
+		return { rules };
+	} catch (error) {
+		return { rules: [], error: errorText(error) };
+	}
+}
 function legacyRecord(home: string, rules: readonly ManifestRule[]): "LEGACY_RECORD_ONLY" | "UNVERIFIED" {
 	if (directoryPath(home, [".local", "state", "omp-kit"]) !== "directory") return "UNVERIFIED";
 	try {
@@ -2406,21 +2433,34 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 		} else retirementError = "retired directory is missing or unsafe";
 		const present: string[] = [], presentUnsafe: string[] = [];
 		let extrasError: string | undefined;
+		const fleetSha = new Map(readFleetManifest(root).rules.map((rule) => [rule.name, rule.sha256] as const));
+		const fleetManaged: string[] = [];
 		if (state === "directory") {
 			try {
 				const managed = new Set(manifest.rules.map((rule) => `${rule.name}.md`));
 				for (const name of readdirSync(target)) {
 					if (!name.endsWith(".md") || managed.has(name)) continue;
 					const base = name.slice(0, -3);
-					const kind = pathState(join(target, name));
+					const candidate = join(target, name);
+					const kind = pathState(candidate);
 					if (retired.includes(base)) (kind === "file" ? present : presentUnsafe).push(base);
-					else (kind === "file" ? unknown : retiredUnsafe).push(base);
+					else if (kind !== "file") retiredUnsafe.push(base);
+					else {
+						// DOCTORDEGRADED1 (ompkit-1ra0d.9): a fleet-manifest name with
+						// byte-identical installed content is managed, not unknown.
+						// A fleet name with changed bytes (or no fleet row) stays unknown.
+						let installed: string | null = null;
+						try { installed = digest(fileBytes(candidate)); } catch { installed = null; }
+						const expected = fleetSha.get(base);
+						if (installed !== null && expected !== undefined && installed === expected) fleetManaged.push(base);
+						else unknown.push(base);
+					}
 				}
 			} catch (error) { extrasError = errorText(error); }
 		} else if (state === "unsafe") extrasError = "installed rules directory is unsafe";
 		const legacyAbsent = state === "missing" && pluginInstalled === null;
 		rows.push(finding("retired_rules", retirementError || extrasError || legacyAbsent ? "UNVERIFIED" : present.length || presentUnsafe.length ? "DEGRADED" : "OK", retirementError || extrasError || (legacyAbsent ? "Installed rules directory is absent; retired entries were not inspected" : present.length || presentUnsafe.length ? "Retired names remain installed; ownership is not established" : "No retired names found in installed rules"), "Inspect omp-kit apply rules --plan; do not remove unowned files automatically.", { present: present.sort(), unsafe: presentUnsafe.sort() }));
-		rows.push(finding("unknown_rules", extrasError || legacyAbsent ? "UNVERIFIED" : unknown.length || retiredUnsafe.length ? "DEGRADED" : "OK", extrasError ?? (legacyAbsent ? "Installed rules directory is absent; extra Markdown was not inspected" : unknown.length || retiredUnsafe.length ? "Unmanaged Markdown exists in the installed rule directory" : "No extra Markdown found"), "Inspect installed rules when present; omp-kit does not own unknown Markdown.", { names: unknown.sort(), unsafe: retiredUnsafe.sort() }));
+		rows.push(finding("unknown_rules", extrasError || legacyAbsent ? "UNVERIFIED" : unknown.length || retiredUnsafe.length ? "DEGRADED" : "OK", extrasError ?? (legacyAbsent ? "Installed rules directory is absent; extra Markdown was not inspected" : unknown.length || retiredUnsafe.length ? "Unmanaged Markdown exists in the installed rule directory" : "No extra Markdown found"), "Inspect installed rules when present; omp-kit does not own unknown Markdown.", { names: unknown.sort(), unsafe: retiredUnsafe.sort(), fleet_managed: fleetManaged.sort() }));
 		if (!input.project) rows.push(finding("project_rules", "UNVERIFIED", "No project was selected for shadow inspection", "Pass an absolute --project path to inspect project shadows."));
 		else {
 			const project = resolve(input.project);
@@ -2511,10 +2551,33 @@ const ruleSha256 = new Map(manifest.rules.map(rule => [rule.name, rule.sha256] a
 	return rows.filter(row => wants(row.component) || row.component === "omp").sort((a, b) => a.component.localeCompare(b.component));
 }
 
-/** Strict precedence never promotes an unperformed or uncertain probe to OK. */
+/**
+ * DOCTORDEGRADED1 (ompkit-1ra0d.9): components whose UNVERIFIED/NOT_RUN verdicts
+ * report read-only on-disk inventory limits and can never become OK from on-disk
+ * evidence on any install. They stay listed with their reasons but do not set the
+ * overall: no operator action can promote them, so they are informational. Every
+ * other row (DEGRADED, DRIFT, FAIL, and UNVERIFIED/NOT_RUN with a remedy) still
+ * drives the overall. Membership is explicit here; never pattern-match reason text.
+ */
+export const DOCTOR_INFORMATIONAL_COMPONENTS: Record<string, true> = {
+	effective_profile: true,
+	extensions: true,
+	policy: true,
+	router: true,
+	agent_mail_guard: true,
+	matcher: true,
+};
+
+/** Strict precedence never promotes an unperformed or uncertain probe to OK.
+ * DOCTORDEGRADED1 (ompkit-1ra0d.9): rows in DOCTOR_INFORMATIONAL_COMPONENTS whose
+ * status is UNVERIFIED or NOT_RUN stay listed with their reasons but do not set
+ * the overall. Every other row still drives it.
+ */
 export function health(findings: readonly Finding[]): "OK" | "DEGRADED" | "UNVERIFIED" | "FAIL" {
-	if (findings.some((item) => item.status === "FAIL")) return "FAIL";
-	if (findings.some((item) => item.status === "UNVERIFIED" || item.status === "NOT_RUN")) return "UNVERIFIED";
-	if (findings.some((item) => item.status === "DEGRADED" || item.status === "DRIFT")) return "DEGRADED";
+	const judged = findings.filter((item) => !(DOCTOR_INFORMATIONAL_COMPONENTS[item.component] && (item.status === "UNVERIFIED" || item.status === "NOT_RUN")));
+	if (judged.some((item) => item.status === "FAIL")) return "FAIL";
+	if (judged.some((item) => item.status === "UNVERIFIED" || item.status === "NOT_RUN")) return "UNVERIFIED";
+	if (judged.some((item) => item.status === "DEGRADED" || item.status === "DRIFT")) return "DEGRADED";
+	if (judged.length) return "OK";
 	return findings.length ? "OK" : "UNVERIFIED";
 }

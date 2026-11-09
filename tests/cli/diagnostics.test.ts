@@ -11,6 +11,7 @@ import { attributeAckSender } from "../../src/diagnostics.ts";
 import type { IdentityAck, PaneBinding, ReservationHolder, SeatBindingRow } from "../../src/diagnostics.ts";
 import { STACK_SOURCE } from "../../src/diagnostics.ts";
 import { RCH_DAEMON_STATUS_TIMEOUT_MS } from "../../src/diagnostics.ts";
+import { DOCTOR_INFORMATIONAL_COMPONENTS, readFleetManifest } from "../../src/diagnostics.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import type { OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
@@ -373,6 +374,97 @@ test("DOCTORDEGRADED1: doctor CLI rules scope accepts a fresh HOME plugin and re
 	expect(result.data.overall).toBe("DEGRADED");
 	expect(result.data.findings.find((row: Finding) => row.component === "installed_rules").reason).toContain(removed);
 });
+
+test("DOCTORDEGRADED1: fixture install with only structural UNVERIFIED rows reports overall OK", async () => {
+	const f = fixture(); installOmp(f);
+	writeFileSync(join(f.root, "package.json"), JSON.stringify({ name: "omp-kit-companion", version: "0.2.24" }));
+	mkdirSync(join(f.root, "extensions"));
+	mkdirSync(join(f.home, ".omp", "agent"), { recursive: true });
+	writeFileSync(join(f.home, ".omp", "agent", "config.yml"), "{}\n");
+	mkdirSync(join(f.home, ".omp", "agent", "extensions"), { recursive: true });
+	writeFileSync(join(f.home, ".omp", "agent", "extensions", "fix.ts"), "export const fix = 1;\n");
+	const link = join(f.home, ".omp", "plugins", "node_modules", "omp-kit-companion");
+	mkdirSync(dirname(link), { recursive: true });
+	symlinkSync(f.root, link);
+	const jsmPath = join(f.base, "jsm-bin", "jsm");
+	mkdirSync(dirname(jsmPath), { recursive: true });
+	writeFileSync(jsmPath, "#!/bin/sh\nexit 0\n");
+	chmodSync(jsmPath, 0o755);
+	const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+	const plugin = JSON.stringify({ npm: [{ name: "omp-kit-companion", version: "0.2.24", path: f.root }], marketplace: [] });
+	const rules = JSON.stringify([{ name: "rule-a", path: join(f.root, "rules", "rule-a.md") }]);
+	writeFileSync(f.ompPath, `#!/bin/sh\ncase "$1" in\n--version) printf 'omp/18.4.0\\n';;\nplugin) printf '%s\\n' ${quote(plugin)};;\nttsr) printf '%s\\n' ${quote(rules)};;\n*) exit 91;;\nesac\n`);
+	const stateRoot = join(f.base, "state");
+	const packageRoot = join(f.bunRoot, "install", "global", "node_modules", "@oh-my-pi", "pi-coding-agent");
+	const fingerprint = ompFingerprint({ launcher: realpathSync(f.ompPath), packageRoot });
+	expect(recordTestReceipt(stateRoot, { ...fingerprint, schema_version: 1, kit_version: "0.2.24", scope: "fast", status: "PASS", recorded_at: new Date().toISOString() })).toBe(true);
+	const savedAgentMailRoot = process.env.AGENT_MAIL_STORAGE_ROOT;
+	delete process.env.AGENT_MAIL_STORAGE_ROOT;
+	try {
+		const input = { root: f.root, home: f.home, project: f.project, ompPath: f.ompPath, stateRoot, jsmPath };
+		const rows = await diagnose(input);
+		const nonOk = rows.filter((row) => row.status !== "OK");
+		expect(nonOk.length).toBeGreaterThan(0);
+		for (const row of nonOk) {
+			expect(row.status === "UNVERIFIED" || row.status === "NOT_RUN").toBe(true);
+			expect(DOCTOR_INFORMATIONAL_COMPONENTS[row.component] ?? false).toBe(true);
+		}
+		expect(nonOk.map((row) => row.component)).toEqual(expect.arrayContaining(["effective_profile", "matcher"]));
+		expect(health(rows)).toBe("OK");
+	} finally {
+		if (savedAgentMailRoot === undefined) delete process.env.AGENT_MAIL_STORAGE_ROOT;
+		else process.env.AGENT_MAIL_STORAGE_ROOT = savedAgentMailRoot;
+	}
+	// Planted negative in the plugin-copy model (rules scope): removing one
+	// installed default rule file degrades the overall and names that file.
+	const copy = join(f.base, "plugin-copy");
+	mkdirSync(join(copy, "rules"), { recursive: true });
+	mkdirSync(join(copy, "extensions"), { recursive: true });
+	writeFileSync(join(copy, "package.json"), readFileSync(join(f.root, "package.json")));
+	writeFileSync(join(copy, "rules", "rule-a.md"), f.bytes);
+	rmSync(link);
+	symlinkSync(copy, link);
+	const copyPlugin = JSON.stringify({ npm: [{ name: "omp-kit-companion", version: "0.2.24", path: copy }], marketplace: [] });
+	const copyRules = JSON.stringify([{ name: "rule-a", path: join(copy, "rules", "rule-a.md") }]);
+	writeFileSync(f.ompPath, `#!/bin/sh\ncase "$1" in\n--version) printf 'omp/18.4.0\\n';;\nplugin) printf '%s\\n' ${quote(copyPlugin)};;\nttsr) printf '%s\\n' ${quote(copyRules)};;\n*) exit 91;;\nesac\n`);
+	const scopeInput = { root: f.root, home: f.home, project: f.project, ompPath: f.ompPath, scope: "rules" };
+	expect(health(await diagnose(scopeInput))).toBe("OK");
+	const removed = join(copy, "rules", "rule-a.md");
+	rmSync(removed);
+	const broken = await diagnose(scopeInput);
+	expect(health(broken)).toBe("DEGRADED");
+	expect(finding(broken, "installed_rules").reason).toContain(removed);
+});
+
+test("DOCTORDEGRADED1: a fleet-manifest rule installed byte-identical is not unknown; changed bytes are DEGRADED", async () => {
+	const f = fixture();
+	const fleetBytes = "# Fleet rule\n";
+	writeFileSync(join(f.root, "MANIFEST.fleet.tsv"), `name\tsha256\tclass\tpack\nfleet-x\t${hash(fleetBytes)}\ttripwire\tabc1234\n`);
+	mkdirSync(join(f.root, "rules-fleet"), { recursive: true });
+	writeFileSync(join(f.root, "rules-fleet", "fleet-x.md"), fleetBytes);
+	expect(readFleetManifest(f.root).rules.map((rule) => rule.name)).toEqual(["fleet-x"]);
+	mkdirSync(join(f.home, ".agents", "rules"), { recursive: true });
+	writeFileSync(join(f.home, ".agents", "rules", "rule-a.md"), f.bytes);
+	writeFileSync(join(f.home, ".agents", "rules", "fleet-x.md"), fleetBytes);
+	const input = { root: f.root, home: f.home, scope: "rules", project: f.project };
+	const healthy = finding(await diagnose(input), "unknown_rules");
+	expect(healthy.status).toBe("OK");
+	expect(healthy.evidence?.fleet_managed).toEqual(["fleet-x"]);
+	expect(healthy.evidence?.names).toEqual([]);
+	// Planted negative: the same fleet name with changed bytes is unknown again.
+	writeFileSync(join(f.home, ".agents", "rules", "fleet-x.md"), "locally edited\n");
+	const edited = finding(await diagnose(input), "unknown_rules");
+	expect(edited.status).toBe("DEGRADED");
+	expect(edited.evidence?.names).toEqual(["fleet-x"]);
+	// A file in neither manifest stays DEGRADED naming it.
+	writeFileSync(join(f.home, ".agents", "rules", "fleet-x.md"), fleetBytes);
+	writeFileSync(join(f.home, ".agents", "rules", "stray.md"), "unmanaged\n");
+	const stray = finding(await diagnose(input), "unknown_rules");
+	expect(stray.status).toBe("DEGRADED");
+	expect(stray.evidence?.names).toEqual(["stray"]);
+	expect(stray.evidence?.fleet_managed).toEqual(["fleet-x"]);
+});
+
 test("STAMP1: lock version differing from the release manifest is DEGRADED with versionMismatch", async () => {
 	const f = fixture();
 	mkdirSync(join(f.root, "extensions"));
@@ -452,7 +544,9 @@ test("unknown profile takes precedence over optional deterioration without conce
 	expect(health(rows)).toBe("UNVERIFIED");
 	expect(rows[0]?.status).toBe("UNVERIFIED");
 	expect(health([...rows, { component: "manifest", status: "FAIL", reason: "Bad source", recommended_action: "Replace release." }])).toBe("FAIL");
-	expect(health([{ component: "matcher", status: "NOT_RUN", reason: "Not tested", recommended_action: "Run test." }])).toBe("UNVERIFIED");
+	// DOCTORDEGRADED1 (ompkit-1ra0d.9): an unexercised matcher is structural: on-disk
+	// evidence can never promote it to OK, so it stays listed but does not set overall.
+	expect(health([{ component: "matcher", status: "NOT_RUN", reason: "Not tested", recommended_action: "Run test." }])).toBe("OK");
 });
 
 test("matching installed bytes establish equality but an old record never confers ownership", async () => {
