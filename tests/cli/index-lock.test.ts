@@ -123,6 +123,26 @@ test("INDEXLOCKHELD1 writer in a worktree subdirectory counts; sibling worktree 
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("LOCKREADER1 a --no-optional-locks status or diff is a reader and does not hold a stale lock; plain status and real writers still do", () => {
+	// CrimsonHorizon (cfsios, AM 80281): the CFS save was refused HELD on exactly this reader.
+	for (const command of ["git --no-optional-locks status --porcelain=v2 --branch -z --no-renames --untracked-files=normal",
+		"git -C /repo --no-optional-locks diff --stat"]) {
+		const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+		try {
+			expect(reapStaleIndexLock(gitDir, { run: processRunner(root, command), staleAfterMs: AGE }).verdict).toBe("REAPED");
+			expect(existsSync(lock)).toBe(false);
+		} finally { rmSync(root, { recursive: true, force: true }); }
+	}
+	for (const command of ["git status --porcelain", "git --no-optional-locks add f.txt", "git --no-optional-locks commit -m x"]) {
+		const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+		try {
+			expect(reapStaleIndexLock(gitDir, { run: processRunner(root, command), staleAfterMs: AGE })).toMatchObject({
+				verdict: "HELD", holders: [{ pid: 95888, reason: "index-writer" }] });
+			expect(existsSync(lock)).toBe(true);
+		} finally { rmSync(root, { recursive: true, force: true }); }
+	}
+});
+
 
 
 test("dry-run reports a stale holder-less empty lock without moving it", () => {

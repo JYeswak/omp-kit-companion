@@ -264,23 +264,25 @@ const NETWORK_HELPERS: Record<string, true> = {
 	"fetch-pack": true, "send-pack": true, "upload-pack": true, "receive-pack": true, "index-pack": true, "pack-objects": true,
 };
 
-function gitInvocation(command: string): { subcommand: string; args: string[] } | null {
+function gitInvocation(command: string): { subcommand: string; args: string[]; noOptionalLocks: boolean } | null {
 	if (command.length > 65_536) return null;
 	// ps joins argv without quoting. Match the executable first (including a path with spaces);
 	// ambiguous global-option values remain UNKNOWN rather than inventing a holder or clearing it.
 	const executable = /^(?:\/[^\n]*?\/)?git(?:-([a-z0-9-]+))?(?:\s+|$)/.exec(command);
 	if (!executable) return null;
 	const words = command.slice(executable[0].length).trim().split(/\s+/).filter(Boolean);
-	if (executable[1]) return { subcommand: executable[1], args: words };
+	if (executable[1]) return { subcommand: executable[1], args: words, noOptionalLocks: false };
+	let noOptionalLocks = false;
 	while (words.length > 0) {
 		const word = words.shift()!;
 		if (["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix", "--exec-path"].includes(word)) {
 			if (words.shift() === undefined) return null;
 		} else if (/^(?:-[Cc].+|--(?:git-dir|work-tree|namespace|config-env|super-prefix|exec-path)=)/.test(word)) continue;
-		else if (["--no-pager", "--paginate", "-p", "-P", "--bare", "--no-optional-locks", "--no-replace-objects",
+		else if (word === "--no-optional-locks") noOptionalLocks = true;
+		else if (["--no-pager", "--paginate", "-p", "-P", "--bare", "--no-replace-objects",
 			"--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-lazy-fetch"].includes(word)) continue;
 		else if (word.startsWith("-")) return null;
-		else return { subcommand: word, args: words };
+		else return { subcommand: word, args: words, noOptionalLocks };
 	}
 	return null;
 }
@@ -292,7 +294,10 @@ function networkHelper(subcommand: string): boolean {
 function writesIndex(command: string): boolean | null {
 	const invocation = gitInvocation(command);
 	if (!invocation) return null;
-	const { subcommand, args } = invocation;
+	const { subcommand, args, noOptionalLocks } = invocation;
+	// LOCKREADER1: git's --no-optional-locks stops status/diff from taking the index lock to refresh it
+	// (git docs: "Do not perform optional operations that require locks"), so such a process only reads.
+	if (noOptionalLocks && (subcommand === "status" || subcommand === "diff")) return false;
 	if (networkHelper(subcommand) || subcommand.startsWith("credential-") || Object.hasOwn(INDEX_READERS, subcommand)) return false;
 	if (subcommand === "apply") return args.some(arg => ["--index", "--cached", "--3way", "-3"].includes(arg));
 	if (subcommand === "reset" && args.includes("--soft")) return false;
