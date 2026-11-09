@@ -1,7 +1,9 @@
 import { afterAll, afterEach, expect, test } from "bun:test";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { check } from "../../src/fleet-guard/durability.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 afterAll(cleanupAllOwnedTmp);
@@ -153,6 +155,22 @@ test("replacement edit evaluates resulting bytes, while native structural edits 
 	f.index("src/original.ts", "export const sample = 2;\n");
 	expect((await check(edit, f.context))?.block).toBe(true);
 	expect((await check({ toolName: "edit", input: `*** Begin Patch\n[${path}#ABCD]\nPUT 1.=1:\n+export const sample = 3;\n*** End Patch` }, f.context))?.reason).toContain("payload variant");
+});
+
+test("PAYLOADSIM1 a hashline edit is judged on its resulting bytes: a notes edit passes, a source copy or a new shebang is refused", async () => {
+	const f = fixture();
+	const path = join(f.scratch, "notes.md");
+	writeFileSync(path, "draft one\ndraft two\n");
+	// The tag a reader of the current bytes holds, from OMP's own engine (runtime-selected native module).
+	const native = await import(pathToFileURL(join(resolveOmpIdentity().nativeRoot!, "native", "index.js")).href);
+	const tag = (): string => new native.EditStore().recordSnapshotFile(path);
+	const edit = (body: string) => ({ toolName: "edit", input: `*** Begin Patch\n[${path}#${tag()}]\n${body}\n*** End Patch` });
+	expect(await check(edit("PUT 2.=2:\n+draft TWO"), f.context)).toBeUndefined();
+	f.index("src/original.ts", "draft one\nexport const sample = 2;\n");
+	expect((await check(edit("PUT 2.=2:\n+export const sample = 2;"), f.context))?.reason).toContain("tracked-source-copy content");
+	expect((await check(edit("PUT <1:\n+#!/bin/sh"), f.context))?.reason).toContain("rerunnable script");
+	// The file on disk is never written by the judgment.
+	expect(readFileSync(path, "utf8")).toBe("draft one\ndraft two\n");
 });
 
 test("native hashline move destinations retain canonical source refusal, including quoted paths", async () => {

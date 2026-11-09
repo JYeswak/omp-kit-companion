@@ -1,0 +1,1 @@
+- Editing a file in your own scratch with a hashline edit is no longer refused as "content cannot be established": the guard computes the edit's resulting bytes with OMP's own edit engine and judges those.
