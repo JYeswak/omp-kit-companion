@@ -877,7 +877,9 @@ fi
 	focus_tests=$(apply_ci_only $focus_tests) || return $?
 	# GATESPEED1: a suite the pre-push contract stage already ran GREEN on this exact tree is not run
 	# again here (pre-push-gate.test.sh alone is about 4 minutes).
+	reused_green=
 	if [ -n "$focus_tests" ] && [ -s "${FRESH_GATE_PASSED_IN:-}" ]; then
+		reused_green=$focus_tests
 		# shellcheck disable=SC2086
 		focus_tests=$(printf '%s\n' $focus_tests | grep -Fvx -f "$FRESH_GATE_PASSED_IN" || :)
 		echo "focused: already GREEN in the contract stage: $(paste -sd , - <"$FRESH_GATE_PASSED_IN")"
@@ -931,6 +933,15 @@ fi
 		# shellcheck disable=SC2086
 		run_affected_tests $focus_tests || return $?
 	else
+		# REUSEDGREEN1 (ompkit-774u.71): every selected suite already passed on this exact tree (the contract
+		# stage, or the base pass with the same judge), so nothing is left to run; that is a pass, not a
+		# missing test. 8e2ed798ba emptied the list here and fell through to NO_AFFECTED_TESTS.
+		if [ -n "$reused_green" ]; then
+			record_run 0 0 0
+			# shellcheck disable=SC2086
+			echo "FRESH-GATE: VERDICT REUSED files=$(printf '%s\n' $reused_green | awk 'NF { n++ } END { print n+0 }'): every selected suite already GREEN on this exact tree"
+			return 0
+		fi
 		echo "focused suites: none selected for changed paths"
 		code=$(changed_code)
 		if [ -n "$code" ]; then

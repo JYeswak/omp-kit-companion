@@ -276,6 +276,14 @@ describe("NATIVEPREGRADE1 (ompkit-1ra0d.41): a native child writes under its own
 			expect(await childWrite("scripts/x.py", "ChildBuilder")).toBeUndefined();
 		}));
 	});
+	test("a failed child lookup (unregistered spawn name) never refuses a write its seat holds; uncovered stays refused", async () => {
+		const unattested = { ...holds("ChildBuilder"), reservation_read_attestation: { ...attested, state: "stale" } };
+		await withAm(holds("Seat", "scripts/x.py"), "ok", "Seat", () => asChild(unattested, async () => {
+			expect(await childWrite("scripts/x.py", "ChildBuilder")).toBeUndefined();
+			// Planted: the seat does not hold this path, so the child's failed lookup is the named refusal.
+			expect((await childWrite("README.md", "ChildBuilder"))?.reason).toContain("WRITE_OWN_LOOKUP_UNAVAILABLE");
+		}));
+	});
 	test("planted: a path neither the child nor its seat holds is refused, and another child's hold is no cover", async () => {
 		await withAm(holds("Seat"), "ok", "Seat", () => asChild(holds("ChildBuilder", "scripts/other.py"), async () => {
 			const result = await childWrite("scripts/x.py", "ChildBuilder");

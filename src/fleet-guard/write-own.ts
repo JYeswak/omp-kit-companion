@@ -310,7 +310,10 @@ async function judge(candidates: readonly Candidate[], context: WriteOwnContext)
 	}
 	for (const [root, judged] of byRoot) {
 		let gaps = reservationGaps(root, judged.map((entry) => entry.probe), context.agentName);
-		if (context.childAgentName && gaps.kind !== "unavailable") {
+		// A seat that holds every path admits its child outright: the child's own lookup can only add cover, so its
+		// failure (an unregistered spawn name, CrimsonHorizon AM 80089) never turns a covered write into a refusal.
+		const seatCovers = gaps.kind === "checked" && gaps.uncovered.length === 0;
+		if (context.childAgentName && gaps.kind !== "unavailable" && !seatCovers) {
 			const own = reservationGaps(root, judged.map((entry) => entry.probe), context.childAgentName);
 			if (own.kind === "unavailable") gaps = own;
 			else if (own.kind === "checked") {
