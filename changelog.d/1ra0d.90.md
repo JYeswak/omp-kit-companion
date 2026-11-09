@@ -1,1 +1,0 @@
-- `omp-kit verify BEAD --live-readback` now also reads back an open bead whose every remaining check is a live check, so such beads can be closed; before, verify reported them pending forever.

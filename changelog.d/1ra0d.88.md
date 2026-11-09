@@ -1,1 +1,0 @@
-- A release install's post-check no longer fails on a large kit state folder: big state files are compared by size and modification time instead of being read, so an install can pass its post-check and then prune old releases.

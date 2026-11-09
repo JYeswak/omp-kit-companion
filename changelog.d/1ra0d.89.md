@@ -1,1 +1,0 @@
-- `omp-kit verify` can again close a bead that has a live check: the live-readback child it creates is no longer refused by the bead linter for lacking a planted negative, which the parent's own checks already ran.

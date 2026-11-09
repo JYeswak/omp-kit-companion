@@ -4,6 +4,19 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.108] - 2026-11-09
+
+### Changed
+
+- Release retention now runs after every successful activation (and after an undo restores the previous release), even when the post-check fails, so old releases and their download caches are pruned; the update job no longer writes a record every five minutes when nothing changed, and old upgrade notices and git-lock-rate files expire with the other operational receipts.
+- Editing a file in your own scratch with a hashline edit is no longer refused as "content cannot be established": the guard computes the edit's resulting bytes with OMP's own edit engine and judges those.
+- A task child whose spawn name Agent Mail does not know no longer gets WRITE_OWN_LOOKUP_UNAVAILABLE for a canonical write: it holds nothing, so the refusal is WRITE_OWN_UNRESERVED naming the seat that can reserve the path on its behalf.
+- A `DONE <repo>@<sha>` handoff for a commit landed through `omp-kit land` is no longer refused: the empty pass the gate records after the complete one no longer hides it.
+- A release install's post-check no longer fails on a large kit state folder: big state files are compared by size and modification time instead of being read, so an install can pass its post-check and then prune old releases.
+- `omp-kit verify` can again close a bead that has a live check: the live-readback child it creates is no longer refused by the bead linter for lacking a planted negative, which the parent's own checks already ran.
+- `omp-kit verify BEAD --live-readback` now also reads back an open bead whose every remaining check is a live check, so such beads can be closed; before, verify reported them pending forever.
+- The README's install blocks pass the GitHub token only to the install commands instead of exporting it into the shell; the quick start uses the installed binary path throughout and says where `apply rules` writes; removal now includes uninstalling the OMP plugin, without which OMP keeps loading the kit.
+
 ## [0.2.107] - 2026-11-09
 
 ### Changed

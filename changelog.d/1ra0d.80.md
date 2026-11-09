@@ -1,1 +1,0 @@
-- A `DONE <repo>@<sha>` handoff for a commit landed through `omp-kit land` is no longer refused: the empty pass the gate records after the complete one no longer hides it.
