@@ -4,6 +4,30 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.103] - 2026-11-09
+
+### Changed
+
+- A background task agent can now write files it reserved under its own Agent Mail name; a reservation its parent seat holds still covers it, so parallel builders no longer fail with WRITE_OWN_UNRESERVED.
+- `commit-preflight --tests` exports now link each test's ancestor `node_modules` directories that exist in the checkout, as well as the root one, so a workspace package's test resolves that package's own dependencies the way it does in the checkout; a dependency the checkout lacks still fails the export test.
+- `omp-kit slice-verify` no longer reports CLEAN when a selected test file fails without naming the failure. A run that exits non-zero or counts failures, but whose named `(fail)` lines do not cover its fail count, is reported as UNATTRIBUTED and introduced, because an unnamed failure cannot be proven pre-existing.
+- The fleet upgrade notice matches the native restart helper: the helper holds its own tool call while omp's `/restart` replaces the process in place, even on a busy seat, so the seat no longer ends its turn; `RESTART_NOT_OBSERVED` means nothing restarted. On omp 18.18.1 or later, running background task agents keep working across the restart (J-2026-11-08-02); on older omp the seat still collects them first.
+- On Linux, scratch directories made by processes with 7-digit pids are no longer rejected as having an invalid owner record, and the stale-worktree commit check reads file times correctly with GNU `stat`.
+- A push that changes code under `src/` or `tests/` but no gate script now runs its affected tests once instead of twice. The pre-push gate still runs its first pass with the previous commit's gate scripts. When the pushed commit's gate scripts hash to the same judge on the same tree, the second pass reuses the first pass's passing files instead of running them again. A change to any gate script still runs both passes in full.
+- Run the daily real-HOME install and upgrade regression on the latest stable published release and its greatest stable predecessor, authenticating both release indexes and fetching genuine archive provenance instead of building unsigned journey inputs.
+- A seat that Tern restores without `AGENT_NAME` (for example after a Tern daemon restart) now takes its name from its own pane's Agent Mail identity file when the plugin loads, so its writes are no longer refused with WRITE_OWN_NO_IDENTITY and no respawn is needed. A name that is already set is never replaced, and a pane bound to two names gets none.
+- The ambient ee session-start extension runs `ee` with `GIT_OPTIONAL_LOCKS=0`, so the `git status` inside `ee orient --fast` no longer takes the optional index lock; when the runner killed ee at its deadline, git never removed that lock, which left orphan empty `.git/index.lock` files that blocked commits in large checkouts.
+- Memory doctor and the opt-in memory audit now use the already-resolved, exact-version OMP source package for compiled and Tern-managed launchers. Mismatched package versions remain unverified, and memory inspection never downloads source packages.
+- A push no longer starts the complete test suite in the background. The full suite runs once per release, when the release is cut; each commit and push still runs the tests its change affects. Set `OMP_KIT_RELEASE_VERDICT=1` on a push to start it there as before.
+- A red release verdict on main no longer refuses unrelated commits. The commit gate reports it (first red commit, failing tests, bead) and the commit lands; the red verdict still stops the release it judged.
+- Scratch cleanup no longer mistakes a live owner for a reused process id on machines east of UTC. `ps` prints a process's start in local time and the reaper read it as UTC, so on a host such as Europe/Berlin a live owner's start looked an hour later than its scratch directory's creation, and its scratch could be reaped as abandoned. The start is now read as local time.
+- Remote full-suite workers now match the CI runners: `suite-worker-setup.sh` sets their system time zone to UTC and makes `/sys/kernel/debug` traversable, so `lsof` answers without the tracefs warning that the kit's open-file checks treat as unavailable.
+- The full-suite verdict can run on Linux suite workers. When `rch workers list` names enabled Linux workers that `scripts/suite-worker-setup.sh` brought to CI parity, every declared file except the macOS-only ones runs there, sharded longest-first from the exact `git archive` of the commit, while this Mac runs the macOS-only files. The result is one main-role verdict that `release-local` reads as before. A failing test on a worker makes the verdict FAIL; a worker that drops out leaves no verdict. With no worker configured, ready or reachable, or with `FULL_SUITE_REMOTE=0`, the complete suite runs locally and the run says why.
+- When one worker's shard does not finish, the shards that did still record their files' run times, so the next run splits the work by measured times instead of repeating the uneven split.
+- Shared CI polling now uses your `gh auth login` credential when token environment variables are absent. Without credentials it reports UNAVAILABLE with a login remedy instead of making anonymous requests or consuming rate-limit backoff.
+- Release archives now use `.tar.gz` (gzip level 6), reducing upload and update download sizes; checksums, signing verification, SBOMs and provenance attest the compressed bytes actually published.
+- Installations on 0.2.101 or older must update through 0.2.102 or 0.2.103 before consuming gzip-only releases; the managed fleet already shares the 0.2.102 installation.
+
 ## [0.2.102] - 2026-11-08
 
 ### Changed

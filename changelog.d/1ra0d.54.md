@@ -1,1 +1,0 @@
-- `commit-preflight --tests` exports now link each test's ancestor `node_modules` directories that exist in the checkout, as well as the root one, so a workspace package's test resolves that package's own dependencies the way it does in the checkout; a dependency the checkout lacks still fails the export test.

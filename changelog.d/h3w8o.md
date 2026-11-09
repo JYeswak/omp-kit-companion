@@ -1,1 +1,0 @@
-- Memory doctor and the opt-in memory audit now use the already-resolved, exact-version OMP source package for compiled and Tern-managed launchers. Mismatched package versions remain unverified, and memory inspection never downloads source packages.

@@ -1,1 +1,0 @@
-- `omp-kit slice-verify` no longer reports CLEAN when a selected test file fails without naming the failure. A run that exits non-zero or counts failures, but whose named `(fail)` lines do not cover its fail count, is reported as UNATTRIBUTED and introduced, because an unnamed failure cannot be proven pre-existing.
