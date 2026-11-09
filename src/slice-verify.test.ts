@@ -203,6 +203,17 @@ test("a test file that exits silently is an error, never clean", async () => {
 	expect(res.error).toContain("NO_VERDICT");
 }, 120_000);
 
+test("a run that counts a failure but names none is introduced, never clean", async () => {
+	// The shape JadeHorizon saw six times (ompkit-1ra0d.56): rc 1, `0 pass 1 fail`, and no `(fail)` line.
+	const quiet = `console.log(" 0 pass");\nconsole.log(" 1 fail");\nprocess.exit(1);\n`;
+	const root = await fixtureRepo({ "tests/unnamed.test.ts": quiet, "tests/dep.ts": DEP_OK });
+	const res = await sliceVerify({ repo: root, overlay: ["tests/dep.ts"], tests: ["tests/unnamed.test.ts"] });
+	expect(res.code).toBe("INTRODUCED");
+	expect(res.exitCode).toBe(1);
+	expect(res.files[0]!.base.counts).toMatchObject({ pass: 0, fail: 1, found: true });
+	expect(res.files[0]!.introduced.join("\n")).toContain("UNATTRIBUTED");
+}, 120_000);
+
 test("a missing shellcheck runner is an error, never a pass", async () => {
 	const root = await fixtureRepo({ "scripts/job.sh": "#!/bin/sh\nexit 0\n", "tests/dep.ts": DEP_OK });
 	const res = await sliceVerify({ repo: root, overlay: ["scripts/job.sh"], tests: ["tests/dep.ts"], env: { DOCKER_BIN: "/nonexistent-probe-docker-bin" } });

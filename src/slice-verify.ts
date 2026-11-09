@@ -317,7 +317,14 @@ export async function sliceVerify(input: SliceVerifyInput): Promise<SliceVerifyR
 		const { preexisting, introduced } = classifyFailures(base.failures, over.failures);
 		const extra: string[] = [];
 		if (over.timedOut && !base.timedOut) extra.push(`TIMEOUT after ${deadline}s`);
-		if (!over.timedOut && over.rc !== 0 && over.failures.length === 0 && !over.counts.found) extra.push("UNPARSEABLE failing output");
+		// SLICECLEAN1: a failing run whose named failures do not cover its fail count cannot prove any of
+		// them pre-existing, so it is introduced; an rc1/0 pass/1 fail run with no `(fail)` line was CLEAN.
+		const overFail = over.counts.fail ?? 0;
+		if (!over.timedOut && (over.rc !== 0 || overFail > 0)) {
+			if (over.failures.length === 0 && !over.counts.found) extra.push("UNPARSEABLE failing output");
+			else if (over.failures.length === 0 || overFail > over.failures.length)
+				extra.push(`UNATTRIBUTED failing run: rc ${over.rc}, ${over.counts.fail ?? "?"} fail, ${over.failures.length} named; an unnamed failure cannot be proven pre-existing`);
+		}
 		files.push({ file, base, overlay: over, preexisting, introduced: [...introduced, ...extra] });
 	}
 	const scHits = shellcheck.filter(s => !s.clean && baseClean.get(s.file) !== false);
