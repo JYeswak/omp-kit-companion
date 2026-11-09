@@ -179,10 +179,23 @@ export function installedHookRepos(home: string): { repo: string; source: string
 	return found;
 }
 
-/** Installed rel under the hooks dir when dest sits inside it, else the dest. */
+/**
+ * Installed rel under the hooks dir when dest sits inside it, else the dest. The installer prints
+ * resolved paths, so a repo reached through a symlink (macOS /tmp -> /private/tmp) is matched
+ * against the hooks dir's real path too.
+ */
 function memberName(hooksDir: string, dest: string): string {
-	const rel = relative(hooksDir, dest);
-	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel) ? rel : dest;
+	let real = hooksDir;
+	try {
+		real = realpathSync(hooksDir);
+	} catch {
+		// An unreadable hooks dir keeps the lexical comparison only.
+	}
+	for (const dir of real === hooksDir ? [hooksDir] : [hooksDir, real]) {
+		const rel = relative(dir, dest);
+		if (rel !== "" && !rel.startsWith("..") && !isAbsolute(rel)) return rel;
+	}
+	return dest;
 }
 /**
  * Per-repo freshness from the active release's

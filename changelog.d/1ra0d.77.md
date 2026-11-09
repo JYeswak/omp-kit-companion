@@ -1,0 +1,1 @@
+- `doctor --scope hooks` names a missing or stale hook member by its path under the hooks folder even when the repository is reached through a symlinked path (such as macOS `/tmp`).

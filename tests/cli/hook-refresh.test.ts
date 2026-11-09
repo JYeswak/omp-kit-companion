@@ -4,7 +4,7 @@
 // install-commit-msg-bead.sh --check output, so no hand-kept member list
 // exists in src/hook-refresh.ts.
 import { expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import {
@@ -419,13 +419,19 @@ test("HOOKCENSUS1: the census reports a missing 42-omp-kit-affected-gate member 
 		const gate = join(hooksDir, "hooks.d/pre-push/42-omp-kit-affected-gate");
 		expect(existsSync(gate)).toBe(true);
 		rmSync(gate);
+		// The installer prints resolved paths; a repo reached through a symlink (macOS /tmp ->
+		// /private/tmp, as a verify export under /tmp is) must name the same relative member.
+		const linked = join(scratch.path, "linked");
+		symlinkSync(repo, linked);
 		const live = liveHookFreshnessIo(scratch.path, root);
-		const io: HookFreshnessIo = { ...live, repos: () => [{ repo, source: "t:census1" }] };
+		const io: HookFreshnessIo = { ...live, repos: () => [{ repo, source: "t:census1" }, { repo: linked, source: "t:census1-link" }] };
 		const rows = await censusHookFreshness(io);
-		expect(rows).toHaveLength(1);
-		expect(rows[0]!.state).toBe("STALE");
-		expect(rows[0]!.stale).toContain("hooks.d/pre-push/42-omp-kit-affected-gate");
-		expect(rows[0]!.members.find((row) => row.member === "hooks.d/pre-push/42-omp-kit-affected-gate")?.status).toBe("MISSING");
+		expect(rows).toHaveLength(2);
+		for (const row of rows) {
+			expect(row.state).toBe("STALE");
+			expect(row.stale).toContain("hooks.d/pre-push/42-omp-kit-affected-gate");
+			expect(row.members.find((member) => member.member === "hooks.d/pre-push/42-omp-kit-affected-gate")?.status).toBe("MISSING");
+		}
 	} finally {
 		scratch.cleanup();
 	}
