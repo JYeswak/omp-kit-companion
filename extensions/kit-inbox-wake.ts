@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fleetPolicyState } from "./fleet-policy";
 import { run } from "../src/kitlib/run.ts";
-import { mailPauseState, mailWakeStopReason } from "./kit-mail-wake";
 
 /**
  * kit-inbox-wake (MAILWAKE1.2, ompkit-uk9wn.2): a seat wakes itself on its own Agent Mail.
@@ -51,7 +50,6 @@ export interface InboxWakeContext {
 	cwd: string;
 	setInterval?: (callback: () => unknown, ms: number) => unknown;
 	clearTimer?: (timer: unknown) => void;
-	sessionManager?: { getEntries?: () => readonly unknown[] };
 }
 
 export interface InboxWakeApi {
@@ -99,6 +97,23 @@ export function cursorPath(home: string, agent: string, project: string): string
 	return join(home, ".local", "state", "omp-kit", "inbox-wake", `${agent}.${key}.json`);
 }
 
+/** Real paths of the repos the fleet-watch config lists under `sessions` and `herdr`; empty when it is absent. */
+export function fleetWatchRepos(fleetWatchPath: string): string[] {
+	let watch: unknown;
+	try { watch = JSON.parse(readFileSync(fleetWatchPath, "utf8")); } catch { return []; }
+	const record = typeof watch === "object" && watch !== null ? watch as Record<string, unknown> : {};
+	const repos: string[] = [];
+	for (const rows of [record.sessions, record.herdr]) {
+		if (!Array.isArray(rows)) continue;
+		for (const row of rows) {
+			const repo = typeof row === "object" && row !== null ? (row as Record<string, unknown>).repo : undefined;
+			if (typeof repo !== "string" || !isAbsolute(repo)) continue;
+			try { repos.push(realpathSync(repo)); } catch { /* a repo that is gone is no fleet repo */ }
+		}
+	}
+	return repos;
+}
+
 function readCursor(path: string): number | null {
 	try {
 		const record = JSON.parse(readFileSync(path, "utf8"));
@@ -141,7 +156,15 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 	const env = deps.env ?? process.env;
 	const now = deps.now ?? (() => new Date());
 	const read = deps.read ?? amRead;
-	const policyOn = deps.policyOn ?? (async (project: string) => (await fleetPolicyState(project)).kind === "on");
+	const fleetWatchPath = deps.fleetWatchPath ?? env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
+	// J-2026-11-09-02: mail wake is on by default for every fleet agent. A repo opts in with .omp/fleet.json, or by
+	// being a fleet-watch repo (that file exists only on fleet machines); an explicit `"enabled": false` stays off.
+	const policyOn = deps.policyOn ?? (async (project: string) => {
+		const state = await fleetPolicyState(project);
+		if (state.kind !== "off") return state.kind === "on";
+		if (existsSync(join(state.root, ".omp", "fleet.json"))) return false;
+		return fleetWatchRepos(fleetWatchPath).includes(state.root);
+	});
 	const agent = env.AGENT_NAME;
 	if (!agent || agent.length > 64 || [...agent].some(c => !((c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9")))) return;
 	// One wake per process: the extension may load twice (a profile line during rollout plus the plugin manifest).
@@ -156,8 +179,6 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 	let project = "";
 	let path = "";
 	let cwd = "";
-	let context: InboxWakeContext | undefined;
-	const fleetWatchPath = deps.fleetWatchPath ?? env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
 
 	/** RESTARTRACE1 (J-2026-10-26-20): the registry naming this seat's project lists a Tern block only while omp runs
 	 *  in it, so a restarted seat can start before it is re-listed (lead 2026-10-26: omp up 17:26:51Z, block re-listed
@@ -185,10 +206,8 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 			}
 			const fresh = got.events.filter(e => e.from !== agent && (e.kind === "to" || e.kind === "cc"));
 			if (fresh.length > 0) {
-				// Re-read after the asynchronous inbox read: the owner may stop the project or goal while it runs.
-				const entries = context?.sessionManager?.getEntries?.() ?? [];
-				const stopped = mailWakeStopReason(fleetWatchPath, project, cwd, undefined, entries);
-				if (!stopped) pi.sendMessage({ customType: "kit-inbox-wake", content: wakeText(agent!, fresh), display: true },
+				// J-2026-11-09-02: every agent wakes on its mail; no fleet stop or paused goal silences it.
+				pi.sendMessage({ customType: "kit-inbox-wake", content: wakeText(agent!, fresh), display: true },
 					{ deliverAs: "followUp", triggerTurn: true });
 				const ledger = join(home, ".local", "state", "omp-kit", "mail-wake.jsonl");
 				mkdirSync(join(ledger, ".."), { recursive: true });
@@ -196,9 +215,7 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 				for (const e of fresh) {
 					appendFileSync(ledger, JSON.stringify({
 						ts, message_id: e.message_id, project_key: project, sender: e.from, recipient: agent,
-						subject: e.subject, status: stopped ? "STOPPED_NOT_WOKEN" : "WOKEN_INPROCESS",
-						...(stopped ? { reason: stopped } : {}), pause_state: mailPauseState(entries),
-						detail: "kit-inbox-wake followUp", cursor: e.cursor,
+						subject: e.subject, status: "WOKEN_INPROCESS", detail: "kit-inbox-wake followUp", cursor: e.cursor,
 					}) + "\n");
 				}
 			}
@@ -212,7 +229,6 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 
 	pi.on("session_start", async (_event, ctx) => {
 		cwd = ctx.cwd;
-		context = ctx;
 		await tick();
 		if (timer === null && typeof ctx.setInterval === "function") timer = ctx.setInterval(() => tick(), INBOX_POLL_MS);
 	});

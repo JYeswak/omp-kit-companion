@@ -69,7 +69,9 @@ describe("kit-inbox-wake", () => {
 		expect(ledger.map(r => [r.message_id, r.status, r.recipient])).toEqual([[69601, "WOKEN_INPROCESS", "PeachLeopard"], [69602, "WOKEN_INPROCESS", "PeachLeopard"]]);
 	});
 
-	test.each(["project", "goal", "both"] as const)("MAILSTOP1 planted: %s stopped seat receives no custom_message turn trigger", async kind => {
+	// J-2026-11-09-02 (mail wake is on for every agent): MAILSTOP1 stored 192 mails to the lead unwoken behind a
+	// paused worker session row. A stopped project, a paused goal and unreadable fleet state each still wake.
+	test.each(["project-stopped", "goal-paused", "fleet-unreadable"] as const)("planted: a %s seat still gets its follow-up wake", async kind => {
 		const f = fixture([
 			{ events: [], next_cursor: 100, tail_cursor: 100 },
 			{ events: [event(78388, 101)], next_cursor: 101, tail_cursor: 101 },
@@ -77,64 +79,40 @@ describe("kit-inbox-wake", () => {
 		const entries: unknown[] = [{ type: "mode_change", mode: "goal" }];
 		const h = harness(f.deps, entries);
 		await h.start();
-		if (kind !== "goal") {
-			const config = join(f.dir, ".config/omp-kit/fleet-watch.json");
-			mkdirSync(join(config, ".."), { recursive: true });
-			writeFileSync(config, JSON.stringify({ sessions: [{ session: "omp-test", repo: "/repo", pullEnabled: false }] }));
-		}
-		if (kind !== "project") entries.push({ type: "mode_change", mode: "goal_paused" });
-		await h.tick();
-		expect(h.sent).toEqual([]);
-		expect(JSON.parse(readFileSync(cursorPath(f.dir, "PeachLeopard", "/repo"), "utf8")).cursor).toBe(101);
-		const rows = readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
-		expect(rows).toMatchObject([{ message_id: 78388, status: "STOPPED_NOT_WOKEN",
-			reason: expect.stringContaining(kind === "goal" ? "GOAL_PAUSED" : "PROJECT_STOPPED") }]);
-	}, fixtureDeadlineS() * 1000);
-
-	test("MAILSTOP1 active control still delivers a custom_message with the idle-turn trigger", async () => {
-		const f = fixture([
-			{ events: [], next_cursor: 100, tail_cursor: 100 },
-			{ events: [event(78389, 101)], next_cursor: 101, tail_cursor: 101 },
-		]);
-		const h = harness(f.deps, [{ type: "mode_change", mode: "goal_paused" }, { type: "mode_change", mode: "goal" }]);
-		await h.start();
+		const config = join(f.dir, ".config/omp-kit/fleet-watch.json");
+		if (kind === "project-stopped") writeFileSync(config, JSON.stringify({ sessions: [{ session: "omp-test", repo: "/repo", pullEnabled: false }] }));
+		if (kind === "goal-paused") entries.push({ type: "mode_change", mode: "goal_paused" });
+		if (kind === "fleet-unreadable") writeFileSync(config, "{");
 		await h.tick();
 		expect(h.sent).toHaveLength(1);
 		expect(h.sent[0]).toMatchObject({ customType: "kit-inbox-wake", deliverAs: "followUp", triggerTurn: true });
+		const rows = readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
+		expect(rows).toMatchObject([{ message_id: 78388, status: "WOKEN_INPROCESS" }]);
 	}, fixtureDeadlineS() * 1000);
 
-	test.each([false, true])("MAILSTOP1 fleet unreadable=%s: suppress only unreadable fleet, not unknown active goal mode", async unreadable => {
+	// The default policy: .omp/fleet.json opts a repo in, and so does a fleet-watch row for a repo without one;
+	// an explicit `"enabled": false` stays off even when fleet-watch lists the repo.
+	test.each([
+		["fleet-watch row, no marker", undefined, true, true],
+		["no row, no marker", undefined, false, false],
+		["explicit enabled:false with a row", false, true, false],
+	] as const)("default policy: %s -> wakes=%s", async (_label, marker, listed, wakes) => {
 		const f = fixture([
 			{ events: [], next_cursor: 100, tail_cursor: 100 },
-			{ events: [event(78391, 101)], next_cursor: 101, tail_cursor: 101 },
+			{ events: [event(78400, 101)], next_cursor: 101, tail_cursor: 101 },
 		]);
-		const h = harness(f.deps);
+		const repo = join(f.dir, "repo");
+		mkdirSync(join(repo, ".git"), { recursive: true });
+		if (marker !== undefined) {
+			mkdirSync(join(repo, ".omp"), { recursive: true });
+			writeFileSync(join(repo, ".omp", "fleet.json"), JSON.stringify({ enabled: marker }));
+		}
+		writeFileSync(join(f.dir, ".config/omp-kit/fleet-watch.json"), JSON.stringify({ sessions: listed ? [{ session: "s", repo, pullEnabled: false }] : [] }));
+		const deps: InboxWakeDeps = { ...f.deps, policyOn: undefined, env: { AGENT_NAME: "PeachLeopard", AGENT_MAIL_PROJECT: repo } };
+		const h = harness(deps);
 		await h.start();
-		if (unreadable) writeFileSync(join(f.dir, ".config/omp-kit/fleet-watch.json"), "{");
 		await h.tick();
-		expect(h.sent).toHaveLength(unreadable ? 0 : 1);
-		const row = JSON.parse(readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim());
-		expect(row).toMatchObject({ status: unreadable ? "STOPPED_NOT_WOKEN" : "WOKEN_INPROCESS", pause_state: "UNKNOWN" });
-		if (unreadable) expect(row.reason).toContain("FLEET_STATE_UNREADABLE");
-	}, fixtureDeadlineS() * 1000);
-
-	test("MAILSTOP1 owner pause during an in-flight read suppresses the follow-up", async () => {
-		const f = fixture([{ events: [], next_cursor: 100, tail_cursor: 100 }]);
-		const pending = Promise.withResolvers<InboxRead>();
-		let first = true;
-		const entries: unknown[] = [{ type: "mode_change", mode: "goal" }];
-		const h = harness({ ...f.deps, read: async (...args) => {
-			if (first) { first = false; return f.deps.read!(...args); }
-			return pending.promise;
-		} }, entries);
-		await h.start();
-		const tick = h.tick();
-		entries.push({ type: "mode_change", mode: "goal_paused" });
-		pending.resolve({ events: [event(78390, 101)], next_cursor: 101, tail_cursor: 101 });
-		await tick;
-		expect(h.sent).toEqual([]);
-		const row = JSON.parse(readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim());
-		expect(row).toMatchObject({ status: "STOPPED_NOT_WOKEN", reason: expect.stringContaining("GOAL_PAUSED") });
+		expect(h.sent).toHaveLength(wakes ? 1 : 0);
 	}, fixtureDeadlineS() * 1000);
 
 	test("planted: an unreadable inbox keeps the cursor, so the same mail is delivered on the next poll", async () => {
