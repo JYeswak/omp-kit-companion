@@ -47,6 +47,27 @@ else
 	fail=$((fail + 1))
 	printf 'FAIL duplicate-comment-target: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
 fi
+# LIVEREADBACK children carry their parent's title; an explicit related link disposes of that match only.
+: > "$TMP/argv"
+br_create_valid --title "RELTRAIN2: candidate-completion never triggers the train publish job so green candidates never publish" \
+	--deps "related:ompkit-dj7d,related:ompkit-fp72.25" > "$TMP/out" 2>&1
+got_rc=$?
+if [ "$got_rc" = "0" ] && [ "$(sed -n '1p' "$TMP/argv")" = "create" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1))
+	printf 'FAIL duplicate-related-disposed: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
+fi
+: > "$TMP/argv"
+br_create_valid --title "RELTRAIN2: candidate-completion never triggers the train publish job so green candidates never publish" \
+	--deps "related:ompkit-dj7d" > "$TMP/out" 2>&1
+got_rc=$?
+if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -Fq "ompkit-fp72.25" "$TMP/out" && ! grep -Fq "ompkit-dj7d (" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1))
+	printf 'FAIL duplicate-related-partial: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
+fi
 
 printf '## Bulk import fixture\n' > "$TMP/bulk.md"
 : > "$TMP/argv"

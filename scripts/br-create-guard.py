@@ -229,7 +229,12 @@ def main(argv: list[str]) -> int:
                       f"checks and retry", file=sys.stderr)
                 return 4
 
-            matches = duplicate_matches(parsed["title"], issues)
+            # An explicit `--deps related:<id>` already says the new bead is distinct from <id>
+            # (verify's LIVEREADBACK child carries its parent's title and links it this way).
+            related = {item.partition(":")[2].strip() for item in (parsed.get("deps") or "").split(",")
+                       if item.partition(":")[0].strip() == "related"}
+            matches = [(score, row) for score, row in duplicate_matches(parsed["title"], issues)
+                       if row["id"] not in related]
             not_duplicate = custom.get("--not-duplicate")
             matching_ids = {row["id"] for _, row in matches}
             if matches and not_duplicate is None:
