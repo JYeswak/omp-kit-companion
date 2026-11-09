@@ -36,9 +36,9 @@ KIT_RAW="https://raw.githubusercontent.com/JYeswak/omp-kit-companion/v${KIT_VERS
 KIT_INSTALLER=$(mktemp -d "${TMPDIR:-/tmp}/omp-kit-installer.XXXXXXXX")
 curl -fsSL -o "$KIT_INSTALLER/install.sh" "$KIT_RAW/install.sh"
 curl -fsSL -o "$KIT_INSTALLER/install.py" "$KIT_RAW/install.py"
-export GH_TOKEN="$(gh auth token)" # same shell: no auth refuses KIT_ATTESTATION_BUNDLE_UNAVAILABLE (exit 2)
-sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit" --dry-run
-sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit"
+# Token only in each install command's env; no auth refuses (exit 2).
+GH_TOKEN="$(gh auth token)" sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit" --dry-run
+GH_TOKEN="$(gh auth token)" sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit"
 export PATH="$HOME/.local/opt/omp-kit/bin:$PATH"
 ```
 
@@ -327,9 +327,9 @@ KIT_RAW="https://raw.githubusercontent.com/JYeswak/omp-kit-companion/v${KIT_VERS
 KIT_INSTALLER=$(mktemp -d "${TMPDIR:-/tmp}/omp-kit-installer.XXXXXXXX")
 curl -fsSL -o "$KIT_INSTALLER/install.sh" "$KIT_RAW/install.sh"
 curl -fsSL -o "$KIT_INSTALLER/install.py" "$KIT_RAW/install.py"
-export GH_TOKEN="$(gh auth token)" # same shell: no auth refuses KIT_ATTESTATION_BUNDLE_UNAVAILABLE (exit 2)
-sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit" --dry-run
-sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit"
+# Token only in each install command's env; no auth refuses (exit 2).
+GH_TOKEN="$(gh auth token)" sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit" --dry-run
+GH_TOKEN="$(gh auth token)" sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit"
 export PATH="$HOME/.local/opt/omp-kit/bin:$PATH"
 ```
 
@@ -435,13 +435,14 @@ KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
 5. Apply it, then confirm the receipt:
 
 ```sh
-omp-kit apply rules --apply --yes
-omp-kit audit --json
+"$KIT" apply rules --apply --yes
+"$KIT" audit --json
 ```
 
-`--json` only formats output; only `--apply` with confirmation changes
-anything. On a fresh HOME the overall status stays `UNVERIFIED` until rules are
-applied. `omp-kit quickstart` prints the same safe first commands.
+`apply rules` writes the pack into `~/.agents/rules/` and never touches
+`~/.omp`; `audit` lists each file. Only `--apply` with confirmation changes
+anything. `overall` may stay `UNVERIFIED` (disk cannot prove OMP's effective
+profile); the pack verdict is `data.test.status`.
 
 ## Command reference
 
@@ -682,12 +683,11 @@ whatever `HOME` is; never use a scratch `HOME`.
 
 Undo in reverse: `omp-kit undo RUN_ID --yes`, then
 `omp-kit service uninstall JOB --apply --yes` bootouts each job and moves its
-plist to backup (`--purge-logs` deletes logs). Then `rm -rf
+plist to backup (`--purge-logs` deletes logs). Remove the plugin (step 2):
+`omp plugin uninstall omp-kit-companion`. Then `rm -rf
 "$HOME/.local/opt/omp-kit"` and the `$HOME/.local/bin/omp-kit` copy if
 present. Receipts stay under the state root (`$XDG_STATE_HOME/omp-kit`, else
-`~/.local/state/omp-kit`) unless removed too; uninstall never touches it.
-The install's attestation check runs `gh`, which keeps its own cache
-(`~/.cache/gh/.sigstore`); that cache belongs to `gh`, not to omp-kit.
+`~/.local/state/omp-kit`) unless removed too. `~/.cache/gh/.sigstore` is gh's.
 
 ## Troubleshooting
 
