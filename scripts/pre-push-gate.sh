@@ -158,8 +158,10 @@ esac
 # RELREADY1: once qualification finishes, inspect actual origin/main (not an
 # unpublished local candidate). The existing log is the command-center surface.
 # Readiness never changes the push or qualification verdict.
+# FULLONRELEASE1 (J-2026-11-08-10, ompkit-kup44): the full suite runs once per release, from release-local.sh, not
+# on every push. A push starts it only when OMP_KIT_RELEASE_VERDICT=1 is set explicitly.
 start_release_verdict() {
-	if [ "${OMP_KIT_RELEASE_VERDICT:-1}" != 0 ] \
+	if [ "${OMP_KIT_RELEASE_VERDICT:-0}" = 1 ] \
 		&& [ -n "$log_git" ] && [ -n "${local_sha:-}" ] && [ -f "$ROOT/scripts/release-verdict.sh" ]; then
 		# shellcheck disable=SC2016 # The qualification child expands its own positional parameters.
 		python3 -c 'import os, sys

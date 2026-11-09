@@ -1,0 +1,2 @@
+- A push no longer starts the complete test suite in the background. The full suite runs once per release, when the release is cut; each commit and push still runs the tests its change affects. Set `OMP_KIT_RELEASE_VERDICT=1` on a push to start it there as before.
+- A red release verdict on main no longer refuses unrelated commits. The commit gate reports it (first red commit, failing tests, bead) and the commit lands; the red verdict still stops the release it judged.

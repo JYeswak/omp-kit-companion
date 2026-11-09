@@ -102,20 +102,22 @@ async function commit(f: Fixture, message = "[test] unrelated", path = "notes.tx
 	await checked(["git", "add", path], f.repo, f.overrides);
 	return command(["git", "commit", "-q", "-m", message], f.repo, f.overrides);
 }
-function refused(result: RunResult, sha: string, file = "tests/cli/broken.test.sh") {
-	expect(result.rc, output(result)).toBe(1);
-	expect(output(result)).toContain("commit-gate: REFUSED");
+// SAVEALONGSIDE1 (J-2026-11-08-11): a red release verdict is reported at every commit and never blocks the save.
+async function reported(f: Fixture, result: RunResult, sha: string, file = "tests/cli/broken.test.sh") {
+	expect(result.rc, output(result)).toBe(0);
+	expect(output(result)).toContain("commit-gate: RED release verdict (releases wait, saves continue)");
+	expect(output(result)).not.toContain("RED FIX admitted");
 	expect(output(result)).toContain(`first recorded red commit ${sha}`);
 	expect(output(result)).toContain(file);
+	expect(await checked(["git", "rev-parse", "HEAD"], f.repo, f.overrides)).not.toBe(sha);
 }
 
-test("REDMAINLAND1 installed gate refuses unrelated commits with first red SHA, failing tests and bead", async () => {
+test("SAVEALONGSIDE1 an unrelated commit on red main lands and names the first red SHA, failing tests and bead", async () => {
 	const f = await fixture();
 	await record(f, "FAIL", { culprit: true });
 	const result = await commit(f);
-	refused(result, f.sha);
+	await reported(f, result, f.sha);
 	expect(output(result)).toContain("bead ompkit-x");
-	expect(await checked(["git", "rev-parse", "HEAD"], f.repo, f.overrides)).toBe(f.sha);
 }, fixtureDeadlineS(60) * 1000);
 
 for (const repair of ["trailer", "failing-file"]) test(`REDMAINLAND1 admits ${repair} repair of red main`, async () => {
@@ -152,14 +154,14 @@ test("REDMAINLAND1 existing flake-rerun clearance admits without weakening uncle
 	await record(f, "FAIL", { flakes: ["tests/cli/broken.test.sh"] });
 	expect((await commit(f)).rc).toBe(0);
 	await record(f, "FAIL", { flakes: ["tests/cli/broken.test.sh"], extraFailure: "tests/cli/still-red.test.sh" });
-	refused(await commit(f, "[test] still unrelated"), f.sha, "tests/cli/still-red.test.sh");
+	await reported(f, await commit(f, "[test] still unrelated"), f.sha, "tests/cli/still-red.test.sh");
 }, fixtureDeadlineS(60) * 1000);
 
-test("REDMAINLAND1 unstaged failing-file edits and malformed Fixes-Red do not bypass refusal", async () => {
+test("SAVEALONGSIDE1 unstaged failing-file edits and malformed Fixes-Red are reported as RED, not as a repair", async () => {
 	const f = await fixture();
 	await record(f, "FAIL");
 	writeFileSync(join(f.repo, "tests/cli/broken.test.sh"), "exit 0\n");
-	refused(await commit(f, "[test] unrelated\n\nFixes-Red: not-a-bead!"), f.sha);
+	await reported(f, await commit(f, "[test] unrelated\n\nFixes-Red: not-a-bead!"), f.sha);
 }, fixtureDeadlineS(60) * 1000);
 
 test("REDMAINLAND1 latest stored PASS supersedes an older FAIL for the same tree", async () => {
@@ -192,7 +194,7 @@ test("REDMAINLAND1 first red lookup crosses unjudged heads but stops at a record
 	await checked(["git", "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "[test] latest red"], f.repo, f.overrides);
 	await checked(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], f.repo, f.overrides);
 	await record(f, "FAIL");
-	refused(await commit(f), first);
+	await reported(f, await commit(f), first);
 }, fixtureDeadlineS(60) * 1000);
 
 
@@ -211,7 +213,7 @@ test("REDMAINLAND1 commit --only judges its prospective index, not another stage
 	writeFileSync(join(f.repo, "tests/cli/broken.test.sh"), "exit 0\n");
 	writeFileSync(join(f.repo, "notes.txt"), "unrelated only commit\n");
 	await checked(["git", "add", "tests/cli/broken.test.sh"], f.repo, f.overrides);
-	refused(await command(["git", "commit", "--only", "notes.txt", "-q", "-m", "[test] not the repair"], f.repo, f.overrides), f.sha);
+	await reported(f, await command(["git", "commit", "--only", "notes.txt", "-q", "-m", "[test] not the repair"], f.repo, f.overrides), f.sha);
 	const repair = await command(["git", "commit", "--only", "tests/cli/broken.test.sh", "-q", "-m", "[test] actual repair"], f.repo, f.overrides);
 	expect(repair.rc, output(repair)).toBe(0);
 	expect(output(repair)).toContain("RED FIX admitted");

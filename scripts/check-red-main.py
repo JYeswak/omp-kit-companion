@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""REDMAINLAND1: refuse unrelated commits while origin/main has a recorded red release.
+"""REDMAINLAND1: report a recorded red release on origin/main at every commit; never block the save.
+
+SAVEALONGSIDE1 (J-2026-11-08-11): saving and building run alongside a red release. The red verdict stops the
+release it judged (release-local requires a PASS for its exact source), not unrelated commits, so the line keeps
+moving while the failing files are fixed.
 
 Read-only: reuse the verdict store's validators and CULPRIT1 flake attribution;
 never rerun a suite or fetch. Missing, incomplete or unreadable evidence is UNKNOWN.
@@ -106,8 +110,8 @@ def check(store, repo: Path, base: str, message: Path) -> int:
     if trailer or changed.intersection(files | culprit_files):
         print(f"commit-gate: RED FIX admitted: {detail}", file=sys.stderr)
         return 0
-    print(f"commit-gate: REFUSED: {detail}. Fix the failing files or carry Fixes-Red: <bead-id> for the repair.", file=sys.stderr)
-    return 1
+    print(f"commit-gate: RED release verdict (releases wait, saves continue): {detail}. Fix the failing files and carry Fixes-Red: <bead-id> on the repair.", file=sys.stderr)
+    return 0
 
 
 def main() -> int:
