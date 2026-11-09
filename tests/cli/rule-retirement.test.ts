@@ -11,8 +11,7 @@ import { fixtureDeadlineS } from "./fixture-process.ts";
 const root = resolve(import.meta.dir, "../..");
 // The installed OMP source directory is selected at runtime, not a bundled module.
 const { TtsrManager } = await import(join(OMP_SRC, "export/ttsr.ts"));
-// kit-fleet-standing-law is restored (J-2026-11-08-03: the law stays until CONTRACT1, ompkit-1ra0d.14, replaces it).
-const retired = ["kit-standing-law", "kit-gate-must-name-the-plant", "kit-relative-path-not-cwd", "kit-weasel-retry", "zz-canary-scope-probe"];
+const retired = ["kit-standing-law", "kit-fleet-standing-law", "kit-gate-must-name-the-plant", "kit-relative-path-not-cwd", "kit-weasel-retry", "zz-canary-scope-probe"];
 const pack = () => [...loadRules(join(root, "rules")), ...loadRules(join(root, "rules-fleet"))];
 function matched(text: string, source = "text", toolName?: string, filePaths?: string[]): string[] {
 	const manager = new TtsrManager({ enabled: true, disabledRules: [] });

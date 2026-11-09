@@ -1,5 +1,4 @@
 [
-  {"id":"fleet-standing-law-system","rule":"kit-fleet-standing-law","class":"always","kind":"system","turns":[{"text":"Done."}],"expect":{"rules":{},"min_requests":1,"system_contains":["## Joshua standing decisions","- R06: Record direct decisions this turn"]}},
   {"id":"unsafe-router-fire","rule":"rs-unsafe-added-router","class":"router","kind":"fire","turns":[{"tool":{"name":"write","args":{"path":"src/ffi.rs","content":"pub fn f(p: *const u8) -> u8 {\n    unsafe { *p }\n}\n"}}}],"expect":{"rules":{"rs-unsafe-added-router":1},"files_present":["src/ffi.rs"]}},
   {"id":"unsafe-router-near","rule":"rs-unsafe-added-router","class":"router","kind":"near-miss","turns":[{"tool":{"name":"write","args":{"path":"notes/ffi.txt","content":"pub fn f(p: *const u8) -> u8 {\n    unsafe { *p }\n}\n"}}}],"expect":{"rules":{},"files_present":["notes/ffi.txt"]}},
   {"id":"commit-preflight-fire","rule":"kit-commit-preflight","class":"reminder","kind":"fire","turns":[{"tool":{"name":"bash","args":{"command":"touch .ran_commit-preflight-fire; false && AGENT_NAME=x git commit -F planned-message"}}}],"expect":{"rules":{"kit-commit-preflight":1},"marker":"present"}},

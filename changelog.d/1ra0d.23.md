@@ -1,0 +1,1 @@
+- The fleet pack no longer injects the 18 KB standing-law file into every turn; the operating contract lives in AGENTS.md and the standing decisions stay in the private decision log.
