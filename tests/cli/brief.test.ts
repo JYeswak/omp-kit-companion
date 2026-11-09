@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { BRIEF_WINDOW_MINUTES, briefCandidates, briefContract, checkTaskBrief, GENERIC_COMPLY, renderBrief } from "../../src/brief.ts";
+import { BRIEF_WINDOW_MINUTES, briefCandidates, briefContract, briefRows, checkTaskBrief, completeTaskBrief, GENERIC_COMPLY, renderBrief } from "../../src/brief.ts";
 import type { BriefExec } from "../../src/brief.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
@@ -233,4 +233,86 @@ test("bounded contract parsing handles a long near-miss and rejects oversized ev
 	expect(await checkTaskBrief({ context, tasks: [{ task: "Implement requested feature" }] }, repo, execute)).toBeUndefined();
 	console.log(`BRIEFCONTRACT1 ${context.length}-character near-miss: ${(performance.now() - started).toFixed(3)} ms (includes git observations)`);
 	expect(await checkTaskBrief({ context: "x".repeat(1_000_001), tasks: [{ task: "Implement feature" }] }, repo, execute)).toContain("inspection limit");
+});
+
+/** BRIEFSCOPE1 fixture: every staged check, the fresh gate and the commit-msg/pre-push members the companion installs. */
+async function fullyGated() {
+	const repo = await fixture();
+	mkdirSync(join(repo, "scripts"));
+	const sources = ["check-staged-tempsafe.sh", "check-staged-wallclock.sh", "check-staged-br-init.sh", "check-staged-imports.sh", "check-staged-readme.sh", "check-staged-fragments.sh",
+		"check-staged-regexploit.sh", "check-staged-pysafe.sh", "check-staged-kitlib.sh", "check-staged-embed.sh", "fresh-gate.sh"];
+	for (const name of sources) writeFileSync(join(repo, "scripts", name), readFileSync(join(source, "scripts", name)));
+	await git(repo, "add", "--", "scripts");
+	await git(repo, "commit", "-qm", "land checks\n\nBead: fixture-checks");
+	const install = (kind: string, name: string, file: string) => {
+		mkdirSync(join(repo, ".git/hooks/hooks.d", kind), { recursive: true });
+		writeFileSync(join(repo, ".git/hooks/hooks.d", kind, name), readFileSync(join(source, "scripts", file)));
+		chmodSync(join(repo, ".git/hooks/hooks.d", kind, name), 0o755);
+	};
+	for (const [index, name] of ["check-staged-imports.sh", "check-staged-readme.sh", "check-staged-fragments.sh", "check-staged-regexploit.sh", "check-staged-pysafe.sh", "check-staged-tempsafe.sh", "check-staged-br-init.sh", "check-staged-wallclock.sh", "check-staged-embed.sh"].entries()) {
+		install("pre-commit", `${60 + index}-omp-kit-${name.slice("check-".length, -".sh".length)}`, name);
+	}
+	install("commit-msg", "40-omp-kit-commit-msg-bead", "commit-msg-bead.sh");
+	install("commit-msg", "41-omp-kit-commit-msg-vlevel", "commit-msg-verification-level.sh");
+	install("commit-msg", "48-omp-kit-deploy-step", "check-deploy-step.sh");
+	install("commit-msg", "49-omp-kit-stale-worktree", "check-stale-worktree.sh");
+	install("commit-msg", "55-omp-kit-commit-gate", "check-commit-gate.sh");
+	install("pre-push", "30-omp-kit-on-main", "check-pushed-on-main.sh");
+	install("pre-push", "41-omp-kit-pushed-vlevel", "pre-push-verification-level.sh");
+	install("pre-push", "40-omp-kit-fresh-gate", "fresh-gate.sh");
+	return repo;
+}
+
+test("BRIEFSCOPE1 a fully gated repo renders at most 15 actionable rows with no empty, duplicate or read-the-member rows", async () => {
+	const repo = await fullyGated();
+	const contract = await briefContract(repo, execute);
+	expect(contract.members.length).toBeGreaterThanOrEqual(25);
+	const rows = briefRows(contract);
+	console.log(`BRIEFSCOPE1 ${contract.rules.length} rules from ${contract.members.length} members -> ${rows.length} rows`);
+	expect(rows.length).toBeLessThanOrEqual(15);
+	expect(new Set(rows).size).toBe(rows.length);
+	for (const row of rows) {
+		expect(row).not.toMatch(/Refuses: [;.]/);
+		expect(row).not.toContain(GENERIC_COMPLY);
+	}
+	// Every requirement the per-member brief taught is still taught.
+	const text = renderBrief(contract);
+	for (const requirement of ["runFixtureAsync", "ownedTmp", "fixtureDeadlineS", "schema-compat", "Supersedes", "changelog.d/<bead-without-ompkit-prefix>", "commit-preflight.sh --files", "[test], [selftest], [live] or [pending]", "Deploy-Step", "exports are read-only", "shared local main"]) expect(text).toContain(requirement);
+	// Planted: the old one-row-per-member renderer exceeds the bound on the same contract.
+	expect(contract.rules.length).toBeGreaterThan(15);
+});
+
+test("BRIEFSCOPE1 a READ-ONLY context covers its tasks; a Change section, reserved paths or a mid-line mention stay build tasks", async () => {
+	const repo = await fixture();
+	const build = { task: "# Target\nCount commits per day.\n# Acceptance\nreport" };
+	expect(await checkTaskBrief({ context: `Repo: ${repo}\n# Contract\n- READ-ONLY. No edits, no git mutations.`, tasks: [build] }, repo, execute)).toBeUndefined();
+	expect(await checkTaskBrief({ context: `Repo: ${repo}\nread-only investigation`, tasks: [build] }, repo, execute)).toBeUndefined();
+	expect(await checkTaskBrief({ context: `Repo: ${repo}\n- READ-ONLY.`, tasks: [{ task: "# Change\nFix src/a.ts" }] }, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
+	expect(await checkTaskBrief({ context: `Repo: ${repo}\n- READ-ONLY.`, tasks: [{ task: "These paths are reserved for you: src/a.ts" }] }, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
+	expect(await checkTaskBrief({ context: `Repo: ${repo}\nDo not make the cache read-only.`, tasks: [build] }, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
+	// A pasted brief's own prose never declares the call read-only.
+	expect(await checkTaskBrief({ context: `Repo: ${repo}\nGate contract: ${repo}\n- read-only exports\nomp-kit-brief: ${repo} ${"0".repeat(64)}`, tasks: [build] }, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
+	const nearMiss = `Repo: ${repo}\n${"- ".repeat(50_000)}not read-only`;
+	const started = performance.now();
+	expect(await checkTaskBrief({ context: nearMiss, tasks: [build] }, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
+	console.log(`BRIEFSCOPE1 ${nearMiss.length}-character read-only near-miss: ${(performance.now() - started).toFixed(3)} ms (includes git observations)`);
+});
+
+test("BRIEFSCOPE1 completion appends exactly the missing contracts, and the completed call passes the same check", async () => {
+	const repo = await fixture();
+	const other = await fixture();
+	const input = { context: `Repo: ${repo}\nRepo: ${other}`, tasks: [{ task: "# Change\nFix work.txt in both checkouts" }] };
+	const completion = await completeTaskBrief(input, repo, execute);
+	expect(completion.refusal).toBeUndefined();
+	expect(completion.repos.sort()).toEqual([realpathSync(repo), realpathSync(other)].sort());
+	expect(completion.context).toContain((await briefContract(repo, execute)).marker);
+	expect(completion.context).toContain((await briefContract(other, execute)).marker);
+	expect(await checkTaskBrief({ ...input, context: completion.context }, repo, execute)).toBeUndefined();
+	// Planted: the uncompleted call is still missing its contract.
+	expect(await checkTaskBrief(input, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
+	// Controls: a call that already carries one contract gets only the other; a read-only call gets nothing; limits still refuse.
+	const partial = await completeTaskBrief({ ...input, context: `${input.context}\n${renderBrief(await briefContract(repo, execute))}` }, repo, execute);
+	expect(partial.repos).toEqual([realpathSync(other)]);
+	expect(await completeTaskBrief({ context: `Repo: ${repo}`, tasks: [{ task: "Read-only: count commits" }] }, repo, execute)).toEqual({ repos: [] });
+	expect((await completeTaskBrief({ context: "x".repeat(1_000_001), tasks: input.tasks }, repo, execute)).refusal).toContain("inspection limit");
 });

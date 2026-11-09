@@ -1,0 +1,3 @@
+- A build task that lacks its repo's gate contract is no longer refused with BRIEF_CONTRACT_REFUSED: the fleet guard appends the current contract to the task's context and reports AUTO_COMPLETED. Only the 1 MB inspection limits still refuse.
+- A task call whose shared context declares READ-ONLY (or analysis-only) at the start of a line needs no contract, unless the task itself has a Change section or reserves paths.
+- `omp-kit brief` prints one row per topic (reservations, commit message, release notes, safety primitives, tests, ...) instead of one row per hook member: the companion's contract drops from 48 rows to 13, with no empty or "read and satisfy" rows.

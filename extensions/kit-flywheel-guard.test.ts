@@ -1434,7 +1434,7 @@ test("DBLITERAL2 control: a literal --db path is not refused by this check", asy
 	expect(result?.reason ?? "").not.toContain("TRACKER_DB_UNEXPANDED");
 });
 
-test("BRIEFCONTRACT1 live tool-call boundary refuses a planted build and admits current digest and read-only controls", async () => {
+test("BRIEFSCOPE1 live tool-call boundary completes a planted build with the current contract and leaves current-digest and read-only calls untouched", async () => {
 	const project = freshDir(base, "brief-");
 	const execute: Responder = async call => {
 		const result = await runFixtureAsync([call.command, ...call.args], { cwd: call.options?.cwd ?? project, env: { ...process.env, GIT_CEILING_DIRECTORIES: base, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
@@ -1448,13 +1448,23 @@ test("BRIEFCONTRACT1 live tool-call boundary refuses a planted build and admits 
 	writeFileSync(member, "#!/bin/sh\n# Refuse raw process spawn; use src/kitlib/run.ts\nexit 0\n", { mode: 0o755 });
 	const h = await createFlywheelHost(base, { respond: execute });
 	const input = { context: `Repo: ${project}`, tasks: [{ task: "Implement the requested change. Do not edit unrelated paths." }] };
-	const [refused] = await h.emit("tool_call", { toolCallId: "brief-missing", toolName: "task", input }, h.ctx(project));
-	expect(refused).toMatchObject({ block: true, reason: expect.stringContaining("BRIEF_CONTRACT_REFUSED") });
 	const contract = await briefContract(project);
+	const [completed] = await h.emit("tool_call", { toolCallId: "brief-missing", toolName: "task", input }, h.ctx(project));
+	const patched = (completed as FlywheelToolCallResult | undefined)?.input;
+	expect((completed as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
+	expect(String(patched?.context)).toContain(contract.marker);
+	expect(patched?.tasks).toEqual(input.tasks);
+	// Planted: without the completion the same call is still missing its contract; with it, the check passes.
+	expect(await checkTaskBrief(input, project)).toContain("BRIEF_CONTRACT_REFUSED");
+	expect(await checkTaskBrief(patched, project)).toBeUndefined();
 	const [admitted] = await h.emit("tool_call", { toolCallId: "brief-present", toolName: "task", input: { ...input, context: `${input.context}\n${renderBrief(contract)}` } }, h.ctx(project));
 	expect((admitted as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
-	const [readOnlyResult] = await h.emit("tool_call", { toolCallId: "brief-read", toolName: "task", input: { ...input, tasks: [{ task: "Read-only: analyze the implementation" }] } }, h.ctx(project));
-	expect((readOnlyResult as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
+	expect((admitted as FlywheelToolCallResult | undefined)?.input).toBeUndefined();
+	for (const readOnly of [{ ...input, tasks: [{ task: "Read-only: analyze the implementation" }] }, { context: `Repo: ${project}\n- READ-ONLY. No edits.`, tasks: [{ task: "# Target\nCount commits per day." }] }]) {
+		const [result] = await h.emit("tool_call", { toolCallId: `brief-read-${freshSeq++}`, toolName: "task", input: readOnly }, h.ctx(project));
+		expect((result as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
+		expect((result as FlywheelToolCallResult | undefined)?.input).toBeUndefined();
+	}
 });
 
 describe("BRIEFREPOWORD1 pasted brief text never names a target", () => {
@@ -1469,7 +1479,8 @@ describe("BRIEFREPOWORD1 pasted brief text never names a target", () => {
 		expect((await execute({ command: "git", args: ["init", "-q", "--template=", project] })).code).toBe(0);
 		const hooks = join(project, ".git", "hooks", "hooks.d", "pre-commit");
 		mkdirSync(hooks, { recursive: true });
-		writeFileSync(join(hooks, "30-db-drift-ledger"), `#!/bin/sh\n${hookProse}exit 0\n`, { mode: 0o755 });
+		// BRIEFSCOPE1: a member with its own remedy keeps its prose in the brief (a remedy-less member folds into one row).
+		writeFileSync(join(hooks, "30-db-drift-ledger"), `#!/bin/sh\n${hookProse}echo "Fix: rerun the drift ledger before committing"\nexit 0\n`, { mode: 0o755 });
 		return project;
 	};
 	const build = [{ task: "# Target\nThese paths are reserved for you: src/x.ts.\n# Change\nFix the bug." }];
@@ -1505,9 +1516,11 @@ describe("BRIEFREPOWORD1 pasted brief text never names a target", () => {
 		const h = await createFlywheelHost(base, { respond: execute });
 		for (const context of ["Repo: -", "per-repo: any", "Repo: /nonexistent/abs/path,", "--repo fails after a chdir"]) {
 			const [verdict] = await h.emit("tool_call", { toolCallId: `brw-b-${freshSeq++}`, toolName: "task", input: { context, tasks: build } }, h.ctx(cwd));
-			const reason = String((verdict as FlywheelToolCallResult | undefined)?.reason ?? "");
-			expect(reason).not.toContain("LOOKUP_REFUSED");
-			expect(reason).toContain(`BRIEF_CONTRACT_REFUSED: build task lacks the current contract for ${realpathSync(cwd)}`);
+			const result = verdict as FlywheelToolCallResult | undefined;
+			expect(String(result?.reason ?? "")).not.toContain("LOOKUP_REFUSED");
+			expect(result?.block).not.toBe(true);
+			// BRIEFSCOPE1: the session cwd's contract is appended, not demanded.
+			expect(String(result?.input?.context)).toContain(`Gate contract: ${realpathSync(cwd)}`);
 		}
 		const plain = freshDir(base, "plain-");
 		expect(await checkTaskBrief({ context: "Repo: -", tasks: build }, plain, execute)).toContain("names no target checkout that resolves");
@@ -1516,11 +1529,12 @@ describe("BRIEFREPOWORD1 pasted brief text never names a target", () => {
 		expect(performance.now() - started).toBeLessThan(2000);
 	});
 
-	test("BRIEFREPOWORD1 control: a real checkout named without its marker is refused with the existing reason", async () => {
+	test("BRIEFREPOWORD1 control: a real checkout named without its marker gets that checkout's contract appended", async () => {
 		const { cfs, input } = await planted();
 		const h = await createFlywheelHost(base, { respond: execute });
 		const [verdict] = await h.emit("tool_call", { toolCallId: "brw-c", toolName: "task", input: { context: `Repo: ${cfs}`, tasks: build } }, h.ctx(base));
-		expect(verdict).toMatchObject({ block: true, reason: expect.stringContaining(`BRIEF_CONTRACT_REFUSED: build task lacks the current contract for ${realpathSync(cfs)}`) });
+		expect((verdict as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
+		expect(String((verdict as FlywheelToolCallResult | undefined)?.input?.context)).toContain((await briefContract(cfs)).marker);
 		expect(input.context).toContain(cfs);
 	});
 

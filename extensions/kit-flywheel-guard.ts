@@ -17,7 +17,7 @@ import { captureMineReplay } from "../src/mine-replay.ts";
 import type { MineReplay } from "../src/mine-replay.ts";
 import { resolveCustodyScript } from "../src/custody.ts";
 import { classifyMineResult } from "../src/mine-cause.ts";
-import { briefHandbackRefusal, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
+import { briefHandbackRefusal, completeTaskBrief, isBuildBriefTask, type BriefCompletion } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
 import { mintNativeSpawn, nativeIdentity, type NativeContext } from "./native-identity.ts";
 import { checkNativeClose } from "../src/native-close.ts";
@@ -128,6 +128,8 @@ export interface FlywheelToolCallResult {
 	block?: boolean;
 	reason?: string;
 	additionalContext?: string;
+	/** A revised tool input the host runs instead of the original (omp tool_call input patch). */
+	input?: Record<string, unknown>;
 }
 
 export interface FlywheelMessage {
@@ -2749,10 +2751,6 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	const guardVerdict = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> => {
 		try {
 			nativeIdentity(ctx);
-			if (event.toolName === "task") {
-				const reason = await checkTaskBrief(event.input, ctx.cwd, pi.exec);
-				if (reason) return { block: true, reason };
-			}
 			if (event.toolName === "write") {
 				const path = field(event.input, "path");
 				const content = field(event.input, "content");
@@ -2817,7 +2815,30 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		try { replay = await replayFor(event, ctx); }
 		catch { replay = captureMineReplay({ ...(typeof event.toolName === "string" ? { tool: event.toolName } : {}), arguments: event.input, cwd: ctx.cwd }); }
 		if (typeof event.toolCallId === "string") pendingReplays.set(event.toolCallId, replay);
-		const verdict = await guardVerdict(event, ctx);
+		// BRIEFSCOPE1 (ompkit-1ra0d.59): a build task missing its gate contract gets it appended to its context
+		// (AUTO_COMPLETED), instead of a BRIEF_CONTRACT_REFUSED the lead answers by pasting the same text.
+		let briefed: Record<string, unknown> | undefined;
+		if (event.toolName === "task") {
+			let completion: BriefCompletion;
+			try { completion = await completeTaskBrief(event.input, ctx.cwd, pi.exec); }
+			catch (error) { completion = { repos: [], refusal: `kit-flywheel-guard LOOKUP_REFUSED: brief check failed (${error instanceof Error ? error.message : String(error)}); nothing was spawned.` }; }
+			if (completion.refusal) {
+				await recordGateEvent({ ...timing(), seat: admissionOwner(env) ?? selfDeclared, act: "task", target: null, gate: gateFromReason(completion.refusal), kind: "refuse", replay, detail: completion.refusal,
+					...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId, event_id: event.toolCallId } : {}) }, { env, home });
+				if (typeof event.toolCallId === "string") { pendingCalls.delete(event.toolCallId); pendingReplays.delete(event.toolCallId); pendingClocks.delete(event.toolCallId); }
+				return { block: true, reason: completion.refusal };
+			}
+			if (completion.context !== undefined && typeof event.input === "object" && event.input !== null) {
+				briefed = { ...(event.input as Record<string, unknown>), context: completion.context };
+				for (const repo of completion.repos) {
+					await recordGateEvent({ ...timing(), repo, seat: admissionOwner(env) ?? selfDeclared, act: "task", target: null, gate: "brief-autocomplete", kind: "auto_complete", detail: `appended the current gate contract for ${repo}`,
+						...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId } : {}) }, { env, home });
+					ctx.ui?.notify(`AUTO_COMPLETED:brief: appended the current gate contract for ${repo} to the task context`, "info");
+				}
+			}
+		}
+		const verdict = await guardVerdict(briefed ? { ...event, input: briefed } : event, ctx);
+		if (briefed && verdict?.block !== true) return { ...(verdict ?? {}), input: briefed };
 		const command = typeof event.toolName === "string" && event.toolName.toLowerCase() === "bash" ? field(event.input, "command") : undefined;
 		const act = typeof command === "string" ? trackerAct(command) : null;
 		// AUTOCOMPLETE1 (ompkit-fp72.135.3.17): on an allowed `git commit`, complete what the kit already knows
@@ -2882,19 +2903,20 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		if (event.toolName !== "task") return;
 		const tasks = field(event.input, "tasks");
 		if (!Array.isArray(tasks)) return;
+		const sharedContext = typeof field(event.input, "context") === "string" ? String(field(event.input, "context")) : "";
 		const results = field(event.details, "results");
 		const refusals: string[] = [];
 		if (Array.isArray(results) && results.length > 0) {
 			for (const result of results) {
 				const index = field(result, "index");
 				const task = typeof index === "number" ? tasks[index] : undefined;
-				if (task === null || typeof task !== "object" || !isBuildBriefTask(task as Record<string, unknown>)) continue;
+				if (task === null || typeof task !== "object" || !isBuildBriefTask(task as Record<string, unknown>, sharedContext)) continue;
 				const output = field(result, "output");
 				if (typeof output !== "string") continue;
 				const reason = briefHandbackRefusal(output);
 				if (reason) refusals.push(`${String(field(result, "id") ?? index)}: ${reason}`);
 			}
-		} else if (tasks.some(task => task !== null && typeof task === "object" && isBuildBriefTask(task as Record<string, unknown>))) {
+		} else if (tasks.some(task => task !== null && typeof task === "object" && isBuildBriefTask(task as Record<string, unknown>, sharedContext))) {
 			for (const part of event.content) {
 				if (part.type !== "text") continue;
 				const reason = briefHandbackRefusal(part.text ?? "");

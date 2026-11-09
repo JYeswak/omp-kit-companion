@@ -12,7 +12,7 @@ const execute: BriefExec = async (command, args, options) => {
 	if (result.timed_out || result.truncated || result.total_truncated) throw new Error("brief: observation incomplete");
 	return { code: result.rc ?? 1, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
 };
-export interface BriefRule { member: string; refuses: string; compliant: string }
+export interface BriefRule { member: string; refuses: string; compliant: string; topic?: string }
 export interface BriefMember { member: string; path: string; sha256: string }
 export interface BriefContract { repo: string; installed: boolean; digest: string; marker: string; rules: BriefRule[]; members: BriefMember[]; kit: string }
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -38,27 +38,44 @@ export function briefKitRelease(): string {
 const blobCache = new Map<string, string>();
 const BLOB_CACHE_CAP = 4096;
 
-/** Vocabulary is attached only to observed members, never to a repository name. */
+/**
+ * Vocabulary is attached only to observed members, never to a repository name. BRIEFSCOPE1 (ompkit-1ra0d.59):
+ * each rule carries a topic, and the rendered brief prints one row per topic, so the 25-50 installed members of a
+ * fleet repo teach in about a dozen actionable rows instead of one row per member with copied hook prose.
+ */
 function memberRules(member: string, source: string): BriefRule[] {
 	const rules: BriefRule[] = [];
-	const add = (refuses: string, compliant: string) => rules.push({ member, refuses, compliant });
-	if (member.includes("kitlib") && !member.includes("reversal")) {
-		add("hand-rolled process spawn", "TS product: run()/runSync() from src/kitlib/run.ts; tests: runFixture/runFixtureAsync from tests/cli/fixture-process.ts; Python: kitlib_run.run; shell: kitlib_run");
-		add("unsafe signal targets", "signal through safePid/safe_pid/kitlib_signal with pid > 1");
-		add("schema-compat: extending an installed schema-1 baseline or increasing its allowance", "preserve installed data schemas; new independently validated data uses a separate file; allowances only shrink");
-	} else if (member.includes("tempsafe")) add("raw temporary directories", "TS: ownedTmp; Python: owned_tmp; shell: source scripts/kitlib-tmp.sh then kitlib_tmp VAR label, never in command substitution");
-	else if (member.includes("wallclock")) add("literal test fixture deadlines and unmeasured timing assertions", "use fixtureDeadlineS() from tests/cli/fixture-process.ts; measured product bounds name their p99 and headroom");
-	else if (member.includes("br-init")) add("unparseable tracker shell including heredocs inside command substitution", "use literal argv and description/acceptance files rather than a heredoc inside $(...)");
-	else if (member.includes("stale-worktree")) add("stale or foreign-bead landed-line deletion", "review each affected hunk and its landed commit/bead; restore unintended deletions; only an author-decided replacement may declare Supersedes (never automatic)");
-	else if (member.includes("pysafe")) add("unbounded Python reads/waits or dynamic shell strings", "use bounded kitlib process/file primitives and argv, not variable-built bash -c");
-	else if (member.includes("fresh-gate") || member.endsWith("/fresh-gate.sh")) {
-		if (source.includes("live coverage")) add("changed TTSR rules without live scenario coverage", "add fire plus quiet corpus rows and fire/near-miss tests/live/scenarios.json scenarios; update README rule count");
-		add("nonportable tests", "tests run in an exported tree without source git history or private HOME files; set TMPDIR inside the export's var/agent-tmp");
+	const add = (topic: string, refuses: string, compliant: string) => rules.push({ member, refuses, compliant, topic });
+	const name = member.slice(member.lastIndexOf("/") + 1);
+	// The chain runners themselves only dispatch members; their findings come from the members.
+	if (["pre-commit", "commit-msg", "pre-push"].includes(member)) return rules;
+	if (name.includes("kitlib") && !name.includes("reversal")) {
+		add("safety primitives", "hand-rolled process spawn", "TS product: run()/runSync() from src/kitlib/run.ts; tests: runFixture/runFixtureAsync from tests/cli/fixture-process.ts; Python: kitlib_run.run; shell: kitlib_run");
+		add("safety primitives", "unsafe signal targets", "signal through safePid/safe_pid/kitlib_signal with pid > 1");
+		add("safety primitives", "schema-compat: extending an installed schema-1 baseline or increasing its allowance", "preserve installed data schemas; new independently validated data uses a separate file; allowances only shrink");
+	} else if (name.includes("tempsafe")) add("safety primitives", "raw temporary directories", "TS: ownedTmp; Python: owned_tmp; shell: source scripts/kitlib-tmp.sh then kitlib_tmp VAR label, never in command substitution");
+	else if (name.includes("pysafe")) add("safety primitives", "unbounded Python reads/waits or dynamic shell strings", "use bounded kitlib process/file primitives and argv, not variable-built bash -c");
+	else if (name.includes("wallclock")) add("tests", "literal test fixture deadlines and unmeasured timing assertions", "use fixtureDeadlineS() from tests/cli/fixture-process.ts; measured product bounds name their p99 and headroom");
+	else if (name.includes("br-init")) add("tracker shell", "unparseable tracker shell including heredocs inside command substitution", "use literal argv and description/acceptance files rather than a heredoc inside $(...)");
+	else if (name.includes("stale-worktree") || name.includes("kitlib-reversal")) add("landed lines", "stale or foreign-bead landed-line deletion", "review each affected hunk and its landed commit/bead; restore unintended deletions; only an author-decided replacement may declare Supersedes (never automatic)");
+	else if (name.includes("storage-root") || name.includes("agent-mail")) add("reservations", "a staged path another agent holds under an exclusive Agent Mail reservation", "reserve every path you edit (file_reservation_paths, exclusive) before committing");
+	else if (name.includes("staged-imports")) add("imports", "a staged file imports a path that is not staged or committed", "stage or commit every file your change imports");
+	else if (name.includes("staged-readme") || name.includes("staged-fragments") || name.includes("commit-notes")) add("release notes", "a user-visible change without its own release note, or a README count or command reference left stale", "write changelog.d/<bead-without-ompkit-prefix>.md, user-facing '- ' bullets; update README's command reference for CLI changes");
+	else if (name.includes("regexploit")) add("regex", "staged JS/TS/Python regexes the push regexploit gate rejects", "anchor patterns and keep repeated classes exclusive of what follows (skill regex-engineering)");
+	else if (name.includes("portable-paths")) add("portable paths", "machine-specific absolute paths in shipped files", "derive paths from the repo root, $HOME or a documented environment variable");
+	else if (name.includes("staged-embed")) add("generated embeds", "a changed embedded source whose installer payload was not regenerated", "run the staged producer's regenerate command the refusal names and stage its output");
+	else if (name.includes("deploy-step") || name.includes("commit-msg-bead") || name.includes("pushed-beads") || name.includes("ref-txn-bead") || name.includes("vlevel") || (name === "10-commit-msg" && source.includes("verification level"))) {
+		add("commit message", "a message with no existing bead id, no verification level, or (on deploy-sensitive paths) no Deploy-Step trailer", "name an existing bead id; end the subject with [test], [selftest], [live] or [pending]; add Deploy-Step: <command> or Deploy-Step: none (<reason>) when the refusal asks");
+	} else if (name.includes("on-main")) add("publication", "pushing a commit that is not on this repo's shared local main", "commit on main (or let the lead land your branch); push only main");
+	else if (name.includes("commit-gate")) add("preflight", "a staged tree whose affected tests fail", "before DONE run sh scripts/commit-preflight.sh --files <every changed path> --tests <changed test files>; report the exact command and its commit-preflight: ... 0 refused/unjudged ...; N export test file(s) run output");
+	else if (name.includes("fresh-gate") || member.endsWith("/fresh-gate.sh")) {
+		if (source.includes("live coverage")) add("tests", "changed TTSR rules without live scenario coverage", "add fire plus quiet corpus rows and fire/near-miss tests/live/scenarios.json scenarios; update README rule count");
+		add("tests", "nonportable tests", "tests run in an exported tree without source git history or private HOME files; set TMPDIR inside the export's var/agent-tmp");
 	}
 	if (!rules.length) {
 		const header = source.split("\n").slice(0, 12).filter(line => line.startsWith("#") && !line.startsWith("#!")).map(line => line.slice(1).trim()).join(" ").slice(0, 600);
 		const { refusals, remedies } = memberRemedies(source);
-		add(refusals.join("; ").slice(0, 600) || header || "violations judged by this executable member", remedies.join("; ").slice(0, 600) || `${GENERIC_COMPLY} ${member} before changing its governed surface`);
+		rules.push({ member, refuses: refusals.join("; ").slice(0, 600) || header || "violations judged by this executable member", compliant: remedies.join("; ").slice(0, 600) || `${GENERIC_COMPLY} ${member} before changing its governed surface` });
 	}
 	return rules;
 }
@@ -156,9 +173,9 @@ export async function briefContract(repoPath: string, exec: BriefExec = execute,
 	}
 	for (const rel of [...committed.keys()].filter(rel => /^scripts\/(?:check-staged-.*\.sh|fresh-gate\.sh)$/.test(rel)).sort()) await inspect(join(repo, rel), `source:${rel}`, readHead);
 	rules.push(
-		{ member: "process:EXPORTINDEX1", refuses: "writes escaping an exported test tree", compliant: "exports are read-only source inputs; fixture repositories need their own git init and GIT_CEILING_DIRECTORIES so git never discovers the parent checkout" },
-		{ member: "process:commit-notes", refuses: "a user-visible change without its own release note", compliant: "write changelog.d/<bead-without-ompkit-prefix>.md, user-facing '- ' bullets; update README's command reference for CLI changes" },
-		{ member: "process:BRIEFCONTRACT1", refuses: "DONE without clean changed-path preflight evidence", compliant: "before DONE run sh scripts/commit-preflight.sh --files <every changed path> --tests <changed test files>; report the exact command and its commit-preflight: ... 0 refused/unjudged ...; N export test file(s) run output" },
+		{ member: "process:EXPORTINDEX1", refuses: "writes escaping an exported test tree", compliant: "exports are read-only source inputs; fixture repositories need their own git init and GIT_CEILING_DIRECTORIES so git never discovers the parent checkout", topic: "tests" },
+		{ member: "process:commit-notes", refuses: "a user-visible change without its own release note", compliant: "write changelog.d/<bead-without-ompkit-prefix>.md, user-facing '- ' bullets; update README's command reference for CLI changes", topic: "release notes" },
+		{ member: "process:BRIEFCONTRACT1", refuses: "DONE without clean changed-path preflight evidence", compliant: "before DONE run sh scripts/commit-preflight.sh --files <every changed path> --tests <changed test files>; report the exact command and its commit-preflight: ... 0 refused/unjudged ...; N export test file(s) run output", topic: "preflight" },
 	);
 	const digest = hash(JSON.stringify({ repo, kit, members, rules }));
 	return { repo, installed, digest, marker: `omp-kit-brief: ${repo} ${digest}`, rules, members, kit };
@@ -213,14 +230,40 @@ export const BRIEF_SCRATCH_RELEASE = "omp-kit scratch release \"$TMPDIR\" --capa
 export const BRIEF_SCRATCH_STEP = "[scratch] Hazard: a refused `scratch new` piped through `jq -r .data.dir` exports TMPDIR=null and writes ./null outside owned scratch, `export TMPDIR=$(...) || exit 1` never exits because export returns 0, and `--print-dir` returns no release capability, so a dir made that way outside a seat is left to the reaper. "
 	+ `Comply: ${BRIEF_SCRATCH_CREATE}, run inside the owning repo; keep CAP unexported and unprinted; when done: ${BRIEF_SCRATCH_RELEASE}.`;
 
+/**
+ * BRIEFSCOPE1: one row per topic. Members that teach only "read and satisfy <member>" fold into one closing row:
+ * each prints its own refusal and fix when it fires, so copying their hook prose taught nothing.
+ */
+export function briefRows(contract: BriefContract): string[] {
+	const groups = new Map<string, { members: string[]; refuses: string[]; compliant: string[] }>();
+	const generic: string[] = [];
+	for (const rule of contract.rules) {
+		if (!rule.topic && rule.compliant.startsWith(GENERIC_COMPLY)) { if (!generic.includes(rule.member)) generic.push(rule.member); continue; }
+		const key = rule.topic ?? rule.member;
+		const group = groups.get(key) ?? { members: [], refuses: [], compliant: [] };
+		if (!group.members.includes(rule.member)) group.members.push(rule.member);
+		if (!group.refuses.includes(rule.refuses)) group.refuses.push(rule.refuses);
+		if (!group.compliant.includes(rule.compliant)) group.compliant.push(rule.compliant);
+		groups.set(key, group);
+	}
+	const rows = [...groups].map(([key, group]) => `[${key}] (${group.members.join(", ")}) Refuses: ${group.refuses.join("; ")}. Comply: ${group.compliant.join("; ")}.`);
+	if (generic.length) rows.push(`[other members] (${generic.join(", ")}) Each prints its own refusal and fix when it fires; fix every finding, then retry once.`);
+	return rows;
+}
+
 export function renderBrief(contract: BriefContract, candidates: readonly BriefCandidate[] = []): string {
-	return [`Gate contract: ${contract.repo}`, ...contract.rules.map(rule => `[${rule.member}] Refuses: ${rule.refuses}. Comply: ${rule.compliant}.`),
+	return [`Gate contract: ${contract.repo} (every hook reports all findings at once; fix every one, then retry once)`, ...briefRows(contract),
 		BRIEF_SCRATCH_STEP,
 		...candidates.map(row => `${row.review} ${row.path}:${row.line}\n${row.hunk}`), contract.marker].join("\n");
 }
 
-/** Only explicitly read-only assignments bypass the build contract; an editing prohibition alone is not a mode. */
-export function isBuildBriefTask(task: Record<string, unknown>): boolean {
+/**
+ * Only explicitly read-only assignments bypass the build contract; an editing prohibition alone is not a mode.
+ * BRIEFSCOPE1: a read-only declaration at a line start of the shared context covers every task in the call that
+ * has no Change section and reserves no paths (the 2026-11-08 reality check declared "- READ-ONLY." in context
+ * and was refused twice).
+ */
+export function isBuildBriefTask(task: Record<string, unknown>, context = ""): boolean {
 	const selector = typeof task.agent === "string" ? task.agent : "";
 	const body = typeof task.task === "string" ? task.task : "";
 	if (["reviewer", "security-reviewer", "seance", "zeststream-planner", "zeststream-reviewer"].includes(selector)) return false;
@@ -229,6 +272,8 @@ export function isBuildBriefTask(task: Record<string, unknown>): boolean {
 	if (/^\s*(?:#\s*)?no-edit:\s*(?:verify|diagnose|replay)\b/im.test(body)) return false;
 	// BRIEFSTABLE1: a task that declares it changes nothing is not a build task.
 	if (/^\s*(?:#+\s*)?Change\s*(?::\s*|\n\s*)(?:None|N\/A|no changes?)\b/im.test(body)) return false;
+	if (context && /^[ \t]*(?:[-*>#][ \t]*)*(?:read-only|analysis-only)\b/im.test(stripBriefBlocks(context))
+		&& !/^[ \t]*#+[ \t]*Change\b/im.test(body) && !/\breserv(?:e|es|ed|ing)[ \t]+(?:these[ \t]+)?paths?\b|\breserved?\b[^\n]*\bfor you\b/i.test(body)) return false;
 	return !(/^\s*(?:analy[sz]e|analysis|investigate|review|inspect)\b/i.test(body)
 		&& !/\b(?:implement|modify|edit|write|fix|refactor|remove|add|create|update)\b/i.test(body));
 }
@@ -312,34 +357,66 @@ export async function briefMarkerAccepted(current: BriefContract, lines: Readonl
 	return false;
 }
 
-/** A digest is checked against installed bytes, committed sources and the kit release, not merely a marker-shaped string. */
-export async function checkTaskBrief(input: unknown, cwd: string, exec: BriefExec = execute): Promise<string | undefined> {
-	if (!input || typeof input !== "object") return undefined;
+type BriefIssue = { kind: "limit"; message: string } | { kind: "unresolved" } | { kind: "missing"; contract: BriefContract };
+/** BRIEFSCOPE1: a size refusal, or the task context with every missing contract appended and the repos it covers. */
+export interface BriefCompletion { refusal?: string; context?: string; repos: string[] }
+
+/** One pass over a task call: the issues in task order. Read-only and no-change tasks raise none. */
+async function scanTaskBrief(input: unknown, cwd: string, exec: BriefExec): Promise<BriefIssue[]> {
+	if (!input || typeof input !== "object") return [];
 	const value = input as Record<string, unknown>;
 	const context = typeof value.context === "string" ? value.context : "";
-	if (context.length > 1_000_000) return "BRIEF_CONTRACT_REFUSED: context exceeds the 1 MB contract inspection limit.";
+	if (context.length > 1_000_000) return [{ kind: "limit", message: "BRIEF_CONTRACT_REFUSED: context exceeds the 1 MB contract inspection limit." }];
 	const tasks = Array.isArray(value.tasks) ? value.tasks : [];
 	const lookup = async (target: string) => { try { return await briefContract(resolve(cwd, target), exec); } catch { return undefined; } };
+	const issues: BriefIssue[] = [];
 	for (const item of tasks) {
 		if (!item || typeof item !== "object") continue;
 		const task = item as Record<string, unknown>;
 		const body = typeof task.task === "string" ? task.task : "";
-		if (body.length > 1_000_000) return "BRIEF_CONTRACT_REFUSED: task exceeds the 1 MB contract inspection limit.";
-		if (!isBuildBriefTask(task)) continue;
+		if (body.length > 1_000_000) return [{ kind: "limit", message: "BRIEF_CONTRACT_REFUSED: task exceeds the 1 MB contract inspection limit." }];
+		if (!isBuildBriefTask(task, context)) continue;
 		const text = `${context}\n${body}`;
 		const lines = new Set(text.split("\n").map(line => line.trim()));
 		// BRIEFREPOWORD1: a target that does not resolve is "no target named": fall back to the session cwd, never crash the guard.
 		const contracts = (await Promise.all(briefTargets(text, cwd).map(lookup))).filter(contract => contract !== undefined);
 		if (!contracts.length) {
 			const fallback = await lookup(cwd);
-			if (!fallback) return `BRIEF_CONTRACT_REFUSED: build task names no target checkout that resolves, and the session cwd ${cwd} is not a repository. Name the checkout as an absolute path and paste the complete output of omp-kit brief --repo <that path> into context.`;
+			if (!fallback) { issues.push({ kind: "unresolved" }); continue; }
 			contracts.push(fallback);
 		}
 		for (const contract of contracts) {
-			if (contract.installed && !await briefMarkerAccepted(contract, lines, exec)) return `BRIEF_CONTRACT_REFUSED: build task lacks the current contract for ${contract.repo}. Run omp-kit brief --repo ${JSON.stringify(contract.repo)} and paste its complete output into context (${contract.marker}). A brief stays valid ${BRIEF_WINDOW_MINUTES} min after a landing supersedes it; one from another kit release or gate contract never matches.`;
+			if (contract.installed && !issues.some(issue => issue.kind === "missing" && issue.contract.repo === contract.repo) && !await briefMarkerAccepted(contract, lines, exec)) issues.push({ kind: "missing", contract });
 		}
 	}
-	return undefined;
+	return issues;
+}
+
+/** A digest is checked against installed bytes, committed sources and the kit release, not merely a marker-shaped string. */
+export async function checkTaskBrief(input: unknown, cwd: string, exec: BriefExec = execute): Promise<string | undefined> {
+	const [issue] = await scanTaskBrief(input, cwd, exec);
+	if (!issue) return undefined;
+	if (issue.kind === "limit") return issue.message;
+	if (issue.kind === "unresolved") return `BRIEF_CONTRACT_REFUSED: build task names no target checkout that resolves, and the session cwd ${cwd} is not a repository. Name the checkout as an absolute path and paste the complete output of omp-kit brief --repo <that path> into context.`;
+	const contract = issue.contract;
+	return `BRIEF_CONTRACT_REFUSED: build task lacks the current contract for ${contract.repo}. Run omp-kit brief --repo ${JSON.stringify(contract.repo)} and paste its complete output into context (${contract.marker}). A brief stays valid ${BRIEF_WINDOW_MINUTES} min after a landing supersedes it; one from another kit release or gate contract never matches.`;
+}
+
+/**
+ * BRIEFSCOPE1 (ompkit-1ra0d.59): the guard completes what it already knows instead of refusing. A build task whose
+ * context lacks a current contract gets every missing contract appended to its context; only the 1 MB inspection
+ * limits still refuse. A task naming no resolvable checkout gets nothing appended: its gates still judge every
+ * commit. Measured before: BRIEF_CONTRACT_REFUSED was the top refusal of 2026-11-07..09 (75 rows in 48 h).
+ */
+export async function completeTaskBrief(input: unknown, cwd: string, exec: BriefExec = execute): Promise<BriefCompletion> {
+	const issues = await scanTaskBrief(input, cwd, exec);
+	const limit = issues.find(issue => issue.kind === "limit");
+	if (limit?.kind === "limit") return { refusal: limit.message, repos: [] };
+	const missing = issues.flatMap(issue => issue.kind === "missing" ? [issue.contract] : []);
+	if (!missing.length) return { repos: [] };
+	const value = input as Record<string, unknown>;
+	const context = typeof value.context === "string" ? value.context : "";
+	return { context: [context, ...missing.map(contract => renderBrief(contract))].join("\n\n"), repos: missing.map(contract => contract.repo) };
 }
 
 export function briefHandbackRefusal(text: string): string | undefined {
