@@ -432,6 +432,11 @@ def _fresh_green(repo: str, commit: str) -> bool:
                 if not landed or _commit_identity(repo, row.get("commit"), identities) != landed:
                     continue
             evidence = row.get("evidence")
+            # EMPTYROW1: a passing gate pass that selected nothing (no declared files, no full-suite reuse) is no
+            # evidence either way; land's second fresh-gate pass writes one after the complete row and used to shadow it.
+            if (row.get("rc") == 0 and isinstance(evidence, dict) and evidence.get("complete") is not True
+                    and not evidence.get("declared_files") and not evidence.get("full_suite")):
+                continue
             return (row.get("version") == 2 and type(row.get("rc")) is int and row["rc"] == 0
                     and isinstance(evidence, dict) and evidence.get("complete") is True)
     except (OSError, ValueError, UnicodeError):

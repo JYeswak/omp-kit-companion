@@ -673,7 +673,14 @@ test("HANDOFFTREE1 a GREEN candidate differing from the landed commit only in au
 			expect(decoder.decode(refused.stderr)).toContain("HANDOFF_UNGATED");
 			expect(await f.status()).toBe("in_progress");
 		}
-		ledger(candidate);
+		// EMPTYROW1: land's second fresh-gate pass appends a passing row that selected nothing; it must not
+		// shadow the complete row before it. A later failing row still refuses.
+		const rows = (...entries: object[]) => writeFileSync(join(f.code, ".git/omp-kit/fresh-gate-runs.jsonl"),
+			entries.map(entry => JSON.stringify({ version: 2, commit: candidate, ...entry }) + "\n").join(""));
+		rows({ rc: 0, evidence: { complete: true } }, { rc: 1, evidence: { complete: false, declared_files: [], files: [] } });
+		expect((await handoff()).rc).toBe(4);
+		expect(await f.status()).toBe("in_progress");
+		rows({ rc: 0, evidence: { complete: true } }, { rc: 0, evidence: { complete: false, declared_files: [], files: [] } });
 		const admitted = await handoff();
 		expect(admitted.rc, decoder.decode(admitted.stderr)).toBe(0);
 		expect(await f.status()).toBe("in_review");
