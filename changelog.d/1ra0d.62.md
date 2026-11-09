@@ -1,0 +1,1 @@
+- The scratch reaper deletes expired quarantine first, before scanning every scratch root, so a scan that runs out of time no longer stops quarantined scratch from ever being deleted.

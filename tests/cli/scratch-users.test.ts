@@ -250,6 +250,24 @@ test("an expired quarantine entry with a live registered user is kept; a dead us
 	expect(existsSync(kept)).toBe(false);
 });
 
+// QEXPIREFIRST1: the reaper's worker hit its deadline mid-plan on every run since 2026-11-04, and expiry ran last,
+// so expired quarantine never drained (21 GB). A plan interrupted at its first item must not starve expiry.
+test("QEXPIREFIRST1 expired quarantine is deleted even when the plan is interrupted before it finishes", () => {
+	const { home } = fixture();
+	delete process.env.XDG_CONFIG_HOME;
+	const qt = quarantineDir(home);
+	mkdirSync(qt, { recursive: true, mode: 0o700 });
+	const old = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+	const expired = join(qt, quarantineEntryFor("expired.1", old));
+	mkdirSync(expired);
+	writeFileSync(join(expired, "item.json"), "{}");
+	for (const p of [join(expired, "item.json"), expired]) utimesSync(p, old, old);
+	const world: World = { table: new Map() };
+	expect(() => applyScratch(home, { ...deps(world), home, onProgress: () => { throw new Error("worker deadline"); } }))
+		.toThrow("worker deadline");
+	expect(existsSync(expired)).toBe(false);
+});
+
 // Review 4 finding #5b: registration and deletion serialize on one lock, so a user is never left registered in a
 // deleted dir: a `use` in flight makes the deleter refuse; a `use` that waits behind the deleter finds the dir gone.
 test("a use holding the users lock makes release --now refuse; a use that waits behind the delete is refused", async () => {

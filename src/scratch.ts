@@ -3848,6 +3848,10 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	const now = deps.now ?? Date.now();
 	const startedAt = new Date(now).toISOString();
 	const freePctBefore = measureDiskFreePercent(home, deps.statfs);
+	// QEXPIREFIRST1: expired quarantine is deleted before the plan scans every root. The reaper's worker hit its
+	// deadline mid-scan on every run since 2026-11-04, so expiry (last in the sequence) never ran and the
+	// quarantine grew to 21 GB. Entries quarantined by this run are not yet expired, so the order is otherwise free.
+	const expired = applyQuarantineExpiry(home, deps);
 	const entries = resolveScratchRootEntries(home);
 	const roots = entries.map(entry => entry.root);
 	const systemWorkDirs = resolveSystemWorkDirs(deps);
@@ -3906,7 +3910,6 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	});
 	for (const decision of orphanDecisions) if (decision.proof === undefined)
 		appendLog(home, { event: "orphan-preserved", dir: decision.path ?? "", at: new Date(now).toISOString(), ...decision });
-	const expired = applyQuarantineExpiry(home, deps);
 	const planEcho = dedupeNestedSizes(sessions);
 	const totals = summarizeScratch(planEcho, allRoots);
 	const rootMetrics = scratchRootMetrics(allRoots, totals.sizeByRoot, deps.statfs, rootSourceMap(entries, systemWorkDirs));
