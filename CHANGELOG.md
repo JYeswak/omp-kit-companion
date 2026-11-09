@@ -4,6 +4,22 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.104] - 2026-11-09
+
+### Changed
+
+- The fleet standing law (`kit-fleet-standing-law`) is back in the opt-in fleet rule pack, which `omp-kit apply rules --fleet` installs. It was removed in 0.2.99 before the contract that replaces it existed, and it stays until that contract lands. Every rule was first checked against the later decisions and the current code: 4 superseded rules were dropped (50 remain), outdated wording was updated, and each `mechanism=` now names the code that actually enforces the rule, or says `unenforced`.
+- The fleet safety rules were replayed against 57,896 real tool calls before they went back on. The changes:
+  - `kit-no-force-push` and `kit-scratch-tmp` are dropped. dcg and the fleet guard already block those actions.
+  - `kit-no-pattern-kill` now also fires when a call names its intent before the command.
+  - `kit-no-plaintext-secret` no longer fires on Infisical reference mappings such as `KEY:e.OTHER_KEY`, and it names `cf-secret run` as the fix.
+  - `kit-no-shared-merge` no longer fires on a rebase inside a builder worktree.
+  - `kit-no-live-tracker-sqlite` now covers eval, write and edit. Bash belongs to dcg.
+  - The rmrf, skill-instruction and send-verify rules now describe the current scratch, worktree and Agent Mail paths.
+- Every agent now wakes on its Agent Mail. A paused project (`fleet-watch` `pullEnabled: false`), a paused goal or unreadable fleet state no longer stores mail without waking its recipient: that rule had left 192 messages to the lead unwoken since 2026-11-04 behind the paused omp-test worker session. The `STOPPED_NOT_WOKEN` status and `arm_seat --override-pause` as a wake exception are gone.
+- A repo listed in `fleet-watch.json` now gets the in-process mail wake without its own `.omp/fleet.json`; a repo whose `.omp/fleet.json` says `"enabled": false` stays off.
+- The release notice now tells every seat to upgrade, including a seat whose goal is paused or whose project is stopped. Before, such a seat, the lead included, was told to stay paused and wait for a fleet restart, so it stayed on the old release. The self-restart keeps a paused goal paused, so upgrading never resumes paused work.
+
 ## [0.2.103] - 2026-11-09
 
 ### Changed

@@ -1,2 +1,0 @@
-- Every agent now wakes on its Agent Mail. A paused project (`fleet-watch` `pullEnabled: false`), a paused goal or unreadable fleet state no longer stores mail without waking its recipient: that rule had left 192 messages to the lead unwoken since 2026-11-04 behind the paused omp-test worker session. The `STOPPED_NOT_WOKEN` status and `arm_seat --override-pause` as a wake exception are gone.
-- A repo listed in `fleet-watch.json` now gets the in-process mail wake without its own `.omp/fleet.json`; a repo whose `.omp/fleet.json` says `"enabled": false` stays off.
