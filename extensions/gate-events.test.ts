@@ -122,3 +122,48 @@ test("recordGateEvent rescreens split secret flags in untrusted retained argv", 
 	expect(row.replay.arguments.argv).toEqual(["--api-key", "[REDACTED]", "--password=[REDACTED]", "-p[REDACTED]", "--project", "visible-value", "--token"]);
 	expect(row.replay.redacted).toBe(true);
 });
+
+test("LEDGERCLASS1: one refused act writes one row; the derived second write is absorbed", async () => {
+	const path = join(base, "ledgerclass-dedup.jsonl");
+	const first = await recordGateEvent({ seat: "PlumRaven", act: "bash", target: null, gate: "PARTIAL_RELEASE_REFUSED", kind: "refuse",
+		attempt: "attempt-dedup-1", event_id: "attempt-dedup-1", detail: "kit-flywheel-guard PARTIAL_RELEASE_REFUSED: held" }, { path });
+	expect(first.ok).toBe(true);
+	const second = await recordGateEvent({ seat: "PlumRaven", act: "unknown", target: null, gate: "guard-friction:PARTIAL_RELEASE_REFUSED", kind: "refuse",
+		attempt: "attempt-dedup-1", event_id: "attempt-dedup-1", detail: "kit-flywheel-guard PARTIAL_RELEASE_REFUSED: held" }, { path });
+	expect(second).toMatchObject({ ok: true, path });
+	const rows = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line));
+	expect(rows).toHaveLength(1);
+	expect(rows[0]).toMatchObject({ gate: "PARTIAL_RELEASE_REFUSED", kind: "refuse", attempt: "attempt-dedup-1" });
+});
+
+test("LEDGERCLASS1: a derived refusal without a prior refusal is still recorded once", async () => {
+	const path = join(base, "ledgerclass-singleton.jsonl");
+	const only = await recordGateEvent({ seat: null, act: "read", target: null, gate: "guard-friction:IDENTITY_UNBOUND", kind: "refuse",
+		attempt: "attempt-single-1", event_id: "attempt-single-1", detail: "kit-agent-mail-guard IDENTITY_UNBOUND" }, { path });
+	expect(only.ok).toBe(true);
+	const rows = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line));
+	expect(rows).toHaveLength(1);
+	expect(rows[0]).toMatchObject({ gate: "guard-friction:IDENTITY_UNBOUND", kind: "refuse" });
+});
+
+test("LEDGERCLASS1: a pass sibling does not absorb a later derived refusal; a commit-refusal derived row is absorbed", async () => {
+	const path = join(base, "ledgerclass-pass.jsonl");
+	await recordGateEvent({ seat: "PlumRaven", act: "close", target: "kit-1", gate: "kit-flywheel-guard", kind: "pass", attempt: "attempt-pass-1" }, { path });
+	await recordGateEvent({ seat: "PlumRaven", act: "unknown", target: null, gate: "guard-friction:WRITE_OWN_LOOKUP_UNAVAILABLE", kind: "refuse", attempt: "attempt-pass-1" }, { path });
+	await recordGateEvent({ seat: "PlumRaven", act: "commit", target: null, gate: "COMMIT_INCOMPLETE", kind: "refuse", attempt: "attempt-commit-1" }, { path });
+	await recordGateEvent({ seat: "PlumRaven", act: "unknown", target: null, gate: "commit-refusal:COMMIT_INCOMPLETE", kind: "refuse", attempt: "attempt-commit-1" }, { path });
+	const rows = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line));
+	expect(rows.map(row => [row.gate, row.kind])).toEqual([
+		["kit-flywheel-guard", "pass"],
+		["guard-friction:WRITE_OWN_LOOKUP_UNAVAILABLE", "refuse"],
+		["COMMIT_INCOMPLETE", "refuse"],
+	]);
+});
+
+test("LEDGERCLASS1 planted negative: a passing act writes one pass row and no refusal", async () => {
+	const path = join(base, "ledgerclass-pass-only.jsonl");
+	await recordGateEvent({ seat: "PlumRaven", act: "close", target: "kit-9", gate: "kit-flywheel-guard", kind: "pass", attempt: "attempt-passonly-1" }, { path });
+	const rows = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line));
+	expect(rows).toHaveLength(1);
+	expect(rows[0]).toMatchObject({ gate: "kit-flywheel-guard", kind: "pass" });
+});

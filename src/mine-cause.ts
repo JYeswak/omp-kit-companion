@@ -90,7 +90,7 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 	const lines = diagnostics.flatMap(diagnostic => diagnostic.split("\n").map(line => line.trim()));
 	const mcp = lines.map(line => line.match(/^MCP failure server: ([a-zA-Z0-9_-]+) tool: ([a-zA-Z0-9_.-]+) transport: \S+ stage: \S+ failure: \S+ retryable:/)).find(Boolean);
 	if (mcp) return finding(`mcp-transport:mcp__${mcp[1]!.replace(/-/g, "_")}_${mcp[2]}`, lines.find(line => line.startsWith("MCP failure server:")));
-	const guard = lines.map(line => line.match(/^fleet-guard [a-zA-Z0-9_.-]+ \(([A-Z][A-Z0-9_]+)\):/)).find(Boolean);
+	const guard = lines.map(line => line.match(/^(?:Error: )?fleet-guard [a-zA-Z0-9_.-]+ \(([A-Z][A-Z0-9_]+)\):/)).find(Boolean);
 	const refusal = lines.map(line => line.match(/^(?:(?:omp-kit|commit)[ :\-]+)?(MEMBER_REFUSED|REFUSED)\b/)).find(Boolean);
 	const code = text(first(["code", "guard_rule", "rule", "gate"]));
 	const kitGuard = lines.find(line => line.startsWith("kit-") || line.startsWith("[kit-"));
@@ -102,24 +102,197 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 		const cause = guard?.[1] || kitCode || code || refusal?.[1] || "unknown";
 		return finding(`${commit ? "commit-refusal" : "guard-friction"}:${toolName(cause)}`);
 	}
+	// LEDGERCLASS1 (ompkit-1ra0d.68): refusal shapes the header matchers above miss. A refused act
+	// already holds its ledger row under the gate name; these classes keep the miners' own outputs
+	// truthful without a second refusal row. Ordered: specific shapes before generic code matches.
+	// Text-derived codes pass the same scrub oracle as tool names: a redacted code yields no class.
+	const codeName = (code: string): string | null => {
+		const name = toolName(code);
+		return name === "unknown" ? null : name;
+	};
+	const gateText: readonly [RegExp, (match: RegExpMatchArray, line: string) => string | null][] = [
+		[/^(?:Error: )?fleet-guard ([A-Za-z0-9_.-]+):/, match => {
+			const name = codeName(match[1]!);
+			return name ? `guard-friction:${name}` : null;
+		}],
+		[/^(?:Error: )?dcg denied\b(.*)$/, match => {
+			const rule = /\(([A-Za-z0-9_.-]+\.[A-Za-z0-9_.:+-]{1,95})\)/.exec(match[1]!);
+			if (!rule) return "guard-friction:dcg-denied";
+			const name = codeName(rule[1]!);
+			return name ? `guard-friction:${name}` : null;
+		}],
+		// A gate header quoted mid-line (verify output citing the refusal it observed) still names its gate.
+		[/(?:^|[\s:"\[])(MEMBER_REFUSED|REFUSED|[A-Z][A-Z0-9_]*_REFUSED):/, match => {
+			const name = codeName(match[1]!);
+			return name ? `guard-friction:${name}` : null;
+		}],
+		[/^Embedded (?:code|shell command) blocked:/, () => "guard-friction:embedded-blocked"],
+		[/AM_GUARD_FAILED/, (match, line) => {
+			const id = /\((AM_[A-Z][A-Z0-9_]{1,60})\b/.exec(line) ?? /\b(AM_[A-Z][A-Z0-9_]{1,60})\b/.exec(line);
+			return id ? `guard-friction:${id[1]}` : null;
+		}],
+		[/\bRule: ([A-Za-z0-9_.-]+\.[A-Za-z0-9_.:+-]{1,95})\s*$/, match => {
+			const name = codeName(match[1]!);
+			return name ? `guard-friction:${name}` : null;
+		}],
+		[/"code"\s*:\s*"([A-Z][A-Z0-9_]*_REFUSED)"/, match => `guard-friction:${match[1]}`],
+		[/"overall"\s*:\s*"([A-Z][A-Z0-9_]*_(?:REQUIRED|REFUSED))"/, match => `guard-friction:${match[1]}`],
+		[/^RESOURCE_DEFERRED\b|heavy-work slots are occupied/, () => "guard-friction:resource-deferred"],
+		[/STALE installed member/, () => "guard-friction:stale-member"],
+		[/^\[close-evidence\] BLOCKED/, () => "guard-friction:close-evidence"],
+		[/\bIDENTITY_UNBOUND\b/, () => "guard-friction:IDENTITY_UNBOUND"],
+		[/^SLB CAUTION:/, () => "guard-friction:slb-caution"],
+		[/^SLB DANGEROUS:/, () => "guard-friction:slb-dangerous"],
+	];
+	for (const line of lines) for (const [pattern, toClass] of gateText) {
+		const gateMatch = pattern.exec(line);
+		if (gateMatch) { const classId = toClass(gateMatch, line); if (classId) return finding(classId, line); }
+	}
 	const named: readonly [RegExp, string][] = [
 		[/^(?:Errors:\s*Missing phase name for append operation|ValidationError:\s*phase name is required)\b/i, "validation:phase-name-required"],
 		[/^Process director verification decision:\s*Error:\s*Wiring disposition not persisted\b/, "assertion:wiring-disposition-not-persisted"],
 		[/^Per-call model is disabled for task calls \(task\.perCallModel: off\)\./, "validation:task-per-call-model-disabled"],
 		[/^content is required for \S+\./, "validation:content-required"],
 		[/^Failed to execute JSON query:\s*(?:Error:)?/, "validation:json-query"],
-		[/^This edit anchors to lines .* never displayed\b/, "validation:edit-undisplayed-anchor"],
+		[/^This edit anchors to lines .*?(displayed|exceed|shown|visible)\b/, "validation:edit-undisplayed-anchor"],
 		[/^Patch did not match\b/, "validation:edit-anchor-mismatch"],
+		[/^(?:Edit rejected for |`PUT \d+\.=\d+:` rejected:)/, "validation:edit-rejected"],
+		[/^line \d+: .*?(hunk|payload|PUT)\b/, "validation:edit-patch-failed"],
+		[/^Line \d+ does not exist/, "validation:edit-line-out-of-range"],
+		[/^(?:error: patch (?:failed|fragment)|Apply failed)/, "validation:edit-patch-failed"],
+		[/^(?:rc=\d+ )?Error: cannot index/, "validation:query-unindexable"],
+		[/suppression-no-reason/, "validation:pysafe-suppression-reason"],
 	];
 	for (const line of lines) {
 		for (const [pattern, cause] of named) if (pattern.test(line)) return finding(cause, line);
 		const diagnostic = line.match(/^(ValidationError|AssertionError|IdentityError):\s*(.+)$/);
 		if (diagnostic) return finding(`${diagnostic[1] === "AssertionError" ? "assertion" : diagnostic[1] === "IdentityError" ? "identity" : "validation"}:${slug(diagnostic[2]!)}`, line);
 	}
-	const timeoutDiagnostic = lines.some(line => /^(?:(?:Error:\s*)?(?:Command|Execution|Request) timed out\b|(?:Error:\s*)?(?:timeout|deadline exceeded)\b|MCP error -?\d+:\s*(?:Request )?(?:timed out|timeout)\b)/i.test(line));
+	const timeoutDiagnostic = lines.some(line => /^(?:(?:Error:\s*)?(?:Command|Execution|Request) timed out\b|(?:Error:\s*)?(?:timeout|deadline exceeded)\b|MCP error -?\d+:\s*(?:Request )?(?:timed out|timeout)\b)/i.test(line)
+		|| /\btimed? out after \d+(?:\.\d+)?\s*(?:ms|s|m)\b/i.test(line)
+		|| /\b[A-Z][A-Z0-9_]*(?:TIMEOUT|TIMED_OUT)[A-Z0-9_]*\b/.test(line));
 	if (timedOut !== false && (timedOut === true || exit === 124 || exit === 142 || outcome === "timeout" || timeoutDiagnostic)) {
 		return finding(`${/^mcp(?:__|[._-])/.test(tool) ? "mcp-transport" : "timeout"}:${toolName(tool)}`);
 	}
+	// LEDGERCLASS1: a check that answers with its own `name: CODE` verdict is that check's answer,
+	// kept visible like FINDING. Gate headers ending in _REFUSED are claimed by the table above.
+	const verdict = lines.map(line => line.match(/^[a-z][\w.-]*: ([A-Z][A-Z0-9_]{2,60})\b/)).find(Boolean);
+	if (verdict) return finding(`finding:${toolName(tool)}`, verdict[0]);
+	if (lines.some(line => /'overall':\s*'UNVERIFIED'|"overall"\s*:\s*"UNVERIFIED"/.test(line))) {
+		return finding(`finding:${toolName(tool)}`);
+	}
+	// LEDGERCLASS1: the agent's own call was wrong (bad path, bad args, stale refs, broken code).
+	// Actionable by the next call, and never a gate refusal.
+	const agentText: readonly [RegExp, string][] = [
+		[/Unknown ARIA ref/, "stale-ref"],
+		[/selector currently matches no elements|No element found for selector/, "selector-no-match"],
+		[/takes .* but was called as|takes no keyword arguments|takes \d+ positional arguments? but \d+ were given|expects? a dict of arguments|Invalid parameters/, "invalid-arguments"],
+		[/^error: unexpected argument/, "invalid-arguments"],
+		[/Invalid resource at/, "invalid-arguments"],
+		[/: Is a directory\b/, "invalid-arguments"],
+		[/unsupported request fields/, "invalid-arguments"],
+		[/did not match any file\(s\) known to git/, "path-not-found"],
+		[/\bno such file or directory\b/i, "path-not-found"],
+		[/^(?:Path|File) (?:not found:|"[^"]*" not found|'[^']*' not found)/, "path-not-found"],
+		[/:\s*unbound variable/, "unbound-variable"],
+		[/error TS\d+:/, "type-error"],
+		[/Cannot find module\b|\bModule not found\b|MODULE_NOT_FOUND/, "module-not-found"],
+		[/Agent not found:/, "unknown-agent"],
+		[/Artifact \d+ not found|Background job or service not found|Tool \S+ not found\. Did you mean|Did you mean:|Unknown skill:/, "unknown-reference"],
+		[/unknown revision|unable to resolve revision|not a git repository|ambiguous argument/, "bad-git-state"],
+		[/syntax error near unexpected token/, "syntax-error"],
+		[/blocked: covered by/, "element-covered"],
+		[/"code"\s*:\s*"INVALID_ARGUMENTS"/, "invalid-arguments"],
+	];
+	for (const line of lines) for (const [pattern, cause] of agentText) {
+		if (pattern.test(line)) return finding(`agent-input:${toolName(tool)}:${cause}`, line);
+	}
+	// LEDGERCLASS1: the tool or its environment failed (no browser here, backend down, upstream
+	// 5xx, a warning with a failing exit). Named causes, still tool-error rows.
+	const toolText: readonly [RegExp, string][] = [
+		[/No pages to adopt here/, "no-browser-target"],
+		[/relay .* is out of date/, "stale-relay"],
+		[/Tool execution was aborted:/, "aborted"],
+		[/DeprecationWarning|MODULE_TYPELESS_PACKAGE_JSON|\(\!\) Your \S+ config uses|^Warning: /, "warning"],
+		[/"status"\s*:\s*"RED"/, "red-verdict"],
+		[/"outcome"\s*:\s*"(?:partial|unavailable)"|'outcome':\s*'(?:partial|unavailable)'|no cursor to advance/, "incomplete-result"],
+		[/"outcome"\s*:\s*"complete"/, "wrapper-failed"],
+		[/"outcome"\s*:\s*"conflict"/, "version-conflict"],
+		[/"delivery"\s*:\s*"blocked"/, "delivery-blocked"],
+		[/"status"\s*:\s*"BACKOFF"/, "upstream-backoff"],
+		[/"(?:bridgeS|s)tatus":\s*503/, "upstream-unavailable"],
+		[/"injected"/, "injected-fault"],
+		[/Infisical unreachable|no cache fallback|machine-identity login failed|^cf-secret: /, "backend-unreachable"],
+		[/send_message failed; queued a durable UNSENT/, "message-unsent"],
+		[/: Input\/output error/, "io-error"],
+		[/Unable to read current working directory/, "missing-cwd"],
+		[/MISSING_PANE_ID|No pane_id provided/, "identity-unresolved"],
+		[/[×✖]|\bFAIL\b|\bfail [1-9]|\(fail\)|^not ok\b|fixture plan rejected|Unhandled error between tests|^\s*\d+\s*\|/, "test-failure"],
+	];
+	for (const line of lines) for (const [pattern, cause] of toolText) {
+		if (pattern.test(line)) return finding(`tool-error:${toolName(tool)}:${cause}`, line);
+	}
+	const lastExc = (pattern: RegExp): string | null => {
+		let found: string | null = null;
+		for (const line of lines) { const match = pattern.exec(line); if (match) found = match[1]!; }
+		return found;
+	};
+	const excName = lastExc(/(?:^|\s)([A-Za-z_]\w{0,60}(?:Error|Exception|Warning|Interrupt|Exit))\s*:/)
+		?? lastExc(/(?:^|\s)([A-Za-z_]\w{1,60}(?:Error|Exception|Warning|Interrupt|Exit))\b/);
+	if (excName) {
+		if (/timeout/i.test(excName)) return finding(`timeout:${toolName(tool)}`);
+		const lower = excName.toLowerCase();
+		const cause = lower === "filenotfounderror" ? "path-not-found" : lower === "modulenotfounderror" ? "module-not-found" : lower;
+		return finding(`agent-input:${toolName(tool)}:${cause}`);
+	}
+	if (lines.some(line => line.includes("Traceback (most recent call last):"))) {
+		return finding(`agent-input:${toolName(tool)}:python-error`);
+	}
+	const jsonCode = lines.map(line => line.match(/"code"\s*:\s*"([A-Z][A-Z0-9_]{2,60})"/)).find(Boolean);
+	if (jsonCode) {
+		if (codeName(jsonCode[1]!) !== null) return finding(`tool-error:${toolName(tool)}:${slug(jsonCode[1]!)}`, jsonCode[0]);
+	}
+	// LEDGERCLASS1: kit envelopes carry their verdict as data, not prose: the reader above parses
+	// JSON diagnostics into layers, so name the structured verdicts with the same classes as text.
+	// The caller's own labels (layers[0]) never count: only the record's own fields do (JEVDOCTOR1).
+	const structuredVerdict = (): string | null => {
+		const seen = new Set<unknown>();
+		const visit = (value: unknown): string | null => {
+			if (value === null || typeof value !== "object" || seen.has(value)) return null;
+			seen.add(value);
+			if (Array.isArray(value)) {
+				for (const item of value) { const found = visit(item); if (found) return found; }
+				return null;
+			}
+			const record = value as Record<string, unknown>;
+			const code = typeof record.code === "string" ? record.code : "";
+			if (/^[A-Z][A-Z0-9_]*_REFUSED$/.test(code)) return `guard-friction:${code}`;
+			if (code === "INVALID_ARGUMENTS") return `agent-input:${toolName(tool)}:invalid-arguments`;
+			if (record.status === "RED") return `tool-error:${toolName(tool)}:red-verdict`;
+			if (record.outcome === "partial" || record.outcome === "unavailable") return `tool-error:${toolName(tool)}:incomplete-result`;
+			if (record.outcome === "conflict") return `tool-error:${toolName(tool)}:version-conflict`;
+			if (record.delivery === "blocked") return `tool-error:${toolName(tool)}:delivery-blocked`;
+			if (record.outcome === "complete") return `tool-error:${toolName(tool)}:wrapper-failed`;
+			if (typeof record.overall === "string" && /^[A-Z][A-Z0-9_]*_(?:REQUIRED|REFUSED)$/.test(record.overall)) return `guard-friction:${record.overall}`;
+			if (record.overall === "UNVERIFIED") return `finding:${toolName(tool)}`;
+			if (record.status === "BACKOFF") return `tool-error:${toolName(tool)}:upstream-backoff`;
+			if (record.status === 503 || record.bridgeStatus === 503) return `tool-error:${toolName(tool)}:upstream-unavailable`;
+			if (record.error === "injected") return `tool-error:${toolName(tool)}:injected-fault`;
+			if (code !== "FINDING" && /^[A-Z][A-Z0-9_]{2,60}$/.test(code) && codeName(code) !== null) return `tool-error:${toolName(tool)}:${toolName(code)}`;
+			for (const key of ["errors", "error", "data", "result", "details"] as const) {
+				const found = visit(record[key]);
+				if (found) return found;
+			}
+			return null;
+		};
+		for (let index = 1; index < layers.length; index++) {
+			const found = visit(layers[index]);
+			if (found) return found;
+		}
+		return null;
+	};
+	const structured = structuredVerdict();
+	if (structured) return finding(structured);
 	// JEVDOCTOR1 (ompkit-fp72.120.16.161): a failed record that carries its own contract code is
 	// that class, never unclassified. Only the record's own `code` counts: a guard rule on a failed
 	// call is not its cause. The kit's exit-1 class FINDING is a check's answer, kept visible.

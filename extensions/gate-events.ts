@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+	import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { appendJsonl } from "../src/kitlib/jsonl.ts";
@@ -97,6 +97,43 @@ export function gateFromReason(reason: string): string {
 	return reason.trim().split(/\s+/)[0] ?? "UNKNOWN";
 }
 
+/** A refusal class derived from refusal text, never a gate's own verdict. */
+const DERIVED_REFUSAL_GATE = /^(?:guard-friction|commit-refusal):/;
+/** How far back to look for the first refusal of one attempt; the second write lands seconds later. */
+const DERIVED_SIBLING_TAIL_BYTES = 256 * 1024;
+
+/** Whether the ledger already holds a non-derived refusal row for this attempt. Fail-open: any read failure keeps the append. */
+function hasRefuseSibling(path: string, attempt: string): boolean {
+	let fd = -1;
+	try {
+		fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+		const stat = fstatSync(fd);
+		if (!stat.isFile() || stat.size <= 0) return false;
+		const start = Math.max(0, stat.size - DERIVED_SIBLING_TAIL_BYTES);
+		const buffer = Buffer.alloc(Math.min(stat.size - start, DERIVED_SIBLING_TAIL_BYTES));
+		let got = 0;
+		while (got < buffer.length) {
+			const n = readSync(fd, buffer, got, buffer.length - got, start + got);
+			if (n <= 0) break;
+			got += n;
+		}
+		const rows = buffer.subarray(0, got).toString("utf8").split("\n");
+		// A nonzero start may cut a row in two; it cannot complete a later row.
+		for (let index = start > 0 ? 1 : 0; index < rows.length; index++) {
+			const raw = rows[index]!.trim();
+			if (raw === "") continue;
+			let row: { kind?: unknown; gate?: unknown; attempt?: unknown };
+			try { row = JSON.parse(raw) as typeof row; } catch { continue; }
+			if (row.kind === "refuse" && row.attempt === attempt && typeof row.gate === "string" && !DERIVED_REFUSAL_GATE.test(row.gate)) return true;
+		}
+		return false;
+	} catch {
+		return false;
+	} finally {
+		if (fd >= 0) try { closeSync(fd); } catch { /* Best effort. */ }
+	}
+}
+
 export async function recordGateEvent(event: GateEvent, options: { env?: Record<string, string | undefined>; home?: string; path?: string } = {}): Promise<{ ok: true; path: string } | { ok: false; why: string }> {
 	const recordedAt = new Date().toISOString();
 	const startedAt = event.started_at ?? recordedAt;
@@ -125,6 +162,14 @@ export async function recordGateEvent(event: GateEvent, options: { env?: Record<
 		...(event.detail ? { detail: clean(event.detail)?.slice(0, 400) } : {}),
 		...(metadataRedacted ? { metadata_redacted: true } : {}),
 		...(metadataTruncated ? { metadata_truncated: true } : {}) };
+	// LEDGERCLASS1 (ompkit-1ra0d.68): one refused act writes one row. The guard records the block
+	// (gate X) and classifies the same attempt again (gate guard-friction:X / commit-refusal:X). The
+	// derived class belongs in the miners' own outputs, not in a second refusal row: when the ledger
+	// already holds a refusal for this attempt, the second write is absorbed. Fail-open by construction.
+	if (row.kind === "refuse" && typeof row.gate === "string" && DERIVED_REFUSAL_GATE.test(row.gate)
+		&& typeof row.attempt === "string" && row.attempt !== "" && hasRefuseSibling(path, row.attempt)) {
+		return { ok: true, path };
+	}
 	try {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 		// The lock lives beside the ledger, so a test or a seat with its own XDG_STATE_HOME never shares a lock root.
