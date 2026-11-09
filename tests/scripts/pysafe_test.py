@@ -26,6 +26,11 @@ if _spec is None or _spec.loader is None:
 pysafe = importlib.util.module_from_spec(_spec)
 sys.modules["pysafe"] = pysafe
 _spec.loader.exec_module(pysafe)
+_store_spec = importlib.util.spec_from_file_location("full_suite_verdict_store", ROOT / "scripts" / "full-suite-verdict-store.py")
+if _store_spec is None or _store_spec.loader is None:
+    raise ImportError("cannot load scripts/full-suite-verdict-store.py")
+_store = importlib.util.module_from_spec(_store_spec)
+_store_spec.loader.exec_module(_store)
 
 
 def alive(pid: int) -> bool:
@@ -39,7 +44,11 @@ def alive(pid: int) -> bool:
 
 
 def wait_dead(pid: int, budget: float = 3.0) -> bool:
-    deadline = time.monotonic() + budget
+    # PYSAFEFLAKE1: the reap is a watchdog the scheduler runs, so its quiet-machine budget scales with host load
+    # by the one fixture formula (factor 1..4, full-suite-verdict-store.load_factor). The 0.2.106 candidate's
+    # full suite saw the ParentDeath child outlive a fixed 3.0 s at load ~38; three runs alone at load ~13 passed.
+    # A reaper that never reaps still fails: its child sleeps 300 s, past the 12 s ceiling.
+    deadline = time.monotonic() + budget * _store.load_factor()[1]
     while time.monotonic() < deadline:
         if not alive(pid):
             return True
