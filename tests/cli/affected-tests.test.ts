@@ -313,7 +313,7 @@ test("EMBEDDEP1 a planted rules-fleet change selects the suite loading that rule
 		rmSync(dir, { recursive: true, force: true });
 	}
 	// The live tree: the G5 escape, and the echo-literal and harness suites for a rules/ rule.
-	expect(selectWithStatus(root, ["rules-fleet/kit-no-force-push.md"]).tests).toContain("tests/cli/rx2-rules.test.ts");
+	expect(selectWithStatus(root, ["rules-fleet/kit-no-pattern-kill.md"]).tests).toContain("tests/cli/rx2-rules.test.ts");
 	const shipped = selectWithStatus(root, ["rules/kit-rea-runtime-shipped.md"]).tests;
 	expect(shipped).toContain("tests/cli/echo-literal-rules.test.ts");
 	expect(shipped).toContain("tests/cli/ttsr-harness.test.ts");

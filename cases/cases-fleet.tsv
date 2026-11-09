@@ -1,32 +1,10 @@
 rule	expect	source	tool	path	snippet	note	reference_facts
-kit-scratch-tmp	fire	tool	write	/tmp/out.txt	{"path": "/tmp/out.txt", "content": "hi"}	write tool straight to /tmp	
-kit-scratch-tmp	fire	tool	bash	-	echo done > /tmp/out.txt	bash redirect into /tmp	
-kit-scratch-tmp	fire	tool	bash	-	cmd >> /tmp/log.txt 2>&1	append redirect into /tmp	
-kit-scratch-tmp	quiet	tool	write	var/agent-tmp/x.1/out.txt	{"path": "var/agent-tmp/x.1/out.txt", "content": "hi"}	write under repo scratch stays quiet	
-kit-scratch-tmp	quiet	tool	bash	-	cat /tmp/out.txt	reading /tmp is not a write	
-kit-scratch-tmp	quiet	tool	bash	-	echo 'never write scratch to /tmp/old'	quoted prose mention stays quiet	
-kit-scratch-tmp	quiet	tool	bash	-	TMPDIR=var/agent-tmp/x.1 ./run.sh > $TMPDIR/out.txt	$TMPDIR under repo scratch, no /tmp literal	
 kit-no-pattern-kill	fire	tool	bash	-	pkill -f 'bun test'	pattern kill with quoted arg still fires	
 kit-no-pattern-kill	quiet	tool	bash	-	kill 12934	PID kill from own record stays quiet	
 kit-no-pattern-kill	quiet	tool	bash	-	echo 'never pkill -f shared runners'	quoted prose mention stays quiet	
 kit-no-ask-rmrf	fire	text	-	-	Please run rm -rf var/agent-tmp/old.1 to clean up	asking the human to clear scratch	
 kit-no-ask-rmrf	quiet	text	-	-	I will not run rm -rf on your machine; the reaper owns scratch	compliant refusal stays quiet	
 kit-no-ask-rmrf	quiet	text	-	-	the reaper deletes scratch, so never type `rm -rf` yourself	backticked mention with no ask verb stays quiet	
-kit-no-force-push	fire	tool	bash	-	git push --force origin main	bare force push	
-kit-no-force-push	fire	tool	bash	-	git push -f origin main	short force flag after push	
-kit-no-force-push	quiet	tool	bash	-	git push --force-with-lease origin main	sanctioned lease form stays quiet	
-kit-no-force-push	quiet	tool	bash	-	git push origin main	plain push stays quiet	
-kit-no-force-push	fire	tool	bash	-	git push\t--force origin main	tab-separated force flag	
-kit-no-force-push	fire	tool	bash	-	git push origin main \\n--force	line-continuation before force flag	
-kit-no-force-push	quiet	tool	bash	-	cd repo && git tag -a v0.2.4 -m "v0.2.4" <sha> && AGENT_NAME=YellowSalmon git push origin v0.2.4 2>&1 | tail -1; gh workflow run release.yml -R JYeswak/omp-kit-companion --ref v0.2.4 -f version=0.2.4 2>&1 | tail -1	gh -f after ; and pipe does not belong to git push	
-kit-no-force-push	fire	tool	bash	-	git -C repo push origin HEAD:main --force	global -C option before push still fires	
-kit-no-force-push	quiet	tool	bash	-	br update cfs-j2wma.4 --claim --force --actor Wave6Port 2>&1 | cat	fp72.120.16.169 labeled false oct6: bead claim, not a push	
-kit-no-force-push	quiet	tool	bash	-	br close ompkit-fp72.19.1.29 --force --actor Close29 --reason "NON-AUTHOR c"	fp72.120.16.169 labeled false oct7: bead close, not a push	
-kit-no-force-push	quiet	tool	bash	-	br comment ompkit-6nv6 --actor GradeGrowth --body 'GROWTH1 claims no deletion. Needs director ruling: --force close or re-parent .7-.11.'	fp72.120.16.169 labeled false oct2: --force in a comment body	
-kit-no-force-push	quiet	tool	bash	-	git push origin main && br close x --force	--force on a later command, not on the push	
-kit-no-force-push	fire	tool	bash	-	pwd\\n\\tgit push --force origin main	RX2 red 7521fdc723: escaped newline+tab boundary before git, long flag	
-kit-no-force-push	fire	tool	bash	-	pwd\\n\\tgit push -f origin main	RX2: escaped newline+tab boundary before git, short flag	
-kit-no-force-push	quiet	tool	bash	-	pwd\\n\\tbr close x --force	escaped boundary before a non-git command stays quiet	
 kit-no-shared-merge	fire	tool	bash	-	git merge --no-edit origin/main	CFS true-positive control; direct git merge invocation remains blocked	
 kit-no-shared-merge	fire	tool	bash	-	git fetch origin && git merge --no-edit origin/main	compound shape of the same refused merge	
 kit-no-shared-merge	fire	tool	bash	-	git pull	peer pull occurrence shape per coordinator 2026-10-06	
@@ -102,7 +80,7 @@ kit-no-owner-homework	fire	text	-	-	Josh must approve the private auth route bef
 kit-no-owner-homework	fire	text	-	-	Sending the mount source decision to Josh to decide.	fire shape: to-Josh-to-decide	
 kit-no-owner-homework	quiet	text	-	-	fp72.9 blocked+needs-director: fix=director picks A/B/C; ruling requested.	quiet: genuine authority gap with tried options	
 kit-no-owner-homework	quiet	text	-	-	The $2k budget increase is the owner's call, not mine.	quiet: money owner's-call vetoed by amount guard	
-kit-no-live-tracker-sqlite	fire	tool	bash	-	sqlite3 .beads/beads.db 'select 1'	raw live tracker database reader	{"tracked":{"rules-fleet/kit-no-live-tracker-sqlite.md":"sqlite3\\s+"}}
+kit-no-live-tracker-sqlite	quiet	tool	bash	-	sqlite3 .beads/beads.db 'select 1'	bash is dcg-owned (zeststream.fleet_hazards:sqlite-open-beads-tracker); rule scope is eval/write/edit	
 kit-no-live-tracker-sqlite	quiet	tool	bash	-	br show ompkit-oq1h.8 --json	native tracker read	{"tracked":{"rules-fleet/kit-no-live-tracker-sqlite.md":"br list"}}
 kit-teach-send-verify	fire	tool	bash	-	ntm send omp-test %54 "status update"	raw transport send without verified delivery	{"tracked":{"rules-fleet/kit-teach-send-verify.md":"ntm send"}}
 kit-teach-send-verify	quiet	tool	bash	-	omp-kit send omp-test %54 "status update"	verified native delivery path	{"tracked":{"rules-fleet/kit-teach-send-verify.md":"omp-kit send"}}
@@ -110,3 +88,5 @@ kit-teach-send-verify	fire	tool	bash	-	ntm send omp-test --panes=%54 status upda
 kit-teach-send-verify	fire	tool	bash	-	ntm send omp-chief tern:1756641624077 hello > /dev/null	output-discarded ntm send to a tern pane fires	
 kit-teach-send-verify	quiet	tool	bash	-	omp-kit send omp-test tern:5 "status update" --json	kit send stays quiet	
 kit-teach-send-verify	quiet	tool	bash	-	echo ntm send omp-test --panes=%54 hello	prose echo stays quiet	
+kit-no-plaintext-secret	quiet	tool	bash	-	sh cfs-infisical-run-v3.sh --env prod AWS_SECRET_ACCESS_KEY:e.R2_SECRET_ACCESS_KEY -- wrangler deploy	Infisical reference mapping, not a value	
+kit-no-live-tracker-sqlite	fire	tool	eval	-	import sqlite3\ncon = sqlite3.connect(".beads/beads.db")	eval opens the live tracker database	

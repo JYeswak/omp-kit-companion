@@ -20,13 +20,14 @@ condition:
   # still sit inside that string.
   - '(sqlite3?|Database)(?:(?<!(?:^|"command"\s{0,8}:\s{0,8}"|[;&|\n\r]|(?<!\\)\\n)(?:[ \t]|\\t){0,8}(?:echo|printf)[ \t](?:[^;&|\\"\n\r(\x60{]|\\[^n]){0,200}(?:sqlite3?|Database))|(?=(?:[^\\"\n\r]|\\[^n]){0,400}\|[ \t]{0,16}(?:(?:sudo|env|exec)[ \t]{1,16})?(?:[\w./-]{0,60}/)?(?:python[0-9.]{0,5}|node|bun|deno|sh|bash|zsh|dash|sqlite3)[\s;&|)"\\])|(?=(?:[^;&|\\"\n\r]|\\[^n]){0,400}?>{1,2}[ \t]{0,16}(?:\\"|'')?(?:\./)?(?<rt>[\w.-][\w./-]{0,79})(?![\w./-])(?:[^\\"]|\\.){0,2000}?(?:(?<=[^\w./-]|\\[nt])(?:sh|bash|zsh|dash|source|\.|python[0-9.]{0,5}|node|bun|deno)[ \t]{1,16}(?:-[\w-]{1,16}[ \t]{1,16}){0,2}(?:\\"|'')?(?:\./)?|(?<=[^\w./-]|\\[nt])chmod[ \t]{1,16}[ugoa]{0,3}\+x[ \t]{1,16}(?:\\"|'')?(?:\./)?|(?:[;&|\n\r(\x60]|(?<!\\)\\n|"command"\s{0,8}:\s{0,8}")[ \t]{0,8}(?:\\"|'')?\./)\k<rt>(?=[\s;&|)\x60"''\\])))(\s*\(\s*|\s*\.\s*(open|connect)\s*\(\s*)(?:[rRbBfFuU]{1,2})?(?:\\{1,3})?["''][^"'']*\.beads[\\/]beads\.db'
   - 'ATTACH\s+(DATABASE\s+)?["''][^"'']*\.beads[\\/]beads\.db'
-scope: tool:bash, tool:eval, tool:write, tool:edit
+scope: tool:eval, tool:write, tool:edit
 interruptMode: always
 ---
 **Blocked before it ran.** The command you were composing opens the live tracker database directly instead of going through the native tracker tools. It was cut off while you wrote it, so the blocked call did not execute. Do not re-issue it unchanged.
 
 A raw SQLite reader on a live `.beads/beads.db` races the tracker writer: reads can observe a half-written page, and any writer handle (including a lingering open from a persistent eval kernel) can wedge the next migration or recovery. Eval cells are covered too: the measured outages (2026-10-13, 10-22, 10-24) each came from a persistent eval kernel holding such a connection. Use the native tools instead:
 
+- In bash, dcg (`zeststream.fleet_hazards:sqlite-open-beads-tracker`) refuses a raw reader before this rule would; this rule covers eval cells and the scripts you write.
 - `br list`, `br show <id>`, `bv --robot-triage` and the other native read commands stay quiet under this rule.
 - To run SQL, copy the database to a disposable path first (`var/agent-tmp/<label>.<pid>/beads-copy.db`), then open the copy. The copy must not live at a `.beads/beads.db` path or this rule still fires.
 

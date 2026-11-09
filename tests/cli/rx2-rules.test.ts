@@ -11,16 +11,12 @@ const root = resolve(import.meta.dir, "../..");
 const ruleNames = [
 	["rules", "bash-pipe-exit"],
 	["rules", "kit-close-reason-no-evidence"],
-	["rules-fleet", "kit-no-force-push"],
 	["rules-fleet", "kit-no-pattern-kill"],
 	["rules", "kit-no-verify"],
-	["rules-fleet", "kit-scratch-tmp"],
 	["rules", "kit-settings-mutation"],
 ] as const;
 
 const cases: [string, "fire" | "quiet", string, string][] = [
-	["kit-scratch-tmp", "fire", "tool", "pwd\\n\\tcat >/tmp/rx2-scratch"],
-	["kit-scratch-tmp", "quiet", "tool", "printf '%s' '>/tmp/rx2-scratch'"],
 	["kit-no-verify", "fire", "tool", "pwd\\n\\tgit commit --no-verify"],
 	["kit-no-verify", "quiet", "tool", "printf '%s' 'git commit --no-verify'"],
 	["bash-pipe-exit", "fire", "tool", "pwd\\n\\tfalse | head -1; echo $?"],
@@ -31,8 +27,6 @@ const cases: [string, "fire" | "quiet", string, string][] = [
 	["kit-close-reason-no-evidence", "quiet", "tool", "br close issue-123 --reason 'bun test tests/cli/ttsr-harness.test.ts -> 23 passed'"],
 	["kit-no-pattern-kill", "fire", "tool", "pwd\\n\\tpkill node"],
 	["kit-no-pattern-kill", "quiet", "tool", "echo 'never pkill node'"],
-	["kit-no-force-push", "fire", "tool", "pwd\\n\\tgit push --force origin main"],
-	["kit-no-force-push", "quiet", "tool", "pwd\\n\\tgit push --force-with-lease origin main"],
 ];
 
 function makeFixture(): string {

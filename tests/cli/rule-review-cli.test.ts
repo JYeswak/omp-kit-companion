@@ -168,7 +168,8 @@ test("TTSRFRICTION1: a rule whose labeled-sample fires are mostly false refusals
 	expect(hash(readFileSync(planted))).toBe("103d683ec251f0493e0e0bd90258729eb5b4b161137ba39d1e4f1540c0adf102");
 	const root = join(base, "ttsrfriction1");
 	const cases = header + forcePushSample.map(([want, snippet, note]) => ["kit-no-force-push", want, "tool", "bash", "-", snippet, note, ""].join("\t")).join("\n") + "\n";
-	for (const [side, rule] of [["incumbent", planted], ["candidate", join(source, "rules-fleet/kit-no-force-push.md")]] as const) {
+	// The narrowed rule left the shipped pack (dcg owns force-push); its last shipped text is the candidate fixture.
+	for (const [side, rule] of [["incumbent", planted], ["candidate", join(source, "tests/cli/fixtures/ttsrfriction1-kit-no-force-push.candidate.md")]] as const) {
 		mkdirSync(join(root, side, "rules"), { recursive: true });
 		writeFileSync(join(root, side, "rules", "kit-no-force-push.md"), readFileSync(rule));
 		writeFileSync(join(root, side, "cases.tsv"), cases);

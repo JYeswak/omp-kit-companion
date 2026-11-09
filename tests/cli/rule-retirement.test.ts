@@ -11,7 +11,8 @@ import { fixtureDeadlineS } from "./fixture-process.ts";
 const root = resolve(import.meta.dir, "../..");
 // The installed OMP source directory is selected at runtime, not a bundled module.
 const { TtsrManager } = await import(join(OMP_SRC, "export/ttsr.ts"));
-const retired = ["kit-standing-law", "kit-fleet-standing-law", "kit-gate-must-name-the-plant", "kit-relative-path-not-cwd", "kit-weasel-retry", "zz-canary-scope-probe"];
+// kit-fleet-standing-law is restored (J-2026-11-08-03: the law stays until CONTRACT1, ompkit-1ra0d.14, replaces it).
+const retired = ["kit-standing-law", "kit-gate-must-name-the-plant", "kit-relative-path-not-cwd", "kit-weasel-retry", "zz-canary-scope-probe"];
 const pack = () => [...loadRules(join(root, "rules")), ...loadRules(join(root, "rules-fleet"))];
 function matched(text: string, source = "text", toolName?: string, filePaths?: string[]): string[] {
 	const manager = new TtsrManager({ enabled: true, disabledRules: [] });
@@ -27,6 +28,14 @@ test("merged-honesty-contract: no duplicated always-context; measured completion
 	expect(pack().filter(loaded => retired.includes(loaded.name) && loaded.rule.alwaysApply).map(loaded => loaded.name)).toEqual([]);
 	expect(matched("UNVERIFIED: cargo test -p parser has not been run.")).not.toContain("kit-unverified-done");
 	expect(matched("Done. All tests pass.")).toContain("kit-unverified-done");
+});
+
+// Dropped after replay validation (J-2026-11-09-03): native guards own these (dcg core.git:push-force-*,
+// fleet-guard system-temp), so a TTSR copy only double-fires. A restored file fails here.
+test("dropped fleet rules stay out of the pack: kit-no-force-push, kit-scratch-tmp", () => {
+	const names = pack().map(loaded => loaded.name);
+	expect(names.filter(name => name === "kit-no-force-push" || name === "kit-scratch-tmp")).toEqual([]);
+	expect(names).toContain("kit-no-pattern-kill");
 });
 
 test("starter-checker-negative: checker execution needs no reminder; a missed defect fails its selftest", async () => {

@@ -11,8 +11,8 @@ interruptMode: never
 ---
 This skill text teaches agents an act the fleet forbids, and every agent that loads the skill will repeat it. Rewrite the line before you finish the write:
 
-- `--worktrees` or `git worktree add` breaks **one canonical checkout on main**. Agent Mail file reservations are the isolation. Write `ntm spawn <proj> --cc=2` (no worktrees) and tell workers to reserve their exact paths.
-- `git pull --rebase`, `git rebase` or `git stash` breaks **no rebase or stash in a shared checkout**: each moves or hides other agents' uncommitted work. Write the single-history save instead: `git commit --only -- <paths>` on `main`, then `git push origin main`; when origin moved, `python3 ~/Developer/omp-kit/scripts/git_converge.py --repo <repo> --push`.
+- `--worktrees` or `git worktree add` breaks **the canonical checkout on main**. A builder's isolation is its own Worktrunk worktree (`wt switch --create <branch> --no-cd`, J-2026-11-07-01) plus Agent Mail file reservations on its exact paths; the lead fans work out through background `task` agents.
+- `git pull --rebase`, `git rebase` or `git stash` in a **canonical** checkout moves or hides other agents' uncommitted work. Teach instead: builders commit on their branch and never push; only the lead lands to main (`omp-kit land --paths <paths> --message <msg> --apply --yes`, or `python3 ~/Developer/omp-kit/scripts/git_converge.py --repo <repo> --push` when origin moved).
 - `br close <id> --reason "done"` (or `Completed`, `fixed`, `resolved`) breaks **director-only evidence close**: workers report, the director re-runs the check and closes with evidence. Write `br close <id> --reason "<command> -> <result>; commit <sha>"`.
 - A `commit-tree` landing taught without `git hook run commit-msg` breaks **the verification-level gate**: plumbing skips the commit hooks, so teach `GIT_INDEX_FILE=<same idx> git hook run commit-msg -- <msgfile>` before `commit-tree`, exit 0 required, or the push lands level-less commits the pre-push member refuses.
 

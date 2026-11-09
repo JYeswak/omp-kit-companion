@@ -5,4 +5,4 @@ condition:
 scope: text
 interruptMode: prose-only
 ---
-This asks the human to clear scratch with `rm -rf`. AGENTS.md (Storing) forbids it in both directions: never `rm -rf` scratch yourself, and never ask the human to. The machine reaper deletes owned scratch dirs once their owner process is dead; unowned dirs age out through quarantine on their own.
+This asks the human to clear scratch with `rm -rf`. `~/.agents/AGENTS.md` (Storing) forbids it in both directions: never `rm -rf` scratch yourself, and never ask the human to. Release your own scratch with `omp-kit scratch release <dir> --bin throwaway --now`; the reaper deletes owned dirs once their owner process is dead, and unowned dirs age out through quarantine on their own.
