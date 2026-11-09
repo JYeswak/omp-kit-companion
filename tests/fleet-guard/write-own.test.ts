@@ -36,7 +36,7 @@ writeScratchOwner(owned, { pid: process.pid, label: "own", repo, created: new Da
 // Test seam for the Agent Mail CLI only: the guard's real spawn, attestation and hold parsing run unchanged.
 const fixtureBin = join(scratch, "bin");
 mkdirSync(fixtureBin, { recursive: true });
-writeFileSync(join(fixtureBin, "am"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AM_FIXTURE_CALLS\"\nif [ \"$AM_FIXTURE_MODE\" = \"fail\" ]; then echo 'connection refused' >&2; exit 1; fi\nif [ -n \"$AM_FIXTURE_PROJECT\" ]; then\n  project=\"\"\n  while [ \"$#\" -gt 0 ]; do\n    if [ \"$1\" = \"--project\" ]; then project=\"$2\"; break; fi\n    shift\n  done\n  if [ \"$project\" != \"$AM_FIXTURE_PROJECT\" ]; then printf '%s' \"$AM_FIXTURE_OTHER_RESPONSE\"; exit 0; fi\nfi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n");
+writeFileSync(join(fixtureBin, "am"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AM_FIXTURE_CALLS\"\nif [ \"$AM_FIXTURE_MODE\" = \"fail\" ]; then echo 'connection refused' >&2; exit 1; fi\nif [ -n \"$AM_FIXTURE_AGENT\" ]; then\n  for a in \"$@\"; do\n    if [ \"$prev\" = \"--agent\" ] && [ \"$a\" = \"$AM_FIXTURE_AGENT\" ]; then printf '%s' \"$AM_FIXTURE_AGENT_RESPONSE\"; exit 0; fi\n    prev=\"$a\"\n  done\nfi\nif [ -n \"$AM_FIXTURE_PROJECT\" ]; then\n  project=\"\"\n  while [ \"$#\" -gt 0 ]; do\n    if [ \"$1\" = \"--project\" ]; then project=\"$2\"; break; fi\n    shift\n  done\n  if [ \"$project\" != \"$AM_FIXTURE_PROJECT\" ]; then printf '%s' \"$AM_FIXTURE_OTHER_RESPONSE\"; exit 0; fi\nfi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n");
 chmodSync(join(fixtureBin, "am"), 0o755);
 const callLog = join(scratch, "am-calls.log");
 
@@ -253,5 +253,35 @@ describe("WRITEOWN1 AC2: a failed reservation lookup refuses with a named error,
 			expect(result?.reason).toContain("WRITE_OWN_NO_IDENTITY");
 			expect(result?.reason).toContain("AGENT_NAME");
 		});
+	});
+});
+
+describe("NATIVEPREGRADE1 (ompkit-1ra0d.41): a native child writes under its own hold or its seat's", () => {
+	const childWrite = (path: string, childAgentName: string) =>
+		handleToolCall({ toolName: "write", input: { path, content: "planted\n" }, cwd: repo }, { cwd: repo, lookupReservations: neutral, childAgentName });
+	async function asChild<T>(childHolds: unknown, run: () => Promise<T>): Promise<T> {
+		process.env.AM_FIXTURE_AGENT = "ChildBuilder";
+		process.env.AM_FIXTURE_AGENT_RESPONSE = JSON.stringify(childHolds);
+		try { return await run(); } finally { delete process.env.AM_FIXTURE_AGENT; delete process.env.AM_FIXTURE_AGENT_RESPONSE; }
+	}
+	test("the child's own exclusive hold admits its write; the seat holding nothing does not matter", async () => {
+		await withAm(holds("Seat"), "ok", "Seat", () => asChild(holds("ChildBuilder", "scripts/x.py"), async () => {
+			expect(await childWrite("scripts/x.py", "ChildBuilder")).toBeUndefined();
+			// The seat itself, without the child's identity, is still refused on the same path.
+			expect((await write("scripts/x.py"))?.reason).toContain("WRITE_OWN_UNRESERVED");
+		}));
+	});
+	test("control: the seat's hold still covers its child (the parent reserves on the child's behalf)", async () => {
+		await withAm(holds("Seat", "scripts/x.py"), "ok", "Seat", () => asChild(holds("ChildBuilder"), async () => {
+			expect(await childWrite("scripts/x.py", "ChildBuilder")).toBeUndefined();
+		}));
+	});
+	test("planted: a path neither the child nor its seat holds is refused, and another child's hold is no cover", async () => {
+		await withAm(holds("Seat"), "ok", "Seat", () => asChild(holds("ChildBuilder", "scripts/other.py"), async () => {
+			const result = await childWrite("scripts/x.py", "ChildBuilder");
+			expect(result?.block).toBe(true);
+			expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");
+			expect((await childWrite("scripts/other.py", "SomeOtherChild"))?.reason).toContain("WRITE_OWN_UNRESERVED");
+		}));
 	});
 });

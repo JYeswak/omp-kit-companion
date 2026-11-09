@@ -1,0 +1,1 @@
+- A background task agent can now write files it reserved under its own Agent Mail name; a reservation its parent seat holds still covers it, so parallel builders no longer fail with WRITE_OWN_UNRESERVED.

@@ -20,6 +20,9 @@ export interface FleetPolicyVerdict { kind: "on" | "off" | "unavailable"; root: 
 
 export interface WriteOwnContext extends FleetGuardContext {
 	fleetPolicy: (directory: string) => Promise<FleetPolicyVerdict>;
+	/** NATIVEPREGRADE1 (ompkit-1ra0d.41): a native task child's own spawn-minted, registered name. Its exclusive holds
+	 * cover its writes; the seat's (AGENT_NAME) still do too, so a parent may reserve on a child's behalf. */
+	childAgentName?: string;
 }
 
 /**
@@ -306,7 +309,16 @@ async function judge(candidates: readonly Candidate[], context: WriteOwnContext)
 		byRoot.set(root, [...byRoot.get(root) ?? [], { candidate, rel, probe }]);
 	}
 	for (const [root, judged] of byRoot) {
-		const gaps = reservationGaps(root, judged.map((entry) => entry.probe), context.agentName);
+		let gaps = reservationGaps(root, judged.map((entry) => entry.probe), context.agentName);
+		if (context.childAgentName && gaps.kind !== "unavailable") {
+			const own = reservationGaps(root, judged.map((entry) => entry.probe), context.childAgentName);
+			if (own.kind === "unavailable") gaps = own;
+			else if (own.kind === "checked") {
+				const seat = gaps;
+				const stillOpen = seat.kind === "checked" ? own.uncovered.filter((probe) => seat.uncovered.includes(probe)) : own.uncovered;
+				gaps = { kind: "checked", agent: own.agent, uncovered: stillOpen, foreign: own.foreign.filter((f) => stillOpen.includes(f.path)) };
+			}
+		}
 		const first = judged[0]!;
 		const shown = (entry: Judged): string => entry.candidate.scope === "children" ? `${entry.rel}/*` : entry.rel;
 		if (gaps.kind === "identity") {

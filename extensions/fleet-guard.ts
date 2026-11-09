@@ -9,6 +9,7 @@ import { check as checkDurability } from "../src/fleet-guard/durability.ts";
 import { check as checkWriteOwnership } from "../src/fleet-guard/write-own.ts";
 import { checkPlutilInPlace } from "../src/fleet-guard/plutil.ts";
 import { fleetPolicyState } from "./fleet-policy.ts";
+import { nativeIdentity, type NativeContext } from "./native-identity.ts";
 
 /**
  * fleet-guard: force the fleet rules inside the session instead of asking.
@@ -77,12 +78,15 @@ export function checkContention(event: FleetGuardEvent, ncpu = cpus().length): F
 }
 
 /** Ordered chain: lexical scratch, Git, repository facts, write ownership, then reservations. First block wins. */
-export async function handleToolCall(event: FleetGuardEvent, context: FleetGuardContext): Promise<FleetGuardBlock | undefined> {
+export async function handleToolCall(event: FleetGuardEvent, context: FleetGuardContext & { childAgentName?: string }): Promise<FleetGuardBlock | undefined> {
 	const reservations = { cwd: context.cwd, agentName: context.agentName,
 		isTrackedPath: context.isTrackedPath, lookupReservations: context.lookupReservations, warn: context.warn };
-	return checkScratch(event, context) ?? checkGit(event, context) ?? await checkDurability(event, context) ??
-		await checkWriteOwnership(event, { ...context, fleetPolicy: fleetPolicyState }) ??
-		await checkReservations(event, reservations) ?? undefined;
+	const early = checkScratch(event, context) ?? checkGit(event, context) ?? await checkDurability(event, context) ??
+		await checkWriteOwnership(event, { ...context, fleetPolicy: fleetPolicyState });
+	if (early) return early;
+	// NATIVEPREGRADE1: a native child's own hold admits the write as well as the seat's (the parent may reserve for it).
+	if (context.childAgentName && !(await checkReservations(event, { ...reservations, agentName: context.childAgentName }))) return undefined;
+	return await checkReservations(event, reservations) ?? undefined;
 }
 export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Promise<void> {
 	const cwd = deps?.cwd ?? process.cwd();
@@ -131,7 +135,9 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 		if (policy.kind === "unavailable") return { block: true, reason: `fleet-guard applicability: ${policy.reason}` };
 		// OMP supplies the calling session's mapping (including subagent sharing).
 		// No cwd/default-session guess: an absent backing root fails closed for local://.
-		return handleToolCall(event, { cwd: callingCwd, localRoot: localRootOf(context) });
+		// NATIVEPREGRADE1 (ompkit-1ra0d.41): a native child's own spawn-minted name; its holds cover its own writes.
+		const childAgentName = context ? nativeIdentity(context as unknown as NativeContext)?.id : undefined;
+		return handleToolCall(event, { cwd: callingCwd, localRoot: localRootOf(context), ...(childAgentName ? { childAgentName } : {}) });
 	});
 	// The session that recorded the seat ends it; a respawn (marker from respawn_seat) hands the dir on instead.
 	pi.on("session_shutdown", async (_event, context) => {
