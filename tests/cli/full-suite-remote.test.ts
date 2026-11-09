@@ -247,6 +247,10 @@ test("fallback: with no adapter configured (no rch, no worker list) the run is t
 	const f = await fixture("fallback-absent");
 	const home = join(f.dir, "home");
 	mkdirSync(home);
+	// A stock Linux runner has bun only under the real HOME; carry it the way a host does
+	// (CI run 42570554579: "bun is not on PATH" here). Nothing else, so still no rch.
+	mkdirSync(join(home, ".bun", "bin"), { recursive: true });
+	symlinkSync(process.execPath, join(home, ".bun", "bin", "bun"));
 	// The pinned PATH holds no rch under this HOME; nothing names a worker.
 	const run = await judge(f, { FULL_SUITE_REMOTE_WORKERS: undefined, HOME: home });
 	expect(run.rc, run.out).toBe(0);
