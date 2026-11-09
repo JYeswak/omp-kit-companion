@@ -588,6 +588,27 @@ test("GATEEVENTS1: a refused close writes a refuse row and an allowed close writ
 	]);
 });
 
+// LEDGERCLASS1 (ompkit-1ra0d.68): the refusal text the host returns for a blocked call is classified again at
+// tool_execution_end (guard-friction:X); the ledger keeps the guard's own row only, one row per refused act.
+test("LEDGERCLASS1: a refused act writes one ledger row; planted: a passing act writes one pass row and no refusal", async () => {
+	const project = freshDir(base, "proj-");
+	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
+	const state = join(home, "state");
+	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77", XDG_STATE_HOME: state }, home, respond: brTable({ "kit-1": bead("kit-1", "BlueFox"), "kit-9": bead("kit-9", "Someone") }) });
+	const [refused] = await callAs(h, project, "r1", "bash", { command: "br close kit-1 --reason \"x\"" }) as ({ block?: boolean; reason?: string } | undefined)[];
+	expect(refused?.block).toBe(true);
+	await h.emit("tool_execution_end", { toolCallId: "r1", toolName: "bash", isError: true,
+		result: { content: [{ type: "text", text: refused?.reason ?? "" }] } }, h.ctx(project));
+	expect(await callAs(h, project, "p1", "bash", { command: "br close kit-9 --reason \"bun test x -> 3 passed\"" })).toEqual([undefined]);
+	await h.emit("tool_execution_end", { toolCallId: "p1", toolName: "bash", isError: false,
+		result: { content: [{ type: "text", text: "Closed kit-9" }] } }, h.ctx(project));
+	const rows = readFileSync(join(state, "omp-kit", "gate-events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+	expect(rows.map(r => [r.target, r.gate, r.kind])).toEqual([
+		["kit-1", "SELF_CLOSE_REFUSED", "refuse"],
+		["kit-9", "kit-flywheel-guard", "pass"],
+	]);
+});
+
 test("SELF_CLOSE_REFUSED negative: an unassigned bead is allowed with a warning", async () => {
 	const project = freshDir(base, "proj-");
 	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
