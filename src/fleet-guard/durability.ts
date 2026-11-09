@@ -9,6 +9,7 @@ import { resolveFilesystemWriteTarget } from "./scratch.ts";
 import type { FleetGuardBlock, FleetGuardContext, FleetGuardEvent } from "./scratch.ts";
 import { pathToFileURL } from "node:url";
 import { resolveOmpIdentity } from "../paths.ts";
+import { loadFactor } from "../kitlib/load.ts";
 import { parseOwnerFile } from "../scratch.ts";
 
 const LIMIT = 1_048_576;
@@ -41,7 +42,15 @@ async function readBounded(path: string, limit = LIMIT): Promise<string> {
 	} finally { await file.close(); }
 }
 
-const GIT_DEADLINE_MS = 2_000;
+const GIT_BASE_DEADLINE_MS = 2_000;
+
+/** One git read's bound (GUARDGITLOAD1): 2 s at quiet load, scaled by the shared
+ * host-load factor exactly as land.ts scales its `am` bound, so a read that answers
+ * inside the scaled bound is judged instead of UNKNOWN. A read that never answers
+ * still throws UnknownReadError naming the read, killed and signal. */
+export function gitDeadlineMs(): number {
+	return Math.ceil(GIT_BASE_DEADLINE_MS * loadFactor());
+}
 
 // No inherited Git redirection, lazy-fetch, pager, credential or network operations.
 async function git(repo: string, args: string[], input?: string, retryFirstExec = false): Promise<string> {
@@ -52,20 +61,22 @@ async function git(repo: string, args: string[], input?: string, retryFirstExec 
 	const read = `git ${(end < 0 ? args : args.slice(0, end)).join(" ")}`;
 	for (let attempt = 0; ; attempt++) {
 		const started = performance.now();
+		const deadlineMs = gitDeadlineMs();
 		let stdinFailed = false;
 		const running = promisify(execFile)("git", ["--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", repo, ...args],
-			{ env, timeout: GIT_DEADLINE_MS, maxBuffer: INDEX_LIMIT, encoding: "utf8" });
+			{ env, timeout: deadlineMs, maxBuffer: INDEX_LIMIT, encoding: "utf8" });
 		running.child.stdin?.on("error", () => { stdinFailed = true; running.child.kill(); });
 		running.child.stdin?.end(input);
 		try { return (await running).stdout; }
 		catch (cause) {
 			const error = cause as ExecFileException & { stderr?: string };
 			// GUARDGITLOAD1: fresh executable startup measured 340/478/490 ms p50/p95/max
-			// at load 16-17; GUARDDIAG1 also captured SIGTERM at 2004 ms. Do not extrapolate
-			// a larger deadline from that tail: retry only the admission's first read once.
-			// A persistent hang still refuses after two 2 s attempts; all later reads get one.
+			// at load 16-17; GUARDDIAG1 also captured SIGTERM at 2004 ms. The per-read
+			// bound above already scales with host load; retry only the admission's
+			// first read once. A persistent hang still refuses after two scaled
+			// attempts; all later reads get one.
 			if (retryFirstExec && attempt === 0 && !stdinFailed && error.killed === true
-				&& error.signal === "SIGTERM" && error.code === null && performance.now() - started >= GIT_DEADLINE_MS) continue;
+				&& error.signal === "SIGTERM" && error.code === null && performance.now() - started >= deadlineMs) continue;
 			// Keep the original error as cause; like git.ts firstLine(), bound stderr to 200 characters.
 			const stderr = (error.stderr ?? "").slice(0, 200).split("\n", 1)[0] ?? "";
 			throw new UnknownReadError(read, error, `git exec failed: killed=${error.killed ?? "UNKNOWN"}`

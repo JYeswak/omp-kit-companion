@@ -2,9 +2,10 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { run as kitlibRun, runSync as kitlibRunSync } from "./kitlib/run.ts";
 import type { RunResult } from "./kitlib/run.ts";
+import { loadFactor } from "./kitlib/load.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { availableParallelism, homedir, loadavg } from "node:os";
+import { homedir } from "node:os";
 import type { CliResult, ParsedCommand } from "./cli.ts";
 import { authorizeSourceAct } from "./source-authority.ts";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
@@ -596,20 +597,10 @@ function resolvePaneBaseSeconds(): number {
 
 /** The production load factor, the same scaling as tests/cli/fixture-process.ts: 1-minute load per core x 4,
  * clamped to 1..4. OMP_KIT_LOAD_OVERRIDE ("load1/ncpu", the test seam cli.ts already reads) pins it; an
- * unreadable reading takes the widest bound. */
+ * unreadable reading takes the widest bound. The single formula lives in src/kitlib/load.ts; this alias keeps
+ * the LANDPANETIMEOUT1 call site spelling that tests assert. */
 function landLoadFactor(): number {
-	const override = process.env.OMP_KIT_LOAD_OVERRIDE;
-	let load1: number, ncpu: number;
-	if (override !== undefined) {
-		const parts = override.split("/");
-		load1 = Number(parts[0]);
-		ncpu = Number(parts[1] ?? "");
-	} else {
-		load1 = loadavg()[0] ?? Number.NaN;
-		ncpu = availableParallelism();
-	}
-	if (!(load1 >= 0) || !(ncpu > 0)) return 4;
-	return Math.max(1, Math.min(4, load1 / ncpu * 4));
+	return loadFactor();
 }
 
 /** Run one `am` call under the shared load-scaled bound (LANDPANETIMEOUT1, LANDRESVTIMEOUT1). am is a single

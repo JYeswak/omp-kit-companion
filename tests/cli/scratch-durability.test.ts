@@ -2,7 +2,7 @@ import { afterAll, afterEach, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
-import { check as durabilityCheck } from "../../src/fleet-guard/durability.ts";
+import { check as durabilityCheck, gitDeadlineMs } from "../../src/fleet-guard/durability.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
@@ -47,9 +47,28 @@ test("identical owned-scratch input is quiet until its canonical source is actua
 	expect(denied?.reason).toContain("scratch-is-not-a-home");
 });
 
+test("GUARDGITLOAD1: quiet load keeps the 2 s git base; pinned-high load scales it", () => {
+	const previous = process.env.OMP_KIT_LOAD_OVERRIDE;
+	try {
+		process.env.OMP_KIT_LOAD_OVERRIDE = "1/32";
+		expect(gitDeadlineMs()).toBe(2000);
+		process.env.OMP_KIT_LOAD_OVERRIDE = "128/32";
+		expect(gitDeadlineMs()).toBe(8000);
+		if (previous === undefined) delete process.env.OMP_KIT_LOAD_OVERRIDE;
+		else process.env.OMP_KIT_LOAD_OVERRIDE = previous;
+		const live = gitDeadlineMs();
+		expect(live).toBeGreaterThanOrEqual(2000);
+		expect(live).toBeLessThanOrEqual(8000);
+	} finally {
+		if (previous === undefined) delete process.env.OMP_KIT_LOAD_OVERRIDE;
+		else process.env.OMP_KIT_LOAD_OVERRIDE = previous;
+	}
+});
+
 test("GUARDGITLOAD1: slow first Git execution recovers without bypassing the canonical index", async () => {
 	const fixture = ownedTmp("durability-git-first", { root: join(import.meta.dir, "../../var/agent-tmp") });
 	const previousPath = process.env.PATH;
+	const previousOverride = process.env.OMP_KIT_LOAD_OVERRIDE;
 	try {
 		const nativeGit = Bun.which("git");
 		if (!nativeGit) throw new Error("Git is required");
@@ -86,6 +105,9 @@ os.execv(sys.argv[1], sys.argv[1:])
 		const ready = await runFixtureAsync([join(bin, "git"), "--probe-ready"], { cwd: fixture.path, env });
 		expect(ready.rc, new TextDecoder().decode(ready.stderr)).toBe(0);
 		process.env.PATH = `${bin}:${previousPath ?? ""}`;
+		// Pin the quiet-load 2 s base: the exact-two-attempts recovery below only holds
+		// when the first 3 s-delayed read actually exceeds its bound, whatever the live host load is.
+		process.env.OMP_KIT_LOAD_OVERRIDE = "1/32";
 		const context = { cwd: fixture.path };
 		const content = "fresh disposable specimen\n";
 		const event = { toolName: "write", input: { path: join(scratch, "specimen.txt"), content } };
@@ -110,6 +132,8 @@ os.execv(sys.argv[1], sys.argv[1:])
 	} finally {
 		if (previousPath === undefined) delete process.env.PATH;
 		else process.env.PATH = previousPath;
+		if (previousOverride === undefined) delete process.env.OMP_KIT_LOAD_OVERRIDE;
+		else process.env.OMP_KIT_LOAD_OVERRIDE = previousOverride;
 		fixture.cleanup();
 	}
 }, fixtureDeadlineS() * 1000);
@@ -119,6 +143,7 @@ async function failedGitRead(script: string, warmupExitCode?: number) {
 	mkdirSync(base, { recursive: true });
 	const shim = ownedTmp("durability-git-failure", { root: base });
 	const previousPath = process.env.PATH;
+	const previousOverride = process.env.OMP_KIT_LOAD_OVERRIDE;
 	try {
 		const attemptsPath = join(shim.path, "attempts");
 		writeFileSync(attemptsPath, "");
@@ -132,6 +157,9 @@ async function failedGitRead(script: string, warmupExitCode?: number) {
 			writeFileSync(attemptsPath, "");
 		}
 		process.env.PATH = `${shim.path}:${previousPath ?? ""}`;
+		// Pin the quiet-load 2 s base so hang plants stay bounded by two 2 s attempts
+		// whatever the live host load is; exit/stderr plants answer at once either way.
+		process.env.OMP_KIT_LOAD_OVERRIDE = "1/32";
 		const result = await durabilityCheck({
 			toolName: "write",
 			input: { path: join(shim.path, "var/agent-tmp/probe/PACKET.md"), content: "# dispatch packet" },
@@ -140,6 +168,8 @@ async function failedGitRead(script: string, warmupExitCode?: number) {
 	} finally {
 		if (previousPath === undefined) delete process.env.PATH;
 		else process.env.PATH = previousPath;
+		if (previousOverride === undefined) delete process.env.OMP_KIT_LOAD_OVERRIDE;
+		else process.env.OMP_KIT_LOAD_OVERRIDE = previousOverride;
 		shim.cleanup();
 	}
 }
@@ -177,3 +207,49 @@ test("GUARDGITLOAD1: a long Git stderr first line is bounded without hiding the 
 	expect(result?.reason).not.toContain(line);
 	expect(result?.reason.length).toBeLessThan(700);
 }, fixtureDeadlineS() * 1000);
+
+test("GUARDGITLOAD1: pinned-high load judges a read delayed past 2 s but inside the scaled bound", async () => {
+	const fixture = ownedTmp("durability-git-scaled", { root: join(import.meta.dir, "../../var/agent-tmp") });
+	const previousPath = process.env.PATH;
+	const previousOverride = process.env.OMP_KIT_LOAD_OVERRIDE;
+	try {
+		const nativeGit = Bun.which("git");
+		if (!nativeGit) throw new Error("Git is required");
+		const env = { ...process.env };
+		for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+		const initialized = await runFixtureAsync([nativeGit, "init", "--quiet", fixture.path], { cwd: fixture.path, env });
+		expect(initialized.rc, new TextDecoder().decode(initialized.stderr)).toBe(0);
+		const scratch = join(fixture.path, "var/agent-tmp/probe");
+		const bin = join(fixture.path, "bin");
+		mkdirSync(scratch, { recursive: true });
+		mkdirSync(bin);
+		writeFileSync(join(scratch, ".owner"),
+			`pid=${process.pid}\nlabel=probe\nrepo=${fixture.path}\ncreated=${new Date().toISOString()}\n`);
+		// Warmed shim: every real Git invocation sleeps 3 s, past the quiet 2 s base but
+		// inside the pinned-high 8 s bound. exec preserves the shim PID for the deadline.
+		writeFileSync(join(bin, "git"), `#!/bin/sh\nif [ "$1" = "--probe-ready" ]; then exit 0; fi\nsleep 3\nexec '${nativeGit.replaceAll("'", "'\\''")}' "$@"\n`, { mode: 0o755 });
+		const ready = await runFixtureAsync([join(bin, "git"), "--probe-ready"], { cwd: fixture.path, env });
+		expect(ready.rc, new TextDecoder().decode(ready.stderr)).toBe(0);
+		const content = "fresh disposable specimen\n";
+		writeFileSync(join(fixture.path, "specimen.txt"), content);
+		const indexed = await runFixtureAsync([nativeGit, "-C", fixture.path, "add", "--", "specimen.txt"], { cwd: fixture.path, env });
+		expect(indexed.rc, new TextDecoder().decode(indexed.stderr)).toBe(0);
+		process.env.PATH = `${bin}:${previousPath ?? ""}`;
+		// 128/32 pins the shared factor to its 4x ceiling: one read gets 8 s, like land's am bound.
+		process.env.OMP_KIT_LOAD_OVERRIDE = "128/32";
+		expect(gitDeadlineMs()).toBe(8000);
+		const denied = await durabilityCheck({
+			toolName: "write",
+			input: { path: join(scratch, "specimen.txt"), content },
+		}, { cwd: fixture.path });
+		expect(denied?.block).toBe(true);
+		expect(denied?.status).not.toBe("UNKNOWN");
+		expect(denied?.reason).toContain("tracked-source-copy");
+	} finally {
+		if (previousPath === undefined) delete process.env.PATH;
+		else process.env.PATH = previousPath;
+		if (previousOverride === undefined) delete process.env.OMP_KIT_LOAD_OVERRIDE;
+		else process.env.OMP_KIT_LOAD_OVERRIDE = previousOverride;
+		fixture.cleanup();
+	}
+}, fixtureDeadlineS(30) * 1000);
