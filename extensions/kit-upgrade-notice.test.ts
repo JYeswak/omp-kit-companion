@@ -134,8 +134,6 @@ test("LIVEAGENTS1 (J-2026-11-08-02): step 1 keeps agents running on omp >= 18.18
 	expect(save).toBeGreaterThan(older);
 	expect(run).toBeGreaterThan(save);
 	expect(msg).toContain("REFUSED_LIVE_AGENTS");
-	// Control: a paused seat never self-restarts, so it gets no wrap-up step.
-	expect(upgradeNoticeMessage("0.2.91", "0.2.90", true, true)).not.toContain("REFUSED_LIVE_AGENTS");
 });
 
 test("message (stock): only how to restart omp; no fleet command, sentinel or handoff", () => {
@@ -167,18 +165,18 @@ test("mode: the installed self-restart helper under home selects fleet text; its
 	}
 });
 
-test("PAUSEDRESTART1 planted: stopped projects and recorded paused goals stay paused; active controls restart", async () => {
+// J-2026-11-09-03: every seat upgrades now. PAUSEDRESTART1 told a paused seat (the lead included, 2026-11-08 and
+// 2026-11-09) to "stay paused" and wait for the lead. Planted: stopped-project and paused-goal seats get the
+// fleet upgrade steps; the helper keeps a paused goal paused across the restart.
+test("planted: stopped-project and paused-goal seats get the same upgrade-now notice as active seats", async () => {
 	const config = JSON.stringify({ sessions: [
 		{ session: "omp-test", repo: "/projects/stopped", pullEnabled: false },
 		{ session: "active", repo: "/projects/active", pullEnabled: true },
 	] });
-	for (const [cwd, modes, paused] of [
-		["/projects/stopped", ["goal"], true],
-		["/projects/stopped/subdir", ["goal"], true],
-		["/projects/active", ["goal", "goal_paused"], true],
-		["/projects/active", ["goal_paused", "goal"], false],
-		["/projects/active", ["goal_paused", "none"], false],
-		["/projects/stopped-other", ["goal"], false],
+	for (const [cwd, modes] of [
+		["/projects/stopped", ["goal"]],
+		["/projects/active", ["goal", "goal_paused"]],
+		["/projects/active", ["goal_paused", "goal"]],
 	] as const) {
 		const ctx: UpgradeNoticeContext = {
 			...IDLE, cwd, sessionManager: {
@@ -191,16 +189,8 @@ test("PAUSEDRESTART1 planted: stopped projects and recorded paused goals stay pa
 		await kitUpgradeNotice(api, { selfPath: LOADED, home: "/h", ...f.deps, isFile: () => true });
 		handlers["session_start"]!(null, ctx);
 		expect(sent).toHaveLength(1);
-		const msg = sent[0]!.content;
-		if (paused) {
-			expect(msg).toContain("stay paused");
-			expect(msg).toContain("next approved fleet restart");
-			expect(msg).not.toContain("upgrade now");
-			expect(msg).not.toContain(SELF_RESTART_COMMAND);
-			expect(msg).not.toContain("restart this seat yourself");
-		} else {
-			expect(msg).toBe(upgradeNoticeMessage("0.2.58", "0.2.57", true));
-		}
+		expect(sent[0]!.content).toBe(upgradeNoticeMessage("0.2.58", "0.2.57", true));
+		expect(sent[0]!.content).not.toContain("stay paused");
 	}
 });
 
