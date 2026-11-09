@@ -290,7 +290,12 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const pre = await preflightBead("close", input.repo, input.bead, { actor: input.actor, env });
 	const blocking = pre.findings.filter(f => f.blocking);
 	if (blocking.some(f => f.code === "SELF_CLOSE")) return { ok: false, code: "NON_AUTHOR_REQUIRED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`refused: ${input.actor} is the assignee`).join("\n"), acts };
-	if (blocking.some(f => f.code === "NOT_IN_REVIEW" || f.code === "UNJUDGED")) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(blocking.map(f => `${f.code}: ${f.detail}`)).join("\n"), acts };
+	// VERIFYOPEN1 (ompkit-1ra0d.70): open and in_progress beads are admitted as well as in_review.
+	// The non-author replay of every box on the exact export is the proof the in_review handoff
+	// gate stands in for, so in_review stays a queue, never a precondition. Unticked boxes are not
+	// a pre-replay refusal either (AC_UNTICKED is only ever logged here): verify ticks the boxes it
+	// judged PASS. Closed, deferred and other states stay refused NOT_IN_REVIEW.
+	if (blocking.some(f => f.code === "NOT_IN_REVIEW" && !/ is (open|in_progress|in_review)$/.test(f.detail)) || blocking.some(f => f.code === "UNJUDGED")) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(blocking.map(f => `${f.code}: ${f.detail}`)).join("\n"), acts };
 	const publication = (await checkPublishedCommits(input.repo, [input.exportSha]))[0]!;
 	if (publication.status !== "PUBLISHED") {
 		const code = publication.status === "NOT_PUBLISHED" ? "NOT_PUBLISHED" : "UNKNOWN";

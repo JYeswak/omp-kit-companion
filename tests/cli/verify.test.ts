@@ -1473,3 +1473,75 @@ test("VERIFYABSPATH1 unmappable: a repo path that cannot be rewritten is UNJUDGE
 	expect(res.replays.map(r => [r.letter, r.pass, r.rc])).toEqual([["a", null, null]]);
 	expect(res.replays[0]!.detail).toContain(`UNJUDGED REPO_PATH_UNMAPPED: ${JSON.stringify(token)}`);
 });
+
+/* VERIFYOPEN1 (ompkit-1ra0d.70): verify admits open beads, not just in_review; the non-author
+   replay of every box on the exact export is the proof. Unticked boxes are ticked on PASS. */
+const OPEN_PASS_BOXES = "- [ ] [a] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [b] [build] `sh scripts/t.sh` -> prints 0 fail";
+
+/** Policy under which an open bead can close (gated, like in_review) or go back for rework. */
+async function openPolicy(t: { dir: string; db: string }): Promise<void> {
+	writeFileSync(join(t.dir, ".beads", "policy.yaml"), `workflow:
+  strict: true
+  statuses: [open, in_progress, in_review, rework, closed]
+  transitions:
+    initial: [open]
+    open: [in_progress, closed, rework]
+    in_progress: [in_review, open]
+    in_review: [closed, rework, open]
+    rework: [in_progress, open]
+    closed: [open]
+  required_fields:
+    "open -> in_progress": [acceptance_criteria_present]
+    in_review: [acceptance_criteria_present, transition_comment]
+    closed: [acceptance_criteria, transition_comment]
+  gates:
+    "open -> closed":
+      require_all:
+        - min_reviewers: 1
+    "in_review -> closed":
+      require_all:
+        - min_reviewers: 1
+`);
+}
+
+/** An open bead with unticked boxes, assigned to Author so Peer verifies as non-author. */
+async function openBead(t: { dir: string; db: string }, title: string, ac: string): Promise<string> {
+	const desc = "WHAT: verifyopen1 fixture.\n\nWHY: proves non-author verify closes an open bead on a full replay in this same turn.";
+	return createBead(t, title, ["--description", desc, "--acceptance-criteria", ac, "--assignee", "Author"]);
+}
+
+test("VERIFYOPEN1 [a]: non-author verify of an open bead with unticked boxes replays, ticks, closes; planted: the author is refused and nothing is ticked", async () => {
+	const { dir, sha } = await repo("verifyopen");
+	const t = await tracker("verifyopen-pass-t").then(async v => { await openPolicy(v); return v; });
+	const env = trackerEnv(t);
+	const id = await openBead(t, "verifyopen pass", OPEN_PASS_BOXES);
+	// Planted negative first: the author running the same verify is refused before replay and ticks nothing.
+	const refused = await verifyBead({ bead: id, exportSha: sha, repo: dir, actor: "Author", env, family: "same (bun)", lesson: "author attempt fixture" });
+	expect(refused.code).toBe("NON_AUTHOR_REQUIRED");
+	expect(refused.replays).toEqual([]);
+	expect(refused.acts).toEqual([]);
+	expect((await row(t, id)).status).toBe("open");
+	expect((await row(t, id)).acceptance_criteria).toBe(OPEN_PASS_BOXES);
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: dir, actor: "Peer", env, family: "same (bun)", lesson: "open-bead close fixture" });
+	expect(res.code).toBe("CLOSED");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true]]);
+	const after = await row(t, id);
+	expect(after.status).toBe("closed");
+	expect(after.acceptance_criteria).toBe(OPEN_PASS_BOXES.replaceAll("- [ ]", "- [x]"));
+}, fixtureDeadlineS(120) * 1_000);
+
+test("VERIFYOPEN1 [b]: a failing box on an open bead leaves it unclosed with the REWORK comment and no tick", async () => {
+	const { dir, sha } = await repo("verifyopen");
+	const t = await tracker("verifyopen-rework-t");
+	const env = trackerEnv(t);
+	const ac = "- [ ] [a] [build] `sh scripts/bad.sh` -> prints PASS";
+	const id = await openBead(t, "verifyopen rework", ac);
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: dir, actor: "Peer", env, family: "same (bun)", lesson: "open-bead rework fixture" });
+	expect(res.code).toBe("REWORK");
+	expect(res.acts[0]).toEqual(["br", "update", id, "--status", "rework", "--transition-comment", expect.stringContaining(`REWORK ${id}:`), "--actor", "Peer"]);
+	const after = await row(t, id);
+	expect(after.status).not.toBe("closed");
+	expect(after.acceptance_criteria).toBe(ac);
+	const comments = JSON.parse((await brun(["comments", "list", "--json", id], t.dir, env)).out) as { text: string }[];
+	expect(comments.some(c => typeof c.text === "string" && c.text.includes(`REWORK ${id}:`))).toBe(true);
+}, fixtureDeadlineS(120) * 1_000);
