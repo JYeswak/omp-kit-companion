@@ -247,15 +247,19 @@ class CaseRun:
             return
         proc, fifo = self.inheritors.pop(name)
         # Opening the write end without blocking succeeds once the child's cat has the read end; closing it is EOF.
-        deadline = time.monotonic() + 10
-        while True:
+        # A writer that opens and closes while the reader is still waking from its blocked open can be missed
+        # (seen twice in full-suite runs under load: cat stayed blocked and wait() timed out), so repeat the
+        # open/close until the child exits. Each round is a fresh EOF; a child that never exits still fails.
+        deadline = time.monotonic() + CHILD_DEADLINE_S
+        while proc.poll() is None:
             try:
                 os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
-                break
             except OSError as error:
-                if error.errno != errno.ENXIO or time.monotonic() > deadline:
+                if error.errno != errno.ENXIO:
                     raise
-                time.sleep(0.01)
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.05)
         proc.wait(timeout=CHILD_DEADLINE_S)
 
     def cleanup(self) -> None:
