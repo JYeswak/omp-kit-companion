@@ -34,6 +34,34 @@ const VOLATILE_CACHE_DIR_NAMES: Record<string, true> = {
  Cache: true, Cache_Data: true, "Code Cache": true, GPUCache: true, DawnCache: true,
 };
 
+/**
+ * Live-fleet namespaces of the kit state root: every seat's guard/wake extensions append the wake ledgers,
+ * scratch accounting churns on its own clock, and the installed kit-update job records its own runs. None
+ * are kit install writes, and the post-run concurrent-writer probe cannot catch writes minutes apart, so the
+ * snapshot does not judge them. Matched by exact top-level name or literal prefix (never a broad pattern);
+ * the two named subdirectories skip wholesale. Everything else under the state root stays watched.
+ */
+const LIVE_FLEET_TOP_FILES: Record<string, true> = { "gate-events.jsonl": true, "mail-wake.jsonl": true, "scratch-budgets.json": true };
+const LIVE_FLEET_TOP_PREFIXES: readonly string[] = ["kit-update-job-", "git-lock-rate."];
+const LIVE_FLEET_SUBDIRS: Record<string, true> = { "inbox-wake": true, "scratch-users": true };
+
+/**
+ * The live-fleet anchor for a path under the state root, or null when the path stays watched. Top-level
+ * live files anchor at themselves; anything under a live subdirectory anchors at that subdirectory.
+ */
+function liveFleetAnchor(stateRoot: string, path: string): string | null {
+	const rel = relative(stateRoot, path);
+	if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
+	const slash = rel.indexOf("/");
+	if (slash === -1) {
+		if (LIVE_FLEET_TOP_FILES[rel] === true) return path;
+		if (LIVE_FLEET_TOP_PREFIXES.some(prefix => rel.startsWith(prefix))) return path;
+		return null;
+	}
+	const top = rel.slice(0, slash);
+	return LIVE_FLEET_SUBDIRS[top] === true ? join(stateRoot, top) : null;
+}
+
 /** True when `path` is, or lies under, state an installed service job writes on its own clock. */
 export function isOwnedState(owned: readonly OwnedStatePath[], path: string): boolean {
 	return owned.some(entry => {
@@ -49,7 +77,7 @@ export type WatchedSnapshot = { entries: Map<string, string>; incomplete: string
 export type WatchedComparison = {
 	unchanged: boolean; complete: boolean; watched: number;
 	changed_paths: string[]; incomplete_paths: string[];
-	/** Declared live browser namespaces, not hashed or judged as operator files. */
+	/** Declared live namespaces (kit-managed browser profiles, live-fleet state), not hashed or judged as operator files. */
 	live_state_paths?: string[];
 	skipped_paths: { path: string; reason: "skipped-concurrent-writer" }[];
 	/** Changes under the live-fleet namespaces the isolated test ran fenced off from (operatorWriteFence). */
@@ -103,6 +131,12 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 			if (paths.owned && isOwnedState(paths.owned, path)) return;
 			// Do not traverse live profiles: SQLite/LevelDB files can disappear or change mid-read.
 			if (paths.liveState?.includes(path)) { liveState.add(path); return; }
+			// Live-fleet namespaces of the state root churn on their own clock during the isolated run and
+			// are never kit install writes: skip them like the live browser profiles, anchored for the report.
+			if (relaxed) {
+				const anchor = liveFleetAnchor(paths.stateRoot!, path);
+				if (anchor !== null) { liveState.add(anchor); return; }
+			}
 			let stat;
 			try { stat = lstatSync(path); }
 			catch (error) {

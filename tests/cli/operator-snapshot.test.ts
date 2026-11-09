@@ -229,6 +229,49 @@ test("POSTCHECKSTATE1 planted: an append under an over-budget state root is stil
 	]);
 }, fixtureDeadlineS() * 1000);
 
+// POSTCHECKSTATE1 (0.2.108 follow-up): the live fleet appends wake ledgers, scratch accounting and kit-update
+// job records under the real state root minutes apart, so the post-run writer probe cannot catch them. These
+// declared namespaces are live state the snapshot does not judge; everything else stays watched.
+test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, other state still counts", () => {
+	const { home, paths } = operatorHome();
+	const state = join(home, ".local", "state", "omp-kit");
+	mkdirSync(join(state, "receipts"), { recursive: true });
+	mkdirSync(join(state, "inbox-wake"), { recursive: true });
+	mkdirSync(join(state, "scratch-users"), { recursive: true });
+	writeFileSync(join(state, "gate-events.jsonl"), "{\"open\":1}\n");
+	writeFileSync(join(state, "mail-wake.jsonl"), "{\"open\":1}\n");
+	writeFileSync(join(state, "scratch-budgets.json"), "{}\n");
+	writeFileSync(join(state, "inbox-wake", "Agent.abc123.json"), "{}\n");
+	writeFileSync(join(state, "scratch-users", "def456.lock"), "1\n");
+	writeFileSync(join(state, "git-lock-rate.0.json.lock"), "1\n");
+	writeFileSync(join(state, "kit-update-job-11111111-2222-3333-4444-555555555555.json"), "{}\n");
+	const before = snapshotWatched(paths);
+	// The fleet's own clock during the isolated run: appends, a new wake file, a new job record, a rate tmp.
+	appendFileSync(join(state, "gate-events.jsonl"), "{\"tick\":2}\n");
+	writeFileSync(join(state, "inbox-wake", "Agent.789xyz.json"), "{}\n");
+	appendFileSync(join(state, "scratch-users", "def456.lock"), "2\n");
+	writeFileSync(join(state, "kit-update-job-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.json"), "{}\n");
+	writeFileSync(join(state, "git-lock-rate.1.json.tmp.12345"), "{}\n");
+	const quiet = compareWatched(before, snapshotWatched(paths), home);
+	expect(quiet, JSON.stringify(quiet)).toMatchObject({ unchanged: true, complete: true, changed_paths: [], incomplete_paths: [] });
+	expect(quiet.live_state_paths).toEqual([
+		"~/.local/state/omp-kit/gate-events.jsonl",
+		"~/.local/state/omp-kit/git-lock-rate.0.json.lock",
+		"~/.local/state/omp-kit/git-lock-rate.1.json.tmp.12345",
+		"~/.local/state/omp-kit/inbox-wake",
+		"~/.local/state/omp-kit/kit-update-job-11111111-2222-3333-4444-555555555555.json",
+		"~/.local/state/omp-kit/kit-update-job-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.json",
+		"~/.local/state/omp-kit/mail-wake.jsonl",
+		"~/.local/state/omp-kit/scratch-budgets.json",
+		"~/.local/state/omp-kit/scratch-users",
+	]);
+	// Planted: a kit receipt the fleet never writes is still reported beside the live state.
+	writeFileSync(join(state, "receipts", "x.json"), "{}\n");
+	expect(compareWatched(before, snapshotWatched(paths), home).changed_paths).toEqual([
+		"~/.local/state/omp-kit/receipts/x.json",
+	]);
+}, fixtureDeadlineS() * 1000);
+
 /** A real concurrent process writing the cc store, cursors and spools the way the live cc service and kit CLIs do. */
 function liveCcWriter(home: string): { stop: () => void; files: string[] } {
 	const cc = ccStateDir(home);
