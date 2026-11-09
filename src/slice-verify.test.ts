@@ -262,13 +262,14 @@ test("an overlay that hangs past its measured deadline is introduced as TIMEOUT"
 		"tests/sleep-ms.txt": "100\n",
 	});
 	worktreeWrite(root, "tests/sleep-ms.txt", "200000\n");
-	const res = await sliceVerify({ repo: root, overlay: ["tests/sleep-ms.txt"], tests: ["tests/sleep.test.ts"] });
+	// A 3 s floor keeps the measured-deadline rule (8x the base run) and spares the suite the 120 s default.
+	const res = await sliceVerify({ repo: root, overlay: ["tests/sleep-ms.txt"], tests: ["tests/sleep.test.ts"], overlayFloorS: 3 });
 	expect(res.exitCode).toBe(1);
 	expect(res.code).toBe("INTRODUCED");
 	const file = res.files[0]!;
 	expect(file.overlay.timedOut).toBe(true);
 	expect(file.introduced.some(n => n.startsWith("TIMEOUT after "))).toBe(true);
-	expect(res.log.join("\n")).toContain(`TIMEOUT after ${Math.min(1800, Math.max(120, Math.ceil(8 * file.base.elapsedS)))}s`);
+	expect(res.log.join("\n")).toContain(`TIMEOUT after ${Math.min(1800, Math.max(3, Math.ceil(8 * file.base.elapsedS)))}s`);
 }, 300_000);
 
 test("the CLI wires slice-verify flags to the verb", async () => {

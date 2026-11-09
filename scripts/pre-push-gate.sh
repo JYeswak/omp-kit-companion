@@ -698,6 +698,18 @@ if [ -n "${base_ref:-}" ] && [ "$base_gate_changed" = 1 ]; then
 	FRESH_GATE_REPO="$ROOT" FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" \
 	FRESH_GATE_PASSED_OUT="$archive_root/base-focused-passed.txt" FRESH_GATE_PASSED_IN="$archive_root/contracts-passed.txt" \
 		sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
+	# GATESPEED1 (ompkit-774u.71): when the candidate's judging files hash to the base's judge (a change
+	# under src/ or tests/ only), both passes run the same runner on the same tree, so the base pass's
+	# focused GREEN is the candidate pass's answer; the full-suite cache reuses on the same three keys.
+	# A changed judging file gives a different judge, and the candidate pass runs everything again.
+	base_passed="$archive_root/base-focused-passed.txt"
+	if [ -s "$base_passed" ] &&
+		[ "$(sed -n '1s/^tree //p' "$base_passed")" = "$(git -C "$ROOT" rev-parse "$local_sha^{tree}")" ] &&
+		candidate_judge=$(cd "$archive/scripts" && python3 -B suite-metrics.py identity --root "$archive" --scope focused </dev/null 2>/dev/null) &&
+		[ -n "$candidate_judge" ] && [ "$(sed -n '2s/^judge //p' "$base_passed")" = "$candidate_judge" ]; then
+		sed -n '4,$p' "$base_passed" >>"$archive_root/contracts-passed.txt"
+		printf 'focused: candidate judge %s equals the base pass judge; its GREEN files are reused\n' "$candidate_judge"
+	fi
 fi
 gate_scripts="$archive"
 FRESH_GATE_TEST_BUDGET_SECS="${FRESH_GATE_TEST_BUDGET_SECS:-$focus_budget}" \

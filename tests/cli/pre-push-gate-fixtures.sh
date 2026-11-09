@@ -352,6 +352,36 @@ else
 	printf 'FAIL base-policy-renamed-helper: rc=%s <<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
 fi
 
+# GATESPEED1 (ompkit-774u.71): the candidate pass skips the base pass's GREEN files only when the
+# candidate's judging files hash to the judge the base pass recorded for this exact tree.
+# shellcheck disable=SC2016 # the fixture gate body expands when the gate runs it, not here
+reuse_gate='commit=; archive=
+while [ "$#" -gt 0 ]; do case "$1" in --commit) commit=$2; shift 2 ;; --archive-dir) archive=$2; shift 2 ;; *) shift ;; esac; done
+case "${FRESH_GATE_PASSED_OUT:-}" in
+	*/base-focused-passed.txt)
+		judge=$(cat "$archive/judge-under-test")
+		[ "$judge" = same ] && judge=$(python3 -B "$archive/scripts/suite-metrics.py" identity --root "$archive" --scope focused)
+		printf "tree %s\njudge %s\nruntime r\ntests/cli/reused.test.ts\n" "$(git -C "$FRESH_GATE_REPO" rev-parse "$commit^{tree}")" "$judge" >"$FRESH_GATE_PASSED_OUT" ;;
+	*) if grep -Fqx tests/cli/reused.test.ts "${FRESH_GATE_PASSED_IN:-/dev/null}"; then echo CANDIDATE-SKIPS-REUSED; else echo CANDIDATE-RUNS-REUSED; fi ;;
+esac'
+for judge_case in same different; do
+	repo=$(mkrepo "base-reuse-$judge_case" "$reuse_gate" "$reuse_gate" "" healthy)
+	for judged in $(python3 -B -c 'import runpy, sys; print(" ".join(runpy.run_path(sys.argv[1])["JUDGING_FILES"]))' "$KITREPO/scripts/suite-metrics.py"); do
+		[ "$judged" = scripts/fresh-gate.sh ] && continue  # the fixture gate above stays the runner
+		mkdir -p "$repo/${judged%/*}" && cp "$KITREPO/$judged" "$repo/$judged"
+	done
+	printf '%s\n' "$judge_case" >"$repo/judge-under-test"
+	git -C "$repo" add -A && git -C "$repo" commit -qm "[test] judging files, judge $judge_case"
+	rc=$(run_adapter "$repo")
+	want=CANDIDATE-RUNS-REUSED
+	[ "$judge_case" = same ] && want=CANDIDATE-SKIPS-REUSED
+	if [ "$rc" = 0 ] && grep -Fq '== fresh-gate role=base' "$TMP/out" && grep -Fqx "$want" "$TMP/out"; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1)); printf 'FAIL base-reuse-%s: rc=%s want=%s <<<%s>>>\n' "$judge_case" "$rc" "$want" "$(cat "$TMP/out")"
+	fi
+done
+
 repo=$(mkrepo candidate-runner-refuses 'exit 0' "$candidate_fixture_gate" "" broken)
 rc=$(run_adapter "$repo")
 if [ "$rc" = 23 ]; then
@@ -1207,14 +1237,14 @@ else
 	fail=$((fail + 1)); printf 'FAIL land1a-control: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
 
-# RELFAST1: even a push that already judged the main suite must schedule CI-only qualification.
-# Exercise the actual adapter; the detached producer logs the immutable commit it receives.
+# RELFAST1: with OMP_KIT_RELEASE_VERDICT=1, even a push that already judged the main suite schedules
+# CI-only qualification. Exercise the actual adapter; the detached producer logs the commit it receives.
 export RV_PUSH_LOG="$TMP/push-judgments"
 # shellcheck disable=SC2016 # expanded by the detached fixture producer, not this shell
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"$RV_PUSH_LOG"\n' >"$vrepro/scripts/release-verdict.sh"
 for push_mode in push release; do
 	: >"$RV_PUSH_LOG"
-	rc=$(PRE_PUSH_FULL_SUITE=$push_mode run_adapter "$vrepro")
+	rc=$(OMP_KIT_RELEASE_VERDICT=1 PRE_PUSH_FULL_SUITE=$push_mode run_adapter "$vrepro")
 	expected="--commit $(git -C "$vrepro" rev-parse HEAD) --no-fetch"
 	attempt=0
 	while [ ! -s "$RV_PUSH_LOG" ] && [ "$attempt" -lt 50 ]; do sleep 0.1; attempt=$((attempt + 1)); done
@@ -1224,6 +1254,16 @@ for push_mode in push release; do
 		fail=$((fail + 1)); printf 'FAIL relfast1-main-push-starts-qualification mode=%s rc=%s log=%s\n' "$push_mode" "$rc" "$(cat "$RV_PUSH_LOG")"
 	fi
 done
+# FULLONRELEASE1 (J-2026-11-08-10): by default a push schedules no full-suite qualification; the
+# release runs it once.
+: >"$RV_PUSH_LOG"
+rc=$(unset OMP_KIT_RELEASE_VERDICT; PRE_PUSH_FULL_SUITE=push run_adapter "$vrepro")
+sleep 2
+if [ "$rc" = 0 ] && [ ! -s "$RV_PUSH_LOG" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL fullonrelease1-default-push-schedules-nothing rc=%s log=%s\n' "$rc" "$(cat "$RV_PUSH_LOG")"
+fi
 export PRE_PUSH_FULL_SUITE=push
 
 # DEFER1 (GATESPEED1, J-2026-10-31-09): by default the push does not run the complete suite. A tree

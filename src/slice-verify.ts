@@ -92,6 +92,8 @@ export interface SliceVerifyInput {
 	tests?: string[];
 	changedFiles?: string[];
 	env?: Record<string, string>;
+	/** Floor of the overlay deadline (default OVERLAY_MIN_S, 120 s). */
+	overlayFloorS?: number;
 }
 
 /** ` N pass` / ` N fail` from bun's summary; found=false when the shape is absent. */
@@ -122,8 +124,8 @@ export function classifyFailures(base: readonly string[], overlay: readonly stri
 }
 
 /** Overlay wall bound from the same file's measured base run. */
-export function overlayDeadline(baseSecs: number): number {
-	return Math.min(OVERLAY_MAX_S, Math.max(OVERLAY_MIN_S, Math.ceil(OVERLAY_FACTOR * Math.max(0, baseSecs))));
+export function overlayDeadline(baseSecs: number, floorS = OVERLAY_MIN_S): number {
+	return Math.min(OVERLAY_MAX_S, Math.max(floorS, Math.ceil(OVERLAY_FACTOR * Math.max(0, baseSecs))));
 }
 
 /** A repo-relative path that stays inside the repo: no absolute, no `..`. */
@@ -307,7 +309,7 @@ export async function sliceVerify(input: SliceVerifyInput): Promise<SliceVerifyR
 			log.push(`[base] ${file} -> ${baseLine} (${base.elapsedS.toFixed(1)}s)`);
 		if (!base.timedOut && base.failures.length === 0 && !base.counts.found)
 			return { ...fail(`BASE_NO_VERDICT: ${file} produced no parseable summary (rc ${base.rc}); a run that proves nothing is an error, never clean`), base: baseSha, selection };
-		const deadline = base.timedOut ? BASE_BUDGET_S : overlayDeadline(base.elapsedS);
+		const deadline = base.timedOut ? BASE_BUDGET_S : overlayDeadline(base.elapsedS, input.overlayFloorS);
 		const over = await runFile(overDir, file, deadline, env, scratch.path);
 		const overLine = over.timedOut ? `TIMEOUT after ${deadline}s` :
 			`rc ${over.rc} ${over.counts.found ? `${over.counts.pass} pass ${over.counts.fail} fail` : "counts unparsed"}`;
