@@ -614,7 +614,7 @@ record_run() {
 	METRICS="${metric_rows:-}" DECLARED="${metric_declared:-}" START_MS="${gate_started_ms:-${metric_started_ms:-0}}" LOAD_START="${gate_load_start:-${metric_load_start:-null}}" \
 	WORKER_COUNT="${workers:-0}" LEDGER="${FRESH_GATE_LEDGER:-}" RUN_COMMIT="$COMMIT" RUN_BASE="${BASE:-}" \
 	RUN_CHANGED="$CHANGED" RUN_TESTS="$1" RUN_FILES="$2" RUN_RC="$3" JUDGE="$SCRIPT_DIR/fresh-gate.sh" JUDGE_ID="${gate_judge_id:-}" GATE_PHASES="$WORK/gate-phases.jsonl" WORKDIR="$WORK" \
-	python3 "$SCRIPT_DIR/fresh-gate-ledger.py"
+	FULL_SUITE_TREE_FILE="$WORK/full-suite-tree" python3 "$SCRIPT_DIR/fresh-gate-ledger.py"
 }
 
 gate_notes() {
@@ -800,6 +800,9 @@ fi
 			if { [ "${ARCHIVE_SUPPLIED:-0}" = 0 ] || [ -n "${FRESH_GATE_REPO:-}" ]; } && full_tree=$(git -C "$full_repo" rev-parse --verify -q "$COMMIT^{tree}"); then
 				if full_verdict=$(cd "$SCRIPT_DIR" && python3 full-suite-verdict-store.py require-pass --repo "$full_repo" --tree "$full_tree" \
 					--role main --judge-root "$SCRIPT_DIR/.." --suite-root "$ARCHIVE_DIR" 2>&1); then
+					# FULLHANDOFF1: the exact-tree PASS is this run's evidence; the ledger row
+					# must say so, or a DONE handoff for a FULL-plan commit can never be admitted.
+					printf '%s\n' "$full_tree" >"$WORK/full-suite-tree" || return 1
 					record_run 0 0 0
 					echo "FRESH-GATE: VERDICT FULL_SUITE_REUSED tree=$full_tree files=$full_files: the exact tree has a main-role full-suite PASS"
 					return 0

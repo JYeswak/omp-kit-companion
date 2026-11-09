@@ -1,0 +1,1 @@
+- A commit that changes shared runtime, and is therefore admitted by its full-suite pass, can now record its `DONE <repo>@<sha>` handoff: the gate's run log marks that run's evidence complete and names the tree the full-suite pass covered.

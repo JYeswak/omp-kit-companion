@@ -358,6 +358,16 @@ test.skipIf(!AMPLE)("EMBEDDEP1 fresh-gate reports a FULL plan as FULL, never as 
 		expect(reused.code, reused.out).toBe(0);
 		expect(reused.out).toContain("FRESH-GATE: VERDICT FULL_SUITE_REUSED tree=");
 		expect(reused.out).not.toContain("affected-tests plan:");
+		// FULLHANDOFF1: the br handoff shim admits a DONE claim only from a row whose evidence is complete.
+		// The row a reused PASS writes must be complete and name its tree; the refused run's row must not be.
+		const row = (out: string) => {
+			const line = out.split("\n").findLast((text) => text.startsWith("FRESH-GATE: measured-verdict "));
+			expect(line, out).toBeDefined();
+			return JSON.parse((line as string).slice("FRESH-GATE: measured-verdict ".length));
+		};
+		const reusedTree = /FULL_SUITE_REUSED tree=([0-9a-f]{40}) /.exec(reused.out)?.[1];
+		expect(row(reused.out).evidence).toEqual({ complete: true, full_suite: { tree: reusedTree, role: "main" }, declared_files: [], files: [] });
+		expect(row(refused.out).evidence.complete).toBe(false);
 	} finally {
 		rmSync(fx.dir, { recursive: true, force: true });
 	}

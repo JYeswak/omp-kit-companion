@@ -53,6 +53,14 @@ entry = {"version": 2, "ts": datetime.now(timezone.utc).isoformat(),
                     "workers": {"bun": int(os.environ["WORKER_COUNT"]), "scripts": int(any(row["runner"] != "bun" for row in rows))}, "stages": stages},
          "evidence": {"complete": bool(declared) and len(rows) == len(declared) and all(row["complete"] for row in rows),
                       "declared_files": declared, "files": rows}}
+# FULLHANDOFF1: a FULL plan admitted by the exact tree's main-role full-suite PASS ran every suite,
+# so its evidence is complete and names the tree that PASS was keyed to.
+full_tree_path = Path(os.environ.get("FULL_SUITE_TREE_FILE") or "")
+if os.environ.get("FULL_SUITE_TREE_FILE") and full_tree_path.is_file() and entry["rc"] == 0:
+    full_tree = full_tree_path.read_text().strip()
+    if len(full_tree) == 40 and all(char in "0123456789abcdef" for char in full_tree):
+        entry["evidence"] = {"complete": True, "full_suite": {"tree": full_tree, "role": "main"},
+                             "declared_files": [], "files": []}
 line = json.dumps(entry, allow_nan=False)
 print("FRESH-GATE: measured-verdict " + line)
 if os.environ["LEDGER"]:
