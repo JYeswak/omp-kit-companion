@@ -136,11 +136,18 @@ def iter_box_lines(acc: str) -> list[str]:
     ]
 
 
+# LIVEREADBACKLINT1: `omp-kit verify` moves a closed bead's [live]/[after] boxes word for word into a child labelled
+# live-readback. The parent's planted negative already ran at the close, so the child need not repeat one; without
+# this every verify of a bead with a live box failed its own act (2026-11-09: .80, .68, .57).
+LIVE_READBACK_LABEL = "live-readback"
+
+
 def check_d(beads: list[dict]) -> list[str]:
     return [
         b["id"]
         for b in beads
-        if not NEGATIVE_RE.search(b.get("acceptance_criteria") or "")
+        if LIVE_READBACK_LABEL not in (b.get("labels") or [])
+        and not NEGATIVE_RE.search(b.get("acceptance_criteria") or "")
     ]
 
 
@@ -438,6 +445,13 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
         "st-v-d",
         acc="- [ ] [a] [build] widget builds with no adversarial specimen.\n"
         "- [ ] [b] [build] docs render, again no adversarial specimen.\n",
+    ))
+    # LIVEREADBACKLINT1: the same specimen-less boxes on a verify-made live-readback child pass; st-v-d still fails.
+    beads.append(clean_bead(
+        "st-v-d-live",
+        acc="- [ ] [a] [build] widget builds with no adversarial specimen.\n"
+        "- [ ] [b] [build] docs render, again no adversarial specimen.\n",
+        labels=["selftest", LIVE_READBACK_LABEL],
     ))
     expected["d-negative-specimen"] = ["st-v-d"]
     beads.append(clean_bead(
