@@ -318,6 +318,32 @@ def _reaper_start() -> None:
     _reaper_state.update(owner=os.getpid(), fd=write_fd, proc=proc)
 
 
+def _reaper_ensure() -> None:
+    """Start this process's reaper now if none is live, so a session spawned next is registered by one pipe write.
+    PARENTRACE1: starting it lazily inside the first ``add`` left the new child unregistered for the reaper's
+    whole interpreter start; a caller killed in that window leaked the child (seen under full-suite load)."""
+    with _reaper_lock:
+        if _reaper_state["owner"] not in (None, os.getpid()):
+            # A forked child drops the parent's reaper and registry, exactly as _reaper_send does.
+            try:
+                os.close(_reaper_state["fd"])
+            except OSError:
+                pass
+            _reaper_registered.clear()
+            _reaper_state.update(owner=None, fd=None, proc=None)
+        if _reaper_state["owner"] is not None:
+            return
+        if _reaper_state["fd"] is not None:
+            try:
+                os.close(_reaper_state["fd"])
+            except OSError:
+                pass
+        _reaper_start()
+        payload = b"".join(b"add %d\n" % each for each in sorted(_reaper_registered))
+        if payload:
+            os.write(_reaper_state["fd"], payload)
+
+
 def _reaper_send(op: str, pid: int) -> None:
     """Deliver ``add PID`` or ``del PID``, starting the reaper on first use and
     restarting it (with the whole registry replayed) when it has died. A forked
@@ -589,6 +615,8 @@ def run_bounded(
     extra = {"pass_fds": fds} if fds else {}
     start = time.monotonic()
     deadline = start + budget
+    # PARENTRACE1: the reaper exists before the child does, so registering the child is one pipe write.
+    _reaper_ensure()
     proc = subprocess.Popen(
         args,
         stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,

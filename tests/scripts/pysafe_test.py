@@ -274,6 +274,22 @@ class ParentDeath(Scratch):
         self.assertTrue(wait_dead(grandchild, 3.0), "setpgid grandchild outlived the SIGKILLed caller")
         self.assertTrue(alive(control), "an unrelated session was killed")
 
+    def test_parentrace1_reaper_is_spawned_before_the_child(self) -> None:
+        # PARENTRACE1: a caller killed between its child's spawn and the child's registration leaks the child, so in a
+        # fresh process the reaper must exist first. The fresh process records every Popen argv in spawn order.
+        code = ("import subprocess,sys;sys.path.insert(0,%r);import pysafe\n"
+                "order=[]\n_real=subprocess.Popen\n"
+                "class Rec(_real):\n"
+                "    def __init__(self,args,*a,**k):\n"
+                "        order.append(' '.join(map(str,args)));super().__init__(args,*a,**k)\n"
+                "pysafe.subprocess.Popen=Rec\n"
+                "pysafe.run_bounded(['true'],30)\n"
+                "print(next(i for i,a in enumerate(order) if a.endswith(' reaper')), order.index('true'))\n") % str(HELPER.parent)
+        result = pysafe.run_bounded([sys.executable, "-c", code], 60.0)
+        self.assertEqual(result.returncode, 0, result.text("stderr"))
+        reaper_at, child_at = (int(v) for v in result.text("stdout").split())
+        self.assertLess(reaper_at, child_at, "the child was spawned before its reaper existed")
+
 
 class Stdin(Scratch):
     def test_child_stdin_is_devnull_without_input(self) -> None:
