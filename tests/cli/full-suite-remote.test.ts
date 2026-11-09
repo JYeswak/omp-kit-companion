@@ -5,6 +5,7 @@
 // the real ones.
 import { afterAll, expect, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -88,6 +89,15 @@ async function fixture(name: string, failing = false): Promise<Fixture> {
 	chmodSync(join(hosts, "..", "ssh"), 0o755);
 	writeFileSync(join(bin, "flock"), FLOCK);
 	chmodSync(join(bin, "flock"), 0o755);
+	// A fixture host stands in for a real suite worker, which carries bun at
+	// ~/.bun/bin (suite-worker-setup.sh parity). The worker shell rebuilds PATH
+	// from its own HOME (fixed-env.sh), so a coordinator PATH entry cannot reach
+	// it: on this Mac /opt/homebrew/bin survives, but on a stock runner bun lives
+	for (const worker of ["omp-suite@worker-1", "omp-suite@worker-2"]) {
+		const workerBunDir = join(hosts, worker, ".bun", "bin");
+		mkdirSync(workerBunDir, { recursive: true });
+		symlinkSync(process.execPath, join(workerBunDir, "bun"));
+	}
 	const marker = await sh(["python3", remote, "pins", "--marker"], repoRoot, cleanEnv());
 	writeFileSync(join(hosts, "READY.json"), JSON.stringify({ pins: text(marker.stdout).trim() }));
 	const env = cleanEnv();
