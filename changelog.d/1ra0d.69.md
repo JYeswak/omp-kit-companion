@@ -1,0 +1,1 @@
+- `omp-kit land --patch` now commits the reconstructed hunks on local main and publishes main itself, exactly like `land --paths`, so the installed shared-main pre-push member admits the push instead of refusing every patch publication.

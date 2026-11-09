@@ -1,9 +1,9 @@
 // Affected-test source dependencies: src/land.ts
 import { expect, setDefaultTimeout, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
-import { LAND_DEFAULT_TIMEOUT_MS, cliPath, command, commandEnvironment, fixture, git, hunkSetup, landArgs, patchHold, remoteHead, repoRoot, responseCode, scratch, type HunkSetup } from "./private-index-land.helpers.ts";
+import { EXPECTED_SERVICE, LAND_DEFAULT_TIMEOUT_MS, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, patchHold, remoteHead, repoRoot, responseCode, scratch, type HunkSetup } from "./private-index-land.helpers.ts";
 
 const LAND_RUN_FLOOR_MS = 60_000;
 const HOOK_MARKER = "LANDPUSH1 pre-push hook started";
@@ -69,6 +69,114 @@ test("LANDPUSH1 a pre-push hook past the push deadline reports LAND_PUBLICATION_
 	expect(existsSync(log!)).toBe(true);
 	expect(readFileSync(log!, "utf8")).toContain(HOOK_MARKER);
 	expect(git(setup.work, ["ls-remote", "origin", "refs/heads/main"]).split("\t")[0]).toBe(setup.base);
+});
+
+/** Install the production shared-main pre-push member: a private-index candidate
+ * push is refused, so only a publication from local main itself can pass. */
+function installOnMainMember(work: string): void {
+	writeFileSync(join(work, ".git", "hooks", "pre-push"),
+		readFileSync(join(repoRoot, "scripts", "check-pushed-on-main.sh")), { mode: 0o755 });
+}
+
+test("LANDPATCH1 patch mode publishes the reconstructed commit from local main with the on-main member installed", () => {
+	const setup = hunkSetup("shift");
+	const { work, fakeBin, base, patch } = setup;
+	installOnMainMember(work);
+	const fresh = remoteHead(work);
+	expect(fresh).not.toBe(base);
+	// The shared checkout stays stale with unrelated staged and worktree bytes.
+	writeFileSync(join(work, "peer.txt"), "staged peer bytes\n");
+	git(work, ["add", "peer.txt"]);
+	writeFileSync(join(work, "untouched.txt"), "unstaged worktree bytes\n");
+	const stagedOid = git(work, ["rev-parse", ":peer.txt"]).trim();
+	const statusBefore = git(work, ["status", "--porcelain"]);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+	const run = command(work, ["--patch", patch, "-m", "feat(land): selected hunks [test]", "--apply", "--yes"], patchHold(), {
+		amDir: fakeBin,
+		gitEnv: { OMP_LAND_CHECK_CONTENT_FILE: setup.checkContent, OMP_LAND_CHECK_ADDED_FILE: setup.checkAdded },
+	});
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	const data = run.body.data as {
+		overall: string; commit: string; candidate_sha: string; pushed_sha: string; owner: string; paths: string[];
+		base: string; localMain: string; check: { status: string; checked_sha: string; pushed_sha: string };
+		convergence: { state: string; reason: string | null; applied: boolean; pushed: boolean; published_commits: number; remote_after: string };
+	};
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("PUSHED");
+	expect(data.base).toBe(fresh);
+	expect(data.commit).toBe(data.candidate_sha);
+	expect(data.pushed_sha).toBe(data.commit);
+	expect(data.check.status).toBe("PASS");
+	expect(data.check.checked_sha).toBe(data.commit);
+	expect(data.check.pushed_sha).toBe(data.commit);
+	expect(data.convergence.pushed).toBe(true);
+	expect(data.convergence.remote_after).toBe(data.commit);
+	// Local main and origin main agree on the published reconstruction.
+	expect(git(work, ["rev-parse", "refs/heads/main"]).trim()).toBe(data.commit);
+	expect(data.localMain).toBe(data.commit);
+	expect(remoteHead(work)).toBe(data.commit);
+	expect(git(work, ["show", "-s", "--format=%P", data.commit]).trim()).toBe(fresh);
+	expect(git(work, ["show", `${data.commit}:service.txt`])).toBe(EXPECTED_SERVICE);
+	expect(git(work, ["show", `${data.commit}:feature/added.txt`])).toBe("caller added file\n");
+	// Peer staged and uncommitted bytes on other paths survive exactly.
+	expect(git(work, ["rev-parse", ":peer.txt"]).trim()).toBe(stagedOid);
+	expect(readFileSync(join(work, "peer.txt"), "utf8")).toBe("staged peer bytes\n");
+	expect(readFileSync(join(work, "untouched.txt"), "utf8")).toBe("unstaged worktree bytes\n");
+	expect(readFileSync(join(work, "service.txt"), "utf8")).toBe(EXPECTED_SERVICE);
+	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
+});
+
+test("LANDPATCH1 a patch conflicting with a newer main commit is refused naming the path and nothing is pushed", () => {
+	const setup = hunkSetup("conflict");
+	const { work, fakeBin, base, patch } = setup;
+	installOnMainMember(work);
+	const originBefore = remoteHead(work);
+	expect(originBefore).not.toBe(base);
+	const refsBefore = git(work, ["for-each-ref", "refs/heads"]);
+	const statusBefore = git(work, ["status", "--porcelain"]);
+	const run = command(work, ["--patch", patch, "-m", "feat(land): conflicting selection [test]", "--apply", "--yes"], patchHold(), { amDir: fakeBin });
+	expect(run.status).toBe(1);
+	expect(responseCode(run.body)).toBe("PATCH_CONFLICT");
+	const message = (run.body.errors as { message: string }[])[0]?.message ?? "";
+	expect(message).toContain("service.txt");
+	expect(remoteHead(work)).toBe(originBefore);
+	expect(git(work, ["for-each-ref", "refs/heads"])).toBe(refsBefore);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
+});
+
+test("LANDPATCH1 a mid-materialization failure restores every patch path byte-identical", () => {
+	const setup = hunkSetup("none");
+	const { work, fakeBin, base, patch } = setup;
+	// Paths land in diff order, so feature/added.txt materializes first: link
+	// it (dangling, so only an lstat/readlink snapshot can bring it back) and
+	// block service.txt with a non-empty directory so materialization throws
+	// midway, after the first path was already written.
+	const linkName = join(work, "feature", "added.txt");
+	mkdirSync(join(work, "feature"), { recursive: true });
+	symlinkSync("nowhere-target.txt", linkName);
+	const blockedDir = join(work, "service.txt");
+	rmSync(blockedDir);
+	mkdirSync(blockedDir, { recursive: true });
+	writeFileSync(join(blockedDir, "kept.txt"), "caller keeps this\n");
+	const refsBefore = git(work, ["for-each-ref", "refs/heads"]);
+	const run = command(work, ["--patch", patch, "-m", "feat(land): blocked materialization [test]", "--apply", "--yes"], patchHold(), { amDir: fakeBin });
+	expect(run.status).toBe(77);
+	expect(responseCode(run.body)).toBe("LAND_CONSTRUCTION_UNVERIFIED");
+	const message = (run.body.errors as { message: string }[])[0]?.message ?? "";
+	expect(message).toContain("service.txt");
+	expectLandSchema(run.body.data);
+	expect(run.body.data).toMatchObject({ overall: "UNRUN", commit: null });
+	// The written path came back as the exact same dangling link (not a file,
+	// not absent), the blocker dir is intact, and no reconstructed bytes
+	// stranded anywhere.
+	expect(lstatSync(linkName).isSymbolicLink()).toBe(true);
+	expect(readlinkSync(linkName)).toBe("nowhere-target.txt");
+	expect(lstatSync(blockedDir).isDirectory()).toBe(true);
+	expect(readFileSync(join(blockedDir, "kept.txt"), "utf8")).toBe("caller keeps this\n");
+	expect(remoteHead(work)).toBe(base);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+	expect(git(work, ["for-each-ref", "refs/heads"])).toBe(refsBefore);
 });
 
 // LANDPANETIMEOUT1 (ompkit-fp72.120.16.280): resolve-pane runs under a base deadline (30 s in production) scaled by

@@ -103,15 +103,17 @@ test("refuses a caller patch restoring bytes the actual parent superseded", () =
 	};
 	expect(data.overall).toBe("REFUSED");
 	expect(data.pushed_sha).toBeNull();
+	expect(data.commit).toBe(data.candidate_sha);
 	// The refused candidate really was parented on the actual parent with stale bytes.
 	expect(git(work, ["show", "-s", "--format=%P", data.candidate_sha]).trim()).toBe(parent);
 	expect(git(work, ["show", `${data.candidate_sha}:owned.txt`])).toBe("base owned\n");
 	expect(data.phases.actual_parents).toEqual([parent]);
 	expect(data.phases.publication_ref).toBe("refs/heads/main");
-	// Zero publication: the seed bytes never reach origin and local refs never move.
+	// Zero publication: the seed bytes never reach origin. Like a refused
+	// path-mode save, the candidate stays on local main for inspection.
 	expect(remoteHead(work)).toBe(parent);
 	expect(git(work, ["show", `${parent}:owned.txt`])).toBe("actual parent bytes\n");
-	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(localBefore);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(data.candidate_sha);
 	expect(seed).not.toBe(parent);
 });
 

@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { run as kitlibRun, runSync as kitlibRunSync } from "./kitlib/run.ts";
 import type { RunResult } from "./kitlib/run.ts";
@@ -7,7 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { availableParallelism, homedir, loadavg } from "node:os";
 import type { CliResult, ParsedCommand } from "./cli.ts";
 import { authorizeSourceAct } from "./source-authority.ts";
-import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { convergeRepository } from "./converge.ts";
 import type { ConvergeResult } from "./converge.ts";
 import { defaultLiveness, defaultRunner, disposalGate } from "./scratch.ts";
@@ -46,28 +46,8 @@ function landPushDeadlineSeconds(): number {
 	return Number.isSafeInteger(value) ? Math.min(7200, Math.max(1, value)) : 2400;
 }
 
-type PushResult = GitResult & { log: string | null };
-
-/** The publication push alone runs under the push deadline; kitlib reaps the whole git+hook group at the
- * deadline. An interrupted push keeps its captured hook output in <git-dir>/omp-kit/land-push/ so the
- * refusal can name it. */
-async function publicationPush(repo: string, gitDir: string, candidate: string, deadlineS: number): Promise<PushResult> {
-	const run = await kitlibRun(["git", "push", "origin", `${candidate}:refs/heads/main`], { cwd: repo, env: gitEnvironment(), deadline_s: deadlineS, max_output_bytes: 8 * 1024 * 1024 });
-	const decoder = new TextDecoder();
-	const out = decoder.decode(run.stdout), err = decoder.decode(run.stderr);
-	const interrupted = run.timed_out || run.killed || run.rc === null;
-	let log: string | null = null;
-	if (interrupted) {
-		const dir = join(gitDir, "omp-kit", "land-push");
-		const path = join(dir, `${candidate}.${Date.now()}.log`);
-		try {
-			mkdirSync(dir, { recursive: true });
-			writeFileSync(path, `# git push origin ${candidate}:refs/heads/main; deadline ${deadlineS} s; timed_out=${run.timed_out} elapsed_s=${run.elapsed_s.toFixed(1)}\n# stderr (pre-push hook output)\n${err}\n# stdout\n${out}`);
-			log = path;
-		} catch { /* the refusal still reports the deadline; it says the log could not be written */ }
-	}
-	return { code: run.rc ?? 1, out, err, interrupted, log };
-}
+// LANDPATCH1: patch mode publishes through commitOwnedPathsAndPublish, the same
+// local-main publisher path mode uses; no second (private-index) publisher remains.
 
 function gitBytes(repo: string, args: string[]): { code: number; out: Buffer; err: string; interrupted: boolean } {
 	const run = spawnSync("git", args, { cwd: repo, env: gitEnvironment(), timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
@@ -828,21 +808,30 @@ function patchUnrun(repo: string, code: string, message: string, remediation: st
 	};
 }
 
-function patchConvergence(repo: string, state: "FAST_FORWARD" | "REFUSED", reason: string | null, pushed: boolean, base: string, candidate: string | null, remoteAfter: string | null, publishedCommits: number, elapsedS: number): ConvergeResult {
-	// Patch mode never integrates local main, so applied stays false: the only
-	// mutation is the exact candidate fast-forwarding origin/main. old/up name
-	// the fetched origin/main the candidate was reconstructed on.
+/** Persist the interrupted publication push's hook output and report it the
+ * way the retired private-index publisher did (LANDPUSH1): the push is
+ * unverified, never failed, and nothing was force-pushed or retried. */
+function pushUnverifiedFailure(repo: string, deadlineS: number, convergence: ConvergeResult): { code: string; message: string; remediation: string } {
+	let log: string | null = null;
+	const gitDir = git(repo, ["rev-parse", "--absolute-git-dir"]);
+	if (gitDir.code === 0 && !gitDir.interrupted) {
+		const dir = join(gitDir.out.trim(), "omp-kit", "land-push");
+		const path = join(dir, `${convergence.new_head ?? "unknown"}.${Date.now()}.log`);
+		try {
+			mkdirSync(dir, { recursive: true });
+			const output = convergence.push_output;
+			writeFileSync(path, `# git push origin <head>:refs/heads/main; deadline ${deadlineS} s; the pre-push hook was still running\n# stderr (pre-push hook output)\n${output?.err ?? ""}\n# stdout\n${output?.out ?? ""}`);
+			log = path;
+		} catch { /* the refusal names the missing log instead */ }
+	}
 	return {
-		repo, state, reason, applied: false, pushed, conflicts: [], elapsed_s: elapsedS,
-		old: base, up: base, ...(candidate ? { new_head: candidate } : {}),
-		published_commits: publishedCommits, ...(remoteAfter ? { remote_after: remoteAfter } : {}),
+		code: "LAND_PUBLICATION_UNVERIFIED",
+		message: `The push did not finish: the pre-push hook was still running after ${deadlineS} s, the land push deadline (${LAND_PUSH_DEADLINE_ENV}, default 2400, 1..7200); hook log: ${log ?? "not written (could not create it under the git dir's omp-kit/land-push)"}; publication could not be verified`,
+		remediation: `Read the hook log, inspect origin/main before retrying, and raise ${LAND_PUSH_DEADLINE_ENV} if the hook chain needs longer. No force-push or fallback was attempted.`,
 	};
 }
 
-
 async function landPatchCommand(repo: string, request: ParsedCommand): Promise<CliResult> {
-	const started = performance.now();
-	const elapsed = (): number => Math.round(performance.now() - started) / 1000;
 	const message = request.flags.get("--message");
 	if (typeof message !== "string" || message.trim().length === 0) return refused("LAND_MESSAGE_REQUIRED", "land needs a nonempty --message", "Pass the commit message; nothing was published.");
 	const patchValue = request.flags.get("--patch");
@@ -952,197 +941,156 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 		cleanup();
 		return patchUnrun(repo, "LAND_CONSTRUCTION_UNVERIFIED", "The reconstructed tree could not be inspected safely", "Repair the local repository and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
 	}
-	const commit = git(scratch, ["commit", "-m", message]);
-	if (commit.code !== 0 || commit.interrupted) {
-		cleanup();
-		const check = checkPreflight.kind === "skip" ? checkPreflight.result : pushCheckResult("UNRUN", "commit_refused", checkPreflight.result.sha256);
-		const phases = landPhaseEvidence(repo, null, false, undefined, "NOT_APPLIED");
-		return {
-			code: commit.interrupted ? 77 : 1,
-			data: { overall: commit.interrupted ? "UNRUN" : "REFUSED", commit: null, owner: owner.owner, paths, base, localMain, check, phases },
-			errors: [{ code: commit.interrupted ? "LAND_COMMIT_INTERRUPTED" : "COMMIT_CREATION_REFUSED", message: commit.interrupted ? "Git saved no verifiable candidate before the commit command ended" : `Git refused the reconstructed candidate: ${commit.err.trim()}`, remediation: "Inspect the shared main and hooks before retrying; no publication was attempted." }],
-			verification: commit.interrupted ? "UNVERIFIED" : "NOT_RUN",
-		};
-	}
-	const candidateRef = git(scratch, ["rev-parse", "--verify", "HEAD"]);
-	if (candidateRef.code !== 0) {
-		cleanup();
-		return patchUnrun(repo, "LAND_CONSTRUCTION_UNVERIFIED", "The reconstructed candidate has no readable commit", "Repair the local repository and retry; nothing was published.", owner.owner, paths, base, checkPreflight.result.sha256);
-	}
-	const candidate = candidateRef.out.trim();
-	// Actual-parent/custody qualification (ompkit-rhy9.10): the reconstructed
-	// candidate carries the caller bytes by construction, so qualification
-	// pins the actual parent, rejects superseded restores, admits only owned
-	// paths, and re-proves custody before any check or publication.
-	const patchQualifiedBlobs: Record<string, WorktreeBlob> = {};
+	// Snapshot the reconstructed bytes for exactly the patch paths, then drop
+	// the scratch worktree: it never publishes. The reconstruction lives only
+	// in the scratch worktree (never committed), so the snapshot reads worktree
+	// files, never a committed tree. Patch mode commits these bytes on local
+	// main and publishes main exactly the way path mode does (LANDPATCH1), so
+	// the on-main pre-push member admits the push.
+	type ReconstructedEntry = { bytes: Buffer; mode: string } | null;
+	const reconstructed = new Map<string, ReconstructedEntry>();
 	for (const path of paths) {
-		const entry = treeBlob(repo, candidate, path);
-		if (entry === null) {
-			cleanup();
-			return patchUnrun(repo, "LAND_CANDIDATE_UNREADABLE", `The reconstructed candidate tree could not be read for ${path}`, "Repair the local repository and retry; nothing was published.", owner.owner, paths, base, checkPreflight.result.sha256);
+		const full = join(scratch, path);
+		let entry: ReconstructedEntry;
+		try {
+			const stat = lstatSync(full);
+			if (stat.isSymbolicLink()) entry = { bytes: Buffer.from(readlinkSync(full), "utf8"), mode: "120000" };
+			else if (stat.isFile()) entry = { bytes: readFileSync(full), mode: (stat.mode & 0o111) !== 0 ? "100755" : "100644" };
+			else {
+				cleanup();
+				return patchUnrun(repo, "LAND_CONSTRUCTION_UNVERIFIED", `The reconstructed candidate entry for ${path} is not a plain file and cannot be landed on local main`, "Land only caller hunks that add or change plain files; nothing was published.", owner.owner, paths, base, checkPreflight.result.sha256);
+			}
+		} catch (error) {
+			if (!(error instanceof Error && "code" in error && error.code === "ENOENT") || existsSync(full)) {
+				cleanup();
+				return patchUnrun(repo, "LAND_CONSTRUCTION_UNVERIFIED", `The reconstructed candidate bytes for ${path} could not be read`, "Repair the local repository and retry; nothing was published.", owner.owner, paths, base, checkPreflight.result.sha256);
+			}
+			entry = null;
 		}
-		patchQualifiedBlobs[path] = entry;
+		reconstructed.set(path, entry);
 	}
-	const patchQualified = qualifyPublicationCandidate(repo, {
-		candidate, base, paths, owner: owner.owner,
-		publicationRef: LAND_PUBLICATION_REF, qualifiedBlobs: patchQualifiedBlobs,
-	});
-	if ("refusal" in patchQualified) {
-		cleanup();
-		const phases = landPhaseEvidence(repo, candidate, false);
-		return {
-			code: 1,
-			data: { overall: "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, check: patchQualified.guardCheck, phases },
-			errors: patchQualified.refusal.errors,
-			verification: "PERFORMED",
-		};
-	}
-	const checkResult = runPushCheck(repo, base, candidate);
-	const admission = pushCheckAdmission(checkResult);
-	if (!admission.allow) {
-		cleanup();
-		const remoteAfter = observedRemoteMain(repo);
-		if (remoteAfter && remoteAfter !== base) git(repo, ["fetch", "origin", "refs/heads/main"]);
-		const convergence = patchConvergence(repo, "REFUSED", checkResult.status === "FAIL" ? "CHECK_FAILED" : "CHECK_UNRUN", false, base, candidate, remoteAfter, 0, elapsed());
-		const phases = landPhaseEvidence(repo, candidate, true, convergence);
-		return {
-			code: 1,
-			data: { overall: "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, convergence, check: { ...checkResult, pushed_sha: null }, phases },
-			errors: [checkResult.status === "FAIL"
-				? { code: "LAND_CHECK_FAILED", message: "The registered repo check failed for the exact reconstructed candidate", remediation: "Repair the check or candidate; it was not published." }
-				: { code: "LAND_CHECK_UNRUN", message: `The registered repo check did not complete: ${checkResult.reason ?? "unknown"}`, remediation: "Restore the registered check tooling and retry; no publication was authorized." }],
-			verification: "PERFORMED",
-		};
-	}
-	const fullSuiteVerdict = await runFullSuiteVerdict(repo, base, candidate);
-	if (fullSuiteVerdict !== "PASS") {
-		cleanup();
-		const remoteAfter = observedRemoteMain(repo);
-		if (remoteAfter && remoteAfter !== base) git(repo, ["fetch", "origin", "refs/heads/main"]);
-		const reason = fullSuiteVerdict === "FAIL" ? "CHECK_FAILED" : "CHECK_UNRUN";
-		const convergence = patchConvergence(repo, "REFUSED", reason, false, base, candidate, remoteAfter, 0, elapsed());
-		const phases = landPhaseEvidence(repo, candidate, true, convergence);
-		return {
-			code: fullSuiteVerdict === "UNRUN" ? 77 : 1,
-			data: { overall: fullSuiteVerdict === "UNRUN" ? "UNRUN" : "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, convergence, check: { ...checkResult, pushed_sha: null }, phases },
-			errors: [fullSuiteError(fullSuiteVerdict)],
-			verification: fullSuiteVerdict === "UNRUN" ? "UNVERIFIED" : "PERFORMED",
-		};
-	}
-	const observed = observedRemoteMain(repo);
-	if (observed === null) {
-		cleanup();
-		return patchUnrun(repo, "LAND_ORIGIN_UNVERIFIED", "Fresh origin/main could not be re-read before publication", "Restore origin reachability and retry; nothing was published.", owner.owner, paths, base, checkResult.sha256);
-	}
-	if (observed !== base) {
-		cleanup();
-		// Materialize the moved origin so phase evidence classifies the
-		// candidate against the actual publication head instead of UNKNOWN.
-		git(repo, ["fetch", "origin", "refs/heads/main"]);
-		const convergence = patchConvergence(repo, "REFUSED", "ORIGIN_MOVED", false, base, candidate, observed, 0, elapsed());
-		const phases = landPhaseEvidence(repo, candidate, true, convergence);
-		return {
-			code: 1,
-			data: { overall: "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, convergence, check: { ...checkResult, pushed_sha: null }, phases },
-			errors: [{ code: "LAND_ORIGIN_MOVED", message: "origin/main moved during patch construction; the exact checked candidate was refused without retry or force", remediation: "Reconcile with current origin/main and run land again so the new candidate is checked." }],
-			verification: "PERFORMED",
-		};
-	}
-	const pushDeadlineS = landPushDeadlineSeconds();
-	const push = await publicationPush(repo, gitDir.out.trim(), candidate, pushDeadlineS);
-	if (push.interrupted) {
-		cleanup();
-		const phases = landPhaseEvidence(repo, candidate, true);
-		return {
-			code: 77,
-			data: { overall: "UNRUN", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, check: checkResult, phases },
-			errors: [{ code: "LAND_PUBLICATION_UNVERIFIED", message: `The push did not finish: the pre-push hook was still running after ${pushDeadlineS} s, the land push deadline (${LAND_PUSH_DEADLINE_ENV}, default 2400, 1..7200); hook log: ${push.log ?? "not written (could not create it under the git dir's omp-kit/land-push)"}; publication could not be verified`, remediation: `Read the hook log, inspect origin/main before retrying, and raise ${LAND_PUSH_DEADLINE_ENV} if the hook chain needs longer. No force-push or fallback was attempted.` }],
-			verification: "UNVERIFIED",
-		};
-	}
-	const after = observedRemoteMain(repo);
 	cleanup();
-	const published = push.code === 0 && after === candidate;
-	const pushedCheck = { ...checkResult, pushed_sha: published ? candidate : null };
-	const convergence = published
-		? patchConvergence(repo, "FAST_FORWARD", null, true, base, candidate, after, 1, elapsed())
-		: patchConvergence(repo, "REFUSED", after === base ? "PUSH_FAILED" : "PUSH_REJECTED", false, base, candidate, after, 0, elapsed());
-	if (after && after !== base && after !== candidate) git(repo, ["fetch", "origin", "refs/heads/main"]);
-	const phases = landPhaseEvidence(repo, candidate, true, convergence);
-	if (published) {
-		return {
-			code: 0,
-			data: { overall: "PUSHED", commit: candidate, candidate_sha: candidate, pushed_sha: candidate, owner: owner.owner, paths, base, localMain, convergence, check: pushedCheck, phases },
-			verification: "PERFORMED",
-		};
+	// Patch paths are normally dirty in the caller checkout: the patch itself
+	// was produced from those bytes. Committing the reconstruction and then
+	// restoring the caller's bytes preserves them exactly, so no refusal is
+	// needed and no byte outside these paths is touched. Only the dirtiness
+	// snapshot below is read; the worktree snapshot decides what comes back.
+	const dirtyBefore = new Set<string>();
+	{
+		const dirty = git(repo, ["status", "--porcelain=v1", "-z", "--", ...paths.map((path) => `:(literal)${path}`)]);
+		if (dirty.code !== 0 || dirty.interrupted)
+			return patchUnrun(repo, "STAGED_INDEX_UNAVAILABLE", "The owned changes could not be checked", "Repair the Git index before landing; no files were changed.", owner.owner, paths, base, checkPreflight.result.sha256);
+		for (const entry of dirty.out.split("\0")) {
+			// Rename records are two NUL fields; only the XY-prefixed side
+			// names a dirty path.
+			if (entry.length > 3 && entry[2] === " ") dirtyBefore.add(entry.slice(3));
+		}
 	}
-	if (after === base) {
-		return {
-			code: 1,
-			data: { overall: "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, convergence, check: pushedCheck, phases },
-			errors: [{ code: "LAND_PUBLICATION_REFUSED", message: `The exact checked candidate was not published: ${push.err.trim().slice(-300) || "the push was rejected without origin movement"}`, remediation: "Preserve the candidate and resolve the typed refusal before another landing." }],
-			verification: "PERFORMED",
-		};
+	// The reconstruction is parented on fresh origin/main: advance local main
+	// onto it before committing, never behind and never diverged. A local main
+	// that already holds unpushed commits would lose those bytes to the
+	// materialized reconstruction, so it refuses instead.
+	const localTip = git(repo, ["rev-parse", "--verify", "refs/heads/main^{commit}"]);
+	if (localTip.code !== 0 || localTip.interrupted)
+		return patchUnrun(repo, "BASELINE_UNAVAILABLE", "Local main has no readable commit", "Repair the Git repository before landing; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
+	if (isAncestor(repo, localTip.out.trim(), base) !== true)
+		return refused("LAND_BASE_ADVANCE_REFUSED", `Local main holds commits that fresh origin/main lacks: ${localTip.out.trim()}`, "Push or reconcile the local main commits first, then run land again; no commit was created or published.");
+	if (localTip.out.trim() !== base) {
+		const ff = git(repo, ["merge", "--ff-only", "refs/remotes/origin/main"]);
+		if (ff.code !== 0 || ff.interrupted)
+			return refused("LAND_BASE_ADVANCE_REFUSED", `Local main could not be fast-forwarded to fresh origin/main: ${(ff.err.trim() || ff.out.trim()).slice(-300)}`, "Reconcile local main with origin/main without discarding work, then run land again; no commit was created or published.");
 	}
-	return {
-		code: 1,
-		data: { overall: "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, convergence, check: pushedCheck, phases },
-		errors: [{ code: "LAND_PUSH_REJECTED", message: "origin/main advanced after candidate check; the exact checked candidate was refused without retry or force", remediation: "Reconcile with current origin/main and run land again so the new candidate is checked." }],
-		verification: "PERFORMED",
+	// Snapshot the exact pre-landing worktree state and index. Paths the
+	// caller left dirty get their state back however the landing ends, so the
+	// reconstruction never strands in their worktree; clean paths keep the
+	// committed bytes on success and come back on any refusal. Symlinks are
+	// snapshotted as links and restored as links, never flattened to files.
+	type WorktreeEntry =
+		| { kind: "absent" }
+		| { kind: "file"; bytes: Buffer; mode: number }
+		| { kind: "symlink"; target: string }
+		| { kind: "other" };
+	const worktreeBefore = new Map<string, WorktreeEntry>();
+	for (const path of paths) {
+		const full = join(repo, path);
+		let entry: WorktreeEntry;
+		try {
+			const stat = lstatSync(full);
+			if (stat.isSymbolicLink()) entry = { kind: "symlink", target: readlinkSync(full) };
+			else if (stat.isFile()) entry = { kind: "file", bytes: readFileSync(full), mode: stat.mode & 0o7777 };
+			else entry = { kind: "other" };
+		} catch (error) {
+			if (error instanceof Error && "code" in error && error.code === "ENOENT" && !existsSync(full)) entry = { kind: "absent" };
+			else return patchUnrun(repo, "LAND_CONSTRUCTION_UNVERIFIED", `The pre-landing worktree state for ${path} could not be read`, "Repair the worktree and index before retrying; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
+		}
+		worktreeBefore.set(path, entry);
+	}
+	const indexPathResult = git(repo, ["rev-parse", "--absolute-git-dir"]);
+	const indexBefore = indexPathResult.code === 0 && !indexPathResult.interrupted
+		? (() => { try { return readFileSync(join(indexPathResult.out.trim(), "index")); } catch { return null; } })()
+		: null;
+	const restoreWorktree = (published: boolean): void => {
+		for (const [path, before] of worktreeBefore) {
+			// Clean paths keep the committed bytes on success; everything
+			// else comes back exactly as the caller left it.
+			if (published && !dirtyBefore.has(path)) continue;
+			const full = join(repo, path);
+			try {
+				rmSync(full, { force: true });
+				if (before.kind === "symlink") symlinkSync(before.target, full);
+				else if (before.kind === "file") {
+					mkdirSync(dirname(full), { recursive: true });
+					writeFileSync(full, before.bytes);
+					chmodSync(full, before.mode);
+				}
+			} catch { /* best-effort per path; the refusal already reports */ }
+		}
+		try {
+			if (!published && indexBefore !== null && indexPathResult.code === 0 && !indexPathResult.interrupted)
+				writeFileSync(join(indexPathResult.out.trim(), "index"), indexBefore);
+		} catch { /* best-effort; the refusal already reports */ }
 	};
+	let result: CliResult | null = null;
+	let published = false;
+	try {
+		for (const path of paths) {
+			const full = join(repo, path);
+			const entry = reconstructed.get(path);
+			try {
+				// Replace the path, never write through a caller symlink.
+				rmSync(full, { force: true });
+				if (!entry) continue;
+				if (entry.mode === "120000") symlinkSync(entry.bytes.toString("utf8"), full);
+				else {
+					mkdirSync(dirname(full), { recursive: true });
+					writeFileSync(full, entry.bytes);
+					if (entry.mode === "100755") chmodSync(full, 0o755);
+				}
+			} catch {
+				return patchUnrun(repo, "LAND_CONSTRUCTION_UNVERIFIED", `The reconstructed bytes for ${path} could not be written to local main`, "Repair the worktree and index before retrying; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
+			}
+		}
+		result = await commitOwnedPathsAndPublish(repo, { paths, message, owner: owner.owner, base, pushDeadlineS: landPushDeadlineSeconds() });
+		published = (result.data as { overall?: string } | null)?.overall === "PUSHED";
+		return result;
+	} finally {
+		restoreWorktree(published);
+	}
 }
 
-export async function landCommand(request: ParsedCommand): Promise<CliResult> {
-	if (!request.flags.has("--apply")) return refused("LAND_APPLY_REQUIRED", "land is a mutation and requires --apply", "Review the exact owner, paths, base and candidate, then pass --apply --yes.");
-	const root = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
-	if (root.code !== 0) return refused("LAND_REPOSITORY_REQUIRED", "The current directory is not inside a Git repository", "Run land from the repository to publish.");
-	const repo = resolve(root.out.trim());
-	try {
-		authorizeSourceAct({ canonicalRoot: repo, privateRoots: [join(repo, "var", "agent-tmp")] }, { path: repo, act: "publish" });
-	} catch (error) {
-		return refused("SOURCE_ACT_REFUSED", error instanceof Error ? error.message : String(error), "Land only from the canonical companion source root; no commit or publication was attempted.");
-	}
-	if (request.flags.get("--patch") !== undefined) return landPatchCommand(repo, request);
-	const paths = normalizePaths(request.flags.get("--paths"), repo);
-	if (!Array.isArray(paths)) return paths;
-	const message = request.flags.get("--message");
-	if (typeof message !== "string" || message.trim().length === 0) return refused("LAND_MESSAGE_REQUIRED", "land needs a nonempty --message", "Pass the commit message; nothing was published.");
-	const owner = authorizedOwner(repo, paths);
-	if ("error" in owner) return owner.error;
-	for (const path of paths) {
-		const staged = git(repo, ["diff", "--cached", "--quiet", "HEAD", "--", `:(literal)${path}`]);
-		if (staged.code === 1) return refused("STAGED_OWNED_PATH_REFUSED", `The shared index already contains changes for ${path}`, "Keep foreign or partial staging separate; commit only a clean reserved worktree path.");
-		if (staged.code !== 0) return refused("STAGED_INDEX_UNREADABLE", "The shared index could not be checked safely", "Repair the local Git index before landing; no files were changed.");
-	}
-	const branch = git(repo, ["symbolic-ref", "--quiet", "HEAD"]);
-	if (branch.code !== 0 || branch.out.trim() !== "refs/heads/main")
-		return refused("LAND_MAIN_REQUIRED", "Land requires the canonical shared main checkout", "Return to shared main without discarding work; no commit was created.");
-	const gitDir = git(repo, ["rev-parse", "--absolute-git-dir"]);
-	const commonDir = git(repo, ["rev-parse", "--git-common-dir"]);
-	if (gitDir.code !== 0 || commonDir.code !== 0 || resolve(repo, commonDir.out.trim()) !== resolve(gitDir.out.trim()))
-		return refused("LAND_CANONICAL_REQUIRED", "Land requires the primary shared checkout, not a linked worktree", "Use the canonical shared main checkout; no commit was created.");
-	const head = git(repo, ["rev-parse", "--verify", "HEAD^{commit}"]);
-	if (head.code !== 0) return refused("BASELINE_UNAVAILABLE", "Local main has no readable commit", "Repair the Git repository before landing.");
-	const changed = git(repo, ["diff", "--quiet", "HEAD", "--", ...paths.map((path) => `:(literal)${path}`)]);
-	const hasNewPath = paths.some((path) => trackedPaths(repo, path)?.length === 0);
-	if (changed.code === 0 && !hasNewPath) return refused("LAND_NO_CHANGES", "The owned paths have no changes to save", "Make the reserved worktree changes before landing.");
-	if (changed.code !== 0 && changed.code !== 1) return refused("STAGED_INDEX_UNREADABLE", "The owned changes could not be checked", "Repair the Git index before landing.");
-	for (const path of paths) {
-		const tracked = trackedPaths(repo, path);
-		if (tracked === null) return refused("STAGED_INDEX_UNREADABLE", "Tracked paths could not be read safely", "Repair the Git index before landing.");
-		if (tracked.some((entry) => entry !== path))
-			return refused("LAND_PATH_INVALID", `Requested path expands to unreserved descendants: ${path}`, "Reserve and name each exact file separately.");
-		try {
-			if (lstatSync(join(repo, path)).isDirectory())
-				return refused("LAND_PATH_INVALID", `Requested path is a directory: ${path}`, "Reserve and name each exact file separately.");
-		} catch {
-			if (!tracked.includes(path)) return refused("LAND_PATH_UNAVAILABLE", `Requested file does not exist: ${path}`, "Name an existing file or a tracked deletion.");
-		}
-	}
-	const currentOwner = authorizedOwner(repo, paths);
-	if ("error" in currentOwner) return currentOwner.error;
-	if (currentOwner.owner !== owner.owner) return refused("OWNER_MISMATCH", "The live pane owner changed before saving", "Reacquire the correct identity and reservation; nothing was committed.");
-	let checkPreflight = preparePushCheck(repo, head.out.trim());
+/** Commit exactly the owned worktree paths on local main and publish main
+ * through owner-resolved convergence (LANDPATCH1, ompkit-1ra0d.69). Path mode
+ * calls this with its reserved worktree bytes; patch mode calls it after
+ * materializing its reconstructed hunks onto local main. One publisher, so
+ * every push moves local main itself and the on-main pre-push member admits
+ * it. Preserves every staged entry and worktree byte outside `paths`, the
+ * same contract as Git's native --only transaction. */
+async function commitOwnedPathsAndPublish(
+	repo: string,
+	input: { paths: string[]; message: string; owner: string; base: string; pushDeadlineS?: number },
+): Promise<CliResult> {
+	const { paths, message, owner, base } = input;
+	let checkPreflight = preparePushCheck(repo, base);
 	if (checkPreflight.kind === "ready" && paths.includes(PUSH_CHECK_PATH)) {
 		const checkDiff = git(repo, ["diff", "--quiet", "HEAD", "--", `:(literal)${PUSH_CHECK_PATH}`]);
 		if (checkDiff.code === 1)
@@ -1154,7 +1102,7 @@ export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 		const phases = landPhaseEvidence(repo, null, false, undefined, "NOT_APPLIED");
 		return {
 			code: 77,
-			data: { overall: "UNRUN", commit: null, owner: owner.owner, paths, base: head.out.trim(), check: checkPreflight.result, phases },
+			data: { overall: "UNRUN", commit: null, owner, paths, base, check: checkPreflight.result, phases },
 			errors: [{ code: "LAND_CHECK_UNRUN", message: `The registered repo check is unavailable: ${checkPreflight.result.reason ?? "unknown"}`, remediation: "Restore the registered check executable and retry; no commit or publication was attempted." }],
 			verification: "UNVERIFIED",
 		};
@@ -1221,7 +1169,7 @@ export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 		const phases = landPhaseEvidence(repo, null, false, undefined, constructionWithoutCandidate);
 		return {
 			code: refusedCommit ? 1 : 77,
-			data: { overall: refusedCommit ? "REFUSED" : "UNRUN", commit: null, owner: owner.owner, paths, base: head.out.trim(), check, phases },
+			data: { overall: refusedCommit ? "REFUSED" : "UNRUN", commit: null, owner, paths, base, check, phases },
 			errors: [{ code: refusedCommit ? "COMMIT_CREATION_REFUSED" : "LAND_COMMIT_UNVERIFIED", message: refusedCommit ? `Git refused the candidate commit: ${commit.err.trim()}` : "The commit operation ended without unambiguous save attribution", remediation: "Inspect the shared main and reflog before retrying; no publication was attempted." }],
 			verification: refusedCommit ? "NOT_RUN" : "UNVERIFIED",
 		};
@@ -1229,21 +1177,21 @@ export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 	if (commit.code !== 0 || commit.interrupted) {
 		const check = pushCheckResult("UNRUN", "commit_interrupted", checkPreflight.result.sha256);
 		const phases = landPhaseEvidence(repo, sha, false);
-		return { code: 77, data: { overall: "UNRUN", commit: sha, owner: owner.owner, paths, base: head.out.trim(), check, phases }, errors: [{ code: "LAND_COMMIT_INTERRUPTED", message: "Git saved the owned commit, but the commit command did not finish successfully", remediation: "Inspect the interrupted hook and saved commit before publication; no hooks were bypassed and no rollback was attempted." }], verification: "UNVERIFIED" };
+		return { code: 77, data: { overall: "UNRUN", commit: sha, owner, paths, base, check, phases }, errors: [{ code: "LAND_COMMIT_INTERRUPTED", message: "Git saved the owned commit, but the commit command did not finish successfully", remediation: "Inspect the interrupted hook and saved commit before publication; no hooks were bypassed and no rollback was attempted." }], verification: "UNVERIFIED" };
 	}
 	// Actual-parent/custody qualification (ompkit-rhy9.10): the constructed
 	// candidate must be parented on exactly the qualified base, carry exactly
 	// the qualified bytes without restoring superseded history, touch only
 	// owned paths, and hold current custody. Anything else publishes nothing.
 	const qualified = qualifyPublicationCandidate(repo, {
-		candidate: sha, base: head.out.trim(), paths, owner: owner.owner,
+		candidate: sha, base, paths, owner,
 		publicationRef: LAND_PUBLICATION_REF, qualifiedBlobs,
 	});
 	if ("refusal" in qualified) {
 		const phases = landPhaseEvidence(repo, sha, false);
 		return {
 			code: 1,
-			data: { overall: "REFUSED", commit: sha, candidate_sha: sha, pushed_sha: null, owner: owner.owner, paths, base: head.out.trim(), check: qualified.guardCheck, phases },
+			data: { overall: "REFUSED", commit: sha, candidate_sha: sha, pushed_sha: null, owner, paths, base, check: qualified.guardCheck, phases },
 			errors: qualified.refusal.errors,
 			verification: "PERFORMED",
 		};
@@ -1258,7 +1206,7 @@ export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 	try {
 		convergenceStarted = true;
 		const convergence = await convergeRepository({
-			repo, apply: true, push: true,
+			repo, apply: true, push: true, pushDeadlineS: input.pushDeadlineS,
 			beforePush: async (candidateSha, baseSha) => {
 				checkedCandidateSha = candidateSha;
 				checkResult = runPushCheck(repo, baseSha, candidateSha);
@@ -1286,27 +1234,85 @@ export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 		checkResult = { ...checkResult, pushed_sha: pushedSha };
 		const checkUnavailable = checkResult.status === "UNRUN" && checkResult.reason !== "not_run";
 		const fullSuiteUnavailable = fullSuiteVerdict === "UNRUN";
+		const pushUnverified = convergence.reason === "PUSH_UNVERIFIED";
 		const checkAllowed = checkResult.status === "PASS" || checkResult.status === "SKIP";
 		const published = convergence.pushed && pushedSha === candidateSha && checkAllowed && fullSuiteVerdict === "PASS";
-		const overall = published ? "PUSHED" : checkUnavailable || fullSuiteUnavailable ? "UNRUN" : "REFUSED";
+		const overall = published ? "PUSHED" : checkUnavailable || fullSuiteUnavailable || pushUnverified ? "UNRUN" : "REFUSED";
 		const phases = landPhaseEvidence(repo, sha, convergenceStarted, convergence);
 		const suiteFailure = fullSuiteVerdict === "FAIL" || fullSuiteVerdict === "UNRUN" ? fullSuiteError(fullSuiteVerdict) : undefined;
+		const convergenceData: ConvergeResult = { ...convergence };
+		delete convergenceData.push_output;
 		const failure = published ? undefined : suiteFailure ?? (checkResult.status === "FAIL"
 			? { code: "LAND_CHECK_FAILED", message: "The registered repo check failed for the exact publication candidate", remediation: "Repair the check or candidate; it was not published." }
 			: checkUnavailable
 				? { code: "LAND_CHECK_UNRUN", message: `The registered repo check did not complete: ${checkResult.reason ?? "unknown"}`, remediation: "Restore the registered check tooling and retry; no publication was authorized." }
 				: convergence.reason === "PUSH_REJECTED"
 					? { code: "LAND_PUSH_REJECTED", message: "origin/main advanced after candidate check; the exact checked candidate was refused without retry or force", remediation: "Reconcile with current origin/main and run land again so the new candidate is checked." }
-					: { code: "LAND_PUBLICATION_REFUSED", message: `The exact checked candidate was not published: ${convergence.reason ?? "publication was not verified"}`, remediation: "Preserve the candidate and resolve the typed refusal before another landing." });
+					: pushUnverified
+						? pushUnverifiedFailure(repo, input.pushDeadlineS ?? landPushDeadlineSeconds(), convergence)
+						: { code: "LAND_PUBLICATION_REFUSED", message: `The exact checked candidate was not published: ${convergence.reason ?? "publication was not verified"}`, remediation: "Preserve the candidate and resolve the typed refusal before another landing." });
 		return {
 			code: published ? 0 : overall === "UNRUN" ? 77 : 1,
-			data: { overall, commit: sha, candidate_sha: candidateSha, pushed_sha: pushedSha, owner: owner.owner, paths, base: head.out.trim(), localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence, check: checkResult, phases },
+			data: { overall, commit: sha, candidate_sha: candidateSha, pushed_sha: pushedSha, owner, paths, base, localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence: convergenceData, check: checkResult, phases },
 			...(failure ? { errors: [failure] } : {}),
 			verification: overall === "UNRUN" ? "UNVERIFIED" : "PERFORMED",
 		};
 	} catch (error) {
 		const phases = landPhaseEvidence(repo, sha, convergenceStarted, convergenceResult);
 		const check = { ...checkResult, pushed_sha: null };
-		return { code: 77, data: { overall: "UNRUN", commit: sha, candidate_sha: checkedCandidateSha ?? sha, pushed_sha: null, owner: owner.owner, paths, base: head.out.trim(), check, phases }, errors: [{ code: "LAND_PUBLICATION_UNVERIFIED", message: `The candidate was saved but publication could not be verified: ${error instanceof Error ? error.message : String(error)}`, remediation: "Inspect local main and origin/main before retrying; no force-push or fallback was attempted." }], verification: "UNVERIFIED" };
+		return { code: 77, data: { overall: "UNRUN", commit: sha, candidate_sha: checkedCandidateSha ?? sha, pushed_sha: null, owner, paths, base, check, phases }, errors: [{ code: "LAND_PUBLICATION_UNVERIFIED", message: `The candidate was saved but publication could not be verified: ${error instanceof Error ? error.message : String(error)}`, remediation: "Inspect local main and origin/main before retrying; no force-push or fallback was attempted." }], verification: "UNVERIFIED" };
 	}
+}
+
+export async function landCommand(request: ParsedCommand): Promise<CliResult> {
+	if (!request.flags.has("--apply")) return refused("LAND_APPLY_REQUIRED", "land is a mutation and requires --apply", "Review the exact owner, paths, base and candidate, then pass --apply --yes.");
+	const root = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
+	if (root.code !== 0) return refused("LAND_REPOSITORY_REQUIRED", "The current directory is not inside a Git repository", "Run land from the repository to publish.");
+	const repo = resolve(root.out.trim());
+	try {
+		authorizeSourceAct({ canonicalRoot: repo, privateRoots: [join(repo, "var", "agent-tmp")] }, { path: repo, act: "publish" });
+	} catch (error) {
+		return refused("SOURCE_ACT_REFUSED", error instanceof Error ? error.message : String(error), "Land only from the canonical companion source root; no commit or publication was attempted.");
+	}
+	if (request.flags.get("--patch") !== undefined) return landPatchCommand(repo, request);
+	const paths = normalizePaths(request.flags.get("--paths"), repo);
+	if (!Array.isArray(paths)) return paths;
+	const message = request.flags.get("--message");
+	if (typeof message !== "string" || message.trim().length === 0) return refused("LAND_MESSAGE_REQUIRED", "land needs a nonempty --message", "Pass the commit message; nothing was published.");
+	const owner = authorizedOwner(repo, paths);
+	if ("error" in owner) return owner.error;
+	for (const path of paths) {
+		const staged = git(repo, ["diff", "--cached", "--quiet", "HEAD", "--", `:(literal)${path}`]);
+		if (staged.code === 1) return refused("STAGED_OWNED_PATH_REFUSED", `The shared index already contains changes for ${path}`, "Keep foreign or partial staging separate; commit only a clean reserved worktree path.");
+		if (staged.code !== 0) return refused("STAGED_INDEX_UNREADABLE", "The shared index could not be checked safely", "Repair the local Git index before landing; no files were changed.");
+	}
+	const branch = git(repo, ["symbolic-ref", "--quiet", "HEAD"]);
+	if (branch.code !== 0 || branch.out.trim() !== "refs/heads/main")
+		return refused("LAND_MAIN_REQUIRED", "Land requires the canonical shared main checkout", "Return to shared main without discarding work; no commit was created.");
+	const gitDir = git(repo, ["rev-parse", "--absolute-git-dir"]);
+	const commonDir = git(repo, ["rev-parse", "--git-common-dir"]);
+	if (gitDir.code !== 0 || commonDir.code !== 0 || resolve(repo, commonDir.out.trim()) !== resolve(gitDir.out.trim()))
+		return refused("LAND_CANONICAL_REQUIRED", "Land requires the primary shared checkout, not a linked worktree", "Use the canonical shared main checkout; no commit was created.");
+	const head = git(repo, ["rev-parse", "--verify", "HEAD^{commit}"]);
+	if (head.code !== 0) return refused("BASELINE_UNAVAILABLE", "Local main has no readable commit", "Repair the Git repository before landing.");
+	const changed = git(repo, ["diff", "--quiet", "HEAD", "--", ...paths.map((path) => `:(literal)${path}`)]);
+	const hasNewPath = paths.some((path) => trackedPaths(repo, path)?.length === 0);
+	if (changed.code === 0 && !hasNewPath) return refused("LAND_NO_CHANGES", "The owned paths have no changes to save", "Make the reserved worktree changes before landing.");
+	if (changed.code !== 0 && changed.code !== 1) return refused("STAGED_INDEX_UNREADABLE", "The owned changes could not be checked", "Repair the Git index before landing.");
+	for (const path of paths) {
+		const tracked = trackedPaths(repo, path);
+		if (tracked === null) return refused("STAGED_INDEX_UNREADABLE", "Tracked paths could not be read safely", "Repair the Git index before landing.");
+		if (tracked.some((entry) => entry !== path))
+			return refused("LAND_PATH_INVALID", `Requested path expands to unreserved descendants: ${path}`, "Reserve and name each exact file separately.");
+		try {
+			if (lstatSync(join(repo, path)).isDirectory())
+				return refused("LAND_PATH_INVALID", `Requested path is a directory: ${path}`, "Reserve and name each exact file separately.");
+		} catch {
+			if (!tracked.includes(path)) return refused("LAND_PATH_UNAVAILABLE", `Requested file does not exist: ${path}`, "Name an existing file or a tracked deletion.");
+		}
+	}
+	const currentOwner = authorizedOwner(repo, paths);
+	if ("error" in currentOwner) return currentOwner.error;
+	if (currentOwner.owner !== owner.owner) return refused("OWNER_MISMATCH", "The live pane owner changed before saving", "Reacquire the correct identity and reservation; nothing was committed.");
+	return commitOwnedPathsAndPublish(repo, { paths, message, owner: owner.owner, base: head.out.trim() });
 }

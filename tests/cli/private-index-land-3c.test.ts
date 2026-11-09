@@ -17,7 +17,7 @@ setDefaultTimeout(LAND_DEFAULT_TIMEOUT_MS);
 // inline suite's refusals, so this file opts in for every land command it runs.
 process.env.PRE_PUSH_FULL_SUITE = "push";
 
-test("compiled public land patch publishes only selected bytes through the linked-worktree stale hook and refuses a foreign removal", async () => {
+test("compiled public land patch publishes only selected bytes through the canonical-checkout stale hook and refuses a foreign removal", async () => {
 	const binary = join(scratch, "stale-worktree-land-cli");
 	const decoder = new TextDecoder();
 	const build = await kitlibRun([process.execPath, "build", "--compile", "--no-compile-autoload-dotenv",
@@ -71,6 +71,7 @@ test("compiled public land patch publishes only selected bytes through the linke
 		git(work, ["add", "--", "peer.txt"]);
 		writeFileSync(join(work, "untouched.txt"), "peer unstaged bytes\n");
 		const serviceBefore = readFileSync(join(work, "service.txt"));
+		const stagedPeerOid = git(work, ["rev-parse", ":peer.txt"]).trim();
 		const statusBefore = git(work, ["status", "--porcelain"]);
 		const indexBefore = readFileSync(join(common, "index"));
 		const hold = [{ agent: "DarkFern", path: "service.txt", exclusive: true, remaining_seconds: 3600 }];
@@ -96,11 +97,13 @@ test("compiled public land patch publishes only selected bytes through the linke
 		}
 		const run = { status: native.rc ?? 1, body };
 		expectLandSchema(run.body.data);
-		expect(readFileSync(hookTrace, "utf8")).toBe("git-file\n");
+		expect(readFileSync(hookTrace, "utf8")).toBe("git-directory\n");
 		expect(JSON.stringify(run.body)).not.toContain("Not a directory");
+		let publishedCommit: string | null = null;
 		if (specimen === "publish") {
 			expect(run.status, `${JSON.stringify(run.body)}\n${nativeDetail}`).toBe(0);
 			const data = run.body.data as { overall: string; commit: string; candidate_sha: string; pushed_sha: string };
+			publishedCommit = data.commit;
 			expect(data.overall).toBe("PUSHED");
 			expect(data.candidate_sha).toBe(data.commit);
 			expect(data.pushed_sha).toBe(data.commit);
@@ -120,12 +123,21 @@ test("compiled public land patch publishes only selected bytes through the linke
 			expect(JSON.stringify(run.body.errors)).toContain("rework on a fresh worktree");
 			expect(remoteHead(work)).toBe(base);
 		}
-		expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+		// Patch mode commits the reconstruction on local main like path mode:
+		// publish moves HEAD onto the selected bytes, while a refusal restores
+		// the exact pre-landing worktree bytes and index.
+		expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(publishedCommit ?? base);
 		expect(readFileSync(join(work, "service.txt"))).toEqual(serviceBefore);
 		expect(readFileSync(join(work, "peer.txt"), "utf8")).toBe("peer staged bytes\n");
 		expect(readFileSync(join(work, "untouched.txt"), "utf8")).toBe("peer unstaged bytes\n");
 		expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
-		expect(readFileSync(join(common, "index"))).toEqual(indexBefore);
+		if (specimen === "publish") {
+			// The local-main commit refreshed only its own path entries, the
+			// same contract as path mode's native --only transaction: the
+			// unrelated peer staging still names its exact pre-landing blob.
+			expect(git(work, ["rev-parse", ":peer.txt"]).trim()).toBe(stagedPeerOid);
+			expect(git(work, ["rev-parse", ":service.txt"]).trim()).toBe(git(work, ["rev-parse", `${publishedCommit}:service.txt`]).trim());
+		} else expect(readFileSync(join(common, "index"))).toEqual(indexBefore);
 	}
 }, 180_000);
 
@@ -232,9 +244,12 @@ test("refuses a true three-way conflict naming the file and hunks", () => {
 	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
 });
 
-test("refuses origin movement during construction without publishing", () => {
+test("merges a concurrent advance to an unrelated path and publishes the merge", () => {
 	const setup = hunkSetup("none");
 	const { work, fakeBin, bare, base, patch } = setup;
+	// A competing writer lands on origin while our local commit runs: the
+	// commit-msg hook below pushes it before publication, so convergence must
+	// integrate it exactly the way path mode does instead of refusing.
 	const writer = join(scratch, `writer-${fixtureNumber}`);
 	git(scratch, ["clone", "--branch", "main", bare, writer]);
 	git(writer, ["config", "user.name", "writer"]);
@@ -244,8 +259,6 @@ test("refuses origin movement during construction without publishing", () => {
 	git(writer, ["commit", "-m", "competing writer [test]"]);
 	const writerSha = git(writer, ["rev-parse", "HEAD"]).trim();
 	const commitMsg = join(work, ".git", "hooks", "commit-msg");
-	// The reconstruction commit runs in a linked scratch worktree, whose absolute
-	// GIT_DIR would otherwise capture the nested push into the wrong repository.
 	writeFileSync(commitMsg, `#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE\ngit -C '${writer}' push origin HEAD:refs/heads/main\nexit 0\n`);
 	chmodSync(commitMsg, 0o755);
 	const attempts = join(scratch, `patch-push-attempts-${fixtureNumber}.txt`);
@@ -257,30 +270,36 @@ test("refuses origin movement during construction without publishing", () => {
 		amDir: fakeBin,
 		gitEnv: { OMP_LAND_CHECK_CONTENT_FILE: setup.checkContent, OMP_LAND_CHECK_ADDED_FILE: setup.checkAdded },
 	});
-	expect(run.status).toBe(1);
-	expect(responseCode(run.body)).toBe("LAND_ORIGIN_MOVED");
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
 	const data = run.body.data as {
-		overall: string; commit: string; candidate_sha: string; pushed_sha: null; base: string;
-		check: { status: string; checked_sha: string; pushed_sha: null }; phases: { publication: string };
-		convergence: { state: string; reason: string | null; pushed: boolean; remote_after: string };
+		overall: string; commit: string; candidate_sha: string; pushed_sha: string; base: string;
+		check: { status: string; checked_sha: string; pushed_sha: string }; phases: { construction: string; publication: string };
+		convergence: { state: string; reason: string | null; pushed: boolean; published_commits: number; remote_after: string };
 	};
 	expectLandSchema(run.body.data);
-	expect(data.overall).toBe("REFUSED");
+	expect(data.overall).toBe("PUSHED");
 	expect(data.base).toBe(base);
-	expect(data.candidate_sha).toBe(data.commit);
-	expect(data.pushed_sha).toBeNull();
+	expect(data.candidate_sha).toBe(data.pushed_sha);
 	expect(data.check.status).toBe("PASS");
-	expect(data.check.checked_sha).toBe(data.candidate_sha);
-	expect(data.check.pushed_sha).toBeNull();
-	expect(data.phases.publication).toBe("NOT_APPLIED");
-	expect(data.convergence.state).toBe("REFUSED");
-	expect(data.convergence.reason).toBe("ORIGIN_MOVED");
-	expect(data.convergence.pushed).toBe(false);
-	expect(data.convergence.remote_after).toBe(writerSha);
-	expect(remoteHead(work)).toBe(writerSha);
-	expect(remoteHead(work)).not.toBe(data.candidate_sha);
-	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
-	expect(existsSync(attempts)).toBe(false);
-	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
+	expect(data.check.checked_sha).toBe(data.pushed_sha);
+	expect(data.check.pushed_sha).toBe(data.pushed_sha);
+	expect(data.phases.construction).toBe("APPLIED");
+	expect(data.phases.publication).toBe("APPLIED");
+	expect(data.convergence.state).toBe("MERGED");
+	expect(data.convergence.reason).toBeNull();
+	expect(data.convergence.pushed).toBe(true);
+	expect(data.convergence.published_commits).toBe(2);
+	expect(data.convergence.remote_after).toBe(data.pushed_sha);
+	expect(remoteHead(work)).toBe(data.pushed_sha);
+	expect(git(work, ["rev-parse", "refs/heads/main"]).trim()).toBe(data.pushed_sha);
+	// The merge joined the writer advance with the reconstructed hunks: our
+	// saved local commit first, the writer advance second, both byte sets
+	// present, and the publication push actually ran the installed hooks.
+	expect(git(work, ["rev-parse", `${data.pushed_sha}^1`]).trim()).toBe(data.commit);
+	expect(git(work, ["rev-parse", `${data.pushed_sha}^2`]).trim()).toBe(writerSha);
+	expect(git(work, ["show", `${data.pushed_sha}:untouched.txt`])).toBe("concurrent remote change\n");
+	expect(git(work, ["show", `${data.pushed_sha}:feature/added.txt`])).toBe("caller added file\n");
+	expect(existsSync(attempts)).toBe(true);
+	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore.replace(" M service.txt\n", ""));
 });
 

@@ -373,7 +373,7 @@ test("refuses publication when inherited hook attribution is ambiguous", () => {
 	expect(remoteHead(work)).toBe(before);
 });
 
-test("reconstructs only caller-selected hunks onto fresh origin/main", () => {
+test("reconstructs only caller-selected hunks onto local main and publishes main", () => {
 	const setup = hunkSetup("shift");
 	const { work, fakeBin, bare, base, patch } = setup;
 	const fresh = remoteHead(work);
@@ -406,14 +406,14 @@ test("reconstructs only caller-selected hunks onto fresh origin/main", () => {
 	expectLandSchema(run.body.data);
 	expect(data.overall).toBe("PUSHED");
 	expect(data.base).toBe(fresh);
-	expect(data.localMain).toBe(base);
+	expect(data.localMain).toBe(data.commit);
 	expect([...data.paths].sort()).toEqual(["feature/added.txt", "service.txt"]);
 	expect(data.check.status).toBe("PASS");
 	expect(data.check.checked_sha).toBe(data.commit);
 	expect(data.check.pushed_sha).toBe(data.commit);
-	expect(data.convergence.state).toBe("FAST_FORWARD");
+	expect(data.convergence.state).toBe("AHEAD");
 	expect(data.convergence.reason).toBeNull();
-	expect(data.convergence.applied).toBe(false);
+	expect(data.convergence.applied).toBe(true);
 	expect(data.convergence.pushed).toBe(true);
 	expect(data.convergence.published_commits).toBe(1);
 	expect(data.convergence.remote_after).toBe(data.commit);
@@ -427,10 +427,11 @@ test("reconstructs only caller-selected hunks onto fresh origin/main", () => {
 	expect(git(work, ["show", `${data.commit}:feature/added.txt`])).toBe("caller added file\n");
 	expect(readFileSync(setup.checkContent, "utf8")).toBe(EXPECTED_SERVICE);
 	expect(readFileSync(setup.checkAdded, "utf8")).toBe("caller added file\n");
-	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(data.commit);
+	expect(git(work, ["rev-parse", "refs/heads/main"]).trim()).toBe(remoteHead(work));
 	expect(git(work, ["rev-parse", ":peer.txt"]).trim()).toBe(stagedOid);
 	expect(readFileSync(join(work, "peer.txt"), "utf8")).toBe("staged peer bytes\n");
 	expect(readFileSync(join(work, "untouched.txt"), "utf8")).toBe("unstaged worktree bytes\n");
-	expect(readFileSync(join(work, "service.txt"), "utf8")).toBe(SERVICE_BASE);
+	expect(readFileSync(join(work, "service.txt"), "utf8")).toBe(EXPECTED_SERVICE);
 	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
 });

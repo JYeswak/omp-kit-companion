@@ -4,6 +4,7 @@ import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, o
 import { dirname, join, resolve } from "node:path";
 import type { Stats } from "node:fs";
 import type { CliResult, ParsedCommand } from "./cli.ts";
+import { run as kitlibRun } from "./kitlib/run.ts";
 import { probeIncarnationSync } from "./kitlib/proc.ts";
 
 /** Native implementation based on git_converge.py (a58ef61, blob 9ffa2446cb6016132897059f4348028f468a98bb).
@@ -19,6 +20,13 @@ export type ConvergeOptions = {
 	resolutions?: Readonly<Record<string, "ours" | "theirs">>;
 	beforePush?: (candidateSha: string, baseSha: string) =>
 		{ allow: boolean; reason?: string } | Promise<{ allow: boolean; reason?: string }>;
+	/** Bound in seconds for the publication push alone (the pre-push hook chain
+	 * runs under it). Absent runs the push unbounded, as before. A timeout is
+	 * unverified, never failed: the push may still complete, so the caller
+	 * must verify the remote before retrying. LANDPATCH1: patch mode passes
+	 * the land push deadline here so the shared publisher keeps LANDPUSH1's
+	 * guarantee; path mode omits it and is unchanged. */
+	pushDeadlineS?: number;
 };
 export type ConvergeConflict = { path: string; kind: string; detail?: string; class?: "true_divergence"; hint?: "theirs_behind" | "ours_behind" };
 export type ConvergeResult = {
@@ -41,6 +49,9 @@ export type ConvergeResult = {
 	published_commits?: number;
 	remote_after?: string;
 	push_error?: string;
+	/** Captured push output (stdout/stderr) when the push ran under pushDeadlineS
+	 * and did not finish: the caller persists the pre-push hook log from it. */
+	push_output?: { out: string; err: string };
 };
 type Side = readonly [mode: string, oid: string] | null;
 type DiskSide = Side | readonly ["dir", null];
@@ -452,19 +463,45 @@ export async function convergeRepository(options: ConvergeOptions): Promise<Conv
 					return done();
 				}
 			}
-			const pushed = git(repo, ["push", "--porcelain", plan.remote, `${head}:refs/heads/main`]);
+			// The publication push alone may run under a caller deadline (LANDPUSH1):
+			// the pre-push hook chain runs under it, and an interruption is
+			// unverified, never failed — the push may still complete, so the
+			// remote is verified before anything is reported, exactly as below.
+			let pushCode = 1, pushErr = "", pushTimedOut = false;
+			if (options.pushDeadlineS === undefined) {
+				const pushed = git(repo, ["push", "--porcelain", plan.remote, `${head}:refs/heads/main`]);
+				pushCode = pushed.code; pushErr = pushed.err;
+			} else {
+				const pushEnv: Record<string, string> = {};
+				for (const [key, value] of Object.entries(environment())) if (value !== undefined) pushEnv[key] = value;
+				const run = await kitlibRun(["git", "push", "--porcelain", plan.remote, `${head}:refs/heads/main`], {
+					cwd: repo, env: pushEnv, deadline_s: options.pushDeadlineS,
+					max_output_bytes: 8 * 1024 * 1024, max_total_bytes: 8 * 1024 * 1024,
+				});
+				const decoder = new TextDecoder();
+				pushCode = run.rc ?? 1; pushErr = decoder.decode(run.stderr);
+				pushTimedOut = run.timed_out || run.killed || run.rc === null;
+				if (pushTimedOut) result.push_output = { out: decoder.decode(run.stdout), err: pushErr };
+			}
 			const remote = out(repo, ["ls-remote", plan.remote, "refs/heads/main"]).split("\t")[0];
 			if (remote === head) { result.pushed = true; result.remote_after = head; result.published_commits = publishedCommits; return done(); }
+			if (pushTimedOut) {
+				result.state = "REFUSED";
+				result.reason = "PUSH_UNVERIFIED";
+				result.push_error = pushErr.slice(-400);
+				result.remote_after = remote;
+				return done();
+			}
 			if (remote === plan.up) {
 				result.reason = "PUSH_FAILED";
-				result.push_error = pushed.err.slice(-400);
+				result.push_error = pushErr.slice(-400);
 				result.remote_after = remote;
 				return done();
 			}
 			if (options.beforePush) {
 				result.state = "REFUSED";
 				result.reason = "PUSH_REJECTED";
-				result.push_error = pushed.err.slice(-400);
+				result.push_error = pushErr.slice(-400);
 				result.remote_after = remote;
 				return done();
 			}
