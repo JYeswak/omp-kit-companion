@@ -118,6 +118,8 @@ omp-kit why RUN_ID --json                 # one run explained
 omp-kit undo RUN_ID --yes                 # restore one verified receipt
 ```
 
+`RUN_ID` is the `id` field of a receipt row in `omp-kit audit --json`.
+
 Receipts live under the private state root (`$XDG_STATE_HOME/omp-kit`, else
 `~/.local/state/omp-kit`, mode 0700). `undo` refuses while another receipt or
 update is pending, refuses an already-undone receipt, and refuses when a
@@ -684,6 +686,8 @@ plist to backup (`--purge-logs` deletes logs). Then `rm -rf
 "$HOME/.local/opt/omp-kit"` and the `$HOME/.local/bin/omp-kit` copy if
 present. Receipts stay under the state root (`$XDG_STATE_HOME/omp-kit`, else
 `~/.local/state/omp-kit`) unless removed too; uninstall never touches it.
+The install's attestation check runs `gh`, which keeps its own cache
+(`~/.cache/gh/.sigstore`); that cache belongs to `gh`, not to omp-kit.
 
 ## Troubleshooting
 
