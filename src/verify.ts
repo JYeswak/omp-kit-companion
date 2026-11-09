@@ -318,8 +318,14 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	if (lesson === null) return { ok: false, code: "LESSON_MISSING", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment; no replay or tracker act ran").join("\n"), acts };
 	// The owned replay fixture uses an explicit database path under its per-run
 	// scratch; deleting BEADS_DB alone would still discover an ancestor tracker.
+	// VERIFYTMP1 (ompkit-1ra0d.73): the export has no .git, so a box that reads git discovers whatever
+	// repository encloses it. Under the caller's TMPDIR that was any repo (CFS on 2026-11-09, so the same
+	// sha got opposite verdicts); under the project's own var/agent-tmp it is always the project, as in
+	// the gates (fresh-gate.sh, full-suite-verdict.sh). A harness-designated root keeps precedence.
 	const harnessRoot = process.env.GRADE_WAVE_SCRATCH || undefined;
-	const scratch = ownedTmp("verify", { bead: input.bead, ...(harnessRoot === undefined ? {} : { root: harnessRoot }) });
+	const scratchRoot = harnessRoot ?? join(input.repo, "var", "agent-tmp");
+	mkdirSync(scratchRoot, { recursive: true });
+	const scratch = ownedTmp("verify", { bead: input.bead, root: scratchRoot });
 	const realBr = resolveRealBr(env.PATH);
 	// HERMETIC1-B: tracker management keeps caller authority; acceptance never inherits it.
 	const replayBase = { ...env };

@@ -648,6 +648,36 @@ test("planted: a box with -> in its obligation text before the command is ACCEPT
 	expect(br.acts()).toEqual([]);
 });
 
+test("VERIFYTMP1 a git-reading box gets the same verdict whatever repository encloses the caller's TMPDIR; it sees the project's tags, never the enclosing repo's", async () => {
+	const { dir, sha } = await repo("verifytmp", {}, true);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "tag", "-a", "-m", "project", "v9.9.9"], dir);
+	const other = join(base, "verifytmp-unrelated");
+	mkdirSync(other, { recursive: true });
+	writeFileSync(join(other, "f"), "x\n");
+	await sh(["git", "init", "-q"], other);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"], other);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "unrelated [test]"], other);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "tag", "-a", "-m", "other", "v0.0.1-unrelated"], other);
+	const saved = { tmp: process.env.TMPDIR, grade: process.env.GRADE_WAVE_SCRATCH };
+	const verdict = async (tmp: string) => {
+		const br = fakeBr(inReview("- [ ] [a] [landed] `git describe --tags --abbrev=0` -> prints v9.9.9"));
+		process.env.TMPDIR = tmp;
+		delete process.env.GRADE_WAVE_SCRATCH;
+		try {
+			const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, dryRun: true });
+			return { pass: res.replays.map(r => r.pass), log: res.log };
+		} finally {
+			if (saved.tmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = saved.tmp;
+			if (saved.grade === undefined) delete process.env.GRADE_WAVE_SCRATCH; else process.env.GRADE_WAVE_SCRATCH = saved.grade;
+		}
+	};
+	const inside = await verdict(dir);
+	const unrelated = await verdict(other);
+	expect(inside.pass, inside.log).toEqual([true]);
+	expect(unrelated.pass, unrelated.log).toEqual([true]);
+	expect(unrelated.log).not.toContain("v0.0.1-unrelated");
+}, fixtureDeadlineS(120) * 1_000);
+
 test("expectedOf reads only the outcome right after the first backticked span, never an earlier or later arrow", () => {
 	expect(expectedOf("status open -> in_review `sh scripts/t.sh` -> 16 pass 0 fail")).toBe("16 pass 0 fail");
 	expect(expectedOf("Replay `sh scripts/t.sh` expect: prints ok; then open -> closed")).toBe("prints ok");
