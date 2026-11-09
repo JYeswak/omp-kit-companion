@@ -1737,8 +1737,17 @@ describe("RETIREGUARD1 legitimate work", () => {
 				expect(Number.isSafeInteger(pid) && pid > 1).toBe(true);
 				// A reparented zombie has terminated; a live descendant is an orphan. Absolute path:
 				// CI's stock-extensions job runs with a PATH that has no ps (run 42439224579).
-				const ps = await runFixtureAsync(["/bin/ps", "-o", "stat=", "-p", String(pid)], { cwd: base });
-				const states = new TextDecoder().decode(ps.stdout).trim();
+				// SIGKILL is sent before the call returns, but teardown is the kernel's: under load
+				// (load1 58, fresh-gate 2026-11-09) the signalled sleep was still listed 61 ms later.
+				// Poll up to 1 s, well under the planted sleep's own 3 s, so the disabled-termination
+				// mutant still finds it alive.
+				let states = "?";
+				for (const until = Date.now() + 1000; ;) {
+					const ps = await runFixtureAsync(["/bin/ps", "-o", "stat=", "-p", String(pid)], { cwd: base });
+					states = new TextDecoder().decode(ps.stdout).trim();
+					if (states === "" || states.startsWith("Z") || Date.now() >= until) break;
+					await Bun.sleep(25);
+				}
 				expect(states === "" || states.startsWith("Z")).toBe(true);
 			}
 		});
