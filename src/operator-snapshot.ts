@@ -8,6 +8,15 @@ import { managedBrowserProfileRoots } from "./cache-retain.ts";
 const PROFILE_FILES = ["config.yml", "config.yaml", "config.json", "settings.json"] as const;
 const MAX_ENTRIES_PER_ROOT = 20_000;
 const MAX_BYTES_PER_ROOT = 512 * 1024 * 1024;
+/**
+ * The kit state root holds tens of thousands of small service records plus gigabyte release tarballs on a
+ * real machine; lstat is cheap but content-hashing is not. Roots carrying the watched state root (see
+ * WatchedPaths.stateRoot) allow far more entries, hash only small files, and record larger files by stable
+ * metadata. The hash/metadata line is per-file size, never a cumulative position, so before/after snapshots
+ * classify every path identically. Every other watched root keeps the strict budgets above.
+ */
+const MAX_STATE_ENTRIES_PER_ROOT = 500_000;
+const MAX_STATE_FILE_HASH_BYTES = 1_048_576;
 const MAX_CONCURRENT_WRITER_CANDIDATES = 50;
 const CONCURRENT_WRITER_PROBE_MS = 1_000; // Timeout never counts as writer evidence; unobserved changes remain failures.
 const EMPTY_CONCURRENT_WRITER_PATHS: ReadonlySet<string> = new Set();
@@ -35,7 +44,7 @@ export function isOwnedState(owned: readonly OwnedStatePath[], path: string): bo
 	});
 }
 
-export type WatchedPaths = string[] & { owned?: readonly OwnedStatePath[]; liveState?: readonly string[] };
+export type WatchedPaths = string[] & { owned?: readonly OwnedStatePath[]; liveState?: readonly string[]; stateRoot?: string | null };
 export type WatchedSnapshot = { entries: Map<string, string>; incomplete: string[]; liveState?: string[] };
 export type WatchedComparison = {
 	unchanged: boolean; complete: boolean; watched: number;
@@ -74,16 +83,20 @@ export function operatorWatchedPaths(home: string, stateRoot: string | null, own
 	if (stateRoot) paths.push(stateRoot);
 	paths.owned = owned;
 	paths.liveState = managedBrowserProfileRoots(home, stateRoot ?? undefined);
+	paths.stateRoot = stateRoot;
 	return paths;
 }
 
 /** Content and mode only: an mtime-only touch is not a change. An absent path is a recorded state, not an error. */
-export function snapshotWatched(paths: readonly string[] & { owned?: readonly OwnedStatePath[]; liveState?: readonly string[] }): WatchedSnapshot {
+export function snapshotWatched(paths: readonly string[] & { owned?: readonly OwnedStatePath[]; liveState?: readonly string[]; stateRoot?: string | null }): WatchedSnapshot {
 	const entries = new Map<string, string>();
 	const incomplete: string[] = [];
 	const liveState = new Set<string>();
 	for (const root of paths) {
 		if (!isAbsolute(root)) throw new Error("watched paths must be absolute");
+		// Only the state root relaxes: every profile, rule, extension and plugin root keeps the strict caps.
+		const relaxed = paths.stateRoot != null && root === paths.stateRoot;
+		const maxEntries = relaxed ? MAX_STATE_ENTRIES_PER_ROOT : MAX_ENTRIES_PER_ROOT;
 		let count = 0, bytes = 0, overflow = false;
 		const visit = (path: string): void => {
 			if (overflow) return;
@@ -96,12 +109,21 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 				if ((error as NodeJS.ErrnoException).code === "ENOENT") { entries.set(path, "absent"); return; }
 				incomplete.push(path); return;
 			}
-			if (++count > MAX_ENTRIES_PER_ROOT) { overflow = true; incomplete.push(root); return; }
+			if (++count > maxEntries) { overflow = true; incomplete.push(root); return; }
 			const mode = (stat.mode & 0o7777).toString(8);
 			if (stat.isSymbolicLink()) { entries.set(path, `link:${readlinkSync(path)}`); return; }
 			if (stat.isFile()) {
-				bytes += stat.size;
-				if (bytes > MAX_BYTES_PER_ROOT) { overflow = true; incomplete.push(root); return; }
+				// A large state file is recorded by stable metadata, never content-hashed: an append or
+				// rewrite still changes size or mtime, while the bulk never counts toward a byte budget.
+				// The `file:` prefix keeps concurrent-writer attribution working on these entries.
+				if (relaxed && stat.size > MAX_STATE_FILE_HASH_BYTES) {
+					entries.set(path, `file:${mode}:meta:${stat.size}:${stat.mtimeMs}`);
+					return;
+				}
+				if (!relaxed) {
+					bytes += stat.size;
+					if (bytes > MAX_BYTES_PER_ROOT) { overflow = true; incomplete.push(root); return; }
+				}
 				try { entries.set(path, `file:${mode}:${createHash("sha256").update(readFileSync(path)).digest("hex")}`); }
 				catch { incomplete.push(path); }
 				return;
@@ -153,12 +175,26 @@ export async function activeConcurrentWriterPaths(before: WatchedSnapshot, after
 		};
 		const inspect = (path: string) => {
 			if (finished || active.has(path)) return;
-			const current = snapshotWatched([path]);
-			if (current.incomplete.includes(path)) return;
-			const currentValue = current.entries.get(path);
 			const finalValue = after.entries.get(path);
-			if (currentValue?.startsWith("file:") && finalValue?.startsWith("file:")
-				&& currentValue.slice(currentValue.lastIndexOf(":") + 1) !== finalValue.slice(finalValue.lastIndexOf(":") + 1)) {
+			if (!finalValue?.startsWith("file:")) return;
+			let stat;
+			try { stat = lstatSync(path); }
+			catch { return; }
+			if (!stat.isFile()) return;
+			const mode = (stat.mode & 0o7777).toString(8);
+			if (finalValue.includes(":meta:")) {
+				// A large state-root file is recorded by stable metadata, not a content hash: compare
+				// metadata against metadata, or every probe would disagree with the snapshot.
+				if (`file:${mode}:meta:${stat.size}:${stat.mtimeMs}` !== finalValue) {
+					active.add(path);
+					if (active.size === candidates.length) finish();
+				}
+				return;
+			}
+			let currentHash: string;
+			try { currentHash = createHash("sha256").update(readFileSync(path)).digest("hex"); }
+			catch { return; }
+			if (currentHash !== finalValue.slice(finalValue.lastIndexOf(":") + 1)) {
 				active.add(path);
 				if (active.size === candidates.length) finish();
 			}

@@ -188,6 +188,47 @@ test("writes by installed service jobs under the state root are not changes; any
 	]);
 }, 120_000);
 
+// POSTCHECKSTATE1: release installs kept failing the postcheck as unreadable because the state root holds
+// ~10 GB outside job-owned dirs while snapshotWatched capped every root at 512 MB. The state root alone now
+// records files past its per-file hash line by stable metadata, so bulk is complete while any isolated-run
+// write under it still counts.
+test("POSTCHECKSTATE1: a state root over the byte budget is complete and unchanged", () => {
+	const { home, paths } = operatorHome();
+	const state = join(home, ".local", "state", "omp-kit");
+	mkdirSync(join(state, "receipts"), { recursive: true });
+	writeFileSync(join(state, "receipts", "r1.json"), "{}\n");
+	const big = join(state, "poll-0.2.99", "release.tar.gz");
+	mkdirSync(join(big, ".."), { recursive: true });
+	writeFileSync(big, "");
+	truncateSync(big, 512 * 1024 * 1024 + 1);
+	expect(statSync(big).size).toBe(512 * 1024 * 1024 + 1);
+	const before = snapshotWatched(paths);
+	const result = compareWatched(before, snapshotWatched(paths), home);
+	expect(result, JSON.stringify(result)).toMatchObject({ unchanged: true, complete: true, changed_paths: [], incomplete_paths: [] });
+}, fixtureDeadlineS() * 1000);
+
+test("POSTCHECKSTATE1 planted: an append under an over-budget state root is still reported", () => {
+	const { home, paths } = operatorHome();
+	const state = join(home, ".local", "state", "omp-kit");
+	mkdirSync(join(state, "receipts"), { recursive: true });
+	writeFileSync(join(state, "receipts", "r1.json"), "{}\n");
+	const big = join(state, "poll-0.2.99", "release.tar.gz");
+	mkdirSync(join(big, ".."), { recursive: true });
+	writeFileSync(big, "");
+	truncateSync(big, 512 * 1024 * 1024 + 1);
+	const before = snapshotWatched(paths);
+	appendFileSync(join(state, "receipts", "r1.json"), "{\"tampered\":true}\n");
+	appendFileSync(big, "x");
+	writeFileSync(join(state, "new-top-level.json"), "{}\n");
+	const result = compareWatched(before, snapshotWatched(paths), home);
+	expect(result.complete).toBe(true);
+	expect(result.changed_paths).toEqual([
+		"~/.local/state/omp-kit/new-top-level.json",
+		"~/.local/state/omp-kit/poll-0.2.99/release.tar.gz",
+		"~/.local/state/omp-kit/receipts/r1.json",
+	]);
+}, fixtureDeadlineS() * 1000);
+
 /** A real concurrent process writing the cc store, cursors and spools the way the live cc service and kit CLIs do. */
 function liveCcWriter(home: string): { stop: () => void; files: string[] } {
 	const cc = ccStateDir(home);
