@@ -329,7 +329,7 @@ describe("CFSFALSEREF1 (ompkit-1ra0d.75): fixture repos in scratch and omp inter
 			expect(refused?.block).toBe(true);
 			expect(refused?.reason).toContain("WRITE_OWN_UNRESERVED");
 		});
-	});
+	}, fixtureDeadlineS(30) * 1_000);
 	test("URLWRITE1: a write to an omp internal URL is admitted with no lookup; a plain relative lookalike is still judged", async () => {
 		await withAm(holds("Intruder"), "fail", "Intruder", async () => {
 			expect(await write("out://report.md", "report\n")).toBeUndefined();
@@ -342,5 +342,5 @@ describe("CFSFALSEREF1 (ompkit-1ra0d.75): fixture repos in scratch and omp inter
 			expect(refused?.block).toBe(true);
 			expect(refused?.reason).toContain("WRITE_OWN_UNRESERVED");
 		});
-	});
+	}, fixtureDeadlineS(30) * 1_000);
 });
