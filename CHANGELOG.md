@@ -4,6 +4,57 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.106] - 2026-11-09
+
+### Changed
+
+- The fleet pack no longer injects the 18 KB standing-law file into every turn; the operating contract lives in AGENTS.md and the standing decisions stay in the private decision log.
+- Retire the pre-canonical commit-msg stamp pair (`10-commit-msg` plus its stale
+  sibling impl) when installing hooks; the canonical `41-omp-kit-commit-msg-vlevel`
+  member keeps enforcing the same rule with the same refusal text and code, so a
+  stamp-less commit is now refused once instead of twice.
+- Record the commit-time bead PASS verdict and reuse it at push and ref-update
+  time: the commit-msg member writes a pending record, a new post-commit member
+  copies it to a record keyed by the exact commit sha under
+  `.git/omp-kit/bead-verdicts/`, and the pre-push and reference-transaction bead
+  members admit recorded shas without re-running `br` per commit. Commits with no
+  record (e.g. `commit-tree` plumbing that bypassed commit-msg) still take today's
+  live `br` check and are refused at push.
+- `br create` no longer refuses a bead as a possible duplicate of a bead it explicitly links with `--deps related:<id>`. `omp-kit verify` creates its LIVEREADBACK child with the parent's title and that link, so every verify close that deferred a `[live]` box was refused with ACT_FAILED.
+- A FULL-plan refusal now teaches the exact recording command the same gate run accepts: the `full-suite-verdict.sh` under the judge root the run consulted, resolved to an absolute path. When the judge is an ephemeral pre-push/commit-gate archive that is removed after the run, the refusal instead prints the command that recreates it (`git archive` of the judged commit into a fresh dir, then that dir's verdict script). A PASS recorded under any other judge is still refused as before.
+- The write-ownership guard no longer treats a fixture repository created inside owned scratch (its own `git init` beneath `var/agent-tmp/`) as a canonical checkout, so writes there are admitted without an Agent Mail reservation lookup.
+- Writes to OMP-internal URLs (`out://`, `cfg://`, and kin) are no longer resolved as files under the canonical checkout, so they are admitted without a reservation lookup.
+- The process-reap tests now wait for a load-scaled time, so a full test suite on a busy machine no longer fails them; a process that never dies is still caught.
+- Kit hook refresh now covers every fleet-watch session repo that already has kit hook members installed, whatever its `pullEnabled`. `pullEnabled` only pauses work supply; it never meant the repo runs no kit hooks, so `pullEnabled: false` repos (omp-kit itself, companion, uds, localbench, zestroku) kept stale members and missed the affected-gate member entirely.
+- The hook freshness census no longer keeps a hand-mirrored member list: `doctor --scope hooks` and the activation doctor read the active release's `scripts/install-commit-msg-bead.sh --check` output, so a member the installer gains (like the `42-omp-kit-affected-gate` member) is reported stale or missing with no code change here.
+- A process started through the bounded runner can no longer outlive a caller that is killed just after starting it: the runner's parent-death reaper is now running before the child starts.
+- `omp-kit doctor` no longer flags fleet-pack rules as unknown: an installed file whose name and bytes match a `MANIFEST.fleet.tsv` row is managed, while a fleet name with changed bytes (or no fleet row) stays DEGRADED naming the file.
+- `omp-kit doctor --json` reports overall OK when the only non-OK rows are structural read-only limits (effective profile values, extension loading, policy recognition, the optional router, the mail guard, the unexercised matcher): those rows stay listed with their reasons but no longer set the overall. DEGRADED, DRIFT, FAIL, and UNVERIFIED rows with a remedy still drive the overall. A run in which every row is one of those structural limits proved nothing, so it reports UNVERIFIED, never OK.
+- The kit planning skill gains the step 2b verb inventory (plus its coverage-check and what-not-to-do rows), so the kit copy is a superset of the local copy again; copy the release file over the local one after upgrading.
+- The scratch-is-not-a-home guard no longer reads UNKNOWN under host load: each git read now gets the shared load-scaled bound (2 s at quiet load, up to 8 s pinned-high), the same factor land uses for its `am` calls, instead of a fixed 2 s deadline. A read that answers inside the scaled bound is judged; a read that never answers still refuses UNKNOWN naming the read.
+- The README install blocks now export `GH_TOKEN` from `gh auth token` in the
+  same shell before the installer runs: attestation refuses a logged-out `gh`
+  as `KIT_ATTESTATION_BUNDLE_UNAVAILABLE` instead of installing.
+- `apply mcp` now says the named source must already exist and points at
+  `omp-kit doctor --scope mcp --sources` first; `apply plugin` shows a
+  fresh-HOME `--store` value and says `--profiles` is required.
+- The `repair --scope github` row is marked not supported (refused as
+  `UNSUPPORTED_REPAIR_SCOPE`); `lsp setup` notes a stock brew OMP reports
+  readiness against defaults only and full readiness needs a source-backed OMP.
+- `service install` says it needs the stable launcher `$HOME/.local/bin/omp-kit`
+  first and refuses as `LAUNCHER_UNAVAILABLE` without it; `rch lease` and
+  `planning convert` name their native `rch`/`br` PATH prerequisites.
+- `update` says to download the release index and archive side by side first;
+  a missing `--index`/`--archive` file is now refused naming the path
+  (`LOCAL_SOURCE_REQUIRED`) instead of as an unverified install.
+- `corpus` notes `--sessions` must be an existing directory a fresh HOME does
+  not have; `service install --apply` warns it bootstraps the real per-user
+  launchd domain whatever `HOME` is; `service` notes it inspects the real
+  launchd domain read-only even with a fresh HOME.
+- `doctor --scope secrets` documents the `UNVERIFIED` cause when the
+  infisical-helpers `lib.sh` is missing, and a new Removal section covers
+  undo, service uninstall, prefix removal, and the state root.
+
 ## [0.2.105] - 2026-11-09
 
 ### Changed

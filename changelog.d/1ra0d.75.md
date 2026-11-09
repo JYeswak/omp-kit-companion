@@ -1,2 +1,0 @@
-- The write-ownership guard no longer treats a fixture repository created inside owned scratch (its own `git init` beneath `var/agent-tmp/`) as a canonical checkout, so writes there are admitted without an Agent Mail reservation lookup.
-- Writes to OMP-internal URLs (`out://`, `cfg://`, and kin) are no longer resolved as files under the canonical checkout, so they are admitted without a reservation lookup.

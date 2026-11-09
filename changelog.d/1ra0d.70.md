@@ -1,1 +1,0 @@
-- `br create` no longer refuses a bead as a possible duplicate of a bead it explicitly links with `--deps related:<id>`. `omp-kit verify` creates its LIVEREADBACK child with the parent's title and that link, so every verify close that deferred a `[live]` box was refused with ACT_FAILED.

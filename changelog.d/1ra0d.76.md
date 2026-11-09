@@ -1,1 +1,0 @@
-- The process-reap tests now wait for a load-scaled time, so a full test suite on a busy machine no longer fails them; a process that never dies is still caught.

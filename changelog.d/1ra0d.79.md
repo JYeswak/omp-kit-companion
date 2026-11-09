@@ -1,1 +1,0 @@
-- A process started through the bounded runner can no longer outlive a caller that is killed just after starting it: the runner's parent-death reaper is now running before the child starts.
