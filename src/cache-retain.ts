@@ -157,8 +157,15 @@ function safeRoot(anchor: string, root: string): BigIntStats | null {
 }
 function selected(target: CacheRetentionTarget, name: string): boolean {
 	if (target.selection === "logs") return name.endsWith(".log") || name.includes(".log.") || name.endsWith(".out") || name.endsWith(".err");
-	if (target.selection === "operational-receipts") return name.endsWith(".json") &&
-		(name.startsWith("claude-save-") || name.startsWith("kit-activation-") || name.startsWith("kit-reconcile-"));
+	if (target.selection === "operational-receipts") {
+		// STATERETAIN1: upgrade-notice-* and git-lock-rate.* are per-run files no
+		// reader needs after the fact: a missing notice marker only re-notices once
+		// (readSentReleases falls back to []), and git-lock-rate.* has no reader at
+		// all. plugin-* receipts stay out: recovery reads them.
+		if (name.startsWith("upgrade-notice-") || name.startsWith("git-lock-rate.")) return true;
+		return name.endsWith(".json") &&
+			(name.startsWith("claude-save-") || name.startsWith("kit-activation-") || name.startsWith("kit-reconcile-"));
+	}
 	return true;
 }
 function protectedEntry(target: CacheRetentionTarget, path: string, name: string): boolean {

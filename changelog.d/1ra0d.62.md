@@ -1,0 +1,1 @@
+- Release retention now runs after every successful activation (and after an undo restores the previous release), even when the post-check fails, so old releases and their download caches are pruned; the update job no longer writes a record every five minutes when nothing changed, and old upgrade notices and git-lock-rate files expire with the other operational receipts.

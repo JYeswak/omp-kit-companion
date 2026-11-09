@@ -359,11 +359,14 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		// Anything else (disabled poll, nothing newer) keeps today's static path.
 		const published = await pollPublishedRelease(config.prefix, config.stateRoot, config.platform, dependencies);
 		const source = published ?? await config.pollRelease();
-		// Poll-only with nothing newer: nothing to install, nothing to refuse.
-		if (!source) return record(config.stateRoot, runId, { status: "CURRENT", receiptId: null, activeVersion: installedVersion(config.prefix), notification: false, relink: "NOT_RUN", service: "NOT_RUN" });
-		// Never a project: launchd runs the job from HOME, and watching HOME's .omp/.agents/.claude as one made every live postcheck fail.
+		// STATERETAIN1: a CURRENT tick changes and fails nothing, so it writes no
+		// per-run record; records exist for runs that change or fail something.
+		// Nothing reads kit-update-job-*.json except this post-mortem scan, so
+		// skipping the write loses no consumer.
+		if (!source) return { status: "CURRENT", receiptId: null, activeVersion: installedVersion(config.prefix), notification: false, relink: "NOT_RUN", service: "NOT_RUN" };
 		const preview = await plan({ prefix: config.prefix, stateRoot: config.stateRoot, home: config.home, platform: config.platform, ...source });
-		if (preview.status === "CURRENT") return record(config.stateRoot, runId, { status: "CURRENT", receiptId: null, activeVersion: preview.current.version, notification: false, relink: "NOT_RUN" });
+		if (preview.status === "CURRENT") return { status: "CURRENT", receiptId: null, activeVersion: preview.current.version, notification: false, relink: "NOT_RUN" };
+		// Never a project: launchd runs the job from HOME, and watching HOME's .omp/.agents/.claude as one made every live postcheck fail.
 		if (preview.status !== "UPDATE_AVAILABLE") { const refusal = preview as KitUpdateRefusal; return record(config.stateRoot, runId, { status: "REFUSED", receiptId: null, activeVersion: null, notification: false, reason: refusal.reason, relink: "NOT_RUN" }); }
 		const runningVersion = runningReleaseVersion(config.prefix);
 		const result = await apply(preview);
@@ -401,9 +404,17 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 				return record(config.stateRoot, runId, { status: "PENDING", receiptId: result.receiptId, activeVersion: restored.activeVersion,
 					notification: true, reason: "KIT_UNDO_FINALIZATION_PENDING", receipt: "PENDING", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
 			}
-			await dependencies.notify?.(`omp-kit update UNDONE: restored ${restored.activeVersion}; kit receipt ${result.receiptId} compensated after ${postcheck.postcheckReason}; postcheck failure retained in the job record.`);
-			return record(config.stateRoot, runId, { status: "UNDONE", receiptId: result.receiptId, activeVersion: restored.activeVersion,
-				notification: true, receipt: "ABORTED_AFTER_COMPENSATION", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
+		await dependencies.notify?.(`omp-kit update UNDONE: restored ${restored.activeVersion}; kit receipt ${result.receiptId} compensated after ${postcheck.postcheckReason}; postcheck failure retained in the job record.`);
+		// STATERETAIN1: the compensated restore is itself a successful activation of
+		// the prior release, so retain on it too; otherwise a failing postcheck loops
+		// forever (apply, fail, undo) while the state root keeps growing. The undone
+		// new release is newer than active, so it survives as a rollback target.
+		const undoneRetention = restored.activeVersion !== null
+			? retainReleases(config.prefix, config.stateRoot, restored.activeVersion, [runningVersion])
+			: undefined;
+		return record(config.stateRoot, runId, { status: "UNDONE", receiptId: result.receiptId, activeVersion: restored.activeVersion,
+			notification: true, receipt: "ABORTED_AFTER_COMPENSATION", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN",
+			...(undoneRetention ? { retention: undoneRetention } : {}) });
 		}
 		// The kit symlink now points at the new release; relink every covered OMP
 		// profile to that exact store and retain the plugin receipt for recovery.
@@ -450,7 +461,12 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		} catch {
 			hooks = { status: "FAILED" as const, repos: 0, refreshed: 0, fresh: 0, pending_commit: 0, failed: 1 };
 		}
-		const retention = result.status === "UPDATED" && result.postcheck.status === "PASS" && hooks.failed === 0 && activeVersion !== null
+		// STATERETAIN1: retention runs after every successful activation, even when
+		// the postcheck fails: the gate that caused the deadlock (retention only on
+		// postcheck PASS) let the state root grow until the postcheck could never
+		// pass. Rollback targets survive: active, the five before it, pinned and
+		// running releases are kept, and newer-than-active versions are untouched.
+		const retention = result.status === "UPDATED" && hooks.failed === 0 && activeVersion !== null
 			? retainReleases(config.prefix, config.stateRoot, activeVersion, [runningVersion])
 			: undefined;
 		const hookNote = hooks.repos === 0 ? "; no fleet repos to refresh hooks in"
