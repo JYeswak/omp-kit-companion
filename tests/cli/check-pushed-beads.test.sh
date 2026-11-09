@@ -22,6 +22,8 @@ cat > "$TMP/bin/br" <<EOF
 #!/bin/sh
 id=""
 for arg in "\$@"; do id="\$arg"; done
+if [ -n "\${BR_BUSY_ALWAYS:-}" ]; then echo "Error: database is locked" >&2; exit 5; fi
+if [ -n "\${BR_BUSY_ONCE:-}" ] && [ -f "\$BR_BUSY_ONCE" ]; then rm -f "\$BR_BUSY_ONCE"; echo "Error: database is locked" >&2; exit 5; fi
 case " \$KNOWN_IDS " in
 	*" \$id "*) exit 0 ;;
 	*) exit 3 ;;
@@ -72,6 +74,17 @@ else fail=$((fail + 1)); printf 'FAIL planted-tree: rc=%s out<<<%s>>>\n' "$rc" "
 run_case missing-args 2 --repo "$FIXTURE"
 # 4. unknown tip refused
 run_case bad-tip 2 --repo "$FIXTURE" --base "$ROOT" --tip deadbeef --db "$DB" --br "$TMP/bin/br"
+# BRBUSY1: a busy tracker is not a missing bead. One busy answer is retried and admitted;
+# a tracker that never answers is refused naming the br error, not "no bead". Fresh commits:
+# an earlier case's cached verdict would answer without asking br.
+BUSY_ONCE_SHA=$(git -C "$FIXTURE" commit-tree "$TREE" -p "$GOOD" -m "busy once probe ompkit-2w7h" 2>/dev/null)
+BUSY_ALWAYS_SHA=$(git -C "$FIXTURE" commit-tree "$TREE" -p "$GOOD" -m "busy always probe ompkit-2w7h" 2>/dev/null)
+: > "$TMP/busy-once"
+BR_BUSY_ONCE="$TMP/busy-once" run_case busy-once-retried 0 --repo "$FIXTURE" --base "$GOOD" --tip "$BUSY_ONCE_SHA" --db "$DB" --br "$TMP/bin/br"
+if [ ! -e "$TMP/busy-once" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL busy-once-consumed: br was never asked\n'; fi
+out=$(BR_BUSY_ALWAYS=1 sh "$CHECK" --repo "$FIXTURE" --base "$GOOD" --tip "$BUSY_ALWAYS_SHA" --db "$DB" --br "$TMP/bin/br" 2>&1); rc=$?
+if [ "$rc" = "4" ] && printf '%s' "$out" | grep -q "tracker error, not a missing bead" && printf '%s' "$out" | grep -q "database is locked"; then pass=$((pass + 1));
+else fail=$((fail + 1)); printf 'FAIL busy-always-named: rc=%s out<<<%s>>>\n' "$rc" "$out"; fi
 
 # 5. an origin/main commit without a bead is outside the pushed set
 ORIGIN_FIXTURE="$TMP/origin-range"

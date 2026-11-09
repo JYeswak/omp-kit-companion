@@ -119,7 +119,8 @@ for sha in $COMMITS; do
 		continue
 	fi
 	git -C "$REPO" log --format=%B -n 1 "$sha" > "$TMPMSG" 2>/dev/null || { printf 'check-pushed-beads: cannot read %s\n' "$sha" >&2; exit 2; }
-	BEADS_DB="$DB" BR_BIN="$BRBIN" BEAD_VERDICT_PENDING=0 sh "$HOOK" "$TMPMSG" >/dev/null 2>&1 || { printf 'check-pushed-beads: refusing %s: no existing bead id in message\n' "$sha" >&2; exit 4; }
+	# BRBUSY1: the judge's own reason (a missing bead, or a br error) is printed, not replaced.
+	HOOK_ERR=$(BEADS_DB="$DB" BR_BIN="$BRBIN" BEAD_VERDICT_PENDING=0 sh "$HOOK" "$TMPMSG" 2>&1 >/dev/null) || { printf 'check-pushed-beads: refusing %s: %s\n' "$sha" "$(printf '%s' "$HOOK_ERR" | tail -1)" >&2; exit 4; }
 	# Cache the live PASS for later pushes of the same sha (best-effort).
 	# Only a real tracker verdict is cached: without a tracker file the judge
 	# passes trivially and there is nothing worth reusing.

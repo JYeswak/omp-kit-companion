@@ -1,0 +1,1 @@
+- A push is no longer refused as "no existing bead id" when the tracker was only busy: the bead check retries a busy tracker once and, if it still cannot answer, says it was a tracker error rather than a missing bead.

@@ -82,23 +82,40 @@ if [ -z "$CANDIDATES" ]; then
 	exit 4
 fi
 # candidate tokens contain no glob characters by construction above
-# shellcheck disable=SC2086
-for id in $CANDIDATES; do
-	# Read-only lookup (G13): a commit hook never imports into or flushes the tracker.
-	if "$BR" --db "$DB" --no-auto-import --no-auto-flush show "$id" >/dev/null 2>&1; then
+# BRBUSY1: br exits 3 only for "Issue not found". Any other failure (a busy or locked tracker right
+# after a `br comments add`) is not evidence of a missing bead: retry it once, then name the br error.
+UNANSWERED=""
+bead_found() {
+	if [ "${BEAD_VERDICT_PENDING:-1}" != 0 ] && command -v bead_msghash >/dev/null 2>&1 && command -v bead_verdict_dir >/dev/null 2>&1 && command -v bead_verdict_store >/dev/null 2>&1; then
 		# HOOKDEDUP1: best-effort commit-time verdict record for the push and
 		# ref guards. Silent and non-fatal: any failure falls back to the live
 		# `br` check at push time. The push and ref guards call this body for an
 		# existing commit with BEAD_VERDICT_PENDING=0: no commit follows, so a
 		# pending record would never be consumed.
-		if [ "${BEAD_VERDICT_PENDING:-1}" != 0 ] && command -v bead_msghash >/dev/null 2>&1 && command -v bead_verdict_dir >/dev/null 2>&1 && command -v bead_verdict_store >/dev/null 2>&1; then
-			PASS_HASH=$(printf '%s' "$MSG" | bead_msghash 2>/dev/null) || PASS_HASH=""
-			if [ -n "$PASS_HASH" ] && PASS_DIR=$(bead_verdict_dir 2>/dev/null); then
-				bead_verdict_store "$PASS_DIR" "pending-$PASS_HASH" "PASS $id $PASS_HASH" 2>/dev/null || true
-			fi
+		PASS_HASH=$(printf '%s' "$MSG" | bead_msghash 2>/dev/null) || PASS_HASH=""
+		if [ -n "$PASS_HASH" ] && PASS_DIR=$(bead_verdict_dir 2>/dev/null); then
+			bead_verdict_store "$PASS_DIR" "pending-$PASS_HASH" "PASS $1 $PASS_HASH" 2>/dev/null || true
 		fi
-		exit 0
 	fi
+	exit 0
+}
+# shellcheck disable=SC2086
+for id in $CANDIDATES; do
+	# Read-only lookup (G13): a commit hook never imports into or flushes the tracker.
+	BR_ERR=$("$BR" --db "$DB" --no-auto-import --no-auto-flush show "$id" 2>&1 >/dev/null) && bead_found "$id"
+	BR_RC=$?
+	[ "$BR_RC" -eq 3 ] || UNANSWERED="$UNANSWERED $id"
 done
+if [ -n "$UNANSWERED" ]; then
+	sleep 1
+	for id in $UNANSWERED; do
+		BR_ERR=$("$BR" --db "$DB" --no-auto-import --no-auto-flush show "$id" 2>&1 >/dev/null) && bead_found "$id"
+		BR_RC=$?
+		if [ "$BR_RC" -ne 3 ]; then
+			printf 'commit-msg-bead: refusing commit: br could not answer for %s (rc %s, retried once): %s; this is a tracker error, not a missing bead; retry when the tracker is free\n' "$id" "$BR_RC" "$(printf '%s' "$BR_ERR" | head -1)" >&2
+			exit 4
+		fi
+	done
+fi
 printf 'commit-msg-bead: refusing commit: none of the named tokens exists in %s\n' "$DB" >&2
 exit 4
