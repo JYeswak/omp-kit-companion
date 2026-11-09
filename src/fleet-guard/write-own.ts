@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { physicalTarget, targets } from "./durability.ts";
 import { commandFromEvent, commandName, executedShellCommands, repositoryRoot, reservationGaps, type ShellInspection, type ShellWord } from "./git.ts";
 import { resolveFilesystemWriteTarget, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent } from "./scratch.ts";
@@ -32,6 +32,8 @@ export interface WriteOwnContext extends FleetGuardContext {
 interface Candidate { path: string; spelled: string; scope: "file" | "children" | "blanket" | "unresolved" }
 
 const SCRATCH = "var/agent-tmp";
+/** OMP-internal routes (out://, local://, cfg://, agent://, artifact://, skill://, xd://, proc://, history://, mcp://, ssh://): never filesystem writes in any repository. */
+const INTERNAL_URL = /^[a-z][a-z0-9+.-]*:\/\//;
 const CHILD_PROBE = "\0";
 const SAFE_SHELL_WORD = /^[A-Za-z0-9_./@%+=:,-]+$/;
 const COPIERS = new Set(["cp", "mv", "install", "gcp", "gmv", "ginstall"]);
@@ -284,12 +286,26 @@ interface Judged { candidate: Candidate; rel: string; probe: string }
 async function judge(candidates: readonly Candidate[], context: WriteOwnContext): Promise<FleetGuardBlock | undefined> {
 	const byRoot = new Map<string, Judged[]>();
 	const policies = new Map<string, FleetPolicyVerdict>();
+	const callingRoot = repositoryRoot(resolve(context.cwd ?? process.cwd()));
 	for (const candidate of candidates) {
+		if (INTERNAL_URL.test(candidate.spelled)) continue;
 		let physical: string;
 		try { physical = await physicalTarget(candidate.path); }
 		catch (error) { return refuse("WRITE_OWN_UNRESOLVED", `cannot resolve write target ${candidate.spelled} (${String(error)})`); }
 		const root = repositoryRoot(physical);
 		if (!root) continue;
+		// A fixture repository created inside owned scratch (its own git init beneath var/agent-tmp) is scratch,
+		// not a canonical checkout: a root inside the calling repository's var/agent-tmp is skipped like scratch
+		// itself. The calling repository bounds the skip so a simulated canonical checkout nested under another
+		// checkout's scratch is still judged as canonical.
+		if (callingRoot !== undefined) {
+			let outer: string | undefined = repositoryRoot(dirname(root));
+			while (outer !== undefined && outer !== callingRoot) outer = repositoryRoot(dirname(outer));
+			if (outer !== undefined) {
+				const outerRel = relative(callingRoot, root).split(sep).join("/");
+				if (outerRel === SCRATCH || outerRel.startsWith(`${SCRATCH}/`)) continue;
+			}
+		}
 		const rel = relative(root, physical).split(sep).join("/");
 		if (rel === SCRATCH || rel.startsWith(`${SCRATCH}/`) || rel.startsWith("../") || rel === "..") continue;
 		let policy = policies.get(root);
@@ -350,6 +366,7 @@ export async function check(event: FleetGuardEvent, context: WriteOwnContext): P
 	if (tool === "write" || tool === "edit") {
 		try {
 			for (const entry of await targets(event)) {
+				if (INTERNAL_URL.test(entry.path)) continue;
 				if (entry.path.toLowerCase().startsWith("ssh://")) continue;
 				const path = resolveFilesystemWriteTarget(cwd, entry.path, context);
 				if (path !== undefined) candidates.push({ path, spelled: entry.path, scope: "file" });

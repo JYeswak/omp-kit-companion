@@ -1,5 +1,7 @@
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, describe, expect, test } from "bun:test";
+import { run } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "../cli/fixture-process.ts";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -291,5 +293,43 @@ describe("NATIVEPREGRADE1 (ompkit-1ra0d.41): a native child writes under its own
 			expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");
 			expect((await childWrite("scripts/other.py", "SomeOtherChild"))?.reason).toContain("WRITE_OWN_UNRESERVED");
 		}));
+	});
+});
+
+describe("CFSFALSEREF1 (ompkit-1ra0d.75): fixture repos in scratch and omp internal URLs are not canonical writes", () => {
+	test("SCRATCHFIXTURE1: a write into a git fixture repo inside owned scratch is admitted with no lookup; canonical writes still refused", async () => {
+		// A fixture cloned or copied from a checkout carries its .omp/fleet.json opt-in: without the
+		// CFSFALSEREF1 skip the write is treated as a canonical-checkout write and the reservation lookup
+		// runs against the fixture project. A bare `git init` without opt-in would be admitted either way.
+		const fx = join(owned, "fx");
+		mkdirSync(join(fx, "src"), { recursive: true });
+		mkdirSync(join(fx, ".omp"), { recursive: true });
+		writeFileSync(join(fx, ".omp", "fleet.json"), JSON.stringify({ enabled: true }));
+		const inited = await run(["git", "-C", fx, "init", "-q", "-b", "main"],
+			{ cwd: scratch, env: gitEnv, deadline_s: fixtureDeadlineS() });
+		expect(inited.rc, new TextDecoder().decode(inited.stderr)).toBe(0);
+		await withAm(holds("Intruder"), "fail", "Intruder", async () => {
+			expect(await write(join(fx, "src", "note.txt"), "fixture notes\n")).toBeUndefined();
+			expect(lookups(), "fixture-repo write consulted Agent Mail").toEqual([]);
+		});
+		// Planted: a write in the canonical checkout outside var/agent-tmp is still refused.
+		await withAm(holds("Intruder"), "ok", "Intruder", async () => {
+			const refused = await write("scripts/other.py");
+			expect(refused?.block).toBe(true);
+			expect(refused?.reason).toContain("WRITE_OWN_UNRESERVED");
+		});
+	});
+	test("URLWRITE1: a write to an omp internal URL is admitted with no lookup; a plain relative lookalike is still judged", async () => {
+		await withAm(holds("Intruder"), "fail", "Intruder", async () => {
+			expect(await write("out://report.md", "report\n")).toBeUndefined();
+			expect(await write("cfg://ns/key", "value\n")).toBeUndefined();
+			expect(lookups(), "internal-URL writes consulted Agent Mail").toEqual([]);
+		});
+		// Planted: a plain relative path is still a filesystem write and still refused.
+		await withAm(holds("Intruder"), "ok", "Intruder", async () => {
+			const refused = await write("out/report.md");
+			expect(refused?.block).toBe(true);
+			expect(refused?.reason).toContain("WRITE_OWN_UNRESERVED");
+		});
 	});
 });
