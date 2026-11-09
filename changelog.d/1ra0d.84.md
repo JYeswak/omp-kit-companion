@@ -1,1 +1,0 @@
-- A stale `index.lock` is no longer reported as held by a `git --no-optional-locks status` or `diff` that is merely reading the repository; saves and commits that were refused on such a reader now proceed.

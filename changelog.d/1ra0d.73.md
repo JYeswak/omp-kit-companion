@@ -1,1 +1,0 @@
-- `omp-kit verify` now exports the commit under the project's own `var/agent-tmp`, so a check that reads git (tags, history) sees the project and gets the same verdict wherever the caller's `TMPDIR` points.

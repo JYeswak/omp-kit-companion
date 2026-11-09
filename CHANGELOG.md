@@ -4,6 +4,20 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.107] - 2026-11-09
+
+### Changed
+
+- The scratch reaper deletes expired quarantine first, before scanning every scratch root, so a scan that runs out of time no longer stops quarantined scratch from ever being deleted.
+- `omp-kit verify` now exports the commit under the project's own `var/agent-tmp`, so a check that reads git (tags, history) sees the project and gets the same verdict wherever the caller's `TMPDIR` points.
+- `doctor --scope hooks` names a missing or stale hook member by its path under the hooks folder even when the repository is reached through a symlinked path (such as macOS `/tmp`).
+- A commit that changes shared runtime, and is therefore admitted by its full-suite pass, can now record its `DONE <repo>@<sha>` handoff: the gate's run log marks that run's evidence complete and names the tree the full-suite pass covered.
+- A `DONE <repo>@<sha>` handoff for a commit whose gate took longer than a second is no longer refused: the handoff check now ignores the author time as well as the committer time when it matches the landed commit to the commit the gate judged.
+- A build child whose finished handback is refused for missing preflight evidence keeps its output: the refusal is placed before the child's result instead of replacing it, so no finished work is lost.
+- A stale `index.lock` is no longer reported as held by a `git --no-optional-locks status` or `diff` that is merely reading the repository; saves and commits that were refused on such a reader now proceed.
+- A push is no longer refused as "no existing bead id" when the tracker was only busy: the bead check retries a busy tracker once and, if it still cannot answer, says it was a tracker error rather than a missing bead.
+- The README says that `RUN_ID` (for `undo` and `why`) is the `id` field of a receipt in `omp-kit audit --json`, and that the attestation check's `~/.cache/gh/.sigstore` cache belongs to `gh`, not omp-kit.
+
 ## [0.2.106] - 2026-11-09
 
 ### Changed
