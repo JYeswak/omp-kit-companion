@@ -1,1 +1,2 @@
 - Editing a file in your own scratch with a hashline edit is no longer refused as "content cannot be established": the guard computes the edit's resulting bytes with OMP's own edit engine and judges those.
+- A task child whose spawn name Agent Mail does not know no longer gets WRITE_OWN_LOOKUP_UNAVAILABLE for a canonical write: it holds nothing, so the refusal is WRITE_OWN_UNRESERVED naming the seat that can reserve the path on its behalf.

@@ -38,7 +38,7 @@ writeScratchOwner(owned, { pid: process.pid, label: "own", repo, created: new Da
 // Test seam for the Agent Mail CLI only: the guard's real spawn, attestation and hold parsing run unchanged.
 const fixtureBin = join(scratch, "bin");
 mkdirSync(fixtureBin, { recursive: true });
-writeFileSync(join(fixtureBin, "am"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AM_FIXTURE_CALLS\"\nif [ \"$AM_FIXTURE_MODE\" = \"fail\" ]; then echo 'connection refused' >&2; exit 1; fi\nif [ -n \"$AM_FIXTURE_AGENT\" ]; then\n  for a in \"$@\"; do\n    if [ \"$prev\" = \"--agent\" ] && [ \"$a\" = \"$AM_FIXTURE_AGENT\" ]; then printf '%s' \"$AM_FIXTURE_AGENT_RESPONSE\"; exit 0; fi\n    prev=\"$a\"\n  done\nfi\nif [ -n \"$AM_FIXTURE_PROJECT\" ]; then\n  project=\"\"\n  while [ \"$#\" -gt 0 ]; do\n    if [ \"$1\" = \"--project\" ]; then project=\"$2\"; break; fi\n    shift\n  done\n  if [ \"$project\" != \"$AM_FIXTURE_PROJECT\" ]; then printf '%s' \"$AM_FIXTURE_OTHER_RESPONSE\"; exit 0; fi\nfi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n");
+writeFileSync(join(fixtureBin, "am"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AM_FIXTURE_CALLS\"\nif [ \"$AM_FIXTURE_MODE\" = \"fail\" ]; then echo 'connection refused' >&2; exit 1; fi\nif [ -n \"$AM_FIXTURE_AGENT_MISSING\" ]; then\n  for a in \"$@\"; do\n    if [ \"$prev\" = \"--agent\" ] && [ \"$a\" = \"$AM_FIXTURE_AGENT_MISSING\" ]; then echo \"error: invalid argument: agent not found: $a\" >&2; exit 1; fi\n    prev=\"$a\"\n  done\n  prev=\"\"\nfi\nif [ -n \"$AM_FIXTURE_AGENT\" ]; then\n  for a in \"$@\"; do\n    if [ \"$prev\" = \"--agent\" ] && [ \"$a\" = \"$AM_FIXTURE_AGENT\" ]; then printf '%s' \"$AM_FIXTURE_AGENT_RESPONSE\"; exit 0; fi\n    prev=\"$a\"\n  done\nfi\nif [ -n \"$AM_FIXTURE_PROJECT\" ]; then\n  project=\"\"\n  while [ \"$#\" -gt 0 ]; do\n    if [ \"$1\" = \"--project\" ]; then project=\"$2\"; break; fi\n    shift\n  done\n  if [ \"$project\" != \"$AM_FIXTURE_PROJECT\" ]; then printf '%s' \"$AM_FIXTURE_OTHER_RESPONSE\"; exit 0; fi\nfi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n");
 chmodSync(join(fixtureBin, "am"), 0o755);
 const callLog = join(scratch, "am-calls.log");
 
@@ -293,6 +293,17 @@ describe("NATIVEPREGRADE1 (ompkit-1ra0d.41): a native child writes under its own
 			expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");
 			expect((await childWrite("scripts/other.py", "SomeOtherChild"))?.reason).toContain("WRITE_OWN_UNRESERVED");
 		}));
+	});
+	test("CHILDUNKNOWN1: a child Agent Mail does not know holds nothing, so a write its seat does not cover is UNRESERVED naming the seat, not LOOKUP_UNAVAILABLE", async () => {
+		process.env.AM_FIXTURE_AGENT_MISSING = "WeeklyEditionGates";
+		try {
+			await withAm(holds("Seat", "scripts/x.py"), "ok", "Seat", async () => {
+				expect(await childWrite("scripts/x.py", "WeeklyEditionGates")).toBeUndefined();
+				const result = await childWrite("README.md", "WeeklyEditionGates");
+				expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");
+				expect(result?.reason).toContain("Seat holds no live exclusive");
+			});
+		} finally { delete process.env.AM_FIXTURE_AGENT_MISSING; }
 	});
 });
 

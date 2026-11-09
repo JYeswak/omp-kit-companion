@@ -331,7 +331,12 @@ async function judge(candidates: readonly Candidate[], context: WriteOwnContext)
 		const seatCovers = gaps.kind === "checked" && gaps.uncovered.length === 0;
 		if (context.childAgentName && gaps.kind !== "unavailable" && !seatCovers) {
 			const own = reservationGaps(root, judged.map((entry) => entry.probe), context.childAgentName);
-			if (own.kind === "unavailable") gaps = own;
+			// CHILDUNKNOWN1: Agent Mail answering that the spawn name is unknown is an answer (the child holds nothing),
+			// not an outage: the seat's gaps stand and name the seat, which reserves on the child's behalf.
+			// 30 CFS refusals read LOOKUP_UNAVAILABLE for this (2026-11-09: WeeklyEditionGates, LandLeadReplies...).
+			if (own.kind === "unavailable") {
+				if (!own.why.includes(`agent not found: ${context.childAgentName}`)) gaps = own;
+			}
 			else if (own.kind === "checked") {
 				const seat = gaps;
 				const stillOpen = seat.kind === "checked" ? own.uncovered.filter((probe) => seat.uncovered.includes(probe)) : own.uncovered;
