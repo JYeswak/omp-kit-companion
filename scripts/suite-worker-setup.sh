@@ -112,6 +112,26 @@ if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || ec
 	sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
 	note "sysctl:apparmor_restrict_unprivileged_userns=0"
 fi
+# 2b. lsof stats every mount point. A root-only debugfs (mode 700) makes it warn on every call
+# ("can't stat() tracefs file system /sys/kernel/debug/tracing"), and the kit's lsof probes treat
+# any warning as unavailable (fail closed), so open-file tests read UNKNOWN; CI runners print no
+# such warning. Traversal only: files under debugfs keep their own modes. tmpfiles keeps it at boot.
+conf=/etc/tmpfiles.d/60-omp-kit-suite-debugfs.conf
+if [ "$(cat "$conf" 2>/dev/null)" != "z /sys/kernel/debug 0711 root root -" ]; then
+	printf 'z /sys/kernel/debug 0711 root root -\n' >"$conf"
+	note "tmpfiles:$conf"
+fi
+if [ -d /sys/kernel/debug ] && [ "$(stat -c %a /sys/kernel/debug)" != 711 ]; then
+	chmod 0711 /sys/kernel/debug
+	note "debugfs:0711"
+fi
+# 2c. CI runners keep their system zone at UTC. bun test runs JavaScript in UTC whatever the host
+# zone, while children such as `ps -o lstart=` print the system zone, so on a Europe/Berlin worker a
+# live process's start read an hour late and scratch tests judged its pid reused (ompkit-ltawi).
+if [ "$(timedatectl show -p Timezone --value 2>/dev/null)" != UTC ]; then
+	timedatectl set-timezone UTC
+	note "timezone:UTC"
+fi
 # 3. the suite user, reachable with root's keys, and its work root.
 if ! id -u "$SUITE_USER" >/dev/null 2>&1; then
 	useradd --create-home --shell /bin/bash "$SUITE_USER"

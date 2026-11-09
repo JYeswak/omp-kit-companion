@@ -1061,11 +1061,26 @@ test("one-line owner files parse like the multi-line form", () => {
 	expect(parseOwnerFile(`pid=${pid} label=x label=y repo=/r created=2026-10-01T00:00:00Z`)).toBeNull();
 });
 
-test("parsePsStart reads ctime lstart output", () => {
-	expect(parsePsStart("Mon Oct  5 13:27:00 2026")).toBe(Date.UTC(2026, 9, 5, 13, 27, 0));
-	expect(parsePsStart("Thu Jan  1 00:00:00 1970")).toBe(0);
+test("parsePsStart reads ctime lstart output as local time", () => {
+	expect(parsePsStart("Mon Oct  5 13:27:00 2026")).toBe(new Date(2026, 9, 5, 13, 27, 0).getTime());
+	expect(parsePsStart("Thu Jan  1 00:00:00 1970")).toBe(new Date(1970, 0, 1, 0, 0, 0).getTime());
 	expect(parsePsStart("garbage")).toBeNull();
 	expect(parsePsStart("")).toBeNull();
+});
+
+test("east of UTC, a live owner started just before its created stamp is not read as pid reuse", () => {
+	const saved = process.env.TZ;
+	process.env.TZ = "Europe/Berlin";
+	try {
+		// ps prints local time: 01:28:04 CET is 00:28:04Z, one second before created.
+		const owner = { pid: 1, processStart: null, label: "x", repo: "r", createdAt: "2026-11-09T00:28:05.000Z", argv0: null };
+		const live = { signalAlive: () => true, psVisible: () => true, processStart: () => "Mon Nov  9 01:28:04 2026" };
+		expect(reuseAfterCreated(owner, live)).toBe(false);
+		const reused = { signalAlive: () => true, psVisible: () => true, processStart: () => "Mon Nov  9 01:28:06 2026" };
+		expect(reuseAfterCreated(owner, reused)).toBe(true);
+	} finally {
+		if (saved === undefined) delete process.env.TZ; else process.env.TZ = saved;
+	}
 });
 
 test("reuseAfterCreated proves PID reuse from the created timestamp", () => {

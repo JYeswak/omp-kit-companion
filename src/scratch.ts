@@ -701,13 +701,18 @@ export function attributeOwnerSeat(owner: ScratchOwner, deps: Pick<LivenessDeps,
 const PS_MONTHS: Record<string, number> = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
 	Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
 
-/** Parse `ps -o lstart=` ctime output ("Mon Oct  5 13:27:00 2026") to epoch ms; null when unparseable. */
+/**
+ * Parse `ps -o lstart=` ctime output ("Mon Oct  5 13:27:00 2026") to epoch ms; null when unparseable.
+ * ps prints the start in the local time zone, so it is read as local time: reading it as UTC put a
+ * live process's start hours late on any host east of UTC, after its owner file was created, and
+ * the reaper then judged the live owner's pid reused (ompkit-ltawi, Europe/Berlin workers).
+ */
 export function parsePsStart(text: string): number | null {
 	const match = /^[A-Z][a-z]{2} ([A-Z][a-z]{2})\s+(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(text.trim());
 	if (!match) return null;
 	const month = PS_MONTHS[match[1]!];
 	if (month === undefined) return null;
-	const ms = Date.UTC(Number(match[6]), month, Number(match[2]), Number(match[3]), Number(match[4]), Number(match[5]));
+	const ms = new Date(Number(match[6]), month, Number(match[2]), Number(match[3]), Number(match[4]), Number(match[5])).getTime();
 	return Number.isNaN(ms) ? null : ms;
 }
 
