@@ -805,9 +805,30 @@ fi
 					return 0
 				fi
 			fi
-			record_run 0 0 1
-			echo "FRESH-GATE: REFUSED reason=FULL_SUITE_REQUIRED trigger=$full_triggers files=$full_files verdict=$(printf '%s\n' "$full_verdict" | head -n 1): run sh scripts/full-suite-verdict.sh --repo $full_repo --commit $COMMIT --judge-role main, then retry" >&2
-			return 1 ;;
+		record_run 0 0 1
+		# FULLJUDGE1 (ompkit-1ra0d.72): teach the exact recording command this run
+		# accepts. The verdict is keyed by this run's judge ($SCRIPT_DIR/..), so a
+		# relative `sh scripts/...` from a checkout whose judging files differ
+		# records under another judge and stays MISS here.
+		judge_root=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P) || judge_root="$SCRIPT_DIR/.."
+		if [ -e "$judge_root/.git" ]; then
+			full_remedy="sh $judge_root/scripts/full-suite-verdict.sh --repo $full_repo --commit $COMMIT --judge-role main"
+		else
+			# Ephemeral archive judge (a pre-push/commit-gate extract removed
+			# after the run): recreate it from the commit it judges. The archive
+			# always holds the candidate, so scripts identical to it mean the
+			# candidate's own judge (recreate from the commit); anything else
+			# is the base judge (recreate from the base).
+			if [ -d "$ARCHIVE_DIR/scripts" ] && diff -r -q "$judge_root/scripts" "$ARCHIVE_DIR/scripts" >/dev/null 2>&1; then
+				judge_ref=$COMMIT
+			else
+				judge_ref=${BASE:-$COMMIT}
+			fi
+			# Refusal text only: the operator's shell runs it, allocating owned scratch.
+			full_remedy="judge_tmp=\$(cd $full_repo && omp-kit scratch new --label full-judge --print-dir) && git -C $full_repo archive $judge_ref | tar -xf - -C \"\$judge_tmp\" && sh \"\$judge_tmp/scripts/full-suite-verdict.sh\" --repo $full_repo --commit $COMMIT --judge-role main"
+		fi
+		echo "FRESH-GATE: REFUSED reason=FULL_SUITE_REQUIRED trigger=$full_triggers files=$full_files verdict=$(printf '%s\n' "$full_verdict" | head -n 1): run $full_remedy, then retry" >&2
+		return 1 ;;
 	esac
 	# Nearest first (changed tests, then direct importers); explicit mappings follow; each runs once.
 	# shellcheck disable=SC2086

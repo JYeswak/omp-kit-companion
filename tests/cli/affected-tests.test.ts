@@ -345,7 +345,8 @@ test.skipIf(!AMPLE)("EMBEDDEP1 fresh-gate reports a FULL plan as FULL, never as 
 		expect(refused.code, refused.out).toBe(1);
 		expect(refused.out).toContain("FRESH-GATE: PLAN FULL trigger=scripts/pysafe.py files=1: a shared runtime changed");
 		expect(refused.out).toContain("FRESH-GATE: REFUSED reason=FULL_SUITE_REQUIRED trigger=scripts/pysafe.py files=1 verdict=");
-		expect(refused.out).toContain("run sh scripts/full-suite-verdict.sh --repo ");
+		expect(refused.out).toContain("scripts/full-suite-verdict.sh");
+		expect(refused.out).toContain("--judge-role main");
 		expect(refused.out).not.toContain("affected-tests plan:");
 		expect(refused.out).not.toContain("wall budget");
 		expect(refused.out).not.toContain("VERDICT PARTIAL");
