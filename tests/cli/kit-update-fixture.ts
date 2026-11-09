@@ -395,7 +395,12 @@ async function buildNPlusTwoCandidate(ctx: FixtureContext): Promise<{
 	if (build.exitCode !== 0) throw new Error("N+2 candidate package build failed: " + build.stdout.toString() + build.stderr.toString());
 	const asset = JSON.parse(build.stdout.toString()) as { os: string; arch: string; libc: string; filename: string; sha256: string; manifest_sha256: string };
 	const packagedArchive = join(output, asset.filename), archive = readFileSync(packagedArchive);
-	writeFileSync(ctx.archivePath, archive);
+	// VPV8A: the packaged asset is gzip (`.tar.gz`); the source holds it under its own published name, as a
+	// real release does, so the planner's asset-name check judges the real artifact.
+	const sourceArchive = join(dirname(ctx.archivePath), asset.filename);
+	writeFileSync(sourceArchive, archive);
+	if (sourceArchive !== ctx.archivePath) copyFileSync(`${ctx.archivePath}.sigstore.json`, `${sourceArchive}.sigstore.json`);
+	ctx.archivePath = sourceArchive;
 	writeFileSync(ctx.indexPath, JSON.stringify({ schema_version: 1, version: ctx.nextVersion, source_tag: "v" + ctx.nextVersion, assets: { [key]: asset } }));
 	const root = join(ctx.root, "candidate-release");
 	mkdirSync(root);
