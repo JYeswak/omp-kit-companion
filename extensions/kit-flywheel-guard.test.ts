@@ -1580,6 +1580,8 @@ test("BRIEFCONTRACT1 parent's task-result hook refuses DONE without preflight, a
 	const emit = (text: string, taskInput = input) => h.emit("tool_result", { toolName: "task", input: taskInput, content: [{ type: "text", text }] }, h.ctx(base));
 	const [refused] = await emit("DONE: implemented feature");
 	expect(refused).toMatchObject({ isError: true, details: { code: "BRIEF_PREFLIGHT_REFUSED", accepted: false } });
+	// HANDBACKKEEP1: the refusal is prepended; the child's finished output is never discarded.
+	expect(refused).toMatchObject({ content: [{ type: "text", text: expect.stringContaining("BRIEF_PREFLIGHT_REFUSED") }, { type: "text", text: "DONE: implemented feature" }] });
 	const [nonzero] = await emit("DONE\nsh scripts/commit-preflight.sh --files src/feature.ts\ncommit-preflight: 12 checks, 1 refused/unjudged, 1.00s");
 	expect(nonzero).toMatchObject({ isError: true });
 	const [missingMember] = await emit("DONE\nsh scripts/commit-preflight.sh --files skills/contract.md\nUNKNOWN installed-gate:55-omp-kit-staged-wallclock: missing or not executable\ncommit-preflight: 22 checks, 1 refused/unjudged, 1.00s");
@@ -1608,7 +1610,7 @@ test("BRIEFCONTRACT1 parent's task-result hook refuses DONE without preflight, a
 			{ index: 1, id: "Second", output: "DONE: second implemented without preflight" },
 		] },
 	}, h.ctx(base));
-	expect(mixed).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringContaining("Second: BRIEF_PREFLIGHT_REFUSED") }] });
+	expect(mixed).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringContaining("Second: BRIEF_PREFLIGHT_REFUSED") }, { type: "text", text: "DONE: both" }] });
 });
 
 test("BRIEFCONTRACT1 direct parent DONE message after file edits needs the same preflight evidence", async () => {

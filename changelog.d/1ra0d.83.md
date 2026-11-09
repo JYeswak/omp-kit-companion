@@ -1,0 +1,1 @@
+- A build child whose finished handback is refused for missing preflight evidence keeps its output: the refusal is placed before the child's result instead of replacing it, so no finished work is lost.

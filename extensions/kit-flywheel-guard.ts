@@ -2923,7 +2923,9 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 				if (reason) refusals.push(reason);
 			}
 		}
-		if (refusals.length > 0) return { isError: true, content: [{ type: "text", text: refusals.join("\n") }], details: { code: "BRIEF_PREFLIGHT_REFUSED", accepted: false } };
+		// HANDBACKKEEP1: the refusal is prepended, never a replacement. Replacing the result threw away finished
+		// child work (OrangeRiver, cfsios 2026-11-09: three children's results lost; one patch gone).
+		if (refusals.length > 0) return { isError: true, content: [{ type: "text", text: `${refusals.join("\n")}\nThe child output below is kept unchanged; its work is not accepted until the preflight evidence is supplied.` }, ...event.content], details: { code: "BRIEF_PREFLIGHT_REFUSED", accepted: false } };
 	});
 	pi.on("tool_execution_end", async (_event, ctx) => {
 		try {
