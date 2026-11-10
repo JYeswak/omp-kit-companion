@@ -1,0 +1,1 @@
+- `omp-kit update --reconcile` now prunes old releases like a completed update: the active release, the five before it, pinned and running releases stay.

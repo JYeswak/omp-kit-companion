@@ -123,11 +123,19 @@ test("unknown update failure preserves its code and original message", () => {
 
 test("UPDATERELINK1: native reconcile relinks every covered profile to the verified release", async () => fixture(async ctx => {
 	const prepared = preparePartialReconcile(ctx);
+	// STATERETAIN1: a reconcile is how every local install since 0.2.106 ended, so it retains like update does.
+	const old = ["1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6"];
+	for (const version of old) mkdirSync(join(ctx.prefix, "releases", version, "bin"), { recursive: true });
 	const result = await runPartialReconcile(prepared);
 	expect(result.rc).toBe(0);
 	for (const profile of RECONCILE_PROFILES)
 		expect(readlinkSync(reconcilePluginLink(ctx.home, profile))).toBe(prepared.store);
-	expect(result.output.data).toMatchObject({ overall: "OK", action: "RECONCILED", plugin_relink: "APPLIED", active_version: ctx.nextVersion });
+	expect(result.output.data).toMatchObject({ overall: "OK", action: "RECONCILED", plugin_relink: "APPLIED", active_version: ctx.nextVersion,
+		retention: { status: "APPLIED" } });
+	for (const version of ["1.1.0", "1.1.1", "1.1.2"]) expect(existsSync(join(ctx.prefix, "releases", version))).toBe(false);
+	// Planted negative: the active release and the five before it, including the predecessor, survive.
+	for (const version of ["1.1.3", "1.1.4", "1.1.5", "1.1.6", ctx.currentVersion, ctx.nextVersion])
+		expect(existsSync(join(ctx.prefix, "releases", version))).toBe(true);
 }), fixtureDeadlineS(60) * 1000);
 
 test("UPDATERELINK1 planted negative: an incomplete profile relink cannot report OK", async () => fixture(async ctx => {

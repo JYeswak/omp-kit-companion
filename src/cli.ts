@@ -4401,8 +4401,18 @@ async function reconcileUpdateCommand(stateRoot: string, id: string, confirmed: 
 			// A reconcile is APPLIED only after every covered profile is verified; retain the failed attempt details.
 			return { ...failure, data: { ...failure.data, plugin_relink: "NOT_RUN" } };
 		}
-		return { code: 0, data: { ...envelope.data, plugin_relink: "APPLIED", plugin_receipt_id: relink.receiptId,
-			plugin_undo_command: relink.undoCommand, plugin_relink_detail: relink.detail }, verification: "UNVERIFIED" };
+		const relinked = { ...envelope.data, plugin_relink: "APPLIED", plugin_receipt_id: relink.receiptId,
+			plugin_undo_command: relink.undoCommand, plugin_relink_detail: relink.detail };
+		// STATERETAIN1: a reconcile completes an activation whose postcheck failed, which is how every local
+		// install since 0.2.106 ended; without retention here releases/ grew to 78 dirs. Same keep set as update.
+		const prefixRoot = dirname(dirname(store));
+		const retention = retainReleases(prefixRoot, stateRoot, result.activeVersion, [runningReleaseVersion(prefixRoot)]);
+		if (retention.status === "FAILED") return { code: 1, data: { ...relinked, overall: "FINDINGS", retention }, errors: [{
+			code: "KIT_RETENTION_FAILED",
+			message: `Reconcile applied, but release retention failed: ${retention.reason ?? "unknown"}`,
+			remediation: "Inspect the prefix releases/ and state poll-* dirs; rerun the reconcile or prune manually after verifying the active link.",
+		}], verification: "UNVERIFIED" };
+		return { code: 0, data: { ...relinked, retention }, verification: "UNVERIFIED" };
 	} catch (error) {
 		const code = error instanceof Error ? error.message : "";
 		if (code === "PENDING_RECOVERY") return { code: 1, data: { overall: "FAIL", scope: "kit", action: "REFUSED", receipt_id: id },
