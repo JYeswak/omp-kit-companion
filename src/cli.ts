@@ -53,7 +53,7 @@ import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, reconcilePendingUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
 import { KIT_UPDATE_REPO_PATTERN, kitUpdateJobOverall, relinkKitPlugin, retainReleases, runKitUpdateJob, runningReleaseVersion } from "./kit-update-job.ts";
-import { claudeSaveJobEnabled, runClaudeSaveJob, runGitleaksScan, type GitleaksScanRequest } from "./claude-save-job.ts";
+import { claudeSaveServiceConfig, claudeSaveUserConfigPath, runClaudeSaveJob, runGitleaksScan, type GitleaksScanRequest } from "./claude-save-job.ts";
 import { ensureMutationStateRoot, writePrivate, type PendingInspection } from "./mutations.ts";
 import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
 import { inspectProjectTrust } from "./project-trust.ts";
@@ -3275,12 +3275,16 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
  			return { code: 0, data: { overall: "OK", job: job.name, ...pollResult }, verification: "UNVERIFIED" };
 		}
 		if (job.name === "claude-save") {
-			const enabled = claudeSaveJobEnabled(process.env);
-			const repo = join(home, ".claude");
-			const stateRoot = join(process.env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit");
+			let config;
+			try { config = claudeSaveServiceConfig(home, process.env); }
+			catch (error) {
+				lock.release();
+				return refusal("CLAUDE_SAVE_CONFIG", error instanceof Error ? error.message : String(error),
+					`Fix ${claudeSaveUserConfigPath(home)}: a JSON object whose "branches" and "gitlinks" are string arrays.`);
+			}
 			const gitleaksBin = Bun.which("gitleaks");
 			const gitleaks = gitleaksBin === null ? undefined : (request: GitleaksScanRequest) => runGitleaksScan(gitleaksBin, request);
-			const result = await runClaudeSaveJob({ enabled, repo, stateRoot }, { gitleaks,
+			const result = await runClaudeSaveJob(config, { gitleaks,
 				notify: message => notifyJobFailure({ title: "omp-kit claude-save", message, platform: process.platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null }) });
 			lock.release();
 			const overall = result.status === "FAILED" ? "FINDINGS" : result.status === "REFUSED" ? "REFUSED" : "OK";

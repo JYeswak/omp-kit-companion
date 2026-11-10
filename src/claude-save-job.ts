@@ -108,6 +108,17 @@ export function claudeSaveJobEnabled(environment: { OMP_KIT_CLAUDE_SAVE_ENABLED?
 	return environment.OMP_KIT_CLAUDE_SAVE_ENABLED === "1" || environment.OMP_KIT_JOB === "claude-save";
 }
 
+/**
+ * CLAUDESAVEWIRE1: the job's config exactly as the service runs it: ~/.claude, the kit state root and the operator's
+ * baselines (oq1h.7). The CLI must use this; before it did, the baselines were never read and every save refused
+ * NEW_BRANCH on main. A malformed operator config throws (the CLI refuses with CLAUDE_SAVE_CONFIG).
+ */
+export function claudeSaveServiceConfig(home: string, env: Readonly<Record<string, string | undefined>>): ClaudeSaveConfig {
+	const stateHome = env.XDG_STATE_HOME !== undefined && env.XDG_STATE_HOME !== "" ? env.XDG_STATE_HOME : join(home, ".local", "state");
+	return { enabled: claudeSaveJobEnabled(env), repo: join(home, ".claude"), stateRoot: join(stateHome, "omp-kit"),
+		baselines: readClaudeSaveUserBaselines(home) };
+}
+
 function basename(path: string): string {
 	const slash = path.lastIndexOf("/");
 	return slash < 0 ? path : path.slice(slash + 1);

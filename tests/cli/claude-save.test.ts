@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { checkSkillLibrary, claudeSaveJobEnabled, readClaudeSaveUserBaselines, runClaudeSaveJob, runGitleaksScan, type ClaudeSaveConfig, type ClaudeSaveGit, type GitleaksScanRequest, type GitleaksScanResult, type GitleaksScanner } from "../../src/claude-save-job.ts";
+import { checkSkillLibrary, claudeSaveJobEnabled, claudeSaveServiceConfig, readClaudeSaveUserBaselines, runClaudeSaveJob, runGitleaksScan, type ClaudeSaveConfig, type ClaudeSaveGit, type GitleaksScanRequest, type GitleaksScanResult, type GitleaksScanner } from "../../src/claude-save-job.ts";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -55,8 +55,8 @@ const FIXTURE_BASELINES = {
 		"skills/.non-skill-dirs-relocated-20260610/rawr-slides"],
 };
 
-function run(repo: string, stateRoot: string, gitleaks: GitleaksScanner = request => completeScan(request)) {
-	const config: ClaudeSaveConfig = { enabled: true, repo, stateRoot, baselines: FIXTURE_BASELINES };
+function run(repo: string, stateRoot: string, gitleaks: GitleaksScanner = request => completeScan(request),
+	config: ClaudeSaveConfig = { enabled: true, repo, stateRoot, baselines: FIXTURE_BASELINES }) {
 	return runClaudeSaveJob(config, {
 		git: (args, env) => {
 			const out = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: repo, ...env } });
@@ -394,4 +394,30 @@ test("oq1h.7 configured user baselines admit the job like the old shipped ones",
 			nowIso: "2026-10-06T00:00:00Z",
 		});
 	expect(result).toMatchObject({ status: "PUSHED", committed: true, pushed: true });
+});
+
+test("CLAUDESAVEWIRE1 the service config carries the operator baselines into the job", async () => {
+	const { repo } = fixtureRepo();
+	const home = join(repo, "..");
+	renameSync(repo, join(home, ".claude"));
+	const claude = join(home, ".claude");
+	writeFileSync(join(claude, "notes.md"), "hello\nmore\n");
+	const configPath = join(home, "claude-save.json");
+	const saved = process.env.OMP_KIT_CLAUDE_SAVE_CONFIG;
+	process.env.OMP_KIT_CLAUDE_SAVE_CONFIG = configPath;
+	const env = { OMP_KIT_CLAUDE_SAVE_ENABLED: "1", XDG_STATE_HOME: join(home, "state") };
+	try {
+		// Planted negative: no operator config, so the stock baseline is empty and main itself is refused.
+		const unconfigured = claudeSaveServiceConfig(home, env);
+		expect(unconfigured).toMatchObject({ enabled: true, repo: claude, stateRoot: join(home, "state", "omp-kit") });
+		expect(await run(claude, unconfigured.stateRoot, undefined, unconfigured)).toMatchObject({ status: "REFUSED", refusal: "NEW_BRANCH" });
+		writeFileSync(configPath, JSON.stringify({ branches: ["main"], gitlinks: [] }));
+		const configured = claudeSaveServiceConfig(home, env);
+		expect(await run(claude, configured.stateRoot, undefined, configured)).toMatchObject({ status: "PUSHED", committed: true, pushed: true });
+		writeFileSync(configPath, "{nope");
+		expect(() => claudeSaveServiceConfig(home, env)).toThrow("CLAUDE_SAVE_CONFIG_INVALID");
+	} finally {
+		if (saved === undefined) delete process.env.OMP_KIT_CLAUDE_SAVE_CONFIG;
+		else process.env.OMP_KIT_CLAUDE_SAVE_CONFIG = saved;
+	}
 });
