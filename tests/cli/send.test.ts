@@ -1374,8 +1374,11 @@ test("WAKEWINDOW1-R control: a target Agent Mail cannot resolve still refuses PL
 });
 test("WAKEWINDOW1-R mutant: with the 0.2.94 identity guard restored, the planted inputs refuse PLANE_SEAT_UNBOUND", async () => {
 	// The mutant is a copy of src with identifyTernSeat's pre-fix guard put back: a null target AGENT_NAME refuses.
-	const mutantSrc = join(scratch, "ww1r-mutant-src-" + Math.random().toString(36).slice(2));
+	const mutantRoot = join(scratch, "ww1r-mutant-" + Math.random().toString(36).slice(2));
+	const mutantSrc = join(mutantRoot, "src");
 	cpSync(join(repoRoot, "src"), mutantSrc, { recursive: true });
+	// src imports shared library modules from ../extensions (plane-tern -> extensions/tern-json.ts).
+	cpSync(join(repoRoot, "extensions"), join(mutantRoot, "extensions"), { recursive: true });
 	const planeFile = join(mutantSrc, "plane-tern.ts");
 	const fixed = "\tif (typeof seat.identityProject !== \"string\" || !isAbsolute(seat.identityProject)) {\n"
 		+ "\t\treturn { status: \"REFUSED\", code: \"PLANE_SEAT_UNBOUND\",\n"

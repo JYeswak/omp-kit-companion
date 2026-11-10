@@ -29,6 +29,7 @@
       "extensions/cass-search.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/dcg-tool-bridge.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/kit-mail-wake.ts": "library module with no extension entrypoint; imported by extensions/kit-agent-mail-guard.ts",
+      "extensions/tern-json.ts": "library module with no extension entrypoint; imported by extensions/kit-mail-wake.ts, src/plane-tern.ts and src/holder-liveness.ts",
       "extensions/kit-published-commit.ts": "library module with no extension entrypoint; imported by extensions/kit-agent-mail-guard.ts and src/preflight.ts",
       "extensions/gate-events.ts": "library module with no extension entrypoint; imported by extensions/kit-flywheel-guard.ts",
       "extensions/commit-autocomplete.ts": "library module with no extension entrypoint; imported by extensions/kit-flywheel-guard.ts",

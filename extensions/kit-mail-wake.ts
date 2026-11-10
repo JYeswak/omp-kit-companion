@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { FlywheelExec, FlywheelToolCallResult } from "./kit-flywheel-guard";
-import { parseTernJson } from "../src/plane-tern.ts";
+import { parseTernJson } from "./tern-json.ts";
 
 /**
  * kit-mail-wake (MAILWAKE1, ompkit-uk9wn): an Agent Mail send must wake its recipient's live seat,

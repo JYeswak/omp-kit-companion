@@ -17,7 +17,7 @@ import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { parseTernJson } from "./plane-tern.ts";
+import { parseTernJson } from "../extensions/tern-json.ts";
 
 export const HOLDER_LIVE_WINDOW_MS = 24 * 3600 * 1000;
 
