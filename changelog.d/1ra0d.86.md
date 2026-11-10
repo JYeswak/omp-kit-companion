@@ -1,0 +1,1 @@
+- A seat can now release the scratch folder a finished task child created (`omp-kit scratch release`), so a dead child's leftover no longer blocks the parent's land publication; a live child's folder and other seats' folders stay refused.

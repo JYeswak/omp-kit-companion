@@ -2286,6 +2286,32 @@ function liveSiblingCreator(owner: ScratchOwner, seat: SeatIdentity, deps: Inspe
 		+ "Only the creator releases it while it lives; pass the capability `scratch new` returned (--capability TOKEN) to release it from elsewhere";
 }
 
+/**
+ * CHILDSCRATCH1 (ompkit-1ra0d.86): the parent incarnation's route to a finished child's dir. A task child's dir
+ * records its parent as `session` (the seat's main session) and itself as `creator_session`, but the parent's own
+ * shell holds no omp session lease, so `heldSeat` never sees it and the release falls through to caller-not-owner
+ * while the disposal guard (which runs inside the seat's omp process) keeps flagging the leftover. The parent link
+ * is already recorded: `session` is the parent, no new owner field is needed. A caller that names the seat's agent
+ * and the parent session as its own incarnation (`own === session`, not the creator) owns the dir once the child's
+ * lease is definitively free (absent from the caller's ancestry and `seatLive === false`). A held or unprovable
+ * creator lease refuses exactly like a live sibling; an unrelated seat (another agent, or another incarnation)
+ * never matches. Liveness evidence only, never ownership by itself: the agent match and the parent claim decide who,
+ * the lease decides when.
+ */
+function parentOfFinishedChild(owner: ScratchOwner, caller: SeatIdentity, deps: InspectDeps): { owned: true } | { live: string } | null {
+	const creator = owner.creatorSession;
+	if (owner.agent === null || owner.session === null || creator === undefined) return null;
+	if (caller.agent !== owner.agent || caller.own !== owner.session || creator === caller.own) return null;
+	if (caller.sessions.includes(creator)) {
+		return { live: `incarnation ${creator} of seat ${owner.session} (${owner.agent}) made this dir and its lease is held; `
+			+ `this caller is ${caller.own}. Only the creator releases it while it lives; pass the capability \`scratch new\` returned (--capability TOKEN) to release it from elsewhere` };
+	}
+	const live = deps.liveness.seatLive?.(owner.agent, creator) ?? null;
+	if (live === false) return { owned: true as const };
+	return { live: `incarnation ${creator} of seat ${owner.session} (${owner.agent}) made this dir and its lease is ${live ? "held" : "unprovable"}; `
+		+ `this caller is ${caller.own}. Only the creator releases it while it lives; pass the capability \`scratch new\` returned (--capability TOKEN) to release it from elsewhere` };
+}
+
 /** PIDIDENT1 (ompkit-a0vy1): the token `scratch new` returns once; 256 random bits, hex. Only its sha256 reaches `.owner`. */
 function mintScratchCapability(): { token: string; sha256: string } {
 	const token = randomBytes(32).toString("hex");
@@ -2535,15 +2561,21 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	// release to its owner, and the marker pins the owner text and inode.
 	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") || owner.label.startsWith("."))
 		return { ok: false, changed: false, dir, reason: "directory-owner-mismatch", ownerPid: owner.pid };
-	// Authority is the seat (agent + session lease) or the creation-time capability (PIDIDENT1 ompkit-a0vy1). The
-	// process rule below is kept only for records and callers that have neither. SCRATCHSIBLING1: the seat reaches a
-	// dir another live incarnation of it made only through that dir's capability, never through the shared process.
+	// Authority is the seat (agent + session lease), the parent incarnation of a finished child (CHILDSCRATCH1
+	// ompkit-1ra0d.86: same agent, own === session, creator lease definitively free), or the creation-time capability
+	// (PIDIDENT1 ompkit-a0vy1). The process rule below is kept only for records and callers that have neither.
+	// SCRATCHSIBLING1: the seat reaches a dir another live incarnation of it made only through that dir's
+	// capability, never through the shared process.
 	const seat = heldSeat(owner, deps);
 	const sibling = seat === null ? null : liveSiblingCreator(owner, seat, deps);
 	const seatOwned = seat !== null && sibling === null;
-	const capabilityOwned = !seatOwned && capabilityAuthorizes(owner, opts.capability);
+	const parentClaim = seatOwned ? null : parentOfFinishedChild(owner, seat ?? (deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run)), deps);
+	const parentOwned = parentClaim !== null && "owned" in parentClaim;
+	const parentLive = parentClaim !== null && "live" in parentClaim ? parentClaim.live : null;
+	const capabilityOwned = !seatOwned && !parentOwned && capabilityAuthorizes(owner, opts.capability);
 	if (sibling !== null && !capabilityOwned) return { ok: false, changed: false, dir, reason: "sibling-live", ownerPid: owner.pid, detail: sibling };
-	if (!seatOwned && !capabilityOwned && !callerIsOwnedBy(owner.pid, process.pid, deps.run)) {
+	if (parentLive !== null && !capabilityOwned) return { ok: false, changed: false, dir, reason: "sibling-live", ownerPid: owner.pid, detail: parentLive };
+	if (!seatOwned && !parentOwned && !capabilityOwned && !callerIsOwnedBy(owner.pid, process.pid, deps.run)) {
 		const detail = owner.capabilitySha256 === null ? undefined : opts.capability === undefined || opts.capability === ""
 			? "no capability was presented; pass the one `scratch new` returned with --capability TOKEN (or OMP_KIT_SCRATCH_CAPABILITY)"
 			: "the presented capability does not match this directory's";
@@ -2562,7 +2594,7 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 		const user = blockingScratchUser(dir, deps.liveness);
 		if (user !== null) return { ok: false, changed: false, dir, reason: "user-live", ownerPid: owner.pid, detail: describeUserBlock(user) };
 	}
-	if (owner.processStart !== null && !seatOwned && !capabilityOwned) {
+	if (owner.processStart !== null && !seatOwned && !parentOwned && !capabilityOwned) {
 		const state = ownerIncarnationState(owner.pid, owner.processStart, deps.liveness);
 		if (state !== "live") {
 			return { ok: false, changed: false, dir,

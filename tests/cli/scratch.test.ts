@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, lutimesSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectBunBuildFiles, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import type { SeatIdentity } from "../../src/scratch.ts";
 import { exportCommitToScratch, parseFreeOwner, parseTextOwner, releaseBudgetEntry, repoOfRoot } from "../../src/scratch.ts";
 import type { ScratchVerdict } from "../../src/scratch.ts";
 import { domain, KNOWN_JOBS, runScratchPressureTrigger, scratchPressureChiefRoute, systemdTimer } from "../../src/service.ts";
@@ -2358,4 +2359,44 @@ test("STATERETAIN1: a symlink inside an expired entry is not followed on delete"
 	expect(existsSync(entry)).toBe(false);
 	// Planted negative: the link target outside the entry is untouched.
 	expect(readFileSync(sentinel, "utf8")).toBe("do not touch\n");
+});
+
+test("CHILDSCRATCH1: the parent seat releases a finished child's dir; an unrelated seat is refused; the parent is refused while the child lives", () => {
+	const AGENT = "ChildScratchLead";
+	const PARENT = "01a1a6d1-65fc-736e-bd99-51de45679811";
+	const CHILD = "01a1a751-0cd4-7400-9971-c4c20abcaa82";
+	const pid = deadPid();
+	const home = useState();
+	const root = agentTmp("childscratch1");
+	roots.push(root);
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	const makeDir = (label: string) => {
+		const dir = sessionDir(root, label, pid);
+		writeFileSync(join(dir, ".owner"), ownerText({ ...deadFields(label, pid), agent: AGENT, session: PARENT, creator_session: CHILD }));
+		writeFileSync(join(dir, "work.txt"), "in progress\n");
+		return dir;
+	};
+	const depsWith = (childLive: boolean | null, caller: SeatIdentity): InspectDeps =>
+		depsFor({ liveness: { ...defaultLiveness(), seatLive: (_agent, session) => (session === CHILD ? childLive : null) },
+			callerSeat: () => caller, lsofSnapshot: new Set<string>() });
+	// The parent's own shell holds no omp lease (a native seat process), yet it releases the finished child's dir.
+	const parentShell = (): SeatIdentity => ({ agent: AGENT, sessions: [], main: null, own: PARENT });
+	const finished = makeDir("childwork");
+	expect(releaseScratch(finished, home, depsWith(false, parentShell()), { bin: "throwaway", now: true }))
+		.toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	expect(existsSync(finished)).toBe(false);
+	// An unrelated seat stays refused and the dir is untouched.
+	const foreign = makeDir("foreignwork");
+	expect(releaseScratch(foreign, home, depsWith(false, { agent: "UnrelatedSeat", sessions: [], main: null, own: PARENT }), { bin: "throwaway" }))
+		.toMatchObject({ ok: false, changed: false, reason: "caller-not-owner" });
+	expect(existsSync(join(foreign, "work.txt"))).toBe(true);
+	expect(existsSync(join(foreign, ".omp-kit-release"))).toBe(false);
+	// The parent is refused while the child is still alive, and while its lease is unprovable.
+	const live = makeDir("livework");
+	for (const childLive of [true, null] as const) {
+		expect(releaseScratch(live, home, depsWith(childLive, parentShell()), { bin: "throwaway" }))
+			.toMatchObject({ ok: false, changed: false, reason: "sibling-live" });
+	}
+	expect(existsSync(join(live, "work.txt"))).toBe(true);
+	expect(existsSync(join(live, ".omp-kit-release"))).toBe(false);
 });
