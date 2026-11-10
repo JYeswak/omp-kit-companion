@@ -5,7 +5,7 @@ import { classifyLadder, fullTestVerdict, runFullTest } from "../../src/full-tes
 import { runIsolatedShell } from "../../src/runtime.ts";
 import { activeConcurrentWriterPaths, compareWatched, operatorWatchedPaths, snapshotWatched } from "../../src/operator-snapshot.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
-import { applyKitUpdate, judgeKitPostcheck, kitPostcheckDetail, kitUpdateEnvelope, planKitUpdate, runKitPostcheck, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
+import { applyKitUpdate, isUndoneCandidateReleaseDir, judgeKitPostcheck, kitPostcheckDetail, kitUpdateEnvelope, planKitUpdate, runKitPostcheck, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
 import { kitUpdateJobOverall, pollPublishedRelease } from "../../src/kit-update-job.ts";
 import { serviceLabel } from "../../src/service.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
@@ -323,9 +323,81 @@ test("verified archive activates one symlink, retains old release and leaves fai
  expect(auditMutations(ctx.stateRoot)).toEqual(expect.arrayContaining([
   expect.objectContaining({ id: result.receiptId, scope: "kit", status: "ABORTED_AFTER_COMPENSATION" }),
  ]));
+ // UNDONETARGET1: the undone candidate is not a rollback target, so the same version re-plans and re-applies.
  const retry = await planKitUpdate(input(ctx));
- expect(retry).toMatchObject({ status: "REFUSED", reason: "KIT_TARGET_EXISTS", exitCode: 2 });
- expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
+ if (retry.status !== "UPDATE_AVAILABLE") throw new Error("compensated retry plan rejected");
+ const retried = await applyKitUpdate(retry);
+ expect(retried.status).toBe("PARTIAL");
+ expect(retried.postcheck.status).not.toBe("PASS");
+ expect(retried.receiptId).toBeTruthy();
+ expect(retried.receiptId).not.toBe(result.receiptId);
+ expect(readlinkSync(link)).toBe("../releases/1.2.3/bin/omp-kit");
+ expect(inspectPendingKitUpdate(ctx.stateRoot)?.id).toBe(retried.receiptId);
+}));
+
+// ompkit-1ra0d.101: after a compensated (undone) update the same version re-applies without
+// KIT_TARGET_EXISTS; a release dir that is the active install, pinned, or unknown still refuses.
+test("UNDONETARGET1 planted: a compensated update retries the same version; other dirs still refuse", async () => fixture(async ctx => {
+ const link = join(ctx.prefix, "bin", "omp-kit");
+ const compensate = async () => {
+  const planned = await planKitUpdate(input(ctx));
+  if (planned.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+  const result = await applyKitUpdate(planned);
+  if (result.status !== "PARTIAL" || !result.receiptId) throw new Error("fixture compensation rejected");
+  const undone = undoKitUpdate({ prefix: ctx.prefix, stateRoot: ctx.stateRoot, receiptId: result.receiptId });
+  expect(undone).toMatchObject({ status: "RESTORED", updatePending: false });
+  expect(readlinkSync(link)).toBe("../releases/1.2.2/bin/omp-kit");
+  return result.receiptId;
+ };
+ // Planted: the undone candidate is proven by its RESTORED receipt, so the retry clears it under lock.
+ await compensate();
+ expect(isUndoneCandidateReleaseDir(ctx.prefix, ctx.stateRoot, "1.2.3")).toBe(true);
+ const retry = await planKitUpdate(input(ctx));
+ if (retry.status !== "UPDATE_AVAILABLE") throw new Error("compensated retry plan rejected: " + JSON.stringify(retry));
+ const retried = await applyKitUpdate(retry);
+ expect(retried.status).toBe("PARTIAL");
+ expect(readlinkSync(link)).toBe("../releases/1.2.3/bin/omp-kit");
+ expect(inspectPendingKitUpdate(ctx.stateRoot)?.id).toBe(retried.receiptId);
+}));
+
+test("UNDONETARGET1 controls: active, pinned, unknown, and tampered dirs still refuse KIT_TARGET_EXISTS", async () => fixture(async ctx => {
+ const link = join(ctx.prefix, "bin", "omp-kit");
+ const targetRoot = join(ctx.prefix, "releases", "1.2.3");
+ const plantDir = (bytes: Buffer) => {
+  mkdirSync(join(targetRoot, "bin"), { recursive: true });
+  writeFileSync(join(targetRoot, "bin", "omp-kit"), bytes);
+ };
+ // Control: a pinned/unknown dir with no undone proof refuses at plan time.
+ const planned = await planKitUpdate(input(ctx));
+ if (planned.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+ plantDir(binary("1.2.3"));
+ expect(isUndoneCandidateReleaseDir(ctx.prefix, ctx.stateRoot, "1.2.3")).toBe(false);
+ const refused = await planKitUpdate(input(ctx));
+ expect(refused).toMatchObject({ status: "REFUSED", reason: "KIT_TARGET_EXISTS", exitCode: 2 });
+ await expect(applyKitUpdate(planned)).rejects.toThrow("KIT_TARGET_EXISTS");
+ // Control: a tampered undone candidate (bytes no longer match the receipt) refuses too.
+ rmSync(targetRoot, { recursive: true, force: true });
+ const compensate = async () => {
+  const fresh = await planKitUpdate(input(ctx));
+  if (fresh.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+  const result = await applyKitUpdate(fresh);
+  if (result.status !== "PARTIAL" || !result.receiptId) throw new Error("fixture compensation rejected");
+  expect(undoKitUpdate({ prefix: ctx.prefix, stateRoot: ctx.stateRoot, receiptId: result.receiptId }))
+   .toMatchObject({ status: "RESTORED" });
+ };
+ await compensate();
+ expect(isUndoneCandidateReleaseDir(ctx.prefix, ctx.stateRoot, "1.2.3")).toBe(true);
+ writeFileSync(join(targetRoot, "bin", "omp-kit"), Buffer.from("tampered"));
+ expect(isUndoneCandidateReleaseDir(ctx.prefix, ctx.stateRoot, "1.2.3")).toBe(false);
+ expect(await planKitUpdate(input(ctx))).toMatchObject({ status: "REFUSED", reason: "KIT_TARGET_EXISTS", exitCode: 2 });
+ // Control: the dir the live link points into is never cleared, even with a matching receipt.
+ writeFileSync(join(targetRoot, "bin", "omp-kit"), binary("1.2.3"));
+ expect(isUndoneCandidateReleaseDir(ctx.prefix, ctx.stateRoot, "1.2.3")).toBe(true);
+ renameSync(link, join(ctx.prefix, "bin", "omp-kit.before"));
+ symlinkSync("../releases/1.2.3/bin/omp-kit", link);
+ expect(isUndoneCandidateReleaseDir(ctx.prefix, ctx.stateRoot, "1.2.3")).toBe(false);
+ expect((await planKitUpdate(input(ctx))).status).toBe("CURRENT");
+ renameSync(join(ctx.prefix, "bin", "omp-kit.before"), link);
 }));
 
 test("KITREC1: null activation requires known-good binary repair, not undo or reconciliation", async () => fixture(async ctx => {

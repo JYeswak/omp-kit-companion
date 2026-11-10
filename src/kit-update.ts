@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { run } from "./kitlib/run.ts";
@@ -168,7 +168,8 @@ export async function planKitUpdate(input: KitUpdateInput): Promise<KitUpdatePre
    selectedVersion: input.version, sourceTag: input.sourceTag, fetchIndex: async () => source.raw });
   if (release.exitCode !== 0) return { status: release.status, exitCode: release.exitCode, reason: release.reason, provenance: "UNVERIFIED" };
   if (release.status === "UPDATE_AVAILABLE" &&
-   lstatSync(join(input.prefix, "releases", release.version), { throwIfNoEntry: false }))
+   lstatSync(join(input.prefix, "releases", release.version), { throwIfNoEntry: false }) &&
+   !isUndoneCandidateReleaseDir(input.prefix, input.stateRoot, release.version))
    throw new Error("KIT_TARGET_EXISTS");
   return { ...input, current, release, status: release.status, exitCode: 0, provenance: "INTEGRITY_ONLY" };
  } catch (error) {
@@ -199,6 +200,28 @@ function readReceipt(stateRoot: string, id: string): ActivationReceipt {
   !receipt.before || !receipt.after || !VERSION.test(receipt.before.version) || !VERSION.test(receipt.after.version) ||
   ![receipt.before.sha256, receipt.after.sha256].every(hash => isSha256Hex(hash))) throw new Error("KIT_RECEIPT_INVALID");
  return receipt;
+}
+/**
+ * UNDONETARGET1: true only when the receipts prove the release dir for this exact version is an undone
+ * candidate: an activation receipt in RESTORED state whose recorded postimage bytes still match the dir.
+ * Never true for the dir the live link points into, or for a dir that is pinned, unknown, or tampered.
+ * Exported as the test seam for that safety property.
+ */
+export function isUndoneCandidateReleaseDir(prefix: string, stateRoot: string, version: string): boolean {
+ if (!VERSION.test(version)) return false;
+ // An unreadable install cannot prove the dir is not the one being served, so nothing is cleared.
+ try {
+  if (readInstallation(prefix).target === relativeTarget(version)) return false;
+ } catch { return false; }
+ let names: string[];
+ try { names = readdirSync(stateRoot); } catch { return false; }
+ return names.filter(name => name.startsWith("kit-activation-") && name.endsWith(".json")).some(name => {
+  try {
+   const receipt = readReceipt(stateRoot, name.slice("kit-activation-".length, -".json".length));
+   return receipt.state === "RESTORED" && receipt.after.version === version &&
+    shaFile(installedBinary(prefix, version)) === receipt.after.sha256;
+  } catch { return false; }
+ });
 }
 function switchLink(prefix: string, version: string): void {
  const bin = join(prefix, "bin");
@@ -393,7 +416,13 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
   if (plan.status !== "UPDATE_AVAILABLE" || plan.release.status !== "UPDATE_AVAILABLE") throw new Error("STALE_KIT_PLAN");
   directory(join(plan.prefix, "releases"));
   const targetRoot = join(plan.prefix, "releases", plan.release.version);
-  if (lstatSync(targetRoot, { throwIfNoEntry: false })) throw new Error("KIT_TARGET_EXISTS");
+  if (lstatSync(targetRoot, { throwIfNoEntry: false })) {
+   // A newer undone candidate is not a rollback target: when the receipts prove this exact version's
+   // dir is its undone postimage, clear it under the held lock and retry. Anything else still refuses.
+   if (!isUndoneCandidateReleaseDir(plan.prefix, plan.stateRoot, plan.release.version)) throw new Error("KIT_TARGET_EXISTS");
+   rmSync(targetRoot, { recursive: true, force: true });
+   syncDirectory(join(plan.prefix, "releases"));
+  }
   const selectedOmp = selectedOmpSnapshot();
   // Authenticate a private snapshot before any extraction, candidate execution, or activation.
   const archive = regular(source.archivePath);

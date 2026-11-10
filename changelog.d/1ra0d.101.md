@@ -1,0 +1,1 @@
+- Retrying a kit update after its postcheck compensated back to the prior release now reuses the undone candidate instead of refusing KIT_TARGET_EXISTS; any other existing release dir still refuses.
