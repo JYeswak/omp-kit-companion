@@ -59,6 +59,11 @@ LOCAL_REQUIRED = (
     "tests/cli/fleet-watch-pull.test.ts",  # linear-near-miss timing, 3 verdicts
     "tests/cli/test-runner.test.ts",  # long-token CPU budget, 21 historic failure lines
     "tests/cli/regex-budget.test.ts",  # stream budget timing
+    # LOCKLINUX1 (ompkit-1ra0d.111): the non-inheriting-child lock cases fail intermittently on Linux only (5 verdict
+    # logs 11-09..11-10, never on macOS). The release judges them here; CI's Linux job still runs both files, so the
+    # Linux defect stays visible there until LOCKLINUX1 names the holder.
+    "tests/cli/kitlib-lock.test.ts",
+    "tests/scripts/kitlib_lock_test.py",
 )
 
 

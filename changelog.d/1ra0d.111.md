@@ -1,0 +1,1 @@
+- The release full suite judges the two kitlib lock conformance test files on the Mac host while LOCKLINUX1 investigates their intermittent Linux-only failure; Linux CI still runs them.
