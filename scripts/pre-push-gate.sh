@@ -146,37 +146,53 @@ case "${remote_sha:-}" in
 		;;
 	*) base_ref=$remote_sha ;;
 esac
-# RELFAST1 (ompkit-fp72.120.16.309): every green main push starts exact-tree qualification,
-# including PRE_PUSH_FULL_SUITE=push: its main PASS does not cover the CI-only ladders.
-# release-verdict reuses the main PASS and starts CI-only under its existing suite lease.
-# If the transport then fails, only an unused exact-tree record remains. OMP_KIT_RELEASE_VERDICT=0
-# opts out. Output goes to .git/omp-kit/release-verdict.log, never to this hook's stdout.
-# It runs in its own session: git_converge.py runs `git push` in a process group that its bounded runner
-# kills once the push returns, and nohup alone died with it (48c5513b5f, 2026-10-31: the log stopped
-# at the runner's header, the lock left naming a gone pid). macOS ships no setsid(1), so python3 forks,
-# calls setsid in the child and execs the verdict.
-# RELREADY1: once qualification finishes, inspect actual origin/main (not an
-# unpublished local candidate). The existing log is the command-center surface.
-# Readiness never changes the push or qualification verdict.
-# FULLONRELEASE1 (J-2026-11-08-10, ompkit-kup44): the full suite runs once per release, from release-local.sh, not
-# on every push. A push starts it only when OMP_KIT_RELEASE_VERDICT=1 is set explicitly.
+# RELFAST1 (ompkit-fp72.120.16.309): qualify a batch of main lands after its quiet interval,
+# never per commit. Each push schedules one finite detached child; a newer origin/main
+# supersedes it. Output stays in .git/omp-kit/release-verdict.log.
+# The child owns a session because the push transport's bounded runner kills its group
+# when the push returns. Every subprocess below uses kitlib_run with a deadline.
+# FULLONRELEASE1 now follows J-2026-11-10-03: default-on after 600 quiet seconds;
+# OMP_KIT_RELEASE_VERDICT=0 opts out. release-local reuses the exact-tree qualification.
 start_release_verdict() {
-	if [ "${OMP_KIT_RELEASE_VERDICT:-0}" = 1 ] \
+	if [ "${OMP_KIT_RELEASE_VERDICT:-1}" != 0 ] && [ "${remote_ref:-}" = refs/heads/main ] \
 		&& [ -n "$log_git" ] && [ -n "${local_sha:-}" ] && [ -f "$ROOT/scripts/release-verdict.sh" ]; then
-		# shellcheck disable=SC2016 # The qualification child expands its own positional parameters.
-		python3 -c 'import os, sys
+		python3 -c 'import os, sys, time
+root, sha = sys.argv[1:]
+QUIET_S = 600  # J-2026-11-10-03: one suite per settled batch, not one per commit.
+quiet = int(os.environ.get("OMP_KIT_RELEASE_VERDICT_QUIET_S", str(QUIET_S)))
+if not 0 <= quiet <= 86400:
+    raise SystemExit("release-verdict: quiet interval must be 0..86400 seconds")
 if os.fork(): os._exit(0)
 os.setsid()
-os.execvp(sys.argv[1], sys.argv[1:])' nice -n 10 sh -c '
-	status=0
-	sh "$1/scripts/release-verdict.sh" --commit "$2" --no-fetch || status=$?
-	if [ "$3" = refs/heads/main ]; then
-		bun "$1/src/release-ready.ts" --repo "$1" || :
-	fi
-	exit "$status"
-' release-qualification "$ROOT" "$local_sha" "${remote_ref:-}" \
-			</dev/null >>"$log_git/omp-kit/release-verdict.log" 2>&1
-		printf 'release verdict: started for %s in the background in its own session (log %s)\n' "$local_sha" "$log_git/omp-kit/release-verdict.log"
+priority = os.getpriority(os.PRIO_PROCESS, 0)
+if priority < 10:
+    os.nice(10 - priority)
+sys.path.insert(0, os.path.join(root, "scripts"))
+from kitlib_run import run
+print(f"release-verdict: quiet interval {quiet}s for {sha}", flush=True)
+time.sleep(quiet)
+fetch = run(["git", "-C", root, "fetch", "-q", "origin",
+             "refs/heads/main:refs/remotes/origin/main"], deadline_s=120)
+head = run(["git", "-C", root, "rev-parse", "--verify", "refs/remotes/origin/main"], deadline_s=15)
+if fetch.rc != 0 or fetch.timed_out or head.rc != 0 or head.timed_out:
+    sys.stderr.buffer.write(fetch.stderr + head.stderr)
+    raise SystemExit("release-verdict: cannot fetch published main; qualification not started")
+newer = head.stdout.decode().strip()
+if newer != sha:
+    print(f"release-verdict: {sha} superseded by {newer}", flush=True)
+    raise SystemExit(0)
+result = run(["sh", os.path.join(root, "scripts/release-verdict.sh"), "--commit", sha, "--no-fetch"],
+             cwd=root, deadline_s=7200, max_output_bytes=16 << 20)
+sys.stdout.buffer.write(result.stdout)
+sys.stderr.buffer.write(result.stderr)
+ready = run(["bun", os.path.join(root, "src/release-ready.ts"), "--repo", root],
+            cwd=root, deadline_s=120)
+sys.stdout.buffer.write(ready.stdout)
+sys.stderr.buffer.write(ready.stderr)
+print(f"release-verdict: qualification finished for {sha} rc={result.rc}", flush=True)
+raise SystemExit(result.rc if result.rc is not None and result.rc >= 0 else 1)
+' "$ROOT" "$local_sha" </dev/null >>"$log_git/omp-kit/release-verdict.log" 2>&1
+		printf 'release verdict: scheduled for %s after the main quiet interval (log %s)\n' "$local_sha" "$log_git/omp-kit/release-verdict.log"
 	fi
 }
 # COMMITPARITY1 (ompkit-9d9fx): the commit-msg member check-commit-gate.sh runs this same file on the

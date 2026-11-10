@@ -94,7 +94,7 @@ git -C "$seed" tag v0.2.82
 git -C "$seed" init --bare -q --template= "$origin"
 git -C "$seed" remote add origin "$origin"
 git -C "$seed" push -q origin main --tags
-git clone -q --branch main "$origin" "$second"
+git clone -q --no-hardlinks --branch main "$origin" "$second"
 for tool in codesign xcrun security spctl ditto plutil openssl shasum; do
 	printf '#!/bin/sh\nexit 0\n' >"$TMP/fake-bin/$tool"
 	chmod +x "$TMP/fake-bin/$tool"
@@ -199,8 +199,15 @@ for attempt in fresh cached; do
 	[ "$failed_rc" != 0 ] && ! grep -Fq 'reusing exact-tree main PASS' "$TMP/fail-$attempt.out" \
 		&& grep -Fq "VERDICT" "$TMP/fail-$attempt.out"
 	ok $? "valid-fail-$attempt-refuses: rc=$failed_rc output=$(cat "$TMP/fail-$attempt.out")"
-	timings "$TMP/fail-$attempt.out" verdict.main-judge
-	ok $? "failed-main-$attempt-emits-completed-judge-interval"
+	if [ "$attempt" = fresh ]; then
+		timings "$TMP/fail-$attempt.out" verdict.main-judge
+		ok $? "failed-main-fresh-emits-completed-judge-interval"
+	else
+		grep -Fq 'reusing exact-tree main FAIL' "$TMP/fail-$attempt.out" &&
+			! grep -Fq '== substep verdict.main-judge ' "$TMP/fail-$attempt.out" &&
+			! grep -Fq '== substep verdict.suite-lease-wait ' "$TMP/fail-$attempt.out"
+		ok $? "cached-fail-is-noop-without-suite-lease"
+	fi
 done
 grep -Fq "cache miss for tree $failed_tree role=main" "$TMP/fail-fresh.out"
 ok $? "different-candidate-tree-runs-suite"

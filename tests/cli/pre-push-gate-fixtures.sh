@@ -21,8 +21,8 @@ unset FULL_SUITE_VERDICT_CACHE_DIR
 # GATESPEED1: the full suite now gates the release by default. These cases exercise the in-push
 # runner, which stays available, so they opt in; DEFER1 below covers the default.
 export PRE_PUSH_FULL_SUITE=push
-# Tiny fixture suites need at most three workers, not a host-sized pool per adapter.
-export FULL_SUITE_JOBS=3
+# Tiny adapter fixtures run one file at a time, including on shared hosts and ovnfs.
+export FULL_SUITE_JOBS=1
 export XDG_CONFIG_HOME="$TMP/xdg-config"
 export XDG_STATE_HOME="$TMP/xdg-state"
 
@@ -1237,14 +1237,18 @@ else
 	fail=$((fail + 1)); printf 'FAIL land1a-control: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
 
-# RELFAST1: with OMP_KIT_RELEASE_VERDICT=1, even a push that already judged the main suite schedules
-# CI-only qualification. Exercise the actual adapter; the detached producer logs the commit it receives.
+# RELFAST1 (J-2026-11-10-03): default-on for main, whether the push itself ran
+# qualification or deferred it. This fixture uses zero quiet time; the real one-second
+# debounce and moved-main negative run in pre-push-gate-debounce.test.ts.
+git init --bare -q --template= "$TMP/relfast-origin.git"
+git -C "$vrepro" remote add origin "$TMP/relfast-origin.git"
+git -C "$vrepro" push -q origin HEAD:refs/heads/main
 export RV_PUSH_LOG="$TMP/push-judgments"
 # shellcheck disable=SC2016 # expanded by the detached fixture producer, not this shell
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"$RV_PUSH_LOG"\n' >"$vrepro/scripts/release-verdict.sh"
 for push_mode in push release; do
 	: >"$RV_PUSH_LOG"
-	rc=$(OMP_KIT_RELEASE_VERDICT=1 PRE_PUSH_FULL_SUITE=$push_mode run_adapter "$vrepro")
+	rc=$(unset OMP_KIT_RELEASE_VERDICT; OMP_KIT_RELEASE_VERDICT_QUIET_S=0 PRE_PUSH_FULL_SUITE=$push_mode run_adapter "$vrepro")
 	expected="--commit $(git -C "$vrepro" rev-parse HEAD) --no-fetch"
 	attempt=0
 	while [ ! -s "$RV_PUSH_LOG" ] && [ "$attempt" -lt 50 ]; do sleep 0.1; attempt=$((attempt + 1)); done
@@ -1254,15 +1258,13 @@ for push_mode in push release; do
 		fail=$((fail + 1)); printf 'FAIL relfast1-main-push-starts-qualification mode=%s rc=%s log=%s\n' "$push_mode" "$rc" "$(cat "$RV_PUSH_LOG")"
 	fi
 done
-# FULLONRELEASE1 (J-2026-11-08-10): by default a push schedules no full-suite qualification; the
-# release runs it once.
+# FULLONRELEASE1 now follows J-2026-11-10-03: an explicit 0 opts out.
 : >"$RV_PUSH_LOG"
-rc=$(unset OMP_KIT_RELEASE_VERDICT; PRE_PUSH_FULL_SUITE=push run_adapter "$vrepro")
-sleep 2
-if [ "$rc" = 0 ] && [ ! -s "$RV_PUSH_LOG" ]; then
+rc=$(OMP_KIT_RELEASE_VERDICT=0 PRE_PUSH_FULL_SUITE=push run_adapter "$vrepro")
+if [ "$rc" = 0 ] && [ ! -s "$RV_PUSH_LOG" ] && ! grep -q 'release verdict: scheduled' "$TMP/out"; then
 	pass=$((pass + 1))
 else
-	fail=$((fail + 1)); printf 'FAIL fullonrelease1-default-push-schedules-nothing rc=%s log=%s\n' "$rc" "$(cat "$RV_PUSH_LOG")"
+	fail=$((fail + 1)); printf 'FAIL relfast1-explicit-optout-schedules-nothing rc=%s log=%s\n' "$rc" "$(cat "$RV_PUSH_LOG")"
 fi
 export PRE_PUSH_FULL_SUITE=push
 

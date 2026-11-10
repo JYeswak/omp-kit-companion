@@ -8,7 +8,7 @@
 #   1. resolve the commit (default: the remote-tracking origin/main after a fetch);
 #   2. take a per-repo lock; when another run holds it, record the wanted commit and exit 0, and the
 #      holder runs again for the newest published head before it releases the lock;
-#   2b. read the exact-tree main record with the exported judge; a matching PASS
+#   2b. read the exact-tree main record with the exported judge; a matching complete verdict
 #       needs no suite lease. A missing verdict takes the machine-wide suite lease.
 #   3. export the exact commit and run only its missing qualification with that commit's own runner
 #      (never the working tree: editing the runner mid-run killed a 25-minute suite on 2026-10-31);
@@ -71,10 +71,16 @@ resolve_head() {
 	git -C "$ROOT" rev-parse --verify refs/remotes/origin/main
 }
 sha=$(resolve_head) || { printf 'release-verdict: cannot resolve the commit\n' >&2; exit 2; }
+requested_tree=$(git -C "$ROOT" rev-parse "$sha^{tree}") || exit 2
 # The lock directory names its holder's pid; a holder that is gone no longer holds it.
 if ! mkdir "$LOCK" 2>/dev/null; then
 	holder=$(cat "$LOCK/pid" 2>/dev/null) || holder=""
 	if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+		holder_tree=$(cat "$LOCK/tree" 2>/dev/null) || holder_tree=""
+		if [ "$holder_tree" = "$requested_tree" ]; then
+			printf 'release-verdict: already running tree %s (run %s); nothing to queue\n' "$requested_tree" "$holder"
+			exit 0
+		fi
 		printf '%s\n' "$sha" >"$WANTED"
 		printf 'release-verdict: run %s holds the lock; it will judge %s next\n' "$holder" "$sha"
 		exit 0
@@ -83,6 +89,7 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 	mkdir "$LOCK" || { printf 'release-verdict: cannot take %s\n' "$LOCK" >&2; exit 1; }
 fi
 printf '%s\n' "$$" >"$LOCK/pid"
+printf '%s\n' "$requested_tree" >"$LOCK/tree"
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$ROOT/scripts/kitlib-tmp.sh"
 kitlib_tmp WORK release-verdict || exit 1
@@ -129,18 +136,18 @@ while :; do
 	git -C "$ROOT" archive "$sha" | tar -xf - -C "$tree"
 	substep_end verdict.archive-export "$rv_substep_t0"
 	rv_tree=$(git -C "$ROOT" rev-parse "$sha^{tree}") || { printf 'release-verdict: cannot read the tree of %s\n' "$sha" >&2; rc=1; break; }
-	# RELFAST1: use the same canonical validators as release-local, before queueing for CPU.
-	# Only a successful exact PASS can skip work; FAIL, missing/corrupt evidence, changed
-	# checker bytes, runtime or tree keep the original producer/refusal path.
+	printf '%s\n' "$rv_tree" >"$LOCK/tree"
+	# RELFAST1: a complete exact-tree verdict (including FAIL) is already qualified.
+	# Reuse it without the suite lease; invalid, missing or changed evidence still runs.
 	main_result=''
 	substep_start verdict.store-lookup
 	if [ -f "$tree/scripts/full-suite-verdict-store.py" ]; then
 		main_result=$(env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB -u BEADS_DIR TMPDIR="$WORK" \
 			python3 -B "$tree/scripts/full-suite-verdict-store.py" require-pass --repo "$ROOT" \
-			--tree "$rv_tree" --role main --judge-root "$tree" --suite-root "$tree" 2>/dev/null) || main_result=''
+			--tree "$rv_tree" --role main --judge-root "$tree" --suite-root "$tree" 2>/dev/null) || :
 	fi
 	substep_end verdict.store-lookup "$rv_substep_t0"
-	if [ "$rv_lease" = 1 ] && [ "$main_result" != PASS ]; then
+	if [ "$rv_lease" = 1 ] && [ "$main_result" != PASS ] && [ "$main_result" != FAIL ]; then
 		lease_rc=0
 		substep_start verdict.suite-lease-wait
 		suite_lease_take release-verdict "$rv_tree" main "$sha" "${FULL_SUITE_VERDICT_CACHE_DIR:-}" 0 '' || lease_rc=$?
@@ -152,13 +159,14 @@ while :; do
 		fi
 		printf 'release-verdict: suite lease %s for %s (%s)\n' "$SUITE_LEASE_STATE" "$sha" "$SUITE_LEASE_DETAIL"
 	fi
-	if [ "$main_result" = PASS ]; then
-		printf 'release-verdict: reusing exact-tree main PASS for %s\n' "$sha"
+	if [ "$main_result" = PASS ] || [ "$main_result" = FAIL ]; then
+		printf 'release-verdict: VERDICT reusing exact-tree main %s for %s\n' "$main_result" "$sha"
 	else
 		printf 'release-verdict: judging %s with its own runner\n' "$sha"
 	fi
 	rc=0
-	if [ "$main_result" != PASS ]; then
+	[ "$main_result" != FAIL ] || rc=1
+	if [ "$main_result" != PASS ] && [ "$main_result" != FAIL ]; then
 		substep_start verdict.main-judge
 		# SUITEREMOTE1: release qualification is the one caller that uses remote workers (opt-in); an
 		# operator's FULL_SUITE_REMOTE=0 still forces the local run.

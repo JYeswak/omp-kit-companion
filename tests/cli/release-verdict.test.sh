@@ -65,13 +65,19 @@ ok "$st" "failure-propagates: rc=$rc"
 
 # 3. A second run while the first holds the lock hands over its commit and exits 0; the holder
 # judges it before releasing the lock.
-git -C "$repo" commit -q --allow-empty -m "[test] two"
+printf 'second tree\n' >"$repo/payload"
+git -C "$repo" add payload
+git -C "$repo" commit -q -m "[test] two"
 c2=$(git -C "$repo" rev-parse HEAD)
 : >"$RV_LOG"
 RV_SLEEP=3 sh "$repo/scripts/release-verdict.sh" --commit "$c1" --no-fetch >"$TMP/o3a" 2>&1 &
 holder=$!
 i=0
 while [ ! -f "$repo/.git/omp-kit/release-verdict.lock/pid" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+sh "$repo/scripts/release-verdict.sh" --commit "$c1" --no-fetch >"$TMP/o3same" 2>&1
+same_rc=$?
+[ "$same_rc" = 0 ] && grep -q "already running tree" "$TMP/o3same" && [ ! -e "$repo/.git/omp-kit/release-verdict.wanted" ]
+ok $? "same-tree-active-is-noop: rc=$same_rc"
 sh "$repo/scripts/release-verdict.sh" --commit "$c2" --no-fetch >"$TMP/o3b" 2>&1
 rc2=$?
 wait "$holder"
