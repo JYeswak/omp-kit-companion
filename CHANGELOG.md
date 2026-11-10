@@ -4,6 +4,13 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.109] - 2026-11-10
+
+### Changed
+
+- A handoff also matches when the landed commit's message lost trailing blank lines that git strips at commit time.
+- A release install's post-check no longer fails because other agents wrote the kit's live fleet records (gate events, mail wakes, inbox wakes, scratch user locks, update-job records) during the isolated test; those files are reported as live state, and every other file under the state folder is still checked.
+
 ## [0.2.108] - 2026-11-09
 
 ### Changed

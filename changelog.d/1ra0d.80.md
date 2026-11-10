@@ -1,1 +1,0 @@
-- A handoff also matches when the landed commit's message lost trailing blank lines that git strips at commit time.

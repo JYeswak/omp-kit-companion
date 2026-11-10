@@ -1,1 +1,0 @@
-- A release install's post-check no longer fails because other agents wrote the kit's live fleet records (gate events, mail wakes, inbox wakes, scratch user locks, update-job records) during the isolated test; those files are reported as live state, and every other file under the state folder is still checked.
