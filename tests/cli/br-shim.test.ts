@@ -506,7 +506,11 @@ test("HANDOFFREPO1 unknown repo refuses without mutation and never borrows a com
 		const out = decoder.decode(result.stderr);
 		expect(result.rc).toBe(4);
 		expect(out).toContain("HANDOFF_UNGATED");
-		expect(out).toContain("no declared gate exists");
+		// HANDOFFPUSHCHECK1: an unknown repo without .omp/push-check names committing
+		// the check and the push-check command, never a script the repo lacks.
+		expect(out).toContain("commit an executable .omp/push-check");
+		expect(out).toContain("omp-kit push-check --commit");
+		expect(out).not.toContain("fresh-gate.sh");
 		expect(out).toContain(`${f.code}@${f.commit}`);
 		expect(await f.status()).toBe("in_progress");
 		expect(await f.comments()).toEqual(before);
@@ -691,6 +695,177 @@ test("HANDOFFTREE1 a GREEN candidate differing from the landed commit only in au
 		expect(await f.status()).toBe("in_review");
 	} finally { f.scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1_000);
+
+/** Native Git and tracker state with a committed executable .omp/push-check (HANDOFFPUSHCHECK1). */
+async function pushCheckHandoffRepo(checkBody: string) {
+	const scratch = ownedTmp("pushcheck-handoff-native");
+	const tracker = join(scratch.path, "tracker");
+	const code = join(scratch.path, "source @ quoted'path");
+	const bin = join(scratch.path, "bin");
+	const origin = join(scratch.path, "origin.git");
+	const backend = nativeBr();
+	for (const path of [tracker, code, bin]) mkdirSync(path);
+	const env: Record<string, string> = {
+		HOME: scratch.path, TMPDIR: scratch.path, XDG_STATE_HOME: join(scratch.path, "state"),
+		XDG_CONFIG_HOME: join(scratch.path, "config"), PATH: `${bin}:${process.env.PATH ?? ""}`,
+		AGENT_NAME: "HandoffAuthor", BR_REAL: backend, PYTHONDONTWRITEBYTECODE: "1",
+		GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_COUNT: "0",
+	};
+	const checked = async (argv: string[], cwd = tracker) => {
+		const result = await run(argv, { cwd, env, deadline_s: fixtureDeadlineS(30), max_output_bytes: 4 << 20 });
+		if (result.rc !== 0 || result.timed_out || result.truncated) {
+			throw new Error(`${argv.join(" ")}: ${result.rc}\n${decoder.decode(result.stdout)}${decoder.decode(result.stderr)}`);
+		}
+		return decoder.decode(result.stdout).trim();
+	};
+	try {
+		symlinkSync(backend, join(bin, "br"));
+		mkdirSync(join(scratch.path, ".bun", "bin"), { recursive: true });
+		symlinkSync(process.execPath, join(scratch.path, ".bun", "bin", "bun"));
+		writeFileSync(join(bin, "am"), `#!/bin/sh
+case "$1:$2" in
+  agents:show) printf '{"name":"HandoffAuthor"}\\n' ;;
+  file_reservations:conflicts) printf 'No conflicts detected.\\n' ;;
+  *) exit 9 ;;
+esac
+`, { mode: 0o755 });
+		await checked(["git", "init", "--bare", "-q", "--template=", origin]);
+		for (const repo of [tracker, code]) {
+			await checked(["git", "init", "-q", "--template=", "-b", "main", repo]);
+			await checked(["git", "-C", repo, "config", "user.name", "Fixture"]);
+			await checked(["git", "-C", repo, "config", "user.email", "fixture@invalid.example"]);
+			mkdirSync(join(repo, "tests"));
+			writeFileSync(join(repo, "payload.txt"), "preserved\n");
+			writeFileSync(join(repo, "tests/replay.sh"), "#!/bin/sh\ntest -f payload.txt\n");
+		}
+		mkdirSync(join(code, ".omp"));
+		writeFileSync(join(code, ".omp/push-check"), checkBody, { mode: 0o755 });
+		await checked(["git", "-C", code, "add", "payload.txt", "tests/replay.sh", ".omp/push-check"]);
+		await checked(["git", "-C", code, "commit", "-qm", "owned source fixture", "-m", "Agent: HandoffAuthor"]);
+		const commit = await checked(["git", "-C", code, "rev-parse", "HEAD"]);
+		await checked(["git", "-C", code, "remote", "add", "origin", origin]);
+		await checked(["git", "-C", code, "push", "-q", "--set-upstream", "origin", "main"]);
+		const db = join(tracker, ".beads/beads.db");
+		const br = (args: string[]) => checked([backend, "--db", db, "--no-auto-import", "--no-auto-flush", ...args]);
+		await br(["init", "--prefix", "hh", "--actor", "HandoffAuthor"]);
+		const beads = ["hh-owned", "hh-other"].map(id => ({
+			id, title: "Preserve native source handoff", issue_type: "task", priority: 2,
+			status: "in_progress", assignee: "HandoffAuthor", created_by: "HandoffAuthor",
+			created_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-01T00:00:00Z",
+			labels: ["fixture"], dependencies: [], comments: [],
+			description: "WHAT: preserve the exact source handoff. WHY: a missing observation must refuse without changing native state.",
+			acceptance_criteria: HANDOFF_AC,
+		}));
+		writeFileSync(join(tracker, ".beads/issues.jsonl"), beads.map(b => JSON.stringify(b)).join("\n") + "\n");
+		await br(["sync", "--import-only", "--actor", "HandoffAuthor"]);
+		const shim = (args: string[], input?: string, cwd = code) => run(["sh", join(root, "scripts/br-shim.sh"), "--db", db, ...args], {
+			cwd, env, deadline_s: fixtureDeadlineS(30), max_output_bytes: 4 << 20,
+			...(input === undefined ? {} : { stdin: input }),
+		});
+		const status = async (id = "hh-owned") => {
+			const values = JSON.parse(await br(["show", id, "--json"]));
+			return (Array.isArray(values) ? values[0] : values).status;
+		};
+		const handoff = (id: string, done: string) =>
+			shim(["update", id, "--status", "in_review", "--transition-comment", done]);
+		const tree = await checked(["git", "-C", code, "rev-parse", `${commit}^{tree}`]);
+		const checkSha256 = createHash("sha256").update(checkBody).digest("hex");
+		const pushCheck = (sha: string) => run([process.execPath, join(root, "src", "cli.ts"),
+			"push-check", "--commit", sha, "--repo", code, "--json"], {
+			cwd: code, env, deadline_s: fixtureDeadlineS(60), max_output_bytes: 4 << 20,
+		});
+		const ledgerPath = join(code, ".git", "omp-kit", "push-check-runs.jsonl");
+		const pushRows = () => existsSync(ledgerPath)
+			? readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line))
+			: [];
+		const plantPushRow = (row: object) => {
+			mkdirSync(join(code, ".git", "omp-kit"), { recursive: true });
+			writeFileSync(ledgerPath, `${JSON.stringify(row)}\n`);
+		};
+		const pushEnvelope = async (sha: string) => {
+			const result = await pushCheck(sha);
+			expect(result.rc, decoder.decode(result.stderr)).toBe(0);
+			return JSON.parse(decoder.decode(result.stdout)).data;
+		};
+		return { scratch, tracker, code, commit, tree, checkSha256, checkBody, shim, status, handoff,
+			checked, br, env, done: `DONE ${code}@${commit}: exact native source observation`,
+			pushCheck, pushRows, plantPushRow, pushEnvelope };
+	} catch (error) {
+		scratch.cleanup();
+		throw error;
+	}
+}
+
+test("HANDOFFPUSHCHECK1 a GREEN push-check row admits the handoff; no row, an rc 1 row and a stale check_sha256 row refuse", async () => {
+	const f = await pushCheckHandoffRepo("#!/bin/sh\nexit 0\n");
+	try {
+		const refused = await f.handoff("hh-owned", f.done);
+		expect(refused.rc, decoder.decode(refused.stderr)).toBe(4);
+		expect(decoder.decode(refused.stderr)).toContain("HANDOFF_UNGATED");
+		expect(await f.status()).toBe("in_progress");
+		const data = await f.pushEnvelope(f.commit);
+		expect(data.overall).toBe("PASS");
+		expect(data.commit).toBe(f.commit);
+		expect(data.rc).toBe(0);
+		const rows = f.pushRows();
+		expect(rows.length).toBe(1);
+		expect(rows[0]).toMatchObject({ version: 1, commit: f.commit, tree: f.tree, check_sha256: f.checkSha256, rc: 0 });
+		expect(typeof rows[0].at).toBe("string");
+		const admitted = await f.handoff("hh-owned", f.done);
+		expect(admitted.rc, decoder.decode(admitted.stderr)).toBe(0);
+		expect(await f.status()).toBe("in_review");
+		f.plantPushRow({ version: 1, commit: f.commit, tree: f.tree, check_sha256: f.checkSha256, rc: 1, at: new Date().toISOString() });
+		const failing = await f.handoff("hh-other", f.done);
+		expect(failing.rc, decoder.decode(failing.stderr)).toBe(4);
+		expect(decoder.decode(failing.stderr)).toContain("HANDOFF_UNGATED");
+		expect(await f.status("hh-other")).toBe("in_progress");
+		f.plantPushRow({ version: 1, commit: f.commit, tree: f.tree, check_sha256: "0".repeat(64), rc: 0, at: new Date().toISOString() });
+		const stale = await f.handoff("hh-other", f.done);
+		expect(stale.rc, decoder.decode(stale.stderr)).toBe(4);
+		expect(decoder.decode(stale.stderr)).toContain("HANDOFF_UNGATED");
+		expect(await f.status("hh-other")).toBe("in_progress");
+		const authorDate = await f.checked(["git", "-C", f.code, "log", "-1", "--format=%ad", "--date=raw", f.commit]);
+		const laterDate = `${Number(authorDate.split(" ")[0]) + 21} +0000`;
+		const candidateRun = await run(["git", "-C", f.code, "commit-tree", f.tree,
+			"-m", "owned source fixture", "-m", "Agent: HandoffAuthor"], {
+			cwd: f.code, deadline_s: fixtureDeadlineS(30), max_output_bytes: 1 << 20,
+			env: { ...f.env, GIT_AUTHOR_DATE: laterDate, GIT_COMMITTER_DATE: laterDate },
+		});
+		expect(candidateRun.rc, decoder.decode(candidateRun.stderr)).toBe(0);
+		const candidate = decoder.decode(candidateRun.stdout).trim();
+		expect(candidate).not.toBe(f.commit);
+		f.plantPushRow({ version: 1, commit: candidate, tree: f.tree, check_sha256: f.checkSha256, rc: 0, at: new Date().toISOString() });
+		const retimed = await f.handoff("hh-other", f.done);
+		expect(retimed.rc, decoder.decode(retimed.stderr)).toBe(0);
+		expect(await f.status("hh-other")).toBe("in_review");
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(180) * 1_000);
+
+test("HANDOFFPUSHCHECK1 without .omp/push-check the refusal names committing the check and the push-check command; companion keeps the fresh-gate requirement", async () => {
+	const f = await handoffRepo();
+	try {
+		const refused = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
+		const err = decoder.decode(refused.stderr);
+		expect(refused.rc, err).toBe(4);
+		expect(err).toContain("HANDOFF_UNGATED");
+		expect(err).toContain(".omp/push-check");
+		expect(err).toContain("omp-kit push-check --commit");
+		expect(err).not.toContain("fresh-gate.sh");
+		expect(await f.status()).toBe("in_progress");
+	} finally { f.scratch.cleanup(); }
+	const g = await handoffRepo(true);
+	try {
+		const refused = await g.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", g.done]);
+		const err = decoder.decode(refused.stderr);
+		expect(refused.rc, err).toBe(4);
+		expect(err).toContain("scripts/fresh-gate.sh");
+		expect(await g.status()).toBe("in_progress");
+		g.ledger();
+		const admitted = await g.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", g.done]);
+		expect(admitted.rc, decoder.decode(admitted.stderr)).toBe(0);
+		expect(await g.status()).toBe("in_review");
+	} finally { g.scratch.cleanup(); }
+}, fixtureDeadlineS(180) * 1_000);
 
 test("HANDOFFREPO1 missing observations cannot admit an ambiguous multiple-bead update", async () => {
 	const f = await handoffRepo();

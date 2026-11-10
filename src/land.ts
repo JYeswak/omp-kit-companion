@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { run as kitlibRun, runSync as kitlibRunSync } from "./kitlib/run.ts";
 import type { RunResult } from "./kitlib/run.ts";
@@ -151,11 +151,11 @@ function landPhaseEvidence(
 		observed_publication_head: publicationHead,
 	};
 }
-const PUSH_CHECK_PATH = ".omp/push-check";
+export const PUSH_CHECK_PATH = ".omp/push-check";
 const MAX_PUSH_CHECK_BYTES = 4 * 1024 * 1024;
 
 type PushCheckStatus = "PASS" | "FAIL" | "SKIP" | "UNRUN";
-type PushCheckResult = {
+export type PushCheckResult = {
 	status: PushCheckStatus;
 	path: string;
 	sha256: string | null;
@@ -178,6 +178,104 @@ type PushCheckPlan =
 	| { kind: "skip"; result: PushCheckResult }
 	| { kind: "unrun"; result: PushCheckResult };
 
+const PUSH_CHECK_DEADLINE_ENV = "OMP_KIT_PUSH_CHECK_DEADLINE_S";
+
+/** The push-check execution deadline in seconds: OMP_KIT_PUSH_CHECK_DEADLINE_S (integer, clamped to 1..3600) or 600. */
+export function pushCheckDeadlineSeconds(): number {
+	const raw = process.env[PUSH_CHECK_DEADLINE_ENV];
+	const value = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+	return Number.isSafeInteger(value) ? Math.min(3600, Math.max(1, value)) : 600;
+}
+
+/** Shared push-check execution (HANDOFFPUSHCHECK1): one runner for land and the push-check verb, bounded by kitlib run(). */
+export async function executePushCheckScript(repo: string, script: Buffer, executable: string, version: string, checkSha256: string, candidateSha: string, cwd: string, deadlineS: number): Promise<PushCheckResult> {
+	const base = pushCheckResult("UNRUN", "not_run", checkSha256);
+	const env = gitEnvironment();
+	env.OMP_LAND_REPOSITORY = repo;
+	env.OMP_LAND_CANDIDATE_SHA = candidateSha;
+	env.OMP_LAND_CHECK_PATH = PUSH_CHECK_PATH;
+	env.OMP_LAND_CHECK_SHA256 = checkSha256;
+	const common = { ...base, selected_executable: executable, selected_version: version, candidate_sha: candidateSha, checked_sha: candidateSha };
+	let run: RunResult;
+	try {
+		run = await kitlibRun([executable, "-s"], { cwd, env, stdin: script, deadline_s: Math.max(1, Math.floor(deadlineS)), max_output_bytes: 8 * 1024 * 1024 });
+	} catch {
+		return { ...common, exit_code: null, status: "UNRUN", reason: "check_execution_unavailable" };
+	}
+	const exitCode = run.rc !== null && run.rc >= 0 ? run.rc : null;
+	if (run.timed_out || exitCode === null) return { ...common, exit_code: exitCode, status: "UNRUN", reason: "check_execution_unavailable" };
+	if (exitCode === 0) return { ...common, exit_code: exitCode, status: "PASS", reason: undefined };
+	if (exitCode === 77) return { ...common, exit_code: exitCode, status: "SKIP", reason: "check_not_applicable" };
+	return { ...common, exit_code: exitCode, status: "FAIL", reason: "check_failed" };
+}
+
+/** sha256 of the .omp/push-check blob at a revision, or null when absent/unreadable (never throws). */
+export function pushCheckHeadSha256(repo: string, revision = "HEAD"): string | null {
+	const entry = pushCheckTreeBlob(repo, revision);
+	if (entry.kind !== "blob") return null;
+	const blob = pushCheckBlob(repo, entry.oid);
+	if ("reason" in blob) return null;
+	return createHash("sha256").update(blob.bytes).digest("hex");
+}
+
+/** Raw .omp/push-check bytes at a revision for the push-check verb (never throws). */
+export function pushCheckHeadBytes(repo: string, revision = "HEAD"): { bytes: Buffer; sha256: string; oid: string } | { kind: "missing" } | { kind: "unavailable"; reason: string } {
+	const entry = pushCheckTreeBlob(repo, revision);
+	if (entry.kind === "missing") return { kind: "missing" };
+	if (entry.kind === "invalid") return { kind: "unavailable", reason: entry.reason };
+	if (entry.kind === "unknown") return { kind: "unavailable", reason: entry.reason };
+	const blob = pushCheckBlob(repo, entry.oid);
+	if ("reason" in blob) return { kind: "unavailable", reason: blob.reason };
+	return { bytes: blob.bytes, sha256: createHash("sha256").update(blob.bytes).digest("hex"), oid: entry.oid };
+}
+
+/** Validate a push-check script the way land does: absolute #! interpreter whose --version answers. */
+export function resolvePushCheckExecutable(repo: string, script: Buffer, sha256: string): { executable: string; version: string } | { reason: string } {
+	const firstLineEnd = script.indexOf(0x0a);
+	const firstLine = script.subarray(0, firstLineEnd < 0 ? script.length : firstLineEnd).toString("utf8").replace(/\r$/, "");
+	if (!firstLine.startsWith("#!")) return { reason: "check_interpreter_unavailable" };
+	const interpreter = firstLine.slice(2).trim();
+	if (!isAbsolute(interpreter) || interpreter.includes(" ") || interpreter.includes("\t"))
+		return { reason: "check_interpreter_unavailable" };
+	let executable: string;
+	try { executable = realpathSync(interpreter); }
+	catch { return { reason: "check_interpreter_unavailable" }; }
+	const versionRun = spawnSync(executable, ["--version"], { cwd: repo, env: gitEnvironment(), encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024 });
+	const versionText = `${String(versionRun.stdout ?? "")}\n${String(versionRun.stderr ?? "")}`.trim();
+	const version = versionText.split("\n")[0]?.trim() ?? "";
+	if (versionRun.error || versionRun.status !== 0 || !version)
+		return { reason: "check_interpreter_unavailable" };
+	return { executable, version };
+}
+
+/** Append one push-check verdict row (HANDOFFPUSHCHECK1 record). Best-effort: false when the ledger could not be written. */
+export function appendPushCheckRow(repo: string, commit: string, checkSha256: string, rc: number): boolean {
+	try {
+		const tree = git(repo, ["rev-parse", "--verify", `${commit}^{tree}`]);
+		if (tree.code !== 0) return false;
+		const gitDir = git(repo, ["rev-parse", "--absolute-git-dir"]);
+		if (gitDir.code !== 0) return false;
+		const dir = join(resolve(repo, gitDir.out.trim()), "omp-kit");
+		mkdirSync(dir, { recursive: true });
+		const row = { version: 1, commit, tree: tree.out.trim(), check_sha256: checkSha256, rc, at: new Date().toISOString() };
+		appendFileSync(join(dir, "push-check-runs.jsonl"), `${JSON.stringify(row)}\n`);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Record a completed land push-check verdict for the checked candidate (PASS/FAIL only; SKIP/UNRUN record nothing). */
+export function recordLandPushCheck(repo: string, result: PushCheckResult): void {
+	try {
+		if (result.status !== "PASS" && result.status !== "FAIL") return;
+		if (typeof result.sha256 !== "string" || !result.sha256) return;
+		const commit = result.candidate_sha ?? result.checked_sha;
+		if (!commit) return;
+		const rc = typeof result.exit_code === "number" ? result.exit_code : result.status === "PASS" ? 0 : 1;
+		appendPushCheckRow(repo, commit, result.sha256, rc);
+	} catch { /* ledger writes never fail a landing */ }
+}
 function pushCheckResult(status: PushCheckStatus, reason?: string, sha256: string | null = null, candidateSha256?: string | null): PushCheckResult {
 	return {
 		status, path: PUSH_CHECK_PATH, sha256,
@@ -217,7 +315,6 @@ function preparePushCheck(repo: string, base: string, candidate?: string): PushC
 	const baseBlob = pushCheckBlob(repo, baseEntry.oid);
 	if ("reason" in baseBlob) return { kind: "unrun", result: pushCheckResult("UNRUN", baseBlob.reason) };
 	const sha256 = createHash("sha256").update(baseBlob.bytes).digest("hex");
-
 	if (candidate) {
 		const candidateEntry = pushCheckTreeBlob(repo, candidate);
 		if (candidateEntry.kind === "unknown") return { kind: "unrun", result: pushCheckResult("UNRUN", candidateEntry.reason, sha256) };
@@ -227,38 +324,15 @@ function preparePushCheck(repo: string, base: string, candidate?: string): PushC
 		const candidateSha256 = createHash("sha256").update(candidateBlob.bytes).digest("hex");
 		if (candidateSha256 !== sha256) return { kind: "skip", result: pushCheckResult("SKIP", "hash_changed", sha256, candidateSha256) };
 	}
-
-	const firstLineEnd = baseBlob.bytes.indexOf(0x0a);
-	const firstLine = baseBlob.bytes.subarray(0, firstLineEnd < 0 ? baseBlob.bytes.length : firstLineEnd).toString("utf8").replace(/\r$/, "");
-	if (!firstLine.startsWith("#!")) return { kind: "unrun", result: pushCheckResult("UNRUN", "check_interpreter_unavailable", sha256) };
-	const interpreter = firstLine.slice(2).trim();
-	if (!isAbsolute(interpreter) || interpreter.includes(" ") || interpreter.includes("\t"))
-		return { kind: "unrun", result: pushCheckResult("UNRUN", "check_interpreter_unavailable", sha256) };
-	let executable: string;
-	try { executable = realpathSync(interpreter); }
-	catch { return { kind: "unrun", result: pushCheckResult("UNRUN", "check_interpreter_unavailable", sha256) }; }
-	const versionRun = spawnSync(executable, ["--version"], { cwd: repo, env: gitEnvironment(), encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024 });
-	const versionText = `${String(versionRun.stdout ?? "")}\n${String(versionRun.stderr ?? "")}`.trim();
-	const version = versionText.split("\n")[0]?.trim() ?? "";
-	if (versionRun.error || versionRun.status !== 0 || !version)
-		return { kind: "unrun", result: pushCheckResult("UNRUN", "check_interpreter_unavailable", sha256) };
-	return { kind: "ready", result: pushCheckResult("UNRUN", "not_run", sha256), script: baseBlob.bytes, executable, version };
+	const resolved = resolvePushCheckExecutable(repo, baseBlob.bytes, sha256);
+	if ("reason" in resolved) return { kind: "unrun", result: pushCheckResult("UNRUN", resolved.reason, sha256) };
+	return { kind: "ready", result: pushCheckResult("UNRUN", "not_run", sha256), script: baseBlob.bytes, executable: resolved.executable, version: resolved.version };
 }
 
-function runPushCheck(repo: string, base: string, candidate: string): PushCheckResult {
+async function runPushCheck(repo: string, base: string, candidate: string): Promise<PushCheckResult> {
 	const plan = preparePushCheck(repo, base, candidate);
 	if (plan.kind !== "ready") return { ...plan.result, candidate_sha: candidate };
-	const env = gitEnvironment();
-	env.OMP_LAND_REPOSITORY = repo;
-	env.OMP_LAND_CANDIDATE_SHA = candidate;
-	env.OMP_LAND_CHECK_PATH = PUSH_CHECK_PATH;
-	env.OMP_LAND_CHECK_SHA256 = plan.result.sha256 ?? "";
-	const run = spawnSync(plan.executable, ["-s"], { cwd: repo, env, input: plan.script, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
-	const common = { ...plan.result, selected_executable: plan.executable, selected_version: plan.version, candidate_sha: candidate, checked_sha: candidate, exit_code: run.status };
-	if (run.error || run.signal !== null || run.status === null) return { ...common, status: "UNRUN", reason: "check_execution_unavailable" };
-	if (run.status === 0) return { ...common, status: "PASS", reason: undefined };
-	if (run.status === 77) return { ...common, status: "SKIP", reason: "check_not_applicable" };
-	return { ...common, status: "FAIL", reason: "check_failed" };
+	return executePushCheckScript(repo, plan.script, plan.executable, plan.version, plan.result.sha256 ?? "", candidate, repo, pushCheckDeadlineSeconds());
 }
 
 function pushCheckAdmission(result: PushCheckResult): { allow: boolean; reason?: string } {
@@ -1214,7 +1288,7 @@ async function commitOwnedPathsAndPublish(
 			repo, apply: true, push: true, pushDeadlineS: input.pushDeadlineS,
 			beforePush: async (candidateSha, baseSha) => {
 				checkedCandidateSha = candidateSha;
-				checkResult = runPushCheck(repo, baseSha, candidateSha);
+				checkResult = await runPushCheck(repo, baseSha, candidateSha);
 				const admission = pushCheckAdmission(checkResult);
 				if (!admission.allow) return admission;
 				fullSuiteVerdict = await runFullSuiteVerdict(repo, baseSha, candidateSha);
@@ -1237,6 +1311,9 @@ async function commitOwnedPathsAndPublish(
 		const candidateSha = checkResult.candidate_sha ?? checkedCandidateSha ?? convergence.new_head ?? sha;
 		const pushedSha = convergence.pushed ? convergence.remote_after ?? null : null;
 		checkResult = { ...checkResult, pushed_sha: pushedSha };
+		// HANDOFFPUSHCHECK1: every completed push-check verdict lands in the
+		// <git-dir>/omp-kit/push-check-runs.jsonl ledger the handoff gate reads.
+		recordLandPushCheck(repo, checkResult);
 		const checkUnavailable = checkResult.status === "UNRUN" && checkResult.reason !== "not_run";
 		const fullSuiteUnavailable = fullSuiteVerdict === "UNRUN";
 		const pushUnverified = convergence.reason === "PUSH_UNVERIFIED";

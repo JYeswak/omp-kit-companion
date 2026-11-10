@@ -3,7 +3,8 @@ import { expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
-import { EXPECTED_SERVICE, LAND_DEFAULT_TIMEOUT_MS, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, patchHold, remoteHead, repoRoot, responseCode, scratch, type HunkSetup } from "./private-index-land.helpers.ts";
+import { EXPECTED_SERVICE, LAND_DEFAULT_TIMEOUT_MS, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, patchHold, registerPushCheck, remoteHead, repoRoot, responseCode, scratch, type HunkSetup } from "./private-index-land.helpers.ts";
+import { createHash } from "node:crypto";
 
 const LAND_RUN_FLOOR_MS = 60_000;
 const HOOK_MARKER = "LANDPUSH1 pre-push hook started";
@@ -296,3 +297,36 @@ test.concurrent(`LANDPANETIMEOUT1 mutant: a fixed ${OLD_FIXED_RESOLVE_TIMEOUT_S}
 	expect(JSON.parse(new TextDecoder().decode(run.stdout))).toBe("OWNER_UNKNOWN");
 	expect(run.elapsed_s).toBeGreaterThanOrEqual(OLD_FIXED_RESOLVE_TIMEOUT_S);
 }, Math.round(fixtureDeadlineS(PLANTED_RESOLVE_SLEEP_S + 60) * 1000));
+
+test("HANDOFFPUSHCHECK1 land with a GREEN push-check appends the ledger row for the landed commit; SKIP land appends none", () => {
+	const checkBody = "#!/bin/bash\nset -eu\nexit 0\n";
+	const expectedSha256 = createHash("sha256").update(checkBody).digest("hex");
+	const green = fixture();
+	registerPushCheck(green.work, checkBody);
+	writeFileSync(join(green.work, "owned.txt"), "base owned\nowner change\n");
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(green.work, landArgs("owned.txt"), hold, { amDir: green.fakeBin });
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	const data = run.body.data as { overall: string; commit: string; candidate_sha: string; pushed_sha: string;
+		check: { status: string; sha256: string; checked_sha: string } };
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("PUSHED");
+	expect(data.check.status).toBe("PASS");
+	expect(data.pushed_sha).toBe(data.commit);
+	const ledger = join(git(green.work, ["rev-parse", "--absolute-git-dir"]).trim(), "omp-kit", "push-check-runs.jsonl");
+	expect(existsSync(ledger)).toBe(true);
+	const rows = readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+	expect(rows.length).toBe(1);
+	const tree = git(green.work, ["rev-parse", "--verify", `${data.commit}^{tree}`]).trim();
+	expect(rows[0]).toMatchObject({ version: 1, commit: data.commit, tree, check_sha256: expectedSha256, rc: 0 });
+	expect(typeof rows[0].at).toBe("string");
+	const skipped = fixture();
+	writeFileSync(join(skipped.work, "owned.txt"), "base owned\nowner change\n");
+	const skipRun = command(skipped.work, landArgs("owned.txt"), hold, { amDir: skipped.fakeBin });
+	expect(skipRun.status, JSON.stringify(skipRun.body)).toBe(0);
+	const skipData = skipRun.body.data as { overall: string; check: { status: string } };
+	expect(skipData.overall).toBe("PUSHED");
+	expect(skipData.check.status).toBe("SKIP");
+	const skipLedger = join(git(skipped.work, ["rev-parse", "--absolute-git-dir"]).trim(), "omp-kit", "push-check-runs.jsonl");
+	expect(existsSync(skipLedger)).toBe(false);
+});

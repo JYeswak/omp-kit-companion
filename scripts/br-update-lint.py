@@ -72,6 +72,7 @@ fixed bead passes immediately (LINTGATE1 acceptance 2).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -445,6 +446,64 @@ def _fresh_green(repo: str, commit: str) -> bool:
         return False
     return False
 
+def _push_check_head_sha256(repo: str) -> str | None:
+    """sha256 of the .omp/push-check blob at HEAD; None when absent or unreadable."""
+    try:
+        result = kitlib_run.run(["git", "-C", repo, "cat-file", "-p", "HEAD:.omp/push-check"],
+                                cwd=repo, deadline_s=10, stdin=b"",
+                                max_output_bytes=4 * 1024 * 1024 + 1024)
+        if result.rc != 0 or result.timed_out or result.truncated:
+            return None
+        data = bytes(result.stdout)
+        if len(data) > 4 * 1024 * 1024:
+            return None
+        return hashlib.sha256(data).hexdigest()
+    except (OSError, ValueError):
+        return None
+
+
+def _push_check_green(repo: str, commit: str) -> bool:
+    """HANDOFFPUSHCHECK1: a version-1 rc-0 row admits the DONE commit under the same
+    _commit_identity rule _fresh_green uses, only when its check_sha256 equals the
+    sha256 of .omp/push-check at HEAD (a changed check needs a fresh run)."""
+    head = _push_check_head_sha256(repo)
+    if not head:
+        return False
+    rc, directory, _ = run(["git", "-C", repo, "rev-parse", "--absolute-git-dir"], repo, 10)
+    if rc != 0:
+        return False
+    ledger = Path(directory.strip()) / "omp-kit" / "push-check-runs.jsonl"
+    limit = 8 * 1024 * 1024
+    try:
+        descriptor = os.open(ledger, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return False
+            size = handle.seek(0, os.SEEK_END)
+            start = max(0, size - limit)
+            handle.seek(start)
+            data = handle.read(limit)
+        if start:
+            data = data.partition(b"\n")[2]
+        if data and not data.endswith(b"\n"):
+            return False
+        identities: dict = {}
+        landed = None
+        for line in reversed(data.splitlines()):
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                return False
+            if row.get("commit") != commit:
+                if landed is None:
+                    landed = _commit_identity(repo, commit, identities) or ()
+                if not landed or _commit_identity(repo, row.get("commit"), identities) != landed:
+                    continue
+            return (row.get("version") == 1 and type(row.get("rc")) is int and row["rc"] == 0
+                    and isinstance(row.get("check_sha256"), str) and row["check_sha256"] == head)
+    except (OSError, ValueError, UnicodeError):
+        return False
+    return False
+
 
 def handoff_gate(argv: list[str]) -> int:
     if len(argv) < 3 or argv[0] not in ("0", "1"):
@@ -498,6 +557,12 @@ def _handoff_remedy(repo: str, target: str) -> str:
             return f"cd {shlex.quote(repo)} && {command} queue {shlex.quote(target)}"
     elif kind == "companion" and (Path(repo) / "scripts/fresh-gate.sh").is_file():
         return f"cd {shlex.quote(repo)} && sh scripts/fresh-gate.sh --commit {shlex.quote(target)}"
+    if kind == "unknown":
+        check_rc, _, _ = run(["git", "-C", repo, "cat-file", "-e", "HEAD:.omp/push-check"], repo, 10)
+        if check_rc == 0:
+            return f"cd {shlex.quote(repo)} && omp-kit push-check --commit {shlex.quote(target)}"
+        return ("commit an executable .omp/push-check that runs the repo's checks, then run: "
+                f"cd {shlex.quote(repo)} && omp-kit push-check --commit {shlex.quote(target)}")
     for hook in (".githooks/hooks.d/pre-push/10-pre-push", ".githooks/pre-push"):
         if (Path(repo) / hook).is_file():
             return (f"no supported GREEN observation; declared gate: "
@@ -514,7 +579,7 @@ def _handoff_claim(repo: str, subject: str, request: list[str]) -> int:
             commit = out.strip()
     if commit and (_storegate_green(repo, commit)
                    if repo == os.path.realpath(Path.home() / ".claude")
-                   else _fresh_green(repo, commit)):
+                   else _fresh_green(repo, commit) or _push_check_green(repo, commit)):
         return 0
     target = commit or subject or "<sha>"
     remedy = _handoff_remedy(repo, target)

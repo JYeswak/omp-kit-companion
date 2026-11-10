@@ -447,6 +447,11 @@ const landData: DataSchema = { type: "object", required: ["overall", "check"], p
 	if: { properties: { overall: { const: "PUSHED" } } },
 	then: { required: ["commit", "candidate_sha", "pushed_sha", "owner", "paths", "base", "convergence"], properties: { commit: { type: "string" }, pushed_sha: { type: "string" } } },
 }] };
+const pushCheckData: DataSchema = { type: "object", required: ["overall"], properties: {
+	overall: { enum: ["PASS", "FAIL", "SKIP", "UNRUN"] },
+	commit: { type: ["string", "null"] }, tree: { type: ["string", "null"] }, check_sha256: { type: ["string", "null"] }, rc: { type: ["number", "null"] },
+	check: landCheckData, text: { type: "string" },
+} };
 const fullSuiteVerdictData: DataSchema = { type: "object", required: ["overall", "repo_key", "store", "records", "text"], properties: {
 	overall: { enum: ["OK"] }, repo_key: { type: "string" }, store: { type: "string" }, text: { type: "string" },
 	records: { type: "array", items: { type: "object", required: ["tree", "judge", "verdict", "integrity", "reason", "record"], properties: {
@@ -541,6 +546,10 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--apply", description: "Request owner-bound save and publication" },
 		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
 	], example: "omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
+	{ name: "push-check", description: "Run the repo's committed .omp/push-check against a commit and record the verdict the author handoff reads", usage: "push-check --commit SHA [--repo PATH]", flags: [
+		{ name: "--commit", value: "SHA", description: "Commit whose tree the HEAD push-check runs against" },
+		{ name: "--repo", value: "PATH", description: "Git repository holding the check and commit (default: current directory)" },
+	], example: "omp-kit push-check --commit <sha> --json", runnable: false, mutation: true, dataSchema: pushCheckData },
 	{ name: "ovnfs-land", description: "Serialize committed worker-checkout landing into shared main without stash, rebase or ovnfs apply", usage: "ovnfs-land --repo PATH --checkout PATH --base SHA --apply --yes", flags: [
 		{ name: "--repo", value: "PATH", description: "Shared Git checkout root, with main checked out" },
 		{ name: "--checkout", value: "PATH", description: "Committed worker root (Worktrunk linked worktree, ovnfs checkout or independent Git copy)" },

@@ -476,7 +476,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit undo` | `undo RUN_ID [--yes]` | Restore one verified receipt | `omp-kit undo RUN_ID --yes` |
 | `omp-kit audit` | `audit` | Receipt chronology | `omp-kit audit --json` |
 | `omp-kit why` | `why RUN_ID` | Explain one recorded run | `omp-kit why RUN_ID --json` |
-| `omp-kit update` | `update [--plan\|--apply] --version X.Y.Z --index PATH --archive PATH` or `update --reconcile RECEIPT --yes [--prefix PATH]` | Guarded update from a local index + archive; never infers latest (`LOCAL_SOURCE_REQUIRED` names a missing file) | `omp-kit update --plan --version X.Y.Z --index /abs/release-index.json --archive /abs/omp-kit.tar --json` |
+| `omp-kit update` | `update [--plan\|--apply] --version X.Y.Z --index PATH --archive PATH` or `update --reconcile RECEIPT --yes [--prefix PATH]` | Guarded update from a local index + archive; never infers latest (`LOCAL_SOURCE_REQUIRED` names a missing file) | `omp-kit help update` |
 | `omp-kit review` | `review rules\|reduce` | Compare two rule versions on witness unions, or minimize a reproduced false fire | `omp-kit review rules --incumbent-rules /old/rules --incumbent-cases /old/cases.tsv --candidate-rules /new/rules --candidate-cases /new/cases.tsv --json` |
 | `omp-kit corpus` | `corpus --sessions ABS_DIR [--out ABS_FILE] [--plan]` | Per-rule fire rates over transcripts; never uploads; `--sessions` must exist (fresh HOMEs have none) | `omp-kit corpus --sessions /absolute/sessions --json` |
 | `omp-kit skill-mine` | `skill-mine [--since 21d] [--apply] \| status` | Mine sessions and mail for skill candidates | `omp-kit skill-mine --json` |
@@ -495,6 +495,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan; needs native `rch` on PATH (else `RCH_UNAVAILABLE`) | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
 | `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or resolve shared-main convergence; keeps peer state, refuses owner conflicts, never force-pushes | `omp-kit converge --repo . --json` |
 | `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit reserved paths, pass `commit-msg` and the [push check](docs/land.md), publish without force: `PUSHED`/`REFUSED`/`UNRUN` | `omp-kit land --paths src/a.ts --message 'fix: x [pending]' --apply --yes --json` |
+| `omp-kit push-check` | `push-check --commit SHA [--repo PATH]` | Record a commit's `.omp/push-check` verdict | `omp-kit help push-check` |
 | `omp-kit ovnfs-land` | `ovnfs-land --repo PATH --checkout PATH --base SHA --apply --yes` | Serialize a committed worker checkout into main | `omp-kit help ovnfs-land` |
 | `omp-kit save` | `save -m MSG -- PATH...` | `land --apply --yes` in one step | `omp-kit save -m 'fix: x [pending]' -- src/a.ts` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them; even with a fresh HOME these inspect the real launchd domain (read-only) | `omp-kit service list --json` |
