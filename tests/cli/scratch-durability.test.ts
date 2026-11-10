@@ -121,11 +121,14 @@ os.execv(sys.argv[1], sys.argv[1:])
 		expect(denied?.block).toBe(true);
 		expect(denied?.status).not.toBe("UNKNOWN");
 		expect(denied?.reason).toContain("tracked-source-copy");
+		// CFSCOPY1: the tracked-copy refusal names the isolated-checkout route; the hung-index refusal below does not.
+		expect(denied?.reason).toContain("separate checkout of the repository (for example `ovnfs new --name <x>`");
 		// The first-exec allowance must never extend a later read's deadline.
 		writeFileSync(join(fixture.path, "hang-index"), "");
 		const hungIndex = await durabilityCheck(event, context);
 		expect(hungIndex).toMatchObject({ block: true, status: "UNKNOWN", read: "git ls-files --stage -z" });
 		expect(hungIndex?.reason).toContain("killed=true");
+		expect(hungIndex?.reason).not.toContain("separate checkout");
 		expect(hungIndex?.reason).toContain("signal=SIGTERM");
 		expect(hungIndex?.reason).toContain("code=null");
 		expect(readFileSync(join(fixture.path, "index-attempts"), "utf8").trim().split("\n")).toEqual(["attempt"]);

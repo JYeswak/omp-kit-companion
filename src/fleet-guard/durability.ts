@@ -15,8 +15,11 @@ import { parseOwnerFile } from "../scratch.ts";
 const LIMIT = 1_048_576;
 const INDEX_LIMIT = 8 * LIMIT;
 const GIT_OBJECT_ID = /^[0-9a-f]{40,64}$/;
+// CFSCOPY1: a tracked-source copy is the one refusal whose next step is not "move it home": the agent wanted an
+// isolated copy of the repo to change, so the refusal names the tool that gives one (CFS hit it ~60 times a day).
+const SEPARATE_CHECKOUT = " To change tracked source in isolation, edit it in a separate checkout of the repository (for example `ovnfs new --name <x>` from the repo, which gives a full checkout outside scratch), not a copy under scratch.";
 const refuse = (detail: string): FleetGuardBlock => ({ block: true,
-	reason: `fleet-guard scratch-is-not-a-home: ${detail}. Keep canonical source, reusable scripts, prompts and packets in their repository home; scratch is for disposable synthetic inputs.` });
+	reason: `fleet-guard scratch-is-not-a-home: ${detail}. Keep canonical source, reusable scripts, prompts and packets in their repository home; scratch is for disposable synthetic inputs.${detail.startsWith("tracked-source-copy") ? SEPARATE_CHECKOUT : ""}` });
 const inside = (root: string, path: string): boolean => path === root || path.startsWith(`${root}/`);
 
 /** Missing live facts block the write, but do not establish a policy match. */

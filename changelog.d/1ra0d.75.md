@@ -1,0 +1,1 @@
+- The scratch tracked-source-copy refusal now names the working route: edit tracked source in a separate checkout of the repository (for example `ovnfs new --name <x>`), not a copy under scratch.
