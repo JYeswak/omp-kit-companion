@@ -6,6 +6,7 @@
 | `REQUIRED_FINDING_FAILED: Release rule inventory cannot be verified` | `doctor --scope kit` ran from a source tree or a damaged install | Use an intact, verified release from the installer |
 | `PENDING_RECOVERY` / `PARTIAL_UNDO` | A receipt or inverse mutation needs recovery; nothing was rolled back or deleted | Run `omp-kit audit --json`, check the postimages, then `omp-kit update --reconcile RECEIPT --yes` for an update or `omp-kit undo RECEIPT --yes` |
 | `INVALID_STATE_ROOT` | `XDG_STATE_HOME` is relative or not canonical | Set an absolute `XDG_STATE_HOME` or unset it; `omp-kit repair --scope state` fixes only the mode |
+| `LAND_COMMIT_TIMEOUT` | `land`'s candidate commit ran past `OMP_KIT_LAND_COMMIT_DEADLINE_S` (default 2400 s, 1..7200); its hooks may still be running | Check `git log -1` and the reflog for the commit, raise the bound if the hooks need longer, then retry; `OMP_KIT_LAND_PUSH_DEADLINE_S` bounds the push the same way |
 | `KIT_UPDATE_JOB_CONFIG` | kit-update has neither a static tuple nor poll settings | Set `OMP_KIT_UPDATE_POLL=github` with `OMP_KIT_UPDATE_REPO=owner/repo`, or the four static inputs, or leave the job off |
 | `BUNDLED_RUNTIME_UNAVAILABLE` | The release is missing `scripts/ttsr-harness.ts` or its resources | Reinstall an intact release and rerun |
 | `REGEX_BUDGET_REPORT_INVALID` | `--regex-budget-report` has no valid `JSON_REPORT=` line | Capture the full `scripts/regex-budget.ts` output, even on nonzero exit |

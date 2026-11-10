@@ -16,7 +16,7 @@ import { parseReservationRead } from "./fleet-guard/git.ts";
 import type { AttestedReservation } from "./fleet-guard/git.ts";
 
 
-type GitResult = { code: number; out: string; err: string; interrupted: boolean };
+type GitResult = { code: number; out: string; err: string; interrupted: boolean; timedOut: boolean };
 
 function gitEnvironment(reflogAction?: string): Record<string, string> {
 	const env: Record<string, string> = {};
@@ -29,9 +29,9 @@ function gitEnvironment(reflogAction?: string): Record<string, string> {
 	return env;
 }
 
-function git(repo: string, args: string[], reflogAction?: string): GitResult {
-	const run = spawnSync("git", args, { cwd: repo, env: gitEnvironment(reflogAction), encoding: "utf8", timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
-	return { code: run.status ?? 1, out: String(run.stdout ?? ""), err: String(run.stderr ?? ""), interrupted: run.signal !== null || run.error !== undefined };
+function git(repo: string, args: string[], reflogAction?: string, timeoutMs = 30_000): GitResult {
+	const run = kitlibRunSync(["git", ...args], { cwd: repo, env: gitEnvironment(reflogAction), deadline_s: timeoutMs / 1000, max_output_bytes: 8 * 1024 * 1024 });
+	return { code: run.rc, out: new TextDecoder().decode(run.stdout), err: new TextDecoder().decode(run.stderr), interrupted: run.timed_out || run.killed, timedOut: run.timed_out };
 }
 
 // LANDPUSH1 (ompkit-fp72.120.16.224): the publication push runs the pre-push hook chain (fresh gate,
@@ -43,6 +43,15 @@ const LAND_PUSH_DEADLINE_ENV = "OMP_KIT_LAND_PUSH_DEADLINE_S";
 /** The publication push deadline in seconds: OMP_KIT_LAND_PUSH_DEADLINE_S (integer, clamped to 1..7200) or 2400. */
 function landPushDeadlineSeconds(): number {
 	const raw = process.env[LAND_PUSH_DEADLINE_ENV];
+	const value = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+	return Number.isSafeInteger(value) ? Math.min(7200, Math.max(1, value)) : 2400;
+}
+
+const LAND_COMMIT_DEADLINE_ENV = "OMP_KIT_LAND_COMMIT_DEADLINE_S";
+
+/** The candidate commit deadline in seconds: OMP_KIT_LAND_COMMIT_DEADLINE_S (integer, clamped to 1..7200) or 2400. */
+function landCommitDeadlineSeconds(): number {
+	const raw = process.env[LAND_COMMIT_DEADLINE_ENV];
 	const value = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
 	return Number.isSafeInteger(value) ? Math.min(7200, Math.max(1, value)) : 2400;
 }
@@ -1145,7 +1154,8 @@ async function commitOwnedPathsAndPublish(
 	// A peer may advance HEAD from a post-commit hook before Git returns. Attribute
 	// our save through a per-call native reflog action, never through the later tip.
 	const action = `omp-kit-land-${randomUUID()}`;
-	const commit = git(repo, ["-c", "core.logAllRefUpdates=true", "commit", "--only", "-m", message, "--", ...paths.map((path) => `:(literal)${path}`)], action);
+	const commitDeadlineS = landCommitDeadlineSeconds();
+	const commit = git(repo, ["-c", "core.logAllRefUpdates=true", "commit", "--only", "-m", message, "--", ...paths.map((path) => `:(literal)${path}`)], action, commitDeadlineS * 1000);
 	const reflog = git(repo, ["reflog", "show", "--format=%H%x00%gs", "refs/heads/main"]);
 	const matches = reflog.out.split("\n").map((line) => line.split("\0"))
 		.filter((fields) => fields[1]?.startsWith(`${action}: `)).map((fields) => fields[0]);
@@ -1161,7 +1171,11 @@ async function commitOwnedPathsAndPublish(
 		return {
 			code: refusedCommit ? 1 : 77,
 			data: { overall: refusedCommit ? "REFUSED" : "UNRUN", commit: null, owner, paths, base, check, phases },
-			errors: [{ code: refusedCommit ? "COMMIT_CREATION_REFUSED" : "LAND_COMMIT_UNVERIFIED", message: refusedCommit ? `Git refused the candidate commit: ${commit.err.trim()}` : "The commit operation ended without unambiguous save attribution", remediation: "Inspect the shared main and reflog before retrying; no publication was attempted." }],
+			errors: [{
+				code: commit.timedOut ? "LAND_COMMIT_TIMEOUT" : refusedCommit ? "COMMIT_CREATION_REFUSED" : "LAND_COMMIT_UNVERIFIED",
+				message: commit.timedOut ? `The candidate commit exceeded ${commitDeadlineS} s; commit hooks may still be running` : refusedCommit ? `Git refused the candidate commit: ${commit.err.trim()}` : "The commit operation ended without unambiguous save attribution",
+				remediation: commit.timedOut ? `Check git log -1 and the reflog, raise ${LAND_COMMIT_DEADLINE_ENV}, then retry; no publication was attempted.` : "Inspect the shared main and reflog before retrying; no publication was attempted.",
+			}],
 			verification: refusedCommit ? "NOT_RUN" : "UNVERIFIED",
 		};
 	}

@@ -42,6 +42,37 @@ function expectPublished(setup: HunkSetup, result: { status: number; body: Recor
 	expect(remoteHead(setup.work)).not.toBe(setup.base);
 }
 
+for (const hookSeconds of [3, 0]) {
+	test(`LANDGITDEADLINE1 pre-commit sleeping ${hookSeconds} s ${hookSeconds ? "reports the commit deadline" : "publishes within the commit deadline"}`, () => {
+		const setup = hunkSetup("none");
+		const hook = join(setup.work, ".git", "hooks", "pre-commit");
+		writeFileSync(hook, `#!/bin/sh\nsleep ${hookSeconds}\n`);
+		chmodSync(hook, 0o755);
+		const result = command(setup.work, ["--patch", setup.patch, "--message", "feat(land): commit deadline [test]", "--apply", "--yes"], patchHold(), {
+			amDir: setup.fakeBin,
+			timeoutMs: LAND_RUN_FLOOR_MS,
+			gitEnv: {
+				OMP_LAND_CHECK_CONTENT_FILE: setup.checkContent,
+				OMP_LAND_CHECK_ADDED_FILE: setup.checkAdded,
+				OMP_KIT_LAND_COMMIT_DEADLINE_S: "1",
+			},
+		});
+		if (hookSeconds === 0) {
+			expectPublished(setup, result);
+			return;
+		}
+		expect(result.status, JSON.stringify(result.body)).toBe(77);
+		expect(responseCode(result.body)).toBe("LAND_COMMIT_TIMEOUT");
+		const error = (result.body.errors as { message: string; remediation: string }[])[0]!;
+		expect(error.message).toContain("1 s");
+		expect(error.message).toContain("commit hooks may still be running");
+		expect(error.remediation).toContain("git log -1");
+		expect(error.remediation).toContain("reflog");
+		expect(error.remediation).toContain("OMP_KIT_LAND_COMMIT_DEADLINE_S");
+		expect(remoteHead(setup.work)).toBe(setup.base);
+	});
+}
+
 test("LANDPUSH1 a 45 s pre-push hook publishes under the default push deadline, past the old 30 s git bound", () => {
 	const { setup, run } = landPatch(null, 180_000);
 	expectPublished(setup, run(45));

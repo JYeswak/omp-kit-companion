@@ -1,0 +1,1 @@
+- Give land candidate commits a configurable `OMP_KIT_LAND_COMMIT_DEADLINE_S` bound (default 2400 seconds, clamped to 1..7200), and report `LAND_COMMIT_TIMEOUT` with hook and retry guidance instead of unknown attribution when it expires.
