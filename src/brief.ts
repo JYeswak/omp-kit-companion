@@ -419,15 +419,58 @@ export async function completeTaskBrief(input: unknown, cwd: string, exec: Brief
 	return { context: [context, ...missing.map(contract => renderBrief(contract))].join("\n\n"), repos: missing.map(contract => contract.repo) };
 }
 
-export function briefHandbackRefusal(text: string): string | undefined {
+/**
+ * CHILDPREFLIGHT1 (ompkit-1ra0d.87): CFS build children were refused because this gate demanded
+ * `scripts/commit-preflight.sh` evidence, which clutterfreespaces.ios does not have. A repo is bound
+ * to the script only when the script ships in its own tree; otherwise the kit's own
+ * `omp-kit preflight commit` evidence (present in every repo) is the compliant form. Walk up to the
+ * enclosing repo root (the first ancestor holding `.git`); a script found on the way up binds.
+ */
+export function briefHasCommitPreflight(startDir: string): boolean {
+	let dir = startDir;
+	for (;;) {
+		if (existsSync(join(dir, "scripts", "commit-preflight.sh"))) return true;
+		if (existsSync(join(dir, ".git"))) return false;
+		const parent = dirname(dir);
+		if (parent === dir) return false;
+		dir = parent;
+	}
+}
+
+/**
+ * CHILDPREFLIGHT1 (ompkit-1ra0d.87): a verify-led assignment edits nothing, so its handback names no
+ * changed paths. An explicit no-edit marker, or a leading verify verb, declares the task verify-only.
+ */
+export function isVerifyOnlyBriefTask(task: Record<string, unknown>): boolean {
+	const body = typeof task.task === "string" ? task.task : "";
+	if (/^\s*(?:#\s*)?no-edit:\s*(?:verify|diagnose|replay)\b/im.test(body)) return true;
+	// The verb counts only as the task's opening word: a build task with a later "Verify:" step stays a build task.
+	if (/^\s*(?:verify|verification)\b/i.test(body)) return true;
+	return false;
+}
+
+export interface BriefHandbackOptions { repoPath?: string; hasCommitPreflight?: boolean; verifyOnly?: boolean }
+
+export function briefHandbackRefusal(text: string, options: BriefHandbackOptions = {}): string | undefined {
 	if (text.length > 1_000_000) return "BRIEF_PREFLIGHT_REFUSED: handback exceeds the 1 MB evidence inspection limit.";
 	if (!text.split("\n").some(line => line.trimStart().startsWith("DONE") && !/[A-Za-z0-9_]/.test(line.trimStart().charAt(4)))) return undefined;
-	const clean = !/^[ \t]*(?:UNKNOWN|UNJUDGED|REFUSED)\b/m.test(text)
-		&& /\bcommit-preflight\.sh\s+--files\s+\S+/.test(text)
-		&& /commit-preflight:\s*\d+ checks, 0 refused(?:\/unjudged)?\b/.test(text);
-	if (!clean) return "BRIEF_PREFLIGHT_REFUSED: DONE requires the exact changed-path commit-preflight command and its 0 refused/unjudged output, with no UNKNOWN, UNJUDGED or REFUSED findings. Return the handback to its author; it is not accepted work.";
-	// EXPORTTEST1: a handback that changed src or test files must show those tests ran in an export.
-	const code = [...text.matchAll(/commit-preflight\.sh\b[^\n]*?--files\s+([^\n]*)/g)].some(match => match[1]!.split(/\s+/).some(path => /^(?:src|tests|extensions)\/|\.test\.[a-z]+$/.test(path)));
-	if (code && !(/\bcommit-preflight\.sh\b[^\n]*\s--tests\s+\S+/.test(text) && /commit-preflight:\s*\d+ checks, 0 refused\/unjudged\b[^\n]*;\s*[1-9]\d* export test file\(s\) run\b/.test(text))) return "BRIEF_PREFLIGHT_REFUSED: DONE names changed src/test files but shows no export test run. Rerun sh scripts/commit-preflight.sh --files <every changed path> --tests <changed test files> and report its 'commit-preflight: N checks, 0 refused/unjudged ...; M export test file(s) run' line.";
-	return undefined;
+	// CHILDPREFLIGHT1: a verify-only handback names no changed paths, so there is nothing to preflight.
+	if (options.verifyOnly === true && !/--files\b/.test(text)) return undefined;
+	const hasScript = options.hasCommitPreflight ?? (options.repoPath ? existsSync(join(options.repoPath, "scripts", "commit-preflight.sh")) : true);
+	const tainted = /^[ \t]*(?:UNKNOWN|UNJUDGED|REFUSED)\b/m.test(text);
+	const scriptCmd = /\bcommit-preflight\.sh\s+--files\s+\S+/.test(text);
+	const scriptClean = /commit-preflight:\s*\d+ checks, 0 refused(?:\/unjudged)?\b/.test(text);
+	if (!tainted && scriptCmd && scriptClean) {
+		// EXPORTTEST1: a handback that changed src or test files must show those tests ran in an export.
+		const code = [...text.matchAll(/commit-preflight\.sh\b[^\n]*?--files\s+([^\n]*)/g)].some(match => match[1]!.split(/\s+/).some(path => /^(?:src|tests|extensions)\/|\.test\.[a-z]+$/.test(path)));
+		if (code && !(/\bcommit-preflight\.sh\b[^\n]*\s--tests\s+\S+/.test(text) && /commit-preflight:\s*\d+ checks, 0 refused\/unjudged\b[^\n]*;\s*[1-9]\d* export test file\(s\) run\b/.test(text))) return "BRIEF_PREFLIGHT_REFUSED: DONE names changed src/test files but shows no export test run. Rerun sh scripts/commit-preflight.sh --files <every changed path> --tests <changed test files> and report its 'commit-preflight: N checks, 0 refused/unjudged ...; M export test file(s) run' line.";
+		return undefined;
+	}
+	// CHILDPREFLIGHT1: repos without the script admit the kit's own preflight. `commit: ok (...)` is the
+	// renderEnvelope clean summary (GATEDIAG1); a `commit REFUSED` envelope or any UNKNOWN/UNJUDGED/REFUSED
+	// finding line stays refused. A repo that ships the script never admits kit-only evidence.
+	if (!hasScript && !tainted && !/^commit\s+REFUSED\b/m.test(text)
+		&& /\bomp-kit\s+preflight\s+commit\b/.test(text) && /^commit:\s*ok\s*\(/m.test(text)) return undefined;
+	if (!tainted && !hasScript && /\bomp-kit\s+preflight\s+commit\b/.test(text)) return "BRIEF_PREFLIGHT_REFUSED: DONE shows an omp-kit preflight commit run that is not clean. Fix every finding, rerun omp-kit preflight commit, and report its 'commit: ok (...)' line with no UNKNOWN, UNJUDGED or REFUSED findings. Return the handback to its author; it is not accepted work.";
+	return "BRIEF_PREFLIGHT_REFUSED: DONE requires preflight evidence with no UNKNOWN, UNJUDGED or REFUSED findings: in a repo with scripts/commit-preflight.sh, the exact changed-path commit-preflight command and its 0 refused/unjudged output; in a repo without it, omp-kit preflight commit and its 'commit: ok (...)' line. Return the handback to its author; it is not accepted work.";
 }

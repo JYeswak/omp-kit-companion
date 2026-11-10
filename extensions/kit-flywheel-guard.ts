@@ -17,7 +17,7 @@ import { captureMineReplay } from "../src/mine-replay.ts";
 import type { MineReplay } from "../src/mine-replay.ts";
 import { resolveCustodyScript } from "../src/custody.ts";
 import { classifyMineResult } from "../src/mine-cause.ts";
-import { briefHandbackRefusal, completeTaskBrief, isBuildBriefTask, type BriefCompletion } from "../src/brief.ts";
+import { briefHandbackRefusal, briefHasCommitPreflight, completeTaskBrief, isBuildBriefTask, isVerifyOnlyBriefTask, type BriefCompletion } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
 import { mintNativeSpawn, nativeIdentity, type NativeContext } from "./native-identity.ts";
 import { checkNativeClose } from "../src/native-close.ts";
@@ -2755,7 +2755,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 				const path = field(event.input, "path");
 				const content = field(event.input, "content");
 				if (typeof path === "string" && path.startsWith("agent://") && buildWorkObserved && typeof content === "string") {
-					const reason = briefHandbackRefusal(content);
+					const reason = briefHandbackRefusal(content, { hasCommitPreflight: briefHasCommitPreflight(ctx.cwd) });
 					if (reason) return { block: true, reason };
 				}
 			}
@@ -2899,11 +2899,19 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	});
 	// This is the parent's actual tool-result boundary, not an agent_end observer.
 	// Async auto-delivery and arbitrary final text do not pass through this hook.
-	pi.on("tool_result", event => {
+	pi.on("tool_result", (event, ctx) => {
 		if (event.toolName !== "task") return;
 		const tasks = field(event.input, "tasks");
 		if (!Array.isArray(tasks)) return;
 		const sharedContext = typeof field(event.input, "context") === "string" ? String(field(event.input, "context")) : "";
+		// CHILDPREFLIGHT1: the handback check is repo-aware. A repo without scripts/commit-preflight.sh
+		// (e.g. clutterfreespaces.ios) admits the kit's own `omp-kit preflight commit` evidence; a repo
+		// that ships the script still requires its evidence. Verify-led build tasks whose handback names
+		// no changed paths are admitted without preflight.
+		const handbackOpts = (task: unknown): { hasCommitPreflight: boolean; verifyOnly: boolean } => ({
+			hasCommitPreflight: typeof ctx?.cwd === "string" ? briefHasCommitPreflight(ctx.cwd) : true,
+			verifyOnly: task !== null && typeof task === "object" && isVerifyOnlyBriefTask(task as Record<string, unknown>),
+		});
 		const results = field(event.details, "results");
 		const refusals: string[] = [];
 		if (Array.isArray(results) && results.length > 0) {
@@ -2913,13 +2921,15 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 				if (task === null || typeof task !== "object" || !isBuildBriefTask(task as Record<string, unknown>, sharedContext)) continue;
 				const output = field(result, "output");
 				if (typeof output !== "string") continue;
-				const reason = briefHandbackRefusal(output);
+				const reason = briefHandbackRefusal(output, handbackOpts(task));
 				if (reason) refusals.push(`${String(field(result, "id") ?? index)}: ${reason}`);
 			}
 		} else if (tasks.some(task => task !== null && typeof task === "object" && isBuildBriefTask(task as Record<string, unknown>, sharedContext))) {
+			const verifyOnly = (tasks as unknown[]).filter(task => task !== null && typeof task === "object" && isBuildBriefTask(task as Record<string, unknown>, sharedContext)).every(task => isVerifyOnlyBriefTask(task as Record<string, unknown>));
+			const opts = { hasCommitPreflight: typeof ctx?.cwd === "string" ? briefHasCommitPreflight(ctx.cwd) : true, verifyOnly };
 			for (const part of event.content) {
 				if (part.type !== "text") continue;
-				const reason = briefHandbackRefusal(part.text ?? "");
+				const reason = briefHandbackRefusal(part.text ?? "", opts);
 				if (reason) refusals.push(reason);
 			}
 		}

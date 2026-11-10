@@ -1,0 +1,1 @@
+- Build handbacks from repos without `scripts/commit-preflight.sh` (e.g. clutterfreespaces.ios) are no longer refused when they carry the kit's own `omp-kit preflight commit` clean line (`commit: ok (...)`); repos that ship the script still require its evidence, and verify-only handbacks naming no changed paths are admitted without preflight.

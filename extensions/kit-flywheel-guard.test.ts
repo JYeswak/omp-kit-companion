@@ -9,7 +9,7 @@ import type { FakeHost, Responder } from "../tests/fleet-guard/kit-flywheel-host
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { run, runSync } from "../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "../tests/cli/fixture-process.ts";
-import { briefContract, briefTargets, checkTaskBrief, renderBrief } from "../src/brief.ts";
+import { briefContract, briefHandbackRefusal, briefHasCommitPreflight, briefTargets, checkTaskBrief, isVerifyOnlyBriefTask, renderBrief } from "../src/brief.ts";
 import { check as checkRetiredTaskReservation, clearReservationCache } from "../src/fleet-guard/reservations.ts";
 import { judge } from "../src/verify.ts";
 
@@ -1986,4 +1986,80 @@ test("AGENTCLOSE1 lifecycle: builder keeps claim through review; unclaimed verif
 	expect(refused?.block).toBe(true);
 	expect(refused?.reason).toContain("NATIVE_SELF_REFUSED");
 	expect(f.row.assignee).toBe("NativeBuilder");
+});
+// --- CHILDPREFLIGHT1 (ompkit-1ra0d.87) --------------------------------------------
+// CFS build children were refused because the handback gate demanded
+// scripts/commit-preflight.sh evidence, which clutterfreespaces.ios does not ship. A repo without
+// the script admits the kit's own `omp-kit preflight commit` evidence (`commit: ok (...)` is the
+// renderEnvelope clean summary); a repo with the script still refuses kit-only evidence.
+describe("CHILDPREFLIGHT1 kit preflight admission for script-less repos", () => {
+	/** A fixture repo root: hermetic via its own `.git`, so the script lookup never walks out. */
+	function childFixture(withScript: boolean): string {
+		const dir = freshDir(base, "childpreflight1-");
+		mkdirSync(join(dir, ".git"), { recursive: true });
+		if (withScript) {
+			mkdirSync(join(dir, "scripts"), { recursive: true });
+			writeFileSync(join(dir, "scripts", "commit-preflight.sh"), "#!/bin/sh\nexit 0\n");
+		}
+		return dir;
+	}
+	const KIT_OK = "DONE\nomp-kit preflight commit\ncommit: ok (tree:abc123)";
+	const KIT_REFUSED = "DONE\nomp-kit preflight commit\ncommit REFUSED: 1 finding(s); fix every one, then retry once (tree:abc123):\n  pre-commit 10-omp-kit-staged-wallclock: deadline\n    remedy: fix it then retry";
+	const SCRIPT_OK = "DONE\nsh scripts/commit-preflight.sh --files skills/contract.md\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s; no fresh gate or tests run";
+
+	test("CHILDPREFLIGHT1: the script binds only when it ships in the repo tree", () => {
+		expect(briefHasCommitPreflight(childFixture(false))).toBe(false);
+		expect(briefHasCommitPreflight(childFixture(true))).toBe(true);
+		expect(briefHasCommitPreflight(join(import.meta.dir, ".."))).toBe(true);
+	});
+
+	test("CHILDPREFLIGHT1: script-less repo admits kit commit evidence with 0 refused", () => {
+		expect(briefHandbackRefusal(KIT_OK, { repoPath: childFixture(false) })).toBeUndefined();
+	});
+
+	test("CHILDPREFLIGHT1: the same handback with no preflight evidence is still refused", () => {
+		expect(briefHandbackRefusal("DONE: implemented feature", { repoPath: childFixture(false) })).toMatch(/BRIEF_PREFLIGHT_REFUSED/);
+	});
+
+	test("CHILDPREFLIGHT1: repo with the script still refuses kit-only evidence", () => {
+		const repo = childFixture(true);
+		expect(briefHandbackRefusal(KIT_OK, { repoPath: repo })).toMatch(/BRIEF_PREFLIGHT_REFUSED/);
+		expect(briefHandbackRefusal(SCRIPT_OK, { repoPath: repo })).toBeUndefined();
+	});
+
+	test("CHILDPREFLIGHT1: unclean kit evidence is refused in a script-less repo", () => {
+		const repo = childFixture(false);
+		expect(briefHandbackRefusal(KIT_REFUSED, { repoPath: repo })).toMatch(/BRIEF_PREFLIGHT_REFUSED/);
+		expect(briefHandbackRefusal("DONE\nomp-kit preflight commit\nUNKNOWN pre-commit: no installed hook chain", { repoPath: repo })).toMatch(/BRIEF_PREFLIGHT_REFUSED/);
+	});
+
+	test("CHILDPREFLIGHT1: verify-only handback naming no changed paths is admitted", () => {
+		expect(isVerifyOnlyBriefTask({ task: "Verify the fix works on device" })).toBe(true);
+		expect(isVerifyOnlyBriefTask({ task: "Implement feature" })).toBe(false);
+		// Planted: a build task whose later step says Verify is still a build task.
+		expect(isVerifyOnlyBriefTask({ task: "# Change\nFix the bug in src/x.ts.\nVerify: run the focused test" })).toBe(false);
+		expect(briefHandbackRefusal("DONE: verified on device, all green", { verifyOnly: true })).toBeUndefined();
+		expect(briefHandbackRefusal("DONE: verified on device, all green", { verifyOnly: false })).toMatch(/BRIEF_PREFLIGHT_REFUSED/);
+		expect(briefHandbackRefusal("DONE\nomp-kit preflight commit --files src/a.ts\ncommit: ok (tree:x)", { verifyOnly: true })).toMatch(/BRIEF_PREFLIGHT_REFUSED/);
+	});
+
+	test("CHILDPREFLIGHT1: guard admits kit evidence from a script-less repo, refuses it from a scripted one", async () => {
+		const h = await createFlywheelHost(base);
+		const input = { context: "Repo: /fixture", tasks: [{ task: "Implement feature" }] };
+		const bare = childFixture(false);
+		const [refused] = await h.emit("tool_result", { toolName: "task", input, content: [{ type: "text", text: "DONE: implemented feature" }] }, h.ctx(bare));
+		expect(refused).toMatchObject({ isError: true, details: { code: "BRIEF_PREFLIGHT_REFUSED" } });
+		const [admitted] = await h.emit("tool_result", { toolName: "task", input, content: [{ type: "text", text: KIT_OK }] }, h.ctx(bare));
+		expect(admitted).toBeUndefined();
+		const scripted = childFixture(true);
+		const [stillRefused] = await h.emit("tool_result", { toolName: "task", input, content: [{ type: "text", text: KIT_OK }] }, h.ctx(scripted));
+		expect(stillRefused).toMatchObject({ isError: true, details: { code: "BRIEF_PREFLIGHT_REFUSED" } });
+	});
+
+	test("CHILDPREFLIGHT1: guard admits a verify-led handback that names no changed paths", async () => {
+		const h = await createFlywheelHost(base);
+		const input = { context: "Repo: /fixture", tasks: [{ task: "Verify the fix works on device" }] };
+		const [admitted] = await h.emit("tool_result", { toolName: "task", input, content: [{ type: "text", text: "DONE: verified on device, all green" }] }, h.ctx(childFixture(false)));
+		expect(admitted).toBeUndefined();
+	});
 });
