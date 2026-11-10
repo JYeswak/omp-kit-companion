@@ -4,6 +4,17 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.110] - 2026-11-10
+
+### Changed
+
+- `omp-kit update --reconcile` now prunes old releases like a completed update: the active release, the five before it, pinned and running releases stay.
+- New daily `cc-compress` service job: gzips the command center's sealed spool days (about 10x smaller) from the operator's `ccCompress` command in fleet-watch.json.
+- The scratch tracked-source-copy refusal now names the working route: edit tracked source in a separate checkout of the repository (for example `ovnfs new --name <x>`), not a copy under scratch.
+- The gate-events ledger names more tool failures instead of `tool-error:unclassified`: multi-line MCP transport failures, JS eval cells that threw, missing packages, aborted commands, a dead eval kernel and diff's exit 1 when inputs differ.
+- Seats' send drops (`send-drop/`), write-ledger appends (`write-ledger/`) and upgrade notices (`upgrade-notice-*`) are live fleet state too.
+- `omp-kit verify` reuses the open live-readback bead a failed earlier attempt left behind instead of being refused as a duplicate.
+
 ## [0.2.109] - 2026-11-10
 
 ### Changed

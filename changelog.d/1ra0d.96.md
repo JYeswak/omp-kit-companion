@@ -1,1 +1,0 @@
-- `omp-kit verify` reuses the open live-readback bead a failed earlier attempt left behind instead of being refused as a duplicate.

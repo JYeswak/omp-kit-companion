@@ -1,1 +1,0 @@
-- Seats' send drops (`send-drop/`), write-ledger appends (`write-ledger/`) and upgrade notices (`upgrade-notice-*`) are live fleet state too.

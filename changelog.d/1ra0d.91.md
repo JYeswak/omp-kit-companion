@@ -1,1 +1,0 @@
-- The gate-events ledger names more tool failures instead of `tool-error:unclassified`: multi-line MCP transport failures, JS eval cells that threw, missing packages, aborted commands, a dead eval kernel and diff's exit 1 when inputs differ.
