@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { pollUntil } from "../../src/kitlib/poll.ts";
 import { run, runSync } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 
 const LAUNCHER_TABLE = fixtureLauncherTableBin();
@@ -48,9 +49,12 @@ test("planted: a second live launcher in the fixture's own tree still refuses SK
 	const marker = `launcher-table-sleeper-${process.pid}`;
 	const stop = new AbortController();
 	// The planted second launcher is a real child process that must stay alive until aborted below;
-	// its argv carries `service run omp-watch`. No test step waits on its sleep.
+	// its argv carries `service run omp-watch`. No test step waits on its sleep. It runs in the fixture
+	// HOME (cwd): SVCLAUNCHHOME1 keeps a launcher whose lsof footprint touches this HOME and drops one
+	// provably serving another, so a sleeper left in the runner's cwd would read as foreign wherever lsof
+	// is on PATH (Linux CI) while passing where it is not (macOS /usr/sbin).
 	const sleeper = run([process.execPath, "-e", `await Bun.sleep(60000) // ${marker}`, "service", "run", "omp-watch"],
-		{ deadline_s: 90, signal: stop.signal });
+		{ deadline_s: fixtureDeadlineS(90), signal: stop.signal, cwd: home });
 	try {
 		const seen = await pollUntil(() => decode(runSync([join(LAUNCHER_TABLE, "ps"), "-axo", "pid=,args="], { deadline_s: 10 }).stdout),
 			{ deadline_s: 30, interval_s: 0.05, classify: table => table.includes(marker) ? "success" : "retry" });
