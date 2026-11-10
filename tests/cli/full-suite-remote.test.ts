@@ -270,3 +270,32 @@ test("fallback: the adapter is opt-in; FULL_SUITE_REMOTE unset or 0 runs locally
 		expect(run.out).toContain("FULL-SUITE: VERDICT PASS");
 	}
 }, CASE_MS);
+
+test("SUITELOAD1: the default remote pool width leaves one core free and FULL_SUITE_REMOTE_JOBS still overrides", async () => {
+	// No worker is contacted: the probe's transport is stubbed to a canned READY answer.
+	const driver = [
+		"import importlib.util, json, os, sys",
+		"spec = importlib.util.spec_from_file_location('full_suite_remote', sys.argv[1])",
+		"mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)",
+		"for cpus, want in [(1, 1), (2, 1), (4, 3), (8, 4)]:",
+		"    got = mod.default_pool_width(cpus)",
+		"    assert got == want, (cpus, got, want)",
+		"marker = 'SUITELOAD1-marker'",
+		"class Canned:",
+		"    timed_out = False; rc = 0; stderr = b''",
+		"    def __init__(self, out): self.stdout = out",
+		"def canned(cpus):",
+		"    out = (json.dumps({'pins': marker}) + '\\n@@disk 99999999\\n@@mem 9999999\\n@@cpu %d\\n' % cpus).encode()",
+		"    return lambda *a, **k: Canned(out)",
+		"os.environ.pop('FULL_SUITE_REMOTE_JOBS', None)",
+		"mod.remote = canned(4)",
+		"assert mod.probe('omp-suite@worker-1', marker)[1] == 3",
+		"os.environ['FULL_SUITE_REMOTE_JOBS'] = '6'",
+		"mod.remote = canned(4)",
+		"assert mod.probe('omp-suite@worker-1', marker)[1] == 6",
+		"print('ok')",
+	].join("\n");
+	const r = await sh(["python3", "-c", driver, remote], repoRoot, cleanEnv());
+	expect(r.rc, `${text(r.stdout)}\n${text(r.stderr)}`).toBe(0);
+	expect(text(r.stdout).trim().split("\n").at(-1)).toBe("ok");
+}, CASE_MS);

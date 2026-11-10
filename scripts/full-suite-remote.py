@@ -6,7 +6,7 @@ rch workers tagged linux (``rch workers list --json``; FULL_SUITE_REMOTE_WORKERS
 them instead), reached as the unprivileged suite user that scripts/suite-worker-setup.sh created, and
 admitted only when their /opt/omp-kit-suite/READY.json carries exactly this tree's CI pins and they
 have the disk and memory a shard needs. FULL_SUITE_REMOTE_SSH names an ssh-compatible transport
-(default ssh). FULL_SUITE_REMOTE_JOBS sets each worker's pool width (default: its cores, at most 4).
+(default ssh). FULL_SUITE_REMOTE_JOBS sets each worker's pool width (default: its cores minus one, at most 4).
 
 Subcommands:
   pins     print the CI pins a worker must carry, as key=value words (--marker: READY.json's form).
@@ -160,6 +160,11 @@ def remote(target: str, program: str, *args: str, deadline_s: float, stdin: byte
                max_output_bytes=max_output_bytes)
 
 
+def default_pool_width(cpus: int) -> int:
+    """SUITELOAD1 (ompkit-1ra0d.122): one core stays free for the worker's own load, at most 4 slots."""
+    return max(1, min(4, cpus - 1))
+
+
 def probe(target: str, marker: str) -> tuple[str, int, str]:
     """(target, pool width, "") when admitted, else (target, 0, reason)."""
     try:
@@ -188,7 +193,7 @@ def probe(target: str, marker: str) -> tuple[str, int, str]:
     if available_kib < MIN_AVAILABLE_KIB:
         return target, 0, f"only {available_kib >> 10} MiB memory available (rch builds share these workers)"
     jobs = os.environ.get("FULL_SUITE_REMOTE_JOBS", "")
-    width = int(jobs) if jobs.isdigit() and int(jobs) > 0 else max(1, min(4, cpus))
+    width = int(jobs) if jobs.isdigit() and int(jobs) > 0 else default_pool_width(cpus)
     return target, width, ""
 
 
