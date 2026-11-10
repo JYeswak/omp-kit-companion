@@ -1203,18 +1203,46 @@ function settleTernPending(pendingDir: string, name: string, rec: TernPendingRec
 	}
 }
 
-/** Explicit loss-of-proof acknowledgement, not consumption proof and never a resend. */
-export function acknowledgeTernPending(path: string, dropDir: string): {
+/**
+ * PENDINGSTALE1: an ordinary unproven attempt older than this may be acknowledged by the operator. A message queued
+ * to a busy seat lands at its next turn boundary, so the window is long enough for a long turn to finish; inside it
+ * the effect may still land and acknowledging would invite a duplicate.
+ */
+export const TERN_PENDING_ACK_AFTER_MS = 60 * 60_000;
+
+function pendingAckableAt(rec: TernPendingRecord): number | null {
+	if (rec.status === "REPLACED_UNPROVEN") return 0;
+	const created = Date.parse(rec.createdAt);
+	return Number.isFinite(created) ? created + TERN_PENDING_ACK_AFTER_MS : null;
+}
+
+function ackPendingCommand(path: string, dropDir: string): string {
+	const quoted = [path, dropDir].map((arg) => `'${arg.split("'").join("'\\''")}'`);
+	return `omp-kit send --ack-pending ${quoted[0]} --drop-dir ${quoted[1]}`;
+}
+
+/**
+ * Explicit loss-of-proof acknowledgement, not consumption proof and never a resend: a REPLACED_UNPROVEN record at
+ * once, an ordinary unproven attempt only after TERN_PENDING_ACK_AFTER_MS (PENDINGSTALE1).
+ */
+export function acknowledgeTernPending(path: string, dropDir: string, now = Date.now()): {
 	ok: boolean; code: string; detail: string; marker: string; sessionId: string; seatKey: string;
 } {
 	const pendingDir = resolve(join(dropDir, "..", "tern-pending"));
-	const refused = { ok: false, code: "PENDING_ACK_REFUSED", detail: "Only an exact REPLACED_UNPROVEN record in this drop folder's tern-pending directory can be acknowledged; nothing sent or cleared.",
+	const refused = { ok: false, code: "PENDING_ACK_REFUSED", detail: "Only an exact pending record in this drop folder's tern-pending directory can be acknowledged; nothing sent or cleared.",
 		marker: "", sessionId: "", seatKey: "" };
 	if (!isAbsolute(path) || dirname(resolve(path)) !== pendingDir) return refused;
 	const rec = readTernPending(path);
-	if (rec === null || rec.status !== "REPLACED_UNPROVEN") return refused;
+	if (rec === null) return refused;
 	const name = `${rec.seatKey}.${sha256Hex(rec.sessionId).slice(0, 16)}.json`;
 	if (resolve(path) !== join(pendingDir, name)) return refused;
+	const ackableAt = pendingAckableAt(rec);
+	if (ackableAt === null || now < ackableAt) {
+		return { ...refused, code: "PENDING_ACK_TOO_EARLY", detail: ackableAt === null
+			? `${path} has no readable createdAt; its attempt may still land; nothing sent or cleared.`
+			: `${path} (${rec.marker}) may still land at the seat's next turn boundary; it can be acknowledged from `
+				+ `${new Date(ackableAt).toISOString()}; nothing sent or cleared.` };
+	}
 	if (!settleTernPending(pendingDir, name, rec, "ACKNOWLEDGED", null)) {
 		return { ...refused, code: "PENDING_ACK_FAILED", detail: `Could not ledger and clear ${path}; nothing sent. Inspect the record before retrying.` };
 	}
@@ -1419,12 +1447,9 @@ export async function deliverToTernSeat(input: {
 	// journal session identity, never the mutable content hash, so appends
 	// and BUSY/IDLE flaps cannot release suppression (AM58562-4, B5).
 	const pendingDir = resolve(join(input.dropDir, "..", "tern-pending"));
-	const refuseReplaced = (path: string, rec: TernPendingRecord): TernDeliverResult => {
-		const quoted = [path, input.dropDir].map((arg) => `'${arg.split("'").join("'\\''")}'`);
-		const command = `omp-kit send --ack-pending ${quoted[0]} --drop-dir ${quoted[1]}`;
-		return fail("REPLACED_UNPROVEN", `Journal replaced; consumption of ${path} (${rec.marker}) is unproven; no resend. `
-			+ `To acknowledge this loss of proof without sending, run: ${command}`);
-	};
+	const refuseReplaced = (path: string, rec: TernPendingRecord): TernDeliverResult =>
+		fail("REPLACED_UNPROVEN", `Journal replaced; consumption of ${path} (${rec.marker}) is unproven; no resend. `
+			+ `To acknowledge this loss of proof without sending, run: ${ackPendingCommand(path, input.dropDir)}`);
 	let pendingNames: string[] = [];
 	try {
 		pendingNames = readdirSync(pendingDir);
@@ -1460,8 +1485,12 @@ export async function deliverToTernSeat(input: {
 	const pending = readTernPending(pendingPath);
 	if (pending !== null && pending.sessionId === journal.sessionId) {
 		if (pending.status === "REPLACED_UNPROVEN") return refuseReplaced(pendingPath, pending);
+		const ackableAt = pendingAckableAt(pending);
+		const how = ackableAt === null ? "" : Date.now() >= ackableAt
+			? `; if it never landed, acknowledge the loss of proof without resending: ${ackPendingCommand(pendingPath, input.dropDir)}`
+			: `; acknowledgeable from ${new Date(ackableAt).toISOString()} if it never lands`;
 		return { status: "PENDING_CONSUME", marker: pending.marker, sends: 0, sessionFile, offset: null, drop_path: null,
-			detail: `earlier attempt unproven on this runtime incarnation; new send suppressed`, code: "SUPPRESSED_PENDING",
+			detail: `earlier attempt unproven on this runtime incarnation; new send suppressed${how}`, code: "SUPPRESSED_PENDING",
 			...(queued ? { queue_states: ["QUEUED", "PENDING_CONSUME"] as const } : {}) };
 	}
 	const marker = `kit-send-${randomBytes(6).toString("hex")}`;

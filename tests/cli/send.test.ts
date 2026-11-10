@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, submitQueuedToTernSeat, ternSendSeat, trackerPrefix, TERN_STEER_BOUND_MS, TERN_TURN_BOUNDARY_WAIT_MS, type ComposerVerdict, type SendExec } from "../../src/send.ts";
+import { acknowledgeTernPending, BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, submitQueuedToTernSeat, ternSendSeat, trackerPrefix, TERN_PENDING_ACK_AFTER_MS, TERN_STEER_BOUND_MS, TERN_TURN_BOUNDARY_WAIT_MS, type ComposerVerdict, type SendExec } from "../../src/send.ts";
 import * as sendModule from "../../src/send.ts";
 import { classifyTernObservation, parseSessionJournal, readSessionTail, sessionViewOfText } from "../../src/plane-tern.ts";
 import type { TernIdentityResult, TernObservation, TernObserverIo, TernSeatBinding } from "../../src/plane-tern.ts";
@@ -766,10 +766,10 @@ test("TERN2.4 F4 partial: an unterminated final record never proves", () => {
 });
 
 // ---- B5 / AM58562-4 pending suppression ----
-function seedPending(dir: string, journal: string, marker: string, payload: string): string {
+function seedPending(dir: string, journal: string, marker: string, payload: string, createdAt = "2026-10-16T00:00:00Z"): string {
 	const seatKey = "s_7_W";
 	const record = { ...buildTernProofKey(journal, { sessionId: "s1", leafId: "m1" }, { kind: "message", payload, marker, objective: "" }),
-		seatKey, sessionSha: sha(journal), textSha256: "t", createdAt: "2026-10-16T00:00:00Z" };
+		seatKey, sessionSha: sha(journal), textSha256: "t", createdAt };
 	mkdirSync(join(dir, "..", "tern-pending"), { recursive: true });
 	const path = join(dir, "..", "tern-pending", `${seatKey}.${sha(record.sessionId).slice(0, 16)}.json`);
 	writeFileSync(path, JSON.stringify(record) + "\n");
@@ -943,16 +943,39 @@ async function sendreachAcknowledgement(arm: "case" | "mutant") {
 test("SENDSTUCK1 case 2: explicit acknowledgement releases the replaced-unproven seat", () => sendreachAcknowledgement("case"));
 test("SENDSTUCK1 mutant 2: v0.2.95 has no acknowledgement path and stays suppressed", () => sendreachAcknowledgement("mutant"));
 
-test("SENDSTUCK1 acknowledgement negative: an ordinary unconsumed attempt cannot be acknowledged away", async () => {
+test("SENDSTUCK1 acknowledgement negative: an ordinary attempt that may still land cannot be acknowledged away", async () => {
 	const dir = ternDropDir();
-	const path = seedPending(dir, settledJournal, "kit-send-0123456789ad", "still pending");
+	const path = seedPending(dir, settledJournal, "kit-send-0123456789ad", "still pending", new Date().toISOString());
 	const home = join(dirname(dir), "home");
 	mkdirSync(home);
 	const refused = await run([process.execPath, "run", "src/cli.ts", "send", "--ack-pending", path,
 		"--drop-dir", dir, "--json"], { deadline_s: fixtureDeadlineS(), cwd: repoRoot, env: { ...process.env, HOME: home } });
 	expect(refused.rc).not.toBe(0);
-	expect(JSON.parse(new TextDecoder().decode(refused.stdout)).errors).toContainEqual(expect.objectContaining({ code: "PENDING_ACK_REFUSED" }));
+	expect(JSON.parse(new TextDecoder().decode(refused.stdout)).errors).toContainEqual(expect.objectContaining({ code: "PENDING_ACK_TOO_EARLY" }));
 	expect(existsSync(path)).toBe(true);
+});
+
+// 2026-11-10 05:16Z a director send to builder FoggyValley never reached its journal; the ordinary record then
+// suppressed every later send to that seat and --ack-pending refused it, leaving only a restart or a hand move.
+test("PENDINGSTALE1: an unlanded attempt past the window is acknowledged (ledgered, no resend) and the next send goes", async () => {
+	const dir = ternDropDir();
+	const stale = new Date(Date.now() - TERN_PENDING_ACK_AFTER_MS - 60_000).toISOString();
+	const path = seedPending(dir, settledJournal, "kit-send-5a1e00000001", "x\n[kit-send-5a1e00000001]", stale);
+	const fake = ternFake();
+	const suppressed = await deliverTern(fake, "new", { dropDir: dir });
+	expect(suppressed).toMatchObject({ code: "SUPPRESSED_PENDING", sends: 0 });
+	expect(suppressed.detail).toContain(`omp-kit send --ack-pending '${path}'`);
+	// One second inside the window the same record still refuses: its effect may land at the next turn boundary.
+	const early = acknowledgeTernPending(path, dir, Date.parse(stale) + TERN_PENDING_ACK_AFTER_MS - 1000);
+	expect(early).toMatchObject({ ok: false, code: "PENDING_ACK_TOO_EARLY" });
+	expect(existsSync(path)).toBe(true);
+	expect(acknowledgeTernPending(path, dir)).toMatchObject({ ok: true, code: "ACKNOWLEDGED", marker: "kit-send-5a1e00000001" });
+	expect(existsSync(path)).toBe(false);
+	expect(readFileSync(join(dir, "..", "tern-pending", "ledger.jsonl"), "utf8")).toContain(`"status":"ACKNOWLEDGED","marker":"kit-send-5a1e00000001"`);
+	expect(fake.sent).toEqual([]);
+	const next = await deliverTern(fake, "after ack", { dropDir: dir });
+	expect(next.code).not.toBe("SUPPRESSED_PENDING");
+	expect(fake.sent).toEqual([`[from agent GoldenStone via omp-kit send]\nafter ack\n[${next.marker}]`]);
 });
 
 test("TERN2.4 AM58562-4: journal append without consumption keeps suppression", async () => {

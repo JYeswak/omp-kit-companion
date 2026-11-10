@@ -226,7 +226,7 @@ omp-kit heavy --label cli-tests -- bun test tests/cli   # load-admitted, nice 10
 
 `send` proves delivery (tmux via `ntm`; `tern:<block>` natively, given `--window-key EP`), drops
 undelivered messages into the state root and exits with the delivery status (`OK`, `PENDING_SUBMIT`,
-`NOT_DELIVERED`, or `REPLACED_UNPROVEN`, cleared by `--ack-pending`). Fleet Watch is opt-in:
+`NOT_DELIVERED`, or `REPLACED_UNPROVEN`; `--ack-pending` clears that, or an attempt unlanded for an hour). Fleet Watch is opt-in:
 [docs/fleet-watch.md](docs/fleet-watch.md).
 
 ### Reviewed installed-template imports

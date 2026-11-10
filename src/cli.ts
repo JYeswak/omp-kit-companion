@@ -3542,7 +3542,7 @@ function acknowledgePendingSendCommand(request: ParsedCommand, path: string, dro
 			"Run omp-kit send --ack-pending RECORD [--drop-dir PATH]; nothing was sent or cleared.");
 	}
 	const ack = acknowledgeTernPending(path, dropDir);
-	if (!ack.ok) return refusal(ack.code, ack.detail, "Inspect the exact pending record; ordinary pending attempts cannot be acknowledged.");
+	if (!ack.ok) return refusal(ack.code, ack.detail, "Inspect the exact pending record; an attempt that may still land is acknowledgeable only after its window.");
 	return { code: 0, data: { overall: "OK", status: "ACKNOWLEDGED", session: ack.sessionId, pane: ack.seatKey,
 		marker: ack.marker, sends: 0, pending_path: path, detail: ack.detail }, verification: "UNVERIFIED" };
 }
