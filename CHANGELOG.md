@@ -4,6 +4,20 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.114] - 2026-11-10
+
+### Changed
+
+- `omp-kit project status` seats again report their real names, liveness, and bead counts: names resolve through `am agents resolve-pane` like land does instead of failing silently without a bearer token, liveness is read from Tern's pane entries so bare-number block lists no longer read dead, and a refused bead read (such as the br identity shim without `AGENT_NAME`) names its reason instead of answering null.
+- `omp-kit project status` stays truthful on the real fleet shapes: pane entries with no `live` field read alive while `exited` is null, pane ids beyond 2^53 are parsed without rounding, and a bare-array `br ready` answer counts by length.
+- `omp-kit project status` and `project add` work again on a fleet-watch.json that lists stopped projects (`pullEnabled: false`): the pause-owner fields the retired pull nudging required are no longer demanded, and an invalid config now names the actual problem instead of saying the file does not parse.
+- `git commit --only` inside a private checkout (`ovnfs new`, or a `git clone --shared` with a separate git dir) is no longer refused with "project not found": like writes there, it needs no Agent Mail reservation, and custody is checked when the work lands in the canonical repository.
+- The regexploit check that runs on commits and pushes no longer leaves a `var/agent-tmp/regexploit-gate.<pid>` folder behind on every run, so seats are no longer told at session end that they owe disposal of scratch they never made.
+- A repo the kit manages can now hand beads to review with its own committed `.omp/push-check`: run `omp-kit push-check --commit <sha>` to record a GREEN verdict, and the author handoff accepts it the way it accepts the companion fresh-gate ledger.
+- The push check runs with a temporary directory of its own (`TMPDIR`), removed when the check finishes, so checks that create temporary files never leave them in a system temp dir or the caller's scratch.
+- A land that changes `.omp/push-check` is accepted even when the registered check cannot run because of its interpreter line, so a broken check can be repaired through `omp-kit land`; an unchanged broken check still refuses.
+- `omp-kit skill-mine` now says what happened to every listed session: the coverage report counts sessions skipped by the project filter, advisor sidecars, the per-project and session caps, and sessions never reached before the wall budget ran out, so the numbers always add up.
+
 ## [0.2.113] - 2026-11-10
 
 ### Changed

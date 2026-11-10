@@ -1,1 +1,0 @@
-- `omp-kit skill-mine` now says what happened to every listed session: the coverage report counts sessions skipped by the project filter, advisor sidecars, the per-project and session caps, and sessions never reached before the wall budget ran out, so the numbers always add up.
