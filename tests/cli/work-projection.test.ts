@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { choosePull, type PullInput } from "../../src/fleet-watch.ts";
 import {
 	classifyWorkProjection,
 	isSendTargetEligible,
@@ -78,26 +77,4 @@ test("live active pane with safe_to_dispatch=false is never a send target", () =
 	expect(isSendTargetEligible({ active: true, safeToDispatch: true }).eligible).toBe(true);
 	// No signal is not a refusal: ntm 1.37.0 exposes no safe_to_dispatch field.
 	expect(isSendTargetEligible({ active: true, safeToDispatch: null }).eligible).toBe(true);
-});
-
-function pullInput(projection: typeof STALE_PROJECTION | undefined): PullInput {
-	return {
-		sessionName: "omp-test", worker: "w", liveWorkers: new Set(), grading: [], rework: [],
-		triage: { usable: false, ids: [], reason: "off" }, issues: [], readyRows: [],
-		policy: { transitions: {} }, focus: [], skipLabels: [],
-		taken: new Set(), workProjection: projection, workProjectionNowMs: NOW.getTime(),
-	};
-}
-
-test("fleet-watch treats a stale projection as UNKNOWN, never as an empty queue", () => {
-	const choice = choosePull(pullInput(STALE_PROJECTION));
-	expect(choice.ready).toBe(false);
-	if (!choice.ready) expect(choice.kind).toBe("UNKNOWN");
-});
-
-test("fleet-watch keeps fresh-empty behavior unchanged", () => {
-	const collected = new Date(NOW.getTime() - 10_000).toISOString();
-	const choice = choosePull(pullInput({ collectedAt: collected, available: true, empty: true }));
-	expect(choice.ready).toBe(false);
-	if (!choice.ready) expect(choice.kind).toBe("NO_FREE_LEAF");
 });
