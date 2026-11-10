@@ -4,6 +4,21 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.111] - 2026-11-10
+
+### Changed
+
+- Kit updates no longer roll back a good release when the regex-budget timing gate reports the host was too slow to judge (reference ratio above clamp): the postcheck is recorded as deferred and the release stays active but unverified.
+- Retrying a kit update after its postcheck compensated back to the prior release now reuses the undone candidate instead of refusing KIT_TARGET_EXISTS; any other existing release dir still refuses.
+- `omp-kit doctor` no longer reports rch FAIL after a reboot or rchd restart: the socket baseline belongs to the daemon pid that bound it and is retaken for a new daemon.
+- Scheduled service runs no longer refuse with SKIPPED-ADMISSION when the only other matching launcher belongs to a different HOME; a second launcher under the same HOME still refuses.
+- Writing into a `var/agent-tmp/<dir>` that `omp-kit scratch new` did not create is refused with the exact `omp-kit scratch new --label ...` command to run, instead of an UNKNOWN read error.
+- A hashline edit that OMP's edit engine itself rejects (for example a stale tag) inside owned scratch is no longer refused by the scratch guard as an unreadable payload; the edit tool reports its own error with the fix.
+- Writes inside a private checkout of a repository (`ovnfs new`, or a shared clone with a separate git dir) no longer need an Agent Mail reservation: that copy has one writer. The canonical checkout still requires one.
+- A seat can now release the scratch folder a finished task child created (`omp-kit scratch release`), so a dead child's leftover no longer blocks the parent's land publication; a live child's folder and other seats' folders stay refused.
+- Build handbacks from repos without `scripts/commit-preflight.sh` (e.g. clutterfreespaces.ios) are no longer refused when they carry the kit's own `omp-kit preflight commit` clean line (`commit: ok (...)`); repos that ship the script still require its evidence, and verify-only handbacks naming no changed paths are admitted without preflight.
+- Mined tool errors name six more causes instead of `tool-error:unclassified`: missing working directory, self-restart, Python unittest failures, status-only exits (`silent-exit`), corrupt or malformed patches, and harness argument validation.
+
 ## [0.2.110] - 2026-11-10
 
 ### Changed

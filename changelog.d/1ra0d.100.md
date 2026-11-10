@@ -1,1 +1,0 @@
-- Kit updates no longer roll back a good release when the regex-budget timing gate reports the host was too slow to judge (reference ratio above clamp): the postcheck is recorded as deferred and the release stays active but unverified.
