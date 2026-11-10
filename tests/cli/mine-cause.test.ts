@@ -225,6 +225,17 @@ test("LEDGERCLASS1: tool and environment failures stay tool-error rows with name
 		["bash", "Files out/a.json and out/b.json differ", "tool-error:bash:diff-differs"],
 		["bash", '1c1\n< {"expectations":1}\n---\n> {"expectations":2}', "tool-error:bash:diff-differs"],
 		["mcp__mcp_agent_mail_whois", "MCP failure\nserver: mcp-agent-mail\ntool: whois\ntransport: http\nstage: send\nfailure: timeout\nretryable: no\nmessage: Request timeout after 30000ms", "mcp-transport:mcp__mcp_agent_mail_whois"],
+		// RECLASS2: the live ledger shapes 0.2.110 still left unclassified (24 h of 2026-11-10 rows).
+		["bash", "Working directory does not exist: /repo/var/agent-tmp/gone/fx", "tool-error:bash:missing-cwd"],
+		["bash", '{"result": "LAUNCHED", "session": "s", "block": "1", "agent": "A", "pid": 2}\nCommand exited with code 143', "tool-error:bash:seat-restarted"],
+		["bash", "Ran 595 tests in 44.017s\n\nFAILED (failures=47, errors=336, skipped=1)", "tool-error:bash:test-failure"],
+		["bash", "(no output)\n\nWall time: 1.77 seconds\nCommand exited with code 1", "tool-error:bash:silent-exit"],
+		["bash", "(no output) Wall time: 1.77 seconds Command exited with code 1", "tool-error:bash:silent-exit"],
+		["bash", "exit=0 Command exited with code 1", "tool-error:bash:silent-exit"],
+		["bash", "error: corrupt patch at line 57\nCommand exited with code 128", "validation:edit-patch-failed"],
+		["bash", "patching file 'a.mjs'\npatch: **** malformed patch at line 10: @@ -1,6 +1,8 @@", "validation:edit-patch-failed"],
+		["edit", 'Validation failed for tool "edit": - input: input must be a string (was missing)', "agent-input:edit:invalid-arguments"],
+		["write", 'Invalid args for xd://retain: Validation failed for tool "retain": - items: missing', "agent-input:write:invalid-arguments"],
 	];
 	for (const [tool, content, id] of cases) {
 		expect(classifyMineResult({ tool, result: { isError: true, content } })?.class_id, content).toBe(id);
@@ -234,7 +245,10 @@ test("LEDGERCLASS1: tool and environment failures stay tool-error rows with name
 test("LEDGERCLASS1 boundaries: generic errors, bare exits and redacted bodies stay unclassified", () => {
 	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: "Error: something went wrong" } })?.class_id).toBe("tool-error:unclassified");
 	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: "the timeout finished but nothing matched" } })?.class_id).toBe("tool-error:unclassified");
-	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: "(no output) Command exited with code 1" } })?.class_id).toBe("tool-error:unclassified");
+	// RECLASS2 boundary: a status-only line is silent-exit, but any other word in it leaves it unclassified,
+	// and a long run of numbers is bounded before the pattern runs.
+	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: "(no output) something Command exited with code 1" } })?.class_id).toBe("tool-error:unclassified");
+	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: "1 ".repeat(5_000) + "x Command exited with code 1" } })?.class_id).toBe("tool-error:unclassified");
 	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: "[REDACTED]" } })?.class_id).toBe("tool-error:unclassified");
 	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: "Rule: ghp_" + "x".repeat(20) } })?.class_id).toBe("tool-error:unclassified");
 	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: "This edit anchors to lines " + "x".repeat(65_536) + " timeout" } })?.class_id).toBe("tool-error:unclassified");

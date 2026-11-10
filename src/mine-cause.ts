@@ -160,7 +160,7 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 		[/^(?:Edit rejected for |`PUT \d+\.=\d+:` rejected:)/, "validation:edit-rejected"],
 		[/^line \d+: .*?(hunk|payload|PUT)\b/, "validation:edit-patch-failed"],
 		[/^Line \d+ does not exist/, "validation:edit-line-out-of-range"],
-		[/^(?:error: patch (?:failed|fragment)|Apply failed)/, "validation:edit-patch-failed"],
+		[/^(?:error: patch (?:failed|fragment)|Apply failed|error: corrupt patch at line \d|error: while searching for:|patch: \*{4} malformed patch at line \d)/, "validation:edit-patch-failed"],
 		[/^(?:rc=\d+ )?Error: cannot index/, "validation:query-unindexable"],
 		[/suppression-no-reason/, "validation:pysafe-suppression-reason"],
 	];
@@ -191,6 +191,8 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 		[/^error: unexpected argument/, "invalid-arguments"],
 		[/Invalid resource at/, "invalid-arguments"],
 		[/: Is a directory\b/, "invalid-arguments"],
+		// RECLASS2: the harness rejected the call's own arguments before running it.
+		[/^(?:Invalid args for \S+: )?Validation failed for tool "/, "invalid-arguments"],
 		[/unsupported request fields/, "invalid-arguments"],
 		[/did not match any file\(s\) known to git/, "path-not-found"],
 		[/\bno such file or directory\b/i, "path-not-found"],
@@ -231,9 +233,11 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 		[/Infisical unreachable|no cache fallback|machine-identity login failed|^cf-secret: /, "backend-unreachable"],
 		[/send_message failed; queued a durable UNSENT/, "message-unsent"],
 		[/: Input\/output error/, "io-error"],
-		[/Unable to read current working directory/, "missing-cwd"],
+		[/Unable to read current working directory|^Working directory does not exist: /, "missing-cwd"],
+		// RECLASS2: the self-restart verb replaces the calling seat, so its own tool call never returns 0.
+		[/"result"\s*:\s*"LAUNCHED"/, "seat-restarted"],
 		[/MISSING_PANE_ID|No pane_id provided/, "identity-unresolved"],
-		[/[×✖]|\bFAIL\b|\bfail [1-9]|\(fail\)|^not ok\b|fixture plan rejected|Unhandled error between tests|^\s*\d+\s*\|/, "test-failure"],
+		[/[×✖]|\bFAIL\b|\bfail [1-9]|\(fail\)|^not ok\b|fixture plan rejected|Unhandled error between tests|^\s*\d+\s*\||^FAILED \((?:failures|errors)=\d/, "test-failure"],
 	];
 	for (const line of lines) for (const [pattern, cause] of toolText) {
 		if (pattern.test(line)) return finding(`tool-error:${toolName(tool)}:${cause}`, line);
@@ -309,5 +313,12 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 			? finding(`finding:${name}`, body || `${name} exited with a FAIL finding (exit class FINDING)`)
 			: finding(`tool-error:${name}:${toolName(ownCode)}`, body || `${name} failed with ${ownCode}`);
 	}
+	// RECLASS2: a command that exited nonzero and printed nothing but its exit status names that
+	// cause: the next step is to rerun with its diagnostics, not to look for a guard. Ledger replays
+	// carry the same text whitespace-collapsed onto one line, so the check runs on the joined body.
+	const statusOnly = lines.join(" ").replace(/\s+/g, " ").trim();
+	if (failed && statusOnly.length <= 200
+		&& /^(?:(?:\(no output\)|exit=-?\d{1,3}|-?\d{1,3}|Wall time: \d{1,6}(?:\.\d{1,3})? seconds) )*Command exited with code -?\d{1,3}$/.test(statusOnly))
+		return finding(`tool-error:${toolName(tool)}:silent-exit`);
 	return failed ? finding("tool-error:unclassified") : null;
 }

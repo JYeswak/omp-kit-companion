@@ -1,0 +1,1 @@
+- Mined tool errors name six more causes instead of `tool-error:unclassified`: missing working directory, self-restart, Python unittest failures, status-only exits (`silent-exit`), corrupt or malformed patches, and harness argument validation.
