@@ -216,3 +216,23 @@ test("unavailable registered check returns UNRUN before commit or publication", 
 	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("owner change\n");
 });
 
+test("a candidate that replaces an unrunnable registered check lands with the check skipped as hash_changed", () => {
+	// The repair of a broken check (here an interpreter that cannot run) must be landable; the case above
+	// keeps an unchanged broken check refusing.
+	const { work, fakeBin } = fixture();
+	const brokenSha = registerPushCheck(work, "#!/not/a/real/land-check-runner\nexit 0\n");
+	const repairedBody = "#!/bin/bash\nexit 0\n";
+	writeFileSync(join(work, ".omp", "push-check"), repairedBody, { mode: 0o755 });
+	const hold = [{ agent: "DarkFern", path: ".omp/push-check", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs(".omp/push-check"), hold, { amDir: fakeBin });
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	const data = run.body.data as { overall: string; commit: string; check: { status: string; reason: string; sha256: string } };
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("PUSHED");
+	expect(data.check.status).toBe("SKIP");
+	expect(data.check.reason).toBe("hash_changed");
+	expect(data.check.sha256).toBe(brokenSha);
+	expect(remoteHead(work)).toBe(data.commit);
+	expect(git(work, ["show", `${data.commit}:.omp/push-check`])).toBe(repairedBody);
+});
+

@@ -337,6 +337,13 @@ function preparePushCheck(repo: string, base: string, candidate?: string): PushC
 	return { kind: "ready", result: pushCheckResult("UNRUN", "not_run", sha256), script: baseBlob.bytes, executable: resolved.executable, version: resolved.version };
 }
 
+/** A land that changes .omp/push-check skips the registered check (hash_changed) when it is runnable, and also when
+ * only its interpreter is unavailable: otherwise the commit repairing a broken check could never land. An
+ * unchanged broken check, or one whose registration or bytes cannot be read, still refuses. */
+function checkReplaceable(plan: PushCheckPlan): boolean {
+	return plan.kind === "ready" || (plan.kind === "unrun" && plan.result.reason === "check_interpreter_unavailable");
+}
+
 async function runPushCheck(repo: string, base: string, candidate: string): Promise<PushCheckResult> {
 	const plan = preparePushCheck(repo, base, candidate);
 	if (plan.kind !== "ready") return { ...plan.result, candidate_sha: candidate };
@@ -956,7 +963,7 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 	const base = mainRef.out.trim();
 	const localMain = git(repo, ["rev-parse", "refs/heads/main"]).out.trim();
 	let checkPreflight = preparePushCheck(repo, base);
-	if (checkPreflight.kind === "ready" && paths.includes(PUSH_CHECK_PATH))
+	if (checkReplaceable(checkPreflight) && paths.includes(PUSH_CHECK_PATH))
 		checkPreflight = { kind: "skip", result: pushCheckResult("SKIP", "hash_changed", checkPreflight.result.sha256) };
 	if (checkPreflight.kind === "unrun") {
 		const phases = landPhaseEvidence(repo, null, false, undefined, "NOT_APPLIED");
@@ -1173,7 +1180,7 @@ async function commitOwnedPathsAndPublish(
 ): Promise<CliResult> {
 	const { paths, message, owner, base } = input;
 	let checkPreflight = preparePushCheck(repo, base);
-	if (checkPreflight.kind === "ready" && paths.includes(PUSH_CHECK_PATH)) {
+	if (checkReplaceable(checkPreflight) && paths.includes(PUSH_CHECK_PATH)) {
 		const checkDiff = git(repo, ["diff", "--quiet", "HEAD", "--", `:(literal)${PUSH_CHECK_PATH}`]);
 		if (checkDiff.code === 1)
 			checkPreflight = { kind: "skip", result: pushCheckResult("SKIP", "hash_changed", checkPreflight.result.sha256) };
