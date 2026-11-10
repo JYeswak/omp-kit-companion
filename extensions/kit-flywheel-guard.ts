@@ -20,6 +20,7 @@ import { classifyMineResult } from "../src/mine-cause.ts";
 import { briefHandbackRefusal, briefHasCommitPreflight, completeTaskBrief, isBuildBriefTask, isVerifyOnlyBriefTask, type BriefCompletion } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
 import { mintNativeSpawn, nativeIdentity, type NativeContext } from "./native-identity.ts";
+import { claimTitle, parseBrCreates, priorArtForClaim, priorArtForTitle } from "./prior-art.ts";
 import { checkNativeClose } from "../src/native-close.ts";
 interface SpawnModelIdentity { provider: string; id: string }
 
@@ -2409,7 +2410,8 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 		? resolve(deps.sessionCwd, expandHome(cwd.trim(), deps.home))
 		: deps.sessionCwd;
 	const requests = trackerRequests(command, callCwd, deps.home);
-	if (requests.length === 0) return undefined;
+	const creations = parseBrCreates(command);
+	if (requests.length === 0 && creations.length === 0) return undefined;
 	const hasClose = requests.some(request => request.operation === "close");
 	const child = hasClose && deps.nativeContext?.agent?.kind === "sub";
 	const native = child ? nativeIdentity(deps.nativeContext!) : null;
@@ -2536,6 +2538,26 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 	}
 	const parts: string[] = [...closeNotes];
 	if (warnings.length > 0) parts.push(`kit-flywheel-guard: ${warnings.join("; ")}. The close was allowed; do not close a bead you implemented.`);
+	// PRIORART2: on admitted claims and creates, attach prior art that reads
+	// like the decision at hand (decisions, tracker, deleted work). Never
+	// blocks: every lookup failure lands as an unavailable line instead.
+	try {
+		const priorDeps = { exec: deps.exec, env: deps.env, home: deps.home };
+		for (const request of requests) {
+			if (request.operation !== "claim" || request.ids.length === 0) continue;
+			const id = request.ids[0]!;
+			const repoDir = request.db !== undefined ? dirname(request.db) : request.cwd;
+			const title = claimTitle(repoDir, request.db, id);
+			const art = await priorArtForClaim(repoDir, id, title, priorDeps);
+			if (art !== null) parts.push(art);
+		}
+		for (const title of creations) {
+			const art = await priorArtForTitle(title, callCwd, priorDeps);
+			if (art !== null) parts.push(art);
+		}
+	} catch {
+		parts.push("PRIOR ART unavailable: lookup failed; proceeding without it.");
+	}
 	if (requests.some(request => request.operation === "review" || request.operation === "close")) {
 		const owed = await scratchOwedNote(deps.exec, deps.sessionCwd, hasClose ? "close" : "review", deps.callerSession);
 		if (owed !== null) {
