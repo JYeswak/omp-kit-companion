@@ -1,2 +1,3 @@
 - Admitted `br update --claim` and `br create --title` now attach a PRIOR ART block (decisions, tracker, deleted work) naming prior art that reads like the decision at hand, instead of reinventing deleted or already-decided work.
 - Decisions come from the register you name with `decisionsDir` in `$XDG_CONFIG_HOME/omp-kit/prior-art.json` (or `OMP_KIT_DECISIONS_DIR`), read from its end so the newest decisions show; unset, the block says decisions are not configured.
+- `doctor --scope activation` no longer reports the extension manifest invalid after this release: `extensions/prior-art.ts` is listed as a library module.
