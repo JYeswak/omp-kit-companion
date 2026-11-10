@@ -226,8 +226,8 @@ omp-kit heavy --label cli-tests -- bun test tests/cli   # load-admitted, nice 10
 
 `send` proves delivery (tmux via `ntm`; `tern:<block>` natively, given `--window-key EP`), drops
 undelivered messages into the state root and exits with the delivery status (`OK`, `PENDING_SUBMIT`,
-`NOT_DELIVERED`, or `REPLACED_UNPROVEN`; `--ack-pending` clears that, or an attempt unlanded for an hour). Fleet Watch is opt-in:
-[docs/fleet-watch.md](docs/fleet-watch.md).
+`NOT_DELIVERED`, or `REPLACED_UNPROVEN`; `--ack-pending` clears that, or an attempt unlanded for an hour).
+Fleet Watch is retired; its [config](docs/fleet-watch.md) remains for admission.
 
 ### Reviewed installed-template imports
 
@@ -241,8 +241,8 @@ mapping fields, activation commands and read-only verification.
 
 ### Service jobs and kit updates
 
-19 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
-`load-watch`, `ci-poller`, `fleet-flush`; 120 s: `fleet-watch`; 300 s:
+18 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
+`load-watch`, `ci-poller`, `fleet-flush`; 300 s:
 `kit-update`, `close-pass`; hourly: `claude-save`, [`am-retain`](docs/service-contract.md#agent-mail-retention),
 `session-retain`, `cache-retain`, `autocut`; 6 h: `scratch-reaper`,
 `fleet-lessons`; daily: `cc-compress`, `skill-mine`; weekly: `gate-rationalize`; daemon: `cc`.
@@ -465,7 +465,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit milestone` | `milestone pin\|unpin SESSION BEAD... --reason TEXT [--by NAME] [--first]`; `milestone date SESSION DATE --reason TEXT`; `milestone show SESSION` | Validated atomic logged edits; `show`: epic, due, pins | `omp-kit milestone show cfsios --json` |
 | `omp-kit tools verify` | `verify NAME [--artifact PATH] [--platform OS_ARCH]` | Pinned archive/binary hashes; no install or execution | `omp-kit tools verify ovnfs --platform darwin_arm64` |
 | `omp-kit checkin` | `checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]` | Record verified own activity or explicit items; refuses unavailable coverage | `omp-kit checkin --done br-123 --next 'Verify the consumer' --bead br-123 --commit --json` |
-| `omp-kit project` | `project add REPO --session NAME [--workers N] [--profile P] [--plan\|--apply] [--undo RECEIPT]`; `project status SESSION [--json]` | Managed, monitored project in one act, with undo | `omp-kit project status skillgrowth --json` |
+| `omp-kit project` | `project add REPO --session NAME [--workers N] [--profile P] [--plan\|--apply] [--undo RECEIPT]`; `project status SESSION [--json]` | Register seats with undo; status shows last wake outcome/time or no wake recorded | `omp-kit project status skillgrowth --json` |
 | `omp-kit test` | `test [--full] [--record] [--rules DIR --cases FILE] [--integrations] [--mcp] [--metamorphic] [--mutants] [--repeat N]` | Matcher conformance, external packs, live fixtures, per-profile integration and MCP proofs, mutation and flake checks | `omp-kit test --json` |
 | `omp-kit doctor` | `doctor [--scope NAME] [--project PATH] [--profile NAME] [--staged] [--deep --yes]` | Read-only diagnosis of one scope (table below) | `omp-kit doctor --scope lsp --json` |
 | `omp-kit health` | `health` | Strict monitoring status | `omp-kit health --json` |
@@ -614,7 +614,7 @@ report without writing.
   │ extensions, mcp.json                 │   │ $XDG_STATE_HOME/omp-kit  │
   └──────────────────────────────────────┘   └──────────────────────────┘
                                                  ▲
-  service jobs (launchd/systemd): omp-watch, kit-update, fleet-watch,
+  service jobs (launchd/systemd): omp-watch, kit-update,
   scratch-reaper, ci-poller, load-watch, fleet-lessons, claude-save, fleet-flush
 
   green main + changelog.d ──► release train ──► tag vX.Y.Z ──► release.yml
@@ -627,7 +627,7 @@ report without writing.
 |---|---|---|
 | `XDG_STATE_HOME` | State root for receipts, census, logs; must be absolute | `~/.local/state` → `omp-kit/` |
 | `$XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json` | Profiles `apply policy` manages | absent: every named profile |
-| `~/.config/omp-kit/fleet-watch.json`, `OMP_KIT_FLEET_WATCH_CONFIG` | Fleet Watch sessions | none; the service refuses without it |
+| `~/.config/omp-kit/fleet-watch.json`, `OMP_KIT_FLEET_WATCH_CONFIG` | Coordinator/admission routes and job settings | none |
 | `$XDG_CONFIG_HOME/omp-kit/load.json` | `heavy` slots, maximum wait, disk observer (`sbh` strict, `statfs` OS-only, `auto` default) and optional floor percent | 2 slots, auto observer, bytes-need only |
 | `config/planning-score.toml`, `<repo>/.omp/planning-score.toml` | Planning score tuning and fleet list | kit defaults |
 | `<repo>/.omp/plan.toml`, `OMP_KIT_PLAN_CONFIG` | The repo's comprehensive plan: path, review dir (rounds counted from review files) | none: missions from `plan(<m>):` commits only |
@@ -650,7 +650,7 @@ report without writing.
 | `OMP_KIT_SERVICES_DIRS` | Extra job directories for `doctor --scope services` | none |
 | `OMP_KIT_ATTEST_OWNER`, `GH_BIN` | Installer attestation owner and `gh` binary | `JYeswak`, `gh` |
 | `OMP_KIT_BIN` | Command the pre-commit hook runs | `omp-kit` |
-| `TMUX_TMPDIR` | tmux socket directory; required by fleet-watch | none |
+| `TMUX_TMPDIR` | tmux socket directory for tmux-based operations | none |
 | `AGENT_MAIL_STORAGE_ROOT` | Agent Mail store for reservations and fleet scopes | unset: `UNVERIFIED` |
 | `BEADS_DB` | Tracker database for `doctor --scope flywheel` | `<project>/.beads/beads.db` |
 
@@ -669,7 +669,7 @@ Example files:
 ```
 
 See [docs/fleet-watch.md](docs/fleet-watch.md) for `fleet-watch.json`:
-session/repo selection, coordinator and worker panes, readiness commands and polling.
+coordinator routes and operator settings. `project status` reads `mail-wake.jsonl` in the kit state root.
 
 Turn on automatic updates (the environment is captured into the job file):
 

@@ -32,9 +32,7 @@ function row(repo: string, overrides: Partial<WorkRepoReport> = {}): WorkRepoRep
 
 function tick(watcher: FleetWatcher | undefined, repos: readonly WorkRepoReport[], sent: { session: string; pane: string; text: string }[], overrides: Partial<FleetWatchOnceDeps> = {}, watchConfig = config) {
 	return runFleetWatchOnce(watchConfig, {
-		capture: () => ({ code: 0, stdout: "⠋ working", stderr: "" }),
 		send: (session, pane, text) => sent.push({ session, pane, text }),
-		sendKeys: () => {},
 		logPath: "/dev/null",
 		statePath: null,
 		now: () => 0,

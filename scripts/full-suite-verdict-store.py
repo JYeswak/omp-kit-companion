@@ -56,7 +56,6 @@ LOCAL_REQUIRED = (
     "tests/cli/package-release.test.ts",  # native full-test hit 120 s on 3 verdicts
     "tests/cli/apply-policy-settings.test.ts",  # hit 120 s
     "tests/cli/output-ids.test.ts",  # hit 120 s
-    "tests/cli/fleet-watch-pull.test.ts",  # linear-near-miss timing, 3 verdicts
     "tests/cli/test-runner.test.ts",  # long-token CPU budget, 21 historic failure lines
     "tests/cli/regex-budget.test.ts",  # stream budget timing
     # LOCKLINUX1 (ompkit-1ra0d.111): the non-inheriting-child lock cases fail intermittently on Linux only (5 verdict

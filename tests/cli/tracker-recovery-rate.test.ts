@@ -3,7 +3,6 @@ import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { preassignVerdict } from "../../src/fleet-watch.ts";
 import { RECOVERY_ARTIFACT_BOUND, recoverBusyTracker, recoveryFlagDirs, type TrackerRecoveryCommandResult } from "../../src/tracker-recovery.ts";
 import type { LivenessDeps } from "../../src/scratch.ts";
 
@@ -84,7 +83,7 @@ function deps(nowMs: number, brCalls: string[][], code = 0, onRecover?: () => vo
 	};
 }
 
-test("[1] old marker followed by a later complete: zero recover commands, preassign ready", () => {
+test("[1] old marker followed by a later complete: zero recover commands", () => {
 	const planted = plantedRepo();
 	plantMarker(planted.root, "20261002T000000.000000Z-1-0", T0);
 	plantComplete(planted.root, "20261010T000000.000000Z-2-0", T1);
@@ -93,7 +92,6 @@ test("[1] old marker followed by a later complete: zero recover commands, preass
 	const result = recoverBusyTracker(planted.repo, "omp-test", deps(T1, brCalls));
 	expect(result).toBeNull();
 	expect(brCalls).toEqual([]);
-	expect(preassignVerdict("s", [], null, [{ id: "x-1", status: "open", assignee: null, labels: [], issue_type: "task" }], []).ready).toBe(true);
 });
 
 test("[1b] old marker with no complete anywhere still latches", () => {
@@ -146,14 +144,11 @@ test("recovery artifacts hit a stable bound and report quarantine growth", () =>
 	expect(first?.receipt).toMatchObject({ cycle_count: 1, wal_index_artifact_count: 0, artifact_count: 1, artifact_bound: RECOVERY_ARTIFACT_BOUND, growth: 1, upstream: { issue: "beads_rust#532", br_version: "0.7.4", disposition: "UNCONFIRMED; mitigation only" } });
 	expect(brCalls).toHaveLength(1);
 
-	const nextRun = plantMarker(planted.root, "20261031T000000.000000Z-101-0", T1 + 2 * 60 * 60_000);
+	plantMarker(planted.root, "20261031T000000.000000Z-101-0", T1 + 2 * 60 * 60_000);
 	const second = recoverBusyTracker(planted.repo, "omp-test", deps(T1 + 2 * 60 * 60_000, brCalls));
 	expect(second?.kind).toBe("RECOVERY_QUARANTINE_GROWTH");
 	expect(second?.text).toContain("WAL_QUARANTINE_GROWTH");
 	expect(second?.receipt).toMatchObject({ cycle_count: 1, wal_index_artifact_count: 0, artifact_count: 1, artifact_bound: RECOVERY_ARTIFACT_BOUND, growth: 0 });
-	const gate = preassignVerdict("omp-test", [nextRun], second?.kind ?? null, [], []);
-	expect(gate.ready).toBe(false);
-	if (!gate.ready) expect(gate.kind).toBe("WRITE_LATCHED");
 	expect(brCalls).toHaveLength(1);
 	expect(JSON.parse(readFileSync(join(planted.root, ".omp-kit-last-recover.json"), "utf8")).at_ms).toBe(T1);
 });
@@ -182,13 +177,6 @@ test("quarantined WAL artifacts latch writes without an active recovery marker",
 	const result = recoverBusyTracker(planted.repo, "omp-test", deps(T1, brCalls));
 	expect(result?.kind).toBe("RECOVERY_QUARANTINE_GROWTH");
 	expect(result?.receipt).toMatchObject({ cycle_count: 0, wal_index_artifact_count: 1, artifact_count: 1, artifact_bound: RECOVERY_ARTIFACT_BOUND, growth: 0 });
-	const gate = preassignVerdict("omp-test", [], result?.kind ?? null, [], []);
-	expect(gate.ready).toBe(false);
-	if (!gate.ready) {
-		expect(gate.kind).toBe("WRITE_LATCHED");
-		expect(gate.text).toContain("WAL_QUARANTINE_GROWTH");
-		expect(gate.text).toContain("quarantine artifacts");
-	}
 	expect(brCalls).toEqual([]);
 });
 

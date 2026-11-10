@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path";
 import { REPORT_INJECT_DEADLINE_MS, runReportInjectJob, type ReportInjectCommandResult } from "../../src/report-inject-job.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
-import { FleetWatcher, type FleetWatchConfig } from "../../src/fleet-watch.ts";
+import type { FleetWatchConfig } from "../../src/fleet-watch.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -164,14 +164,14 @@ test("SUPPLYARM1 puts persistent overdue cut exhaustion first in the chief diges
 			milestone: { epic: "x-goal", declaredAt: "2026-10-13T17:00:00.000Z", pinned: ["x-waiting"] },
 		}],
 	};
-	let now = Date.parse(observedAt) - 120 * 60_000;
-	const watcher = new FleetWatcher(cfg, () => now);
-	watcher.supply.settleCutExhaustion(cfg.sessions[0]!, 0);
-	now += 120 * 60_000;
-	watcher.supply.settleCutExhaustion(cfg.sessions[0]!, 0);
+	const cut = cfg.sessions[0]!.milestone!;
+	const persisted = { version: 1, panes: {}, cutExhaustion: {
+		w2: { declaration: JSON.stringify([cut.epic, cut.declaredAt, cut.pinned]),
+			startedAt: Date.parse(observedAt) - 120 * 60_000, stage: "critical" },
+	} };
 	const watcherStateDir = join(f.home, ".local", "state", "omp-kit");
 	mkdirSync(watcherStateDir, { recursive: true });
-	writeFileSync(join(watcherStateDir, "fleet-watch-state.json"), JSON.stringify(watcher.snapshot()), { mode: 0o600 });
+	writeFileSync(join(watcherStateDir, "fleet-watch-state.json"), JSON.stringify(persisted), { mode: 0o600 });
 	writeFileSync(f.configPath, JSON.stringify(cfg));
 	const delivered: string[] = [];
 	const invoke = () => runReportInjectJob({ reportRoot: f.kitRoot, home: f.home, dropDir: join(f.root, "drop"), fleetConfigPath: f.configPath }, {

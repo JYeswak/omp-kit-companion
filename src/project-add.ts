@@ -1,12 +1,6 @@
-/** project-add (ompkit-1ra0d.104 PROJECTADD1): make a repository a managed,
- * monitored omp-kit project in one act — mint seat names, write the repo
- * opt-in, insert the roster entry (minimal text insertion, never a reformat),
- * add the fleet-watch session, create the Tern tab and start the seats via
- * the turn-on path, record the created pane ids back into fleet-watch,
- * deliver the director's first goal and each worker's orientation with proof
- * of consumption, and write a receipt with undo. Plus `project status` for
- * live monitoring. Every external effect runs through the injected deps so
- * the fixture suite fakes Tern, Agent Mail, br and turn-on without processes.
+/** Project registration preserves fleet routing/admission metadata, creates
+ * named seats and proves their initial goal delivery. Status reads live seats
+ * and their latest recorded mail wake; registration is not a monitoring service.
  */
 import { closeSync, existsSync, fdatasyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -20,6 +14,7 @@ import { loadFleetWatchConfig, type FleetWatchSession } from "./fleet-watch.ts";
 import { run as runBounded } from "./kitlib/run.ts";
 import { writePrivate } from "./mutations.ts";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
+import { readJsonl } from "./kitlib/jsonl.ts";
 
 export interface ProjectAddExec {
 	run: (argv: readonly string[], opts?: { cwd?: string; env?: Record<string, string>; deadlineMs?: number }) => Promise<{ code: number; out: string; err: string }>;
@@ -687,6 +682,7 @@ export interface ProjectSeatStatus {
 	named: boolean;
 	lastActivity: string | null;
 	activeGoal: string | null;
+	wake: { outcome: string; at: string | null };
 }
 
 export interface ProjectStatusResult {
@@ -703,6 +699,25 @@ function tryParseJson(text: string): unknown {
 	} catch {
 		return null;
 	}
+}
+
+/** Both mail-wake writers record recipient, status and ts in the kit state root. */
+function latestSeatWakes(stateRoot: string): Map<string, { outcome: string; at: string }> {
+	const wakes = new Map<string, { outcome: string; at: string }>();
+	let cursor;
+	do {
+		const result = readJsonl(join(stateRoot, "mail-wake.jsonl"), { fromCursor: cursor });
+		for (const value of result.rows) {
+			if (typeof value !== "object" || value === null) continue;
+			const row = value as Record<string, unknown>;
+			if (typeof row.recipient !== "string" || typeof row.status !== "string" || typeof row.ts !== "string" || !Number.isFinite(Date.parse(row.ts))) continue;
+			const previous = wakes.get(row.recipient);
+			if (previous === undefined || Date.parse(row.ts) >= Date.parse(previous.at)) wakes.set(row.recipient, { outcome: row.status, at: row.ts });
+		}
+		if (!result.more || result.cursor === null) break;
+		cursor = result.cursor;
+	} while (true);
+	return wakes;
 }
 
 export async function projectStatus(input: { session: string; env: NodeJS.ProcessEnv; deps?: ProjectAddDeps }): Promise<{ ok: true; status: ProjectStatusResult } | { ok: false; code: string; detail: string; remediation: string }> {
@@ -767,6 +782,7 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 			names.push(null);
 		}
 	}
+	const wakes = latestSeatWakes(paths.stateRoot);
 	const seats: ProjectSeatStatus[] = [coordinator, ...(workerIds as string[])].map((id, index) => {
 		const file = paneFile(id);
 		let lastActivity: string | null = null;
@@ -789,6 +805,7 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 		return {
 			role: index === 0 ? "director" : "worker", name: names[index] ?? null, pane: `tern:${id}`,
 			alive: blockLive(id), named: names[index] !== null, lastActivity, activeGoal,
+			wake: wakes.get(names[index] ?? "") ?? { outcome: "no wake recorded", at: null },
 		};
 	});
 	const brBin = input.env.BR_BIN?.trim() || "br";

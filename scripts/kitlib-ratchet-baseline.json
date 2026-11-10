@@ -146,7 +146,6 @@
    "tests/cli/fleet-lessons.test.ts": 19,
    "tests/cli/fleet-round.test.ts": 1,
    "tests/cli/fleet-watch-gitlock-reap.test.ts": 3,
-   "tests/cli/fleet-watch-preassign.test.ts": 1,
    "tests/cli/fleet-watch-stranded-rhy9-24.test.ts": 1,
    "tests/cli/fleet-watch.test.ts": 3,
    "tests/cli/fresh-gate.test.ts": 16,
@@ -270,6 +269,6 @@
  },
  "schema": 1,
  "totals": {
-  "raw-spawn": 737
+  "raw-spawn": 736
  }
 }

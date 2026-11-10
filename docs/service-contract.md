@@ -16,7 +16,7 @@ contract; `service doctor` enforces it item by item.
 | 1 | install = render, diff, backup, bootstrap, verify, with receipt; `--dry-run` previews | IMPLEMENTED (`src/service.ts` `installService`, `planInstall`; cli `serviceCommand`) | `plist-present`, `plist-valid`, `plist-matches-renderer`, `loaded`, `binary-resolves` |
 | 2 | uninstall restores (backup kept, bootout verified) | IMPLEMENTED (`uninstallService`, `uninstallSystemd`) | `plist-present` / `unit-present` after the fact |
 | 3 | refuses a label loaded from another plist unless `--replace` | IMPLEMENTED (`LABEL_LOADED_ELSEWHERE`, both platforms) | `loaded` (path-mismatch FAIL) |
-| 4 | off switch per job: uninstalled, or a disabled flag; off means no run and no receipt | WIRED: `service run` checks `readJobOff` first per job (fleet-watch migrated); OFF writes no receipt | `service run <job>` with `<job>.off` present |
+| 4 | off switch per job: uninstalled, or a disabled flag; off means no run and no receipt | WIRED: `service run` checks `readJobOff` first per job; OFF writes no receipt | `service run <job>` with `<job>.off` present |
 | 5 | RunAtLoad false | RESOLVED: defs are `runAtLoad: false`; enforced by `contract-run-at-load` (see below) | `contract-run-at-load` (`src/service-contract.ts`, wired into `checkService`) |
 | 6 | ProcessType Background | IMPLEMENTED in renderer | NEW: `contract-processtype` |
 | 7 | explicit absolute PATH/HOME from config | IMPLEMENTED in renderer | NEW: `contract-env`, `contract-systemd-env` |
@@ -24,7 +24,7 @@ contract; `service doctor` enforces it item by item.
 | 9 | single-flight lock: overlap exits SKIPPED-OVERLAP | SOURCE: per-job kernel-serialized claim updates; live or unknown holders are never age-stolen; release is fenced to the acquired nonce and directory identity. Installed qualification remains `rz5.113.1`. | `service-run.test.ts` and `service-run-admission.test.ts`: aged live keeper, unknown probe, replaced claim, same-clock reacquisition, and competing owned processes |
 | 10 | load gate: 1-min load > 2.5x cores writes SKIPPED-LOAD, no work; heavy steps via `omp-kit heavy` at nice 10 | WIRED: `service run` gates on entry (real loadavg, `OMP_KIT_LOAD_OVERRIDE` test seam); skip writes receipt, no work | planted e2e high-load in `service-fleet.test.ts` |
 | 11 | per-run time cap: kill past the cap, record TIMEOUT | WIRED for subprocess jobs (`omp-watch` via `runWithCap`+SIGKILL, per-job caps below cadence); in-process jobs are bounded by design, supervisor TimeoutStartSec covers installs | planted e2e TIMEOUT in `service-fleet.test.ts`; live `/bin/sleep` killed at cap |
-| 12 | one receipt per run (job, version, start, duration, exit, outcome counts) feeding VALUE1 | PARTIAL: `scratch-reaper` + default jobs write `JobReceipt`; `load-watch`, `kit-update`, `fleet-watch` do not | MISSING: `contract-receipt` (runtime; holder wires) |
+| 12 | one receipt per run (job, version, start, duration, exit, outcome counts) feeding VALUE1 | PARTIAL: `scratch-reaper` + default jobs write `JobReceipt`; `load-watch`, `kit-update` do not | MISSING: `contract-receipt` (runtime; holder wires) |
 | 13 | a failed action names path + reason in stderr and receipt | MISSING for `scratch-reaper` (`SCRATCH_APPLY_FAILED` counts only; live: exit 1 every run, unnamed) | Owned by REAP1 (`rz5.118`, blocks SVC1): fix lands there, this doc asserts it |
 | 14 | logs rotated by doctor | IMPLEMENTED (`--fix` renames oversized own logs; `oversizedOwnLogs`, 50 MB threshold) | `log-dir-logs` |
 | 15 | launchd macOS / systemd user timers Linux | IMPLEMENTED (si4 tracks Linux) | `unit-present`, `unit-matches-renderer`, `loaded` (linux) |
@@ -281,14 +281,12 @@ reports all six `contract-*` checks. `service doctor --all` on Josh's machine
 still needs stale installs reinstalled (drifted plists report
 `plist-matches-renderer` until `--fix` rewrites them).
 
-## Fleet-watch render inputs
+## Retired Fleet Watch service
 
-When `OMP_KIT_FLEET_WATCH_CONFIG` is set while rendering `fleet-watch`, the
-launchd plist and systemd unit carry the resolved absolute config path, so the
-preflighted custom file is the one the scheduled job reads. When unset, the
-job uses the default path under `HOME`. `--dry-run` includes the rendered
-definition as a preview only; it does not write the config or install the
-service.
+Fleet Watch is no longer in the service job table and cannot be installed or
+run through `service`. Its configuration remains project routing and admission
+data, not a monitoring subscription. `project status` reports each seat's last
+mail-wake outcome and timestamp instead; see [fleet configuration](fleet-watch.md).
 
 The service contract reports `HOME`, `PATH`, and (for systemd) `TMPDIR`
 separately, so a path failure is attributed to the field that failed.
@@ -323,4 +321,4 @@ Each row ships in its own bead, whose acceptance names SVC1: value-table
 (VALUE1 `rz5.110`), ecosystem-dogfood (VALUE2 `rz5.111`), mission-scoreboard
 (MP5 `rz5.97`), adoption-replay (ADOPT1 `rz5.107`), skill-gap-mining (SM1
 `ompkit-4gak`), load-watch (LOAD2 `ompkit-w559`), learning-digest (MP7
-`rz5.99`), prompt-grade (PROMPT1 `rz5.105`), fleet-watch (already defined).
+`rz5.99`), prompt-grade (PROMPT1 `rz5.105`). Fleet Watch's job has since been retired.

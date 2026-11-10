@@ -92,9 +92,7 @@ function tickDeps(logPath: string, brCalls: string[][], options: {
 } = {}) {
 	const rec = options.recovery ?? recoveryDeps(brCalls, { nowMs: options.nowMs });
 	return {
-		capture: () => ({ code: 0, stdout: "", stderr: "" }),
 		send: () => { throw new Error("must not send"); },
-		sendKeys: () => { throw new Error("must not steer"); },
 		logPath,
 		statePath: null,
 		now: () => options.nowMs ?? T1,

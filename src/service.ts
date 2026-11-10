@@ -109,8 +109,6 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 		ownedState: home => [{ path: quarantineDir(home) }, { path: reapLogPath(home) }] },
 	"scratch-pressure": { name: "scratch-pressure", label: "com.omp-kit.scratch-pressure", kind: "interval", intervalSeconds: 60, runAtLoad: false },
 	"kit-update": { name: "kit-update", label: "com.omp-kit.kit-update", kind: "interval", intervalSeconds: 300, runAtLoad: false },
-	"fleet-watch": { name: "fleet-watch", label: "com.omp-kit.fleet-watch", kind: "interval", intervalSeconds: 120, runAtLoad: false,
-		ownedState: home => [{ path: fleetWatchLogPath(home) }, { path: join(dirname(fleetWatchLogPath(home)), "fleet-watch-state.json") }] },
 	"fleet-lessons": { name: "fleet-lessons", label: "com.omp-kit.fleet-lessons", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
 	// The census dir; `omp-kit heavy` keeps its admission queue beside the census it admits against.
 	"load-watch": { name: "load-watch", label: "com.omp-kit.load-watch", kind: "interval", intervalSeconds: 60, runAtLoad: false,
@@ -481,12 +479,9 @@ export function ccStateDir(home: string): string {
 	return join(kitStateDir(home), "cc");
 }
 
-/** fleet-flush and fleet-watch log under the default state home whatever XDG_STATE_HOME says. */
+/** fleet-flush logs under the default state home whatever XDG_STATE_HOME says. */
 export function fleetFlushLogPath(home: string): string {
 	return join(home, ".local", "state", "omp-kit", "fleet-flush.jsonl");
-}
-export function fleetWatchLogPath(home: string): string {
-	return join(home, ".local", "state", "omp-kit", "fleet-watch.jsonl");
 }
 
 function serviceTmpDir(home: string): string {
@@ -554,29 +549,6 @@ function xml(value: string): string {
 	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function plistEnvironmentValue(text: string | null | undefined, key: string): string | null {
-	const value = text?.match(new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`))?.[1];
-	return value === undefined ? null : value.replace(/&quot;/g, "\"").replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&");
-}
-
-function systemdEnvironmentValue(text: string | null, key: string): string | null {
-	const value = text?.match(new RegExp(`^Environment=${key}=(.+)$`, "m"))?.[1];
-	if (!value) return null;
-	if (value.startsWith("\"") && value.endsWith("\"")) {
-		return value.slice(1, -1).replace(/\$\$\$\$/g, "$").replace(/%%/g, "%").replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
-	}
-	return value;
-}
-
-function tmuxTmpDirResolves(path: string | null): boolean {
-	if (!path || !isAbsolute(path) || (process.env.TMUX_TMPDIR && path !== process.env.TMUX_TMPDIR)) return false;
-	try { return statSync(path).isDirectory(); } catch { return false; }
-}
-
-function withoutTmuxTmpDir(text: string): string {
-	return text.replace(/<key>TMUX_TMPDIR<\/key>\s*<string>[^<]*<\/string>/, "")
-		.replace(/^Environment=TMUX_TMPDIR=.*\n?/m, "");
-}
 
 const KIT_UPDATE_ENV_KEYS = ["OMP_KIT_UPDATE_ENABLED", "OMP_KIT_UPDATE_POLL", "OMP_KIT_UPDATE_REPO", "OMP_KIT_UPDATE_INDEX", "OMP_KIT_UPDATE_ARCHIVE", "OMP_KIT_UPDATE_VERSION", "OMP_KIT_UPDATE_SOURCE_TAG"] as const;
 function kitUpdateEnvironment(job: ServiceJobDef): [string, string][] {
@@ -654,9 +626,6 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		`\t\t<string>${xml(stateHome(home))}</string>`,
 		"\t\t<key>TMPDIR</key>",
 		`\t\t<string>${xml(serviceTmpDir(home))}</string>`,
-		...(job.name === "fleet-watch" && process.env.TMUX_TMPDIR
-			? ["\t\t<key>TMUX_TMPDIR</key>", `\t\t<string>${xml(process.env.TMUX_TMPDIR)}</string>`]
-			: []),
 		"\t\t<key>PATH</key>",
 		`\t\t<string>${xml(servicePath(home))}</string>`,
 		...ciPollerEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
@@ -706,9 +675,6 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 		`Environment=XDG_STATE_HOME=${systemdQuote(stateHome(home))}`,
 		`Environment=PATH=${systemdQuote(servicePath(home))}`,
 		`Environment=TMPDIR=${systemdQuote(serviceTmpDir(home))}`,
-		...(job.name === "fleet-watch" && process.env.TMUX_TMPDIR
-			? [`Environment=TMUX_TMPDIR=${systemdQuote(process.env.TMUX_TMPDIR)}`]
-			: []),
 		...ciPollerEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		...kitUpdateEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		...amRetentionEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
@@ -916,9 +882,7 @@ export function checkService(input: DoctorInput): ServiceCheck[] {
 	if (!input.installed) {
 		checks.push({ id: "plist-matches-renderer", status: "FAIL", message: "No installed plist to compare", remediation: `Run omp-kit service install ${input.job.name} --apply --yes.` });
 	} else {
-		const expected = input.job.name === "fleet-watch" ? withoutTmuxTmpDir(input.rendered) : input.rendered;
-		const installed = input.job.name === "fleet-watch" ? withoutTmuxTmpDir(input.installed.text) : input.installed.text;
-		const diff = plistDiff(expected, installed);
+		const diff = plistDiff(input.rendered, input.installed.text);
 		checks.push(diff.length === 0
 			? { id: "plist-matches-renderer", status: "PASS", message: "Installed plist matches the renderer", remediation: "None." }
 			: { id: "plist-matches-renderer", status: "WARN", message: `Installed plist drifts by ${diff.length} normalized line(s): ${diff.slice(0, 3).join(" | ")}`, remediation: `Run omp-kit service install ${input.job.name} --apply --yes to rewrite it with a backup.` });
@@ -928,13 +892,6 @@ export function checkService(input: DoctorInput): ServiceCheck[] {
 	checks.push(hasPrivateTmpdir
 		? { id: "tmpdir-present", status: "PASS", message: `Installed plist uses private service TMPDIR ${serviceTmpDir(input.home)}`, remediation: "None." }
 		: { id: "tmpdir-present", status: "FAIL", message: "Installed plist does not use the private service TMPDIR or its owner marker and permissions are unsafe", remediation: `Run omp-kit service install ${input.job.name} --apply --yes.` });
-	if (input.job.name === "fleet-watch") {
-		const tmuxTmpDir = plistEnvironmentValue(input.installed?.text, "TMUX_TMPDIR");
-		const resolves = tmuxTmpDirResolves(tmuxTmpDir);
-		checks.push(resolves
-			? { id: "tmux-tmpdir-resolves", status: "PASS", message: `TMUX_TMPDIR resolves to ${tmuxTmpDir}`, remediation: "None." }
-			: { id: "tmux-tmpdir-resolves", status: "FAIL", message: "Installed plist TMUX_TMPDIR is missing, relative, unresolved, or differs from the current TMUX_TMPDIR", remediation: `Set TMUX_TMPDIR to the absolute tmux socket directory and reinstall fleet-watch.` });
-	}
 	if (!executableFile(input.launcher)) {
 		checks.push({ id: "binary-resolves", status: "FAIL", message: `Launcher ${input.launcher} is missing or not executable`, remediation: "Reinstall the kit at the stable path, then reinstall the job." });
 	} else {
@@ -1067,9 +1024,7 @@ export function checkServiceLinux(input: LinuxUnitInput): ServiceCheck[] {
 	if (installed === null) {
 		checks.push({ id: "unit-matches-renderer", status: "FAIL", message: "No installed unit to compare", remediation: `Run omp-kit service install ${input.job.name} --apply --yes.` });
 	} else {
-		const expected = input.job.name === "fleet-watch" ? withoutTmuxTmpDir(input.renderedService) : input.renderedService;
-		const comparableInstalled = input.job.name === "fleet-watch" ? withoutTmuxTmpDir(installed) : installed;
-		const diff = plistDiff(expected, comparableInstalled);
+		const diff = plistDiff(input.renderedService, installed);
 		checks.push(diff.length === 0
 			? { id: "unit-matches-renderer", status: "PASS", message: "Installed unit matches the renderer", remediation: "None." }
 			: { id: "unit-matches-renderer", status: "WARN", message: `Installed unit drifts by ${diff.length} normalized line(s)`, remediation: `Run omp-kit service install ${input.job.name} --apply --yes to rewrite it with a backup.` });
@@ -1079,13 +1034,6 @@ export function checkServiceLinux(input: LinuxUnitInput): ServiceCheck[] {
 	checks.push(hasPrivateTmpdir
 		? { id: "tmpdir-present", status: "PASS", message: `Installed unit uses private service TMPDIR ${serviceTmpDir(input.home)}`, remediation: "None." }
 		: { id: "tmpdir-present", status: "FAIL", message: "Installed unit does not use the private service TMPDIR or its owner marker and permissions are unsafe", remediation: `Run omp-kit service install ${input.job.name} --apply --yes.` });
-	if (input.job.name === "fleet-watch") {
-		const tmuxTmpDir = systemdEnvironmentValue(installed, "TMUX_TMPDIR");
-		const resolves = tmuxTmpDirResolves(tmuxTmpDir);
-		checks.push(resolves
-			? { id: "tmux-tmpdir-resolves", status: "PASS", message: `TMUX_TMPDIR resolves to ${tmuxTmpDir}`, remediation: "None." }
-			: { id: "tmux-tmpdir-resolves", status: "FAIL", message: "Installed unit TMUX_TMPDIR is missing, relative, unresolved, or differs from the current TMUX_TMPDIR", remediation: `Set TMUX_TMPDIR to the absolute tmux socket directory and reinstall fleet-watch.` });
-	}
 	if (!executableFile(input.launcher)) {
 		checks.push({ id: "binary-resolves", status: "FAIL", message: `Launcher ${input.launcher} is missing or not executable`, remediation: "Reinstall the kit at the stable path, then reinstall the job." });
 	} else {

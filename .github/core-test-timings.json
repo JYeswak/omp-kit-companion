@@ -41,8 +41,6 @@
     "tests/cli/fleet-respawn.test.ts": 4,
     "tests/cli/fleet-round.test.ts": 1516,
     "tests/cli/fleet-watch-admission.test.ts": 2,
-    "tests/cli/fleet-watch-preassign.test.ts": 2017,
-    "tests/cli/fleet-watch-pull.test.ts": 255,
     "tests/cli/fleet-watch.test.ts": 70,
     "tests/cli/flush-admission.test.ts": 6,
     "tests/cli/flywheel-invariants.test.ts": 10,

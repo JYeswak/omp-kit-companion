@@ -364,7 +364,6 @@ export const RUN_TIME_CAPS_MS: Record<string, number> = {
 	"omp-watch": 300_000,
 	"scratch-reaper": 1_800_000,
 	"kit-update": 600_000,
-	"fleet-watch": 90_000,
 	"fleet-lessons": 1_800_000,
 	"load-watch": 45_000,
 	"cache-retain": 120_000,

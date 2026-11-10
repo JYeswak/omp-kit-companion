@@ -40,25 +40,19 @@ function idleDeps(logPath: string, admission: AdmissionInput | undefined, recove
 		sends,
 		keys,
 		deps: {
-			capture: () => ({ code: 0, stdout: "idle", stderr: "" }),
 			send: (session: string, pane: string, text: string) => sends.push({ session, pane, text }),
-			sendKeys: (session: string, pane: string, keys: readonly string[]) => keys.push({ session, pane, keys: [...keys] }),
 			logPath,
 			now: () => 0,
 			recoverTracker: (repo: string, _session: string): TrackerRecoveryResult | null => {
 				recoveries.push(repo);
 				return null;
 			},
-			preassignProbes: {
-				findRecoveryFlags: () => [],
-				listReadyRows: () => ({ rows: [{ id: "x-1", status: "open", assignee: null, labels: [], issue_type: "task" }], failure: null }),
-			},
 			...(admission === undefined ? {} : { admission }),
 		},
 	};
 }
 
-test("[b] planted: paused authority refuses nudges with zero sends", () => {
+test("[b] paused authority refuses retained tracker recovery with zero sends", () => {
 	const logPath = scratchLog();
 	const recoveries: string[] = [];
 	const run = idleDeps(logPath, snapshot("PAUSED"), recoveries);
@@ -72,15 +66,16 @@ test("[b] planted: paused authority refuses nudges with zero sends", () => {
 	expect(readFileSync(logPath, "utf8")).toContain("ADMISSION_REFUSED");
 });
 
-test("[b] admitted nudge sends through the real branch", () => {
+test("[b] admitted retained tracker recovery never nudges seats", () => {
 	const logPath = scratchLog();
 	const recoveries: string[] = [];
 	const run = idleDeps(logPath, snapshot("ACTIVE"), recoveries);
 	const watcher = new FleetWatcher(config, () => 0);
 	runFleetWatchOnce(config, run.deps, watcher);
 	const actions = runFleetWatchOnce(config, run.deps, watcher);
-	expect(actions.map((action) => action.kind)).toEqual(["NUDGED"]);
-	expect(run.sends).toHaveLength(1);
+	expect(actions).toEqual([]);
+	expect(run.sends).toEqual([]);
+	expect(recoveries).toEqual(["/repo", "/repo"]);
 });
 
 afterAll(() => cleanupAllOwnedTmp());

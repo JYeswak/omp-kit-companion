@@ -42,9 +42,7 @@ function tick(repo: string, log: string, extra: Record<string, unknown>) {
 			{ session: "omp-test", coordinatorPane: "%54", coordinatorSession: "omp-test", repo, workerPanes: [] },
 		] },
 		{
-			capture: () => ({ code: 0, stdout: "idle", stderr: "" }),
 			send: () => { throw new Error("the reaper never steers panes"); },
-			sendKeys: () => { throw new Error("the reaper never steers panes"); },
 			logPath: log,
 			now: () => NOW,
 			recoverTracker: () => null,
@@ -109,9 +107,7 @@ test.skipIf(!hasLsof)("with no gitLockReap option the tick still reaps, using th
 				{ session: "omp-test", coordinatorPane: "%54", coordinatorSession: "omp-test", repo: f.repo, workerPanes: [] },
 			] },
 			{
-				capture: () => ({ code: 0, stdout: "idle", stderr: "" }),
 				send: () => { throw new Error("the reaper never steers panes"); },
-				sendKeys: () => { throw new Error("the reaper never steers panes"); },
 				logPath: f.log, recoverTracker: () => null, retainTracker: null,
 				gitLockReap: { ledgerPath: f.ledger },
 			},

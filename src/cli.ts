@@ -41,7 +41,6 @@ import { inspectSecrets, secretsScanInputFromEnv } from "./secrets-doctor.ts";
 import { inspectStaleWorktree } from "./stale-worktree-doctor.ts";
 import { inspectPushLatency } from "./push-latency.ts";
 import { releaseReadyFinding } from "./release-ready.ts";
-import { loadFleetWatchConfig, paneTarget, runFleetWatchOnce, STRANDED_ESCALATION_LIMIT_MINUTES } from "./fleet-watch.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
 import { inspectMcpReadiness, mcpExample } from "./mcp-readiness.ts";
@@ -75,7 +74,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
 import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, waitForCi, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, fleetWatchLogPath, jobCodePrefix, launchdLoaded, resolveOperatorCommand, type OperatorCommand, type ServiceProgram } from "./service.ts";
+import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, jobCodePrefix, launchdLoaded, resolveOperatorCommand, type OperatorCommand, type ServiceProgram } from "./service.ts";
 import { ccStateDir } from "./service.ts";
 import { retainOmpSessions } from "./session-retain.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
@@ -2898,22 +2897,6 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					"Run on the fleet host with the omp-kit checkout present (OMP_KIT_FLEET_ROOT or fleet-watch.json); the shipped companion stays inert without it.");
 			}
 		}
-		if (job.name === "fleet-watch") {
-			const configPath = process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
-			let configFile = false;
-			try { configFile = statSync(configPath).isFile(); } catch {}
-			if (!configFile) return refusal("FLEET_WATCH_CONFIG_MISSING", "fleet-watch config file is absent or is not a regular file",
-				"Create fleet-watch.json or leave the opt-in service disabled.");
-			const tmuxTmpDir = process.env.TMUX_TMPDIR;
-			if (!tmuxTmpDir) return refusal("FLEET_WATCH_TMUX_TMPDIR_MISSING", "TMUX_TMPDIR is required for fleet-watch",
-				"Set TMUX_TMPDIR to the tmux server's socket directory and retry.");
-			let tmuxTmpDirValid = isAbsolute(tmuxTmpDir);
-			if (tmuxTmpDirValid) {
-				try { tmuxTmpDirValid = statSync(tmuxTmpDir).isDirectory(); } catch { tmuxTmpDirValid = false; }
-			}
-			if (!tmuxTmpDirValid) return refusal("FLEET_WATCH_TMUX_TMPDIR_INVALID", "TMUX_TMPDIR must be an absolute, existing directory",
-				"Set TMUX_TMPDIR to the absolute tmux server socket directory and retry.");
-		}
 		if (!executableFile(launcher)) {
 			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
 				errors: [{ code: "LAUNCHER_UNAVAILABLE", message: `Stable launcher ${launcher} is missing or not executable`,
@@ -3380,47 +3363,6 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			try { logFlushReport(fleetFlushLogPath(home), report, Date.now()); } catch {}
 			lock.release();
 			return { code: report.overall === "UNAVAILABLE" ? 3 : 0, data: { job: job.name, ...report }, verification: "UNVERIFIED" };
-		}
-		if (job.name === "fleet-watch") {
-			const configPath = process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
-			if (!existsSync(configPath)) { lock.release(); return refusal("FLEET_WATCH_CONFIG_MISSING", "fleet-watch config is absent", "Create fleet-watch.json or leave the opt-in service disabled."); }
-			try {
-				const config = loadFleetWatchConfig(configPath);
-				const logPath = fleetWatchLogPath(home);
-				const watchClaim = readRunClaim(jobsDir, job.name);
-				const watchVersion = watchClaim === null ? null : claimIncarnation(watchClaim);
-				// ompkit-bj08.5 [d]: authority and launchers re-read at this
-				// effects boundary — never constants. The off switch is
-				// re-read because a pause declared after the pre-lock check
-				// must still refuse every nudge; the launcher set is
-				// observed via ps, not derived from the keeper claim, so a
-				// live second launcher outside the claim refuses. An
-				// unobservable ps snapshot confirms nothing (fail-closed).
-				// Generations stay temporal: the gate-time claim incarnation
-				// authorizes the packet, the body-time incarnation is the
-				// current authority; a changed holder in between refuses.
-				const watchOff = readJobOff(join(home, ".local", "state", "omp-kit", `${job.name}.off`));
-				const watchLaunchers = observeServiceLaunchers(defaultRunner, job.name, { home, stateRoot: dirname(jobsDir) });
-				const result = runFleetWatchOnce(config, {
-					capture: (session, pane) => defaultRunner(["tmux", "capture-pane", "-p", "-t", paneTarget(session, pane)]),
-					send: (session, pane, text) => { defaultRunner(["ntm", "send", session, "--panes=" + pane, "--no-cass-check", text]); },
-					sendKeys: (session, pane, keys) => { defaultRunner(["tmux", "send-keys", "-t", paneTarget(session, pane), ...keys]); },
-					logPath,
-					workAudit: await inspectWorkFleet({ roots: [...new Set([...config.sessions.map((session) => session.repo), ...(config.registeredTrackers ?? []).map((tracker) => tracker.repo)])], staleEditLimitMinutes: STRANDED_ESCALATION_LIMIT_MINUTES }),
-					admission: {
-						launcherBinding: "keeper",
-						authority: watchOff.disabled ? "OFF" : "ACTIVE",
-						authorityConfirmed: "launchers" in watchLaunchers,
-						authorityGeneration: watchVersion,
-						launchers: "launchers" in watchLaunchers ? watchLaunchers.launchers : [],
-						keeper: watchClaim === null ? null : { pid: watchClaim.pid, command: "service run fleet-watch" },
-						packet: { action: "nudge", ownedAction: "nudge", generation: gateVersion },
-						governedActions: ["send", "send-keys", "tracker-recovery"],
-					},
-				});
-				lock.release();
-				return { code: 0, data: { overall: "OK", job: job.name, actions: result }, verification: "UNVERIFIED" };
-			} catch (error) { lock.release(); return refusal("FLEET_WATCH_FAILED", error instanceof Error ? error.message : String(error), "Fix the config or disable fleet-watch; no worker claim was made."); }
 		}
 		if (job.name === "scratch-reaper") {
 			if (bodyVersion === null) {

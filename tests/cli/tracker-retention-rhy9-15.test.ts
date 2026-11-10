@@ -305,9 +305,7 @@ test("fleet-watch tick emits the retention action with receipt; quiet repos stay
 				{ session: "omp-other", coordinatorPane: "%55", coordinatorSession: "omp-other", repo: quiet.repo, workerPanes: [] },
 			] },
 			{
-				capture: () => ({ code: 0, stdout: "idle", stderr: "" }),
 				send: () => { throw new Error("retention must not steer panes"); },
-				sendKeys: () => { throw new Error("retention must not steer panes"); },
 				logPath,
 				recoverTracker: () => null,
 				retainTracker: (target: string) => retainTrackerQuarantine(target, { now: () => NOW, holderOf: clearHolder }),

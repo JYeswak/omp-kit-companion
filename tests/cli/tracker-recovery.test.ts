@@ -61,9 +61,7 @@ function watchConfig(repo: string): FleetWatchConfig {
 
 function runOnce(repo: string, logPath: string, recoverTracker: (repo: string, session: string) => TrackerRecoveryResult | null) {
 	return runFleetWatchOnce(watchConfig(repo), {
-		capture: () => ({ code: 0, stdout: "⠋ worker running", stderr: "" }),
 		send: () => { throw new Error("recovery events must be logged, not sent to a worker"); },
-		sendKeys: () => { throw new Error("recovery must not steer tmux panes"); },
 		logPath,
 		recoverTracker,
 	});

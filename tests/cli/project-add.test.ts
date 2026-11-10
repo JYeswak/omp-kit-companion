@@ -2,12 +2,49 @@ import { afterAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { deliverFirstSeatGoal } from "../../src/send.ts";
-import { resolveTurnOnPath, resolveRosterPath } from "../../src/project-add.ts";
+import { projectStatus, resolveTurnOnPath, resolveRosterPath } from "../../src/project-add.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 
 afterAll(cleanupAllOwnedTmp);
+
+test("wake health uses the configured state root and handles absent seat records", async () => {
+	const task = ownedTmp("project-wake-health");
+	const home = join(task.path, "home"), stateHome = join(task.path, "state");
+	mkdirSync(join(home, ".config", "omp-kit"), { recursive: true });
+	mkdirSync(join(stateHome, "omp-kit"), { recursive: true });
+	writeFileSync(join(home, ".config", "omp-kit", "fleet-watch.json"), JSON.stringify({ sessions: [{
+		session: "test", repo: task.path, coordinatorSession: "test", coordinatorPane: "tern:1", workerPanes: ["tern:2"],
+	}] }));
+	const env = { HOME: home, XDG_STATE_HOME: stateHome };
+	const input = { session: "test", env, deps: {
+		mail: { call: async (_tool: string, args: Record<string, unknown>) => ({ agent_name: args.pane_id === "tern:1" ? "Director" : "Worker" }) },
+		exec: { run: async () => ({ code: 0, out: "{}", err: "" }) },
+	} };
+	const previous = process.env.OMP_KIT_FLEET_WATCH_CONFIG;
+	delete process.env.OMP_KIT_FLEET_WATCH_CONFIG;
+	try {
+		const absent = await projectStatus(input);
+		if (!absent.ok) throw new Error(absent.detail);
+		expect(absent.status.seats.map(seat => seat.wake)).toEqual([
+			{ outcome: "no wake recorded", at: null }, { outcome: "no wake recorded", at: null },
+		]);
+		writeFileSync(join(stateHome, "omp-kit", "mail-wake.jsonl"), [
+			{ recipient: "Worker", status: "WAKE_QUEUED", ts: "2026-11-10T12:00:00Z" },
+			{ recipient: "Worker", status: "UNSIGNALED", ts: "2026-11-10T12:02:00Z" },
+			{ recipient: "Worker", status: "WAKE_DELIVERED", ts: "invalid" },
+		].map(row => JSON.stringify(row)).join("\n") + "\n");
+		const recorded = await projectStatus(input);
+		if (!recorded.ok) throw new Error(recorded.detail);
+		expect(recorded.status.seats[0]!.wake).toEqual({ outcome: "no wake recorded", at: null });
+		expect(recorded.status.seats[1]!.wake).toEqual({ outcome: "UNSIGNALED", at: "2026-11-10T12:02:00Z" });
+	} finally {
+		if (previous === undefined) delete process.env.OMP_KIT_FLEET_WATCH_CONFIG;
+		else process.env.OMP_KIT_FLEET_WATCH_CONFIG = previous;
+		task.cleanup();
+	}
+});
 const ROOT = resolve(import.meta.dir, "../..");
 const decoder = new TextDecoder();
 
@@ -254,13 +291,20 @@ test("PROJECTADD1 fixture apply writes stores, delivers the goal with proof, and
 		const goalText = readFileSync(f.sessionFile(f.directorBlock), "utf8");
 		expect(goalText).toContain('"objective":"Grow the skill library"');
 		// Status: seats named and alive, bead counts, real last commit.
+		writeFileSync(join(f.stateRoot, "mail-wake.jsonl"), [
+			{ recipient: "TurquoisePuma", status: "WOKEN_INPROCESS", ts: "2026-11-10T12:01:00Z" },
+			{ recipient: "TurquoisePuma", status: "UNSIGNALED", ts: "2026-11-10T12:00:00Z" },
+			{ recipient: "UnrelatedSeat", status: "WAKE_DELIVERED", ts: "2026-11-10T12:02:00Z" },
+		].map(row => JSON.stringify(row)).join("\n") + "\n{torn");
 		const status = await cli(f, ["project", "status", "skillgrowth", "--json"]);
 		expect(status.code, status.out + status.err).toBe(0);
 		const reported = JSON.parse(status.out).data;
 		expect(reported.census).toEqual({ named: "2/2" });
 		expect(reported.seats).toMatchObject([
-			{ role: "director", name: "TurquoisePuma", pane: `tern:${f.directorBlock}`, alive: true, named: true, activeGoal: "Grow the skill library" },
-			{ role: "worker", name: "FoggyValley", pane: `tern:${f.workerBlock}`, alive: true, named: true },
+			{ role: "director", name: "TurquoisePuma", pane: `tern:${f.directorBlock}`, alive: true, named: true, activeGoal: "Grow the skill library",
+				wake: { outcome: "WOKEN_INPROCESS", at: "2026-11-10T12:01:00Z" } },
+			{ role: "worker", name: "FoggyValley", pane: `tern:${f.workerBlock}`, alive: true, named: true,
+				wake: { outcome: "no wake recorded", at: null } },
 		]);
 		expect(reported.beads).toEqual({ ready: 1, inProgress: 2 });
 		const head = decoder.decode(runFixture(["git", "-C", f.repo, "rev-parse", "HEAD"], { cwd: f.repo, label: "project-add head" }).stdout).trim();

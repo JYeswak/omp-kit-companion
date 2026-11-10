@@ -36,9 +36,7 @@ function fleetConfig(repoA: string, repoB: string, repoC: string, repoD: string)
 
 function tickDeps(logPath: string, recoverCalls: [string, string][]) {
 	return {
-		capture: () => ({ code: 0, stdout: "", stderr: "" }),
 		send: () => { throw new Error("must not send"); },
-		sendKeys: () => { throw new Error("must not steer"); },
 		logPath,
 		recoverTracker: (repo: string, session: string): TrackerRecoveryResult | null => {
 			recoverCalls.push([repo, session]);

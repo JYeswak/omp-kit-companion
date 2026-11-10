@@ -308,9 +308,7 @@ test("[coverage] registry fixtures: exact coverage, no duplicates, foreign direc
 			return { kind: "RECOVERY_PROCEEDED", text: `Fleet Watch: zero live holders; proceeded for ${session}.` };
 		};
 		const actions = runFleetWatchOnce(fleetConfig(join(scratch, "a"), join(scratch, "b"), join(scratch, "c"), join(scratch, "d")), {
-			capture: () => ({ code: 0, stdout: "", stderr: "" }),
 			send: () => { throw new Error("must not send"); },
-			sendKeys: () => { throw new Error("must not steer"); },
 			logPath,
 			recoverTracker,
 			gitLockReap: null,

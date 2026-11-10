@@ -271,7 +271,7 @@ test("SVC1: age does not authorize claiming an unverifiable empty keeper", () =>
 
 test("SVC1: interval caps sit below cadence", () => {
 	expect(RUN_TIME_CAPS_MS["load-watch"]).toBeLessThan(60_000);
-	expect(RUN_TIME_CAPS_MS["fleet-watch"]).toBeLessThan(120_000);
+	expect(RUN_TIME_CAPS_MS["fleet-watch"]).toBeUndefined();
 	for (const cap of Object.values(RUN_TIME_CAPS_MS)) expect(cap).toBeGreaterThan(0);
 });
 
