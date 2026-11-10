@@ -4,6 +4,17 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.112] - 2026-11-10
+
+### Changed
+
+- Mail wakes and holder liveness read Tern block ids exactly; ids above 2^53 were rounded to a neighbouring pane, so wakes to those seats went nowhere.
+- The kit package loads again: the mail wake's exact Tern id reader ships with the extensions instead of reaching into source the package does not include.
+- The commit gate now selects the package load gate suite when a staged change touches any extensions/*.ts source or the root package.json, so a shipped extension importing outside the package can no longer land untested.
+- New `omp-kit skill-mine` mines every project's agent history (cass sessions and the live Agent Mail store) for recurring procedures worth packaging as skills, drops what an installed skill already covers, and writes a daily evidence pack (`<kit state>/skill-mine/pack-<date>.md`) with verbatim quotes and refs for an agent to judge; read-only unless `--apply` files SKILLCAND beads.
+- Only procedures rank: multi-step sequences with distinct steps, shared verbatim text, error->fix arcs, corrections and mail teaching threads. Single commands, kit/tool verbs, dispatch prompts, advisor sidecar transcripts, harness render lines and injected reminders or skill files never do.
+- `skill-mine status` reports the last run; a new daily `skill-mine` service job runs it once `skillMine` is set in `fleet-watch.json`.
+
 ## [0.2.111] - 2026-11-10
 
 ### Changed

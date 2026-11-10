@@ -1,2 +1,0 @@
-- Mail wakes and holder liveness read Tern block ids exactly; ids above 2^53 were rounded to a neighbouring pane, so wakes to those seats went nowhere.
-- The kit package loads again: the mail wake's exact Tern id reader ships with the extensions instead of reaching into source the package does not include.
