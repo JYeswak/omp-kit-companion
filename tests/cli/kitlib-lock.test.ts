@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { __testing, canonicalPath, privateLock, PrivateLockError, resolveLock, type LockResource, type PrivateLock } from "../../src/kitlib/lock";
 import { run } from "../../src/kitlib/run";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { fixtureDeadlineS } from "./fixture-process";
 
 type Json = Record<string, unknown>;
 type Step = Json & { op: string; when?: "normal" | "bypassed" };
@@ -48,9 +49,37 @@ function replaceLockfile(lockfile: string): void {
 	closeSync(fd);
 }
 
+function linuxLockHolders(path: string): Record<string, unknown> {
+	if (process.platform !== "linux") return {};
+	const evidence: Record<string, unknown> = { holders: [] };
+	try {
+		const target = statSync(path);
+		evidence.dev = target.dev;
+		evidence.ino = target.ino;
+		evidence.locks = readFileSync("/proc/locks", "utf8").split("\n")
+			.filter(line => line.split(" ").filter(Boolean)[5]?.split(":").at(-1) === String(target.ino));
+		const deadline = performance.now() + 2_000;
+		for (const pid of readdirSync("/proc")) {
+			if (!Number.isSafeInteger(Number(pid))) continue;
+			if (performance.now() >= deadline) { evidence.scan_deadline = true; break; }
+			try {
+				for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+					const info = statSync(`/proc/${pid}/fd/${fd}`);
+					if (info.dev !== target.dev || info.ino !== target.ino) continue;
+					(evidence.holders as unknown[]).push({
+						pid: Number(pid), fd, cmdline: readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " "),
+						fdinfo: readFileSync(`/proc/${pid}/fdinfo/${fd}`, "utf8"),
+					});
+				}
+			} catch { /* A process may exit or refuse access during this diagnostic-only snapshot. */ }
+		}
+	} catch (error) { evidence.unavailable = String(error); }
+	return evidence;
+}
+
 type Holder = { proc: Bun.Subprocess<"pipe", "pipe", "inherit">; pid: number };
 type PopenChild = { file: number; pidPath: string; pid?: number; closed: boolean };
-type Inheritor = PopenChild & { fifo: string };
+type Inheritor = PopenChild & { fifo: string; writer?: number };
 // Real-process integration: fake timers cannot advance kernel child states or FIFO opens; polls use real time.
 
 function shellWord(word: string): string {
@@ -234,7 +263,11 @@ class CaseRun {
 			outcome = error;
 		}
 		if (want.acquired) {
-			if (outcome instanceof Error) throw new Error(`${where}: expected acquired, got ${outcome.message} ${JSON.stringify((outcome as PrivateLockError).evidence ?? {})}`);
+			if (outcome instanceof Error) {
+				const refusal = outcome as PrivateLockError;
+				const holders = refusal.code === "DEADLINE" ? linuxLockHolders(refusal.evidence.path) : {};
+				throw new Error(`${where}: expected acquired, got ${outcome.message} ${JSON.stringify(refusal.evidence ?? {})}; linux_lock_holders=${JSON.stringify(holders)}`);
+			}
 			const lock = outcome as PrivateLock;
 			// A bypassed run acquires through the planted state on purpose; only a clean run must show the private shape.
 			if (!this.bypassed) {
@@ -280,12 +313,31 @@ class CaseRun {
 		expect(made.rc).toBe(0);
 		const argv = substitute(corpus.inheritor_argv, { FIFO: fifo });
 		this.inheritors.set(step.as as string, { ...startPopen(argv, `${fifo}.pid`), fifo });
+		// Linux wakes a vfork/posix_spawn parent in exec_mm_release(), before do_close_on_exec().
+		// popen returning is not a CLOEXEC barrier. Only the exec'd cat opens this FIFO for reading.
+		const deadline = performance.now() + fixtureDeadlineS(30) * 1_000;
+		while (performance.now() < deadline) {
+			try {
+				// Keep cat alive until endInheritor instead of sending EOF during startup.
+				this.inheritors.get(step.as as string)!.writer = openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK);
+				return;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENXIO") throw error;
+			}
+			await Bun.sleep(10); // Poll the kernel's reader-open state; fake clocks cannot advance cat.
+		}
+		throw new Error(`INHERITOR_EXEC_UNPROVED fifo=${fifo}`);
 	}
 
 	async endInheritor(name: string): Promise<void> {
 		const inheritor = this.inheritors.get(name);
 		if (inheritor === undefined) return;
 		try {
+			if (inheritor.writer !== undefined) {
+				const writer = inheritor.writer;
+				delete inheritor.writer;
+				closeSync(writer);
+			}
 			// A signal ends our child even while it is opening/reading the FIFO; EOF timing is not a handshake.
 			await finishPopen(inheritor, 10_000, true);
 		} finally {
@@ -363,6 +415,20 @@ describe("kitlib lock conformance corpus", () => {
 });
 
 describe("kitlib lock inheritor shutdown", () => {
+	test("inheritor startup returns only after cat opens the FIFO", async () => {
+		const scratch = ownedTmp("kitlib-lock-startup");
+		const tmp = realpathSync(scratch.path);
+		const testCase = corpus.cases.find(item => item.id === "default-no-inheritance-child-holds-nothing")!;
+		const caseRun = new CaseRun(testCase, { TMP: tmp, STATE: join(tmp, "state") }, false);
+		try {
+			await caseRun.inheritor({ op: "inheritor", as: "ready" });
+			// ENXIO here means startup returned before the exec'd cat reached its FIFO open.
+			closeSync(openSync(join(tmp, "fifo-ready"), constants.O_WRONLY | constants.O_NONBLOCK));
+		} finally {
+			try { await caseRun.cleanup(); } finally { scratch.cleanup(); }
+		}
+	}, fixtureDeadlineS(30) * 1_000);
+
 	async function delayedReader(tmp: string): Promise<PopenChild> {
 		const fifo = join(tmp, "reader.fifo");
 		const gate = join(tmp, "reader-gate.fifo");

@@ -96,6 +96,42 @@ def descriptors_on(path: str) -> list:
     return found
 
 
+def linux_lock_holders(path: str) -> dict:
+    """Failure-only kernel evidence; a raced exit or inaccessible process is reported, not fatal."""
+    if not sys.platform.startswith("linux"):
+        return {}
+    evidence: dict = {"holders": []}
+    try:
+        target = os.stat(path)
+        evidence.update({"dev": target.st_dev, "ino": target.st_ino})
+        with open("/proc/locks", "r", encoding="utf-8") as handle:
+            evidence["locks"] = [line for line in handle.read(1 << 20).splitlines()
+                                 if line.split()[5].rsplit(":", 1)[-1] == str(target.st_ino)]
+        deadline = time.monotonic() + 2
+        for process in Path("/proc").iterdir():
+            if not process.name.isdecimal():
+                continue
+            if time.monotonic() >= deadline:
+                evidence["scan_deadline"] = True
+                break
+            try:
+                for fd in (process / "fd").iterdir():
+                    info = fd.stat()
+                    if (info.st_dev, info.st_ino) != (target.st_dev, target.st_ino):
+                        continue
+                    with (process / "cmdline").open("rb") as handle:
+                        cmdline = handle.read(4096).replace(b"\0", b" ").decode("utf-8", "replace")
+                    with (process / "fdinfo" / fd.name).open("r", encoding="utf-8") as handle:
+                        fdinfo = handle.read(4096)
+                    evidence["holders"].append({"pid": int(process.name), "fd": fd.name,
+                                                "cmdline": cmdline, "fdinfo": fdinfo})
+            except OSError:
+                continue  # A process may exit during this diagnostic-only snapshot.
+    except (OSError, IndexError) as error:
+        evidence["unavailable"] = str(error)
+    return evidence
+
+
 def reset_seam() -> None:
     kitlib_lock._TESTING.update({"disabled": set(), "expect_uid": None, "skip_inherit": False, "after_lock": None})
 
@@ -198,7 +234,9 @@ class CaseRun:
             outcome = error
         if want.get("acquired"):
             if isinstance(outcome, Exception):
-                raise AssertionError(f"{where}: expected acquired, got {outcome!r} {getattr(outcome, 'evidence', {})}")
+                holders = linux_lock_holders(outcome.evidence["path"]) if getattr(outcome, "code", None) == "DEADLINE" else {}
+                raise AssertionError(f"{where}: expected acquired, got {outcome!r} {getattr(outcome, 'evidence', {})}; "
+                                     f"linux_lock_holders={json.dumps(holders)}")
             # A bypassed run acquires through the planted state on purpose; only a clean run must show the private shape.
             if not self.bypassed:
                 info = os.stat(outcome.path)
@@ -240,12 +278,30 @@ class CaseRun:
         argv = substitute(CORPUS["inheritor_argv"], {"FIFO": fifo})
         # close_fds=False: the ordinary exec path that keeps every descriptor not marked close-on-exec.
         proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, close_fds=False)
-        self.inheritors[step["as"]] = (proc, fifo)
+        self.inheritors[step["as"]] = (proc, fifo, None)
+        # Linux wakes a vfork/posix_spawn parent in exec_mm_release(), before do_close_on_exec().
+        # Popen returning is not a CLOEXEC barrier. Only the exec'd cat opens this FIFO for reading.
+        deadline = time.monotonic() + CHILD_DEADLINE_S
+        while time.monotonic() < deadline:
+            try:
+                writer = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError as error:
+                if error.errno != errno.ENXIO:
+                    raise
+            else:
+                self.inheritors[step["as"]] = (proc, fifo, writer)  # Keep cat alive until end_inheritor.
+                return
+            if proc.poll() is not None:
+                raise AssertionError(f"inheritor {proc.pid} exited before opening {fifo}: {proc.returncode}")
+            time.sleep(0.01)  # Poll the kernel's reader-open state, not an assumed exec delay.
+        raise AssertionError(f"inheritor {proc.pid} did not open {fifo} within {CHILD_DEADLINE_S} s")
 
     def end_inheritor(self, name: str) -> None:
         if name not in self.inheritors:
             return
-        proc, fifo = self.inheritors.pop(name)
+        proc, fifo, writer = self.inheritors.pop(name)
+        if writer is not None:
+            os.close(writer)
         # Opening the write end without blocking succeeds once the child's cat has the read end; closing it is EOF.
         # A writer that opens and closes while the reader is still waking from its blocked open can be missed
         # (seen twice in full-suite runs under load: cat stayed blocked and wait() timed out), so repeat the
@@ -318,6 +374,19 @@ class _Cancel(Exception):
 
 # Python-only surface (TypeScript cancellation is an AbortSignal, tested in kitlib-lock.test.ts).
 class Surface(unittest.TestCase):
+    def test_inheritor_returns_only_after_cat_opens_the_fifo(self) -> None:
+        with owned_tmp("kitlib-lock-startup") as scratch:
+            tmp = os.path.realpath(scratch)
+            case = next(case for case in CORPUS["cases"]
+                        if case["id"] == "default-no-inheritance-child-holds-nothing")
+            run = CaseRun(case, {"TMP": tmp, "STATE": os.path.join(tmp, "state")}, False, self)
+            try:
+                run.inheritor({"as": "ready"})
+                # ENXIO here means startup returned before the exec'd cat reached its FIFO open.
+                os.close(os.open(os.path.join(tmp, "fifo-ready"), os.O_WRONLY | os.O_NONBLOCK))
+            finally:
+                run.cleanup()
+
     def _holder(self, state: str, resource: dict) -> subprocess.Popen:
         argv = substitute(CORPUS["holders"]["py"], {"PYTHON": sys.executable, "SCRIPTS_DIR": SCRIPTS_DIR, "STATE": state,
                                                     "RESOURCE_JSON": json.dumps(resource), "MODE": "stdin"})

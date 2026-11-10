@@ -1,1 +1,2 @@
 - The release full suite judges the two kitlib lock conformance test files on the Mac host while LOCKLINUX1 investigates their intermittent Linux-only failure; Linux CI still runs them.
+- Lock conformance tests wait for the child's FIFO reader before releasing the holder, avoiding Linux's vfork/CLOEXEC race; unexpected acquisition deadlines now include Linux lock-holder diagnostics.
