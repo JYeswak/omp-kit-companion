@@ -553,7 +553,7 @@ def lookup(repo: Path, tree: str, role: str, checks: str, runtime: str, *,
 # with agent-bin first) reads back as MISS and release-local re-ran a 15 min suite for a tree that had passed. On an
 # exact-key miss, a valid record for the same tree and checks under another runtime is named RUNTIME_MISMATCH with
 # both env digests and the differing fields. It is never a PASS.
-RUNTIME_FIELDS = ("system", "machine", "bun", "python")
+RUNTIME_FIELDS = ("system", "machine", "bun", "python", "omp")
 
 
 def describe_runtime_mismatch(metrics, stored: str, prefix: str, environment: dict[str, str]) -> str:

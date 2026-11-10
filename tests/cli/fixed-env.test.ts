@@ -86,8 +86,9 @@ test("a real stored suite PASS is reused across caller shells and retains the ju
 		mkdirSync(dirname(join(repo, path)), { recursive: true });
 		copyFileSync(join(kit, path), join(repo, path));
 	}
-	mkdirSync(join(repo, "src"), { recursive: true });
-	for (const file of ["paths.ts", "omp-source-cache.ts"]) copyFileSync(join(kit, "src", file), join(repo, "src", file));
+	mkdirSync(join(repo, "src", "kitlib"), { recursive: true });
+	// omp-source-cache.ts reads the npm registry through kitlib run (OMPSRCLAG1); run.ts embeds pysafe-source.ts.
+	for (const file of ["paths.ts", "omp-source-cache.ts", "kitlib/run.ts", "kitlib/pysafe-source.ts"]) copyFileSync(join(kit, "src", file), join(repo, "src", file));
 	const identitySuite = join(repo, "tests/cli/omp-identity.test.ts");
 	// The inner suite resolves OMP in the constructed suite environment (which names the operator's OMP source
 	// cache), so the expected identity is computed in exactly that environment, not the test runner's.
