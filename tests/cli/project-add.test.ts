@@ -19,8 +19,9 @@ test("wake health uses the configured state root and handles absent seat records
 	}] }));
 	const env = { HOME: home, XDG_STATE_HOME: stateHome };
 	const input = { session: "test", env, deps: {
-		mail: { call: async (_tool: string, args: Record<string, unknown>) => ({ agent_name: args.pane_id === "tern:1" ? "Director" : "Worker" }) },
-		exec: { run: async () => ({ code: 0, out: "{}", err: "" }) },
+		exec: { run: async (argv: readonly string[]) => argv[0] === "am"
+			? { code: 0, out: JSON.stringify({ agent_name: argv.includes("tern:1") ? "Director" : "Worker" }), err: "" }
+			: { code: 0, out: "{}", err: "" } },
 	} };
 	const previous = process.env.OMP_KIT_FLEET_WATCH_CONFIG;
 	delete process.env.OMP_KIT_FLEET_WATCH_CONFIG;
@@ -160,8 +161,12 @@ if (args[0] === "inspect") {
 			fs.writeFileSync(stageFile(block), JSON.stringify(staged));
 		}
 	}
-	const pane = (id) => ({ pane: id, cwd: repo, working: false, exited: null, omp_session_file: dir + "/session-" + id + ".jsonl" });
-	console.log(JSON.stringify({ sessions: [{ id: "2", name: "skillgrowth", tabs: [{ name: "skillgrowth", blocks: [{ id: process.env.DIR_BLOCK, cwd: repo, live: true }, { id: process.env.WORKER_BLOCK, cwd: repo, live: true }] }] }], panes: [pane(process.env.DIR_BLOCK), pane(process.env.WORKER_BLOCK)] }));
+// Real tern shape: object blocks with numeric ids, pane entries keyed by
+// numeric id with exited:null and no live field. Ids interpolate as raw
+// JSON numbers so >2^53 digits stay exact on the wire, the way real tern
+// serializes its uint64 ids (a JS number here would pre-round them).
+const paneJson = (id) => '{"pane": ' + id + ', "cwd": ' + JSON.stringify(repo) + ', "working": false, "exited": null, "omp_session_file": ' + JSON.stringify(dir + "/session-" + id + ".jsonl") + '}';
+console.log('{"sessions": [{"id": "2", "name": "skillgrowth", "tabs": [{"name": "skillgrowth", "blocks": [{"id": ' + process.env.DIR_BLOCK + ', "cwd": ' + JSON.stringify(repo) + '}, {"id": ' + process.env.WORKER_BLOCK + ', "cwd": ' + JSON.stringify(repo) + '}]}]}], "panes": [' + paneJson(process.env.DIR_BLOCK) + ', ' + paneJson(process.env.WORKER_BLOCK) + ']}');
 	process.exit(0);
 }
 if (args[0] === "process") {
@@ -201,6 +206,19 @@ console.log(JSON.stringify({ at: "2026-11-10T00:00:00Z", session: "skillgrowth",
 		{ block: process.env.WORKER_BLOCK, role: "worker", name: "FoggyValley", action: "start", result: "STARTED" },
 	], result: "ALL_NAMED" }));
 `);
+	// Fake am: resolve-pane answers the two created pane identities.
+	write(join(bin, "am"), `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+if (args[0] === "agents" && args[1] === "resolve-pane") {
+	const pane = String(args[args.indexOf("--pane") + 1] ?? "");
+	const id = pane.startsWith("tern:") ? pane.slice(5) : pane;
+	const name = id === process.env.DIR_BLOCK ? "TurquoisePuma" : id === process.env.WORKER_BLOCK ? "FoggyValley" : null;
+	if (name === null) { console.error("unknown pane " + pane); process.exit(1); }
+	console.log(JSON.stringify({ agent_name: name, pane_id: pane }));
+	process.exit(0);
+}
+process.exit(1);
+`);
 	// Fake br: canned ready/in-progress counts.
 	write(join(bin, "br"), `#!/usr/bin/env bun
 const args = process.argv.slice(2);
@@ -208,7 +226,7 @@ if (args[0] === "ready") { console.log(JSON.stringify({ issues: [{ id: "a" }], t
 if (args[0] === "list") { console.log(JSON.stringify({ issues: [{ id: "b" }, { id: "c" }], total: 2 })); process.exit(0); }
 process.exit(1);
 `);
-	for (const script of ["tern", "respawn_seat.py", "br"]) chmodSync(join(bin, script), 0o755);
+	for (const script of ["tern", "respawn_seat.py", "br", "am"]) chmodSync(join(bin, script), 0o755);
 
 	const env: Record<string, string> = {
 		...process.env as Record<string, string>,
@@ -306,7 +324,7 @@ test("PROJECTADD1 fixture apply writes stores, delivers the goal with proof, and
 			{ role: "worker", name: "FoggyValley", pane: `tern:${f.workerBlock}`, alive: true, named: true,
 				wake: { outcome: "no wake recorded", at: null } },
 		]);
-		expect(reported.beads).toEqual({ ready: 1, inProgress: 2 });
+	expect(reported.beads).toEqual({ ready: 1, inProgress: 2, error: null });
 		const head = decoder.decode(runFixture(["git", "-C", f.repo, "rev-parse", "HEAD"], { cwd: f.repo, label: "project-add head" }).stdout).trim();
 		expect(reported.last_commit.sha).toBe(head);
 		expect(typeof reported.last_commit.subject).toBe("string");
@@ -387,3 +405,158 @@ test("PROJECTADD1 turn-on and roster paths resolve from env, fleet-watch, or ref
 		f.mail.server.stop(true);
 	}
 });
+
+type StatusRun = { code: number; out: string; err: string };
+
+function statusHarness(plant: {
+	director?: string;
+	worker?: string;
+	blocks: unknown;
+	panes: unknown[];
+	inspectOut?: string;
+	am: (pane: string) => StatusRun;
+	br: (sub: string[]) => StatusRun;
+}): {
+	env: Record<string, string>;
+	exec: { run: (argv: readonly string[]) => Promise<StatusRun> };
+	cleanup: () => void;
+} {
+	const director = plant.director ?? "5";
+	const worker = plant.worker ?? "6";
+	const task = ownedTmp("project-status-108", { root: process.env.TMPDIR ?? "/tmp" });
+	const home = realpathSync(task.path);
+	const repo = join(home, "repo");
+	mkdirSync(repo, { recursive: true });
+	mkdirSync(join(home, ".config", "omp-kit"), { recursive: true });
+	const fleetWatchPath = join(home, ".config", "omp-kit", "fleet-watch.json");
+	writeFileSync(fleetWatchPath, JSON.stringify({ sessions: [{
+		session: "skillgrowth", repo, coordinatorSession: "skillgrowth", coordinatorPane: `tern:${director}`, workerPanes: [`tern:${worker}`],
+	}] }));
+	const exec = { run: async (argv: readonly string[]): Promise<StatusRun> => {
+		if (argv[0] === "tern") {
+			if (plant.inspectOut !== undefined) return { code: 0, out: plant.inspectOut, err: "" };
+			return { code: 0, out: JSON.stringify({
+				sessions: [{ id: "2", name: "skillgrowth", tabs: [{ name: "skillgrowth", blocks: plant.blocks }] }],
+				panes: plant.panes,
+			}), err: "" };
+		}
+		if (argv[0] === "am") {
+			const at = argv.indexOf("--pane");
+			return plant.am(at < 0 ? "" : String(argv[at + 1] ?? ""));
+		}
+		if (argv[0] === "br") return plant.br(argv.slice(1, argv.indexOf("--json")));
+		if (argv[0] === "git") return { code: 1, out: "", err: "no repo" };
+		return { code: 1, out: "", err: "unexpected " + String(argv[0]) };
+	} };
+	const env: Record<string, string> = {
+		HOME: home, XDG_STATE_HOME: join(home, "state"),
+		TERN_CTL_BIN: "tern", BR_BIN: "br", AM_BIN: "am",
+	};
+	const previousWatch = process.env.OMP_KIT_FLEET_WATCH_CONFIG;
+	process.env.OMP_KIT_FLEET_WATCH_CONFIG = fleetWatchPath;
+	let cleaned = false;
+	const cleanup = () => {
+		if (cleaned) return;
+		cleaned = true;
+		if (previousWatch === undefined) delete process.env.OMP_KIT_FLEET_WATCH_CONFIG;
+		else process.env.OMP_KIT_FLEET_WATCH_CONFIG = previousWatch;
+		task.cleanup();
+	};
+	return { env, exec, cleanup };
+}
+
+const statusNames = (pane: string): StatusRun => ({ code: 0,
+	out: JSON.stringify({ agent_name: pane === "tern:5" ? "Director" : "Worker" }), err: "" });
+
+const statusCounts = (sub: string[]): StatusRun => sub[0] === "ready"
+	? { code: 0, out: JSON.stringify([{ id: "a" }]), err: "" }
+	: { code: 0, out: JSON.stringify([{ id: "b" }, { id: "c" }]), err: "" };
+
+test("PROJECTSTATUS108 bare-number blocks with present panes read alive", async () => {
+	const h = statusHarness({ blocks: [5, 6],
+		panes: [{ pane: 5, exited: null }, { pane: 6, exited: null }],
+		am: statusNames, br: statusCounts });
+	try {
+		const reported = await projectStatus({ session: "skillgrowth", env: h.env, deps: { exec: h.exec } });
+		if (!reported.ok) throw new Error(reported.detail);
+		expect(reported.status.seats.map((seat) => seat.alive)).toEqual([true, true]);
+		expect(reported.status.seats.map((seat) => seat.named)).toEqual([true, true]);
+		expect(reported.status.seats.map((seat) => seat.name)).toEqual(["Director", "Worker"]);
+		expect(reported.status.seats.map((seat) => seat.nameError)).toEqual([null, null]);
+		expect(reported.status.beads).toEqual({ ready: 1, inProgress: 2, error: null });
+	} finally {
+		h.cleanup();
+	}
+}, fixtureDeadlineS(60) * 1000);
+
+test("PROJECTSTATUS108 planted dead panes read not alive", async () => {
+	const h = statusHarness({ blocks: [5, 6],
+		panes: [{ pane: 5, live: false, exited: null }, { pane: 6, exited: "boom" }],
+		am: statusNames, br: statusCounts });
+	try {
+		const reported = await projectStatus({ session: "skillgrowth", env: h.env, deps: { exec: h.exec } });
+		if (!reported.ok) throw new Error(reported.detail);
+		expect(reported.status.seats.map((seat) => seat.alive)).toEqual([false, false]);
+		expect(reported.status.seats.map((seat) => seat.named)).toEqual([true, true]);
+	} finally {
+		h.cleanup();
+	}
+}, fixtureDeadlineS(60) * 1000);
+
+test("PROJECTSTATUS108 resolve-pane failure reports nameError instead of bare false", async () => {
+	const h = statusHarness({ blocks: [5, 6],
+		panes: [{ pane: 5, exited: null }, { pane: 6, exited: null }],
+		am: (pane) => pane === "tern:5"
+			? { code: 0, out: JSON.stringify({ agent_name: "Director" }), err: "" }
+			: { code: 1, out: "", err: "unknown pane tern:6" },
+		br: statusCounts });
+	try {
+		const reported = await projectStatus({ session: "skillgrowth", env: h.env, deps: { exec: h.exec } });
+		if (!reported.ok) throw new Error(reported.detail);
+		expect(reported.status.seats[0]).toMatchObject({ named: true, name: "Director", nameError: null });
+		expect(reported.status.seats[1]!.named).toBe(false);
+		expect(reported.status.seats[1]!.name).toBe(null);
+		expect(reported.status.seats[1]!.nameError ?? "").toContain("am agents resolve-pane exited 1");
+		expect(reported.status.seats[1]!.nameError ?? "").toContain("unknown pane tern:6");
+	} finally {
+		h.cleanup();
+	}
+}, fixtureDeadlineS(60) * 1000);
+
+test("PROJECTSTATUS108 br shim refusal reports the beads reason", async () => {
+	const h = statusHarness({ blocks: [5, 6],
+		panes: [{ pane: 5, exited: null }, { pane: 6, exited: null }],
+		am: statusNames,
+		br: (sub) => sub[0] === "ready"
+			? { code: 4, out: "", err: "BR_SHIM_IDENTITY_REQUIRED refusing to run br without AGENT_NAME (pane identity not resolved at spawn)" }
+			: { code: 0, out: JSON.stringify([{ id: "b" }, { id: "c" }]), err: "" } });
+	try {
+		const reported = await projectStatus({ session: "skillgrowth", env: h.env, deps: { exec: h.exec } });
+		if (!reported.ok) throw new Error(reported.detail);
+		expect(reported.status.beads.ready).toBe(null);
+		expect(reported.status.beads.inProgress).toBe(2);
+		expect(reported.status.beads.error ?? "").toContain("BR_SHIM_IDENTITY_REQUIRED");
+	} finally {
+		h.cleanup();
+	}
+}, fixtureDeadlineS(60) * 1000);
+
+test("PROJECTSTATUS108 odd id beyond 2^53 resolves and reads alive", async () => {
+	const director = "9374092541034498";
+	const worker = "9374096836001793";
+	const inspectOut = `{"sessions": [{"id": "2", "name": "skillgrowth", "tabs": [{"name": "skillgrowth", "blocks": [{"id": ${director}}, {"id": ${worker}}]}]}], `
+		+ `"panes": [{"pane": ${director}, "program": "/bin/zsh", "working": true, "exited": null, "omp_session_file": null}, `
+		+ `{"pane": ${worker}, "program": "/bin/zsh", "working": true, "exited": null, "omp_session_file": null}]}`;
+	const h = statusHarness({ director, worker, blocks: [], panes: [], inspectOut,
+		am: (pane) => ({ code: 0, out: JSON.stringify({ agent_name: pane === `tern:${director}` ? "Director" : "Worker" }), err: "" }),
+		br: statusCounts });
+	try {
+		const reported = await projectStatus({ session: "skillgrowth", env: h.env, deps: { exec: h.exec } });
+		if (!reported.ok) throw new Error(reported.detail);
+		expect(reported.status.seats.map((seat) => seat.name)).toEqual(["Director", "Worker"]);
+		expect(reported.status.seats.map((seat) => seat.named)).toEqual([true, true]);
+		expect(reported.status.seats.map((seat) => seat.alive)).toEqual([true, true]);
+	} finally {
+		h.cleanup();
+	}
+}, fixtureDeadlineS(60) * 1000);

@@ -12,6 +12,7 @@ import { callAgentMail } from "./fleet-guard/reservations.ts";
 import { fleetWatchConfigPath } from "./service.ts";
 import { loadFleetWatchConfig, type FleetWatchSession } from "./fleet-watch.ts";
 import { run as runBounded } from "./kitlib/run.ts";
+import { parseTernJson } from "../extensions/tern-json.ts";
 import { writePrivate } from "./mutations.ts";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { readJsonl } from "./kitlib/jsonl.ts";
@@ -680,6 +681,7 @@ export interface ProjectSeatStatus {
 	pane: string;
 	alive: boolean;
 	named: boolean;
+	nameError: string | null;
 	lastActivity: string | null;
 	activeGoal: string | null;
 	wake: { outcome: string; at: string | null };
@@ -689,7 +691,7 @@ export interface ProjectStatusResult {
 	session: string;
 	repo: string;
 	seats: ProjectSeatStatus[];
-	beads: { ready: number | null; inProgress: number | null };
+	beads: { ready: number | null; inProgress: number | null; error: string | null };
 	lastCommit: { sha: string; at: number; subject: string } | null;
 }
 
@@ -727,7 +729,6 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 	}
 	const paths = resolveProjectAddPaths(input.env, home);
 	const exec = input.deps?.exec ?? { run: defaultExec };
-	const mail = input.deps?.mail ?? { call: defaultMail };
 	const failed = (code: string, detail: string, remediation: string) => ({ ok: false as const, code, detail, remediation });
 	let config: { sessions: FleetWatchSession[] };
 	try {
@@ -747,18 +748,37 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 		return failed("PROJECT_PANES_UNRECORDED", `session ${input.session} has no recorded panes yet`, "Wait for project add to finish recording them.");
 	}
 	const ternBin = input.env.TERN_CTL_BIN?.trim() || "tern";
-	let inspect: { sessions: { name?: unknown; tabs?: { name?: unknown; blocks?: { id?: unknown; live?: unknown }[] }[] }[]; panes: { pane?: unknown; omp_session_file?: unknown; exited?: unknown }[] } | null = null;
+	const amBin = input.env.AM_BIN?.trim() || "am";
+	let inspect: { sessions: { name?: unknown; tabs?: { name?: unknown; blocks?: ({ id?: unknown; live?: unknown } | number | string)[] }[] }[]; panes: { pane?: unknown; live?: unknown; omp_session_file?: unknown; exited?: unknown }[] } | null = null;
 	try {
+		// Pane ids exceed 2^53, so the inspect parse must not round them.
 		const probed = await exec.run([ternBin, "inspect", "--json"], { deadlineMs: 30_000 });
-		const parsed = probed.code === 0 ? tryParseJson(probed.out) : null;
+		let parsed: unknown = null;
+		try { parsed = probed.code === 0 ? parseTernJson(probed.out) : null; } catch { parsed = null; }
 		inspect = parsed !== null && typeof parsed === "object" ? parsed as typeof inspect : null;
 	} catch { inspect = null; }
+	// Liveness lives in the panes entries keyed by block id; the tab block
+	// list may be bare numbers with no liveness of their own.
+	const liveByPane = new Map<string, boolean>();
+	if (inspect !== null) {
+		for (const row of inspect.panes ?? []) {
+			const key = typeof row.pane === "number" || typeof row.pane === "string" ? String(row.pane) : "";
+			if (key === "") continue;
+			// Real pane entries carry no `live` field: present with
+			// exited == null means alive; a present `live` field vetoes only
+			// when it is exactly false.
+		liveByPane.set(key, row.exited == null && (!("live" in row) || row.live !== false));
+		}
+	}
 	const blockLive = (id: string): boolean => {
+		const known = liveByPane.get(id);
+		if (known !== undefined) return known;
 		if (inspect === null) return false;
 		for (const session of inspect.sessions ?? []) {
 			for (const tab of session.tabs ?? []) {
 				for (const block of tab.blocks ?? []) {
-					if (String(block.id ?? "") === id) return block.live === true;
+					const bid = typeof block === "number" || typeof block === "string" ? String(block) : String(block.id ?? "");
+					if (bid === id) return typeof block === "object" && block !== null && block.live === true;
 				}
 			}
 		}
@@ -771,19 +791,35 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 		}
 		return null;
 	};
-	const names: (string | null)[] = [];
-	for (const id of [coordinator, ...(workerIds as string[])]) {
+	// Seat names come from the `am agents resolve-pane` CLI under a deadline,
+	// the same path land uses, so status works from any shell. A seat whose
+	// pane does not resolve keeps its reason in nameError instead of a bare
+	// false/null.
+	const resolveSeatName = async (id: string): Promise<{ name: string } | { error: string }> => {
+		let result: { code: number; out: string; err: string };
 		try {
-			const resolved = await mail.call("resolve_pane_identity", { project_key: entry.repo, pane_id: `tern:${id}` });
-			const record = (typeof resolved === "object" && resolved !== null ? resolved : null) as Record<string, unknown> | null;
-			const name = record === null ? null : record.agent_name ?? record.name;
-			names.push(typeof name === "string" && name !== "" ? name : null);
-		} catch {
-			names.push(null);
+			result = await exec.run([amBin, "agents", "resolve-pane", "--project", entry.repo, "--pane", `tern:${id}`, "--json"], { deadlineMs: 30_000 });
+		} catch (error) {
+			const cause = error instanceof Error ? error.message : String(error);
+			return { error: `am agents resolve-pane could not run (${cause.slice(0, 200)})` };
 		}
-	}
+		if (result.code !== 0) {
+			const detail = (result.err !== "" ? result.err : result.out).split("\n")[0]?.trim().slice(0, 200) ?? "";
+			return { error: detail === "" ? `am agents resolve-pane exited ${result.code}` : `am agents resolve-pane exited ${result.code}: ${detail}` };
+		}
+		const parsed = tryParseJson(result.out);
+		const record = (Array.isArray(parsed) ? parsed[0] : parsed) as Record<string, unknown> | null;
+		const candidate = record === null || typeof record !== "object" ? null : (record.agent_name ?? record.name);
+		if (typeof candidate !== "string" || candidate === "") return { error: "am agents resolve-pane answered without a name" };
+		return { name: candidate };
+	};
+	const resolvedNames: ({ name: string } | { error: string })[] = [];
+	for (const id of [coordinator, ...(workerIds as string[])]) resolvedNames.push(await resolveSeatName(id));
 	const wakes = latestSeatWakes(paths.stateRoot);
 	const seats: ProjectSeatStatus[] = [coordinator, ...(workerIds as string[])].map((id, index) => {
+		const resolved = resolvedNames[index]!;
+		const seatName = "name" in resolved ? resolved.name : null;
+		const nameError = "error" in resolved ? resolved.error : null;
 		const file = paneFile(id);
 		let lastActivity: string | null = null;
 		let activeGoal: string | null = null;
@@ -803,26 +839,41 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 			} catch { activeGoal = null; }
 		}
 		return {
-			role: index === 0 ? "director" : "worker", name: names[index] ?? null, pane: `tern:${id}`,
-			alive: blockLive(id), named: names[index] !== null, lastActivity, activeGoal,
-			wake: wakes.get(names[index] ?? "") ?? { outcome: "no wake recorded", at: null },
+			role: index === 0 ? "director" : "worker", name: seatName, pane: `tern:${id}`,
+			alive: blockLive(id), named: seatName !== null, nameError, lastActivity, activeGoal,
+			wake: wakes.get(seatName ?? "") ?? { outcome: "no wake recorded", at: null },
 		};
 	});
 	const brBin = input.env.BR_BIN?.trim() || "br";
-	const count = async (argv: string[]): Promise<number | null> => {
+	const count = async (argv: string[]): Promise<{ value: number } | { error: string }> => {
+		let result: { code: number; out: string; err: string };
 		try {
-			const result = await exec.run([brBin, ...argv, "--json", "--no-auto-import", "--no-auto-flush"], { cwd: entry.repo, deadlineMs: 60_000 });
-			if (result.code !== 0) return null;
-			const parsed = tryParseJson(result.out) as { issues?: unknown[]; total?: unknown } | null;
-			if (parsed === null) return null;
-			if (Array.isArray(parsed.issues)) return parsed.issues.length;
-			return typeof parsed.total === "number" ? parsed.total : null;
-		} catch {
-			return null;
+			result = await exec.run([brBin, ...argv, "--json", "--no-auto-import", "--no-auto-flush"], { cwd: entry.repo, deadlineMs: 60_000 });
+		} catch (error) {
+			const cause = error instanceof Error ? error.message : String(error);
+			return { error: `br ${argv.join(" ")} could not run (${cause.slice(0, 200)})` };
 		}
+		// The agent-pane br shim refuses without AGENT_NAME
+		// (BR_SHIM_IDENTITY_REQUIRED); never bypass it, report the refusal.
+		if (result.code !== 0) {
+			const detail = (result.err !== "" ? result.err : result.out).split("\n")[0]?.trim().slice(0, 200) ?? "";
+			const reason = detail === "" ? `br ${argv.join(" ")} exited ${result.code}` : `br ${argv.join(" ")} exited ${result.code}: ${detail}`;
+			return { error: reason };
+		}
+		const parsed: unknown = tryParseJson(result.out);
+		if (parsed === null) return { error: `br ${argv.join(" ")} answered unparseable JSON` };
+		if (Array.isArray(parsed)) return { value: parsed.length };
+		if (typeof parsed === "object") {
+			const rows = parsed as { issues?: unknown; total?: unknown };
+			if (Array.isArray(rows.issues)) return { value: rows.issues.length };
+			if (typeof rows.total === "number") return { value: rows.total };
+		}
+		return { error: `br ${argv.join(" ")} answered without a count` };
 	};
 	const ready = await count(["ready"]);
 	const inProgress = await count(["list", "--status", "in_progress"]);
+	const beadErrors = [ready, inProgress].filter((row): row is { error: string } => "error" in row).map((row) => row.error);
+	const beadError = beadErrors.length > 0 ? beadErrors.join("; ") : null;
 	let lastCommit: ProjectStatusResult["lastCommit"] = null;
 	try {
 		const logged = await exec.run(["git", "-C", entry.repo, "log", "-1", "--format=%H%n%ct%n%s"], { deadlineMs: 30_000 });
@@ -831,5 +882,6 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 			if (sha && at && /^\d+$/.test(at.trim())) lastCommit = { sha: sha.trim(), at: Number(at.trim()), subject: (subject ?? "").trim() };
 		}
 	} catch { lastCommit = null; }
-	return { ok: true, status: { session: entry.session, repo: entry.repo, seats, beads: { ready, inProgress }, lastCommit } };
+	return { ok: true, status: { session: entry.session, repo: entry.repo, seats,
+		beads: { ready: "value" in ready ? ready.value : null, inProgress: "value" in inProgress ? inProgress.value : null, error: beadError }, lastCommit } };
 }
