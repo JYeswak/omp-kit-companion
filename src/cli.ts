@@ -3133,7 +3133,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		const bodyClaim = readRunClaim(jobsDir, job.name);
 		const bodyVersion = bodyClaim === null ? null : claimIncarnation(bodyClaim);
 		const bodyOff = readJobOff(join(home, ".local", "state", "omp-kit", `${job.name}.off`));
-		const bodyLaunchers = observeServiceLaunchers(defaultRunner, job.name);
+		const bodyLaunchers = observeServiceLaunchers(defaultRunner, job.name, { home, stateRoot: dirname(jobsDir) });
 		const runAdmission: AdmissionInput = {
 			launcherBinding: "keeper",
 			authority: bodyOff.disabled ? "OFF" : "ACTIVE",
@@ -3309,7 +3309,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				// authorizes the packet, the body-time incarnation is the
 				// current authority; a changed holder in between refuses.
 				const watchOff = readJobOff(join(home, ".local", "state", "omp-kit", `${job.name}.off`));
-				const watchLaunchers = observeServiceLaunchers(defaultRunner, job.name);
+				const watchLaunchers = observeServiceLaunchers(defaultRunner, job.name, { home, stateRoot: dirname(jobsDir) });
 				const result = runFleetWatchOnce(config, {
 					capture: (session, pane) => defaultRunner(["tmux", "capture-pane", "-p", "-t", paneTarget(session, pane)]),
 					send: (session, pane, text) => { defaultRunner(["ntm", "send", session, "--panes=" + pane, "--no-cass-check", text]); },

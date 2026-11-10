@@ -1,4 +1,4 @@
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { finished } from "node:stream/promises";
@@ -218,6 +218,61 @@ export function claimIncarnation(claim: RunClaim): string {
 	return `${claim.pid}:${claim.startedAt}:${claim.token}`;
 }
 
+/**
+ * SVCLAUNCHHOME1: the admitting run's own ground. A launcher provably serving
+ * another HOME/state root is not a competing launcher for this run; anything
+ * of unknown ownership still competes (fail closed).
+ */
+export interface ServiceLauncherScope {
+	home: string;
+	stateRoot: string;
+}
+
+/**
+ * True when the launcher may share this run's HOME/state root — or when that
+ * cannot be told. Probes the candidate's open files with lsof (cwd plus every
+ * mapped path): a live footprint touching nothing under our HOME or state root
+ * proves another HOME. A shared cwd proves nothing (parallel fixture runs share
+ * the repository cwd while each serves its own HOME). lsof missing, failing,
+ * oversized, or silent on cwd keeps the launcher (fail closed). Never throws.
+ */
+function launcherSharesScope(run: (args: readonly string[]) => { code: number; stdout: string }, pid: number, scope: ServiceLauncherScope): boolean {
+	let homeReal: string, stateReal: string;
+	try {
+		homeReal = realpathSync(scope.home);
+		stateReal = realpathSync(scope.stateRoot);
+	} catch { return true; }
+	let probed: { code: number; stdout: string };
+	try {
+		probed = run(["lsof", "-p", String(pid), "-F", "fn"]);
+	} catch { return true; }
+	if (probed.stdout.length > 1 << 20) return true;
+	if (probed.code !== 0) {
+		// A launcher seen by ps can exit before lsof reads it (a 1 ms run cap does). A pid ps no longer lists
+		// is not a competitor; any other lsof failure keeps the launcher (fail closed).
+		try {
+			const alive = run(["ps", "-p", String(pid), "-o", "pid="]);
+			return !(alive.code !== 0 && alive.stdout.trim() === "");
+		} catch { return true; }
+	}
+	let fd = "";
+	let cwd: string | null = null;
+	const names: string[] = [];
+	for (const line of probed.stdout.split("\n")) {
+		if (line.startsWith("f")) fd = line.slice(1);
+		else if (line.startsWith("n") && line.length > 1) {
+			const name = line.slice(1);
+			if (fd === "cwd") { if (cwd === null) cwd = name; }
+			else names.push(name);
+		}
+	}
+	if (cwd === null) return true;
+	if (cwd === homeReal || cwd === stateReal || cwd.startsWith(homeReal + "/") || cwd.startsWith(stateReal + "/")) return true;
+	if (names.some(path => path === homeReal || path === stateReal
+		|| path.startsWith(homeReal + "/") || path.startsWith(stateReal + "/"))) return true;
+	return false;
+}
+
 export interface ServiceLauncherMember {
 	pid: number;
 	command: string;
@@ -239,8 +294,14 @@ export type ServiceLauncherObservation =
  * unparseable rows are skipped, never assumed. Failure is explicit (the
  * caller must fail closed: an unobservable launcher set confirms
  * nothing). Never throws.
+ *
+ * SVCLAUNCHHOME1: with a scope, a candidate provably serving another
+ * HOME/state root (lsof-observed cwd and open files touching nothing of
+ * ours) is not a competitor for this run and is dropped. The admitting
+ * process itself is always kept; anything of unknown ownership is kept
+ * (fail closed).
  */
-export function observeServiceLaunchers(run: (args: readonly string[]) => { code: number; stdout: string }, job: string): ServiceLauncherObservation {
+export function observeServiceLaunchers(run: (args: readonly string[]) => { code: number; stdout: string }, job: string, scope?: ServiceLauncherScope): ServiceLauncherObservation {
 	let stdout: string;
 	try {
 		const result = run(["ps", "-axo", "pid=,args="]);
@@ -259,7 +320,7 @@ export function observeServiceLaunchers(run: (args: readonly string[]) => { code
 		if (!Number.isSafeInteger(pid)) continue;
 		for (let i = 1; i + 2 < tokens.length; i++) {
 			if (tokens[i] === "service" && tokens[i + 1] === "run" && tokens[i + 2] === job) {
-				launchers.push({ pid, command });
+				if (scope === undefined || pid === process.pid || launcherSharesScope(run, pid, scope)) launchers.push({ pid, command });
 				break;
 			}
 		}

@@ -1,7 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { retainFleetCaches } from "../../src/cache-retain.ts";
+import { observeServiceLaunchers } from "../../src/service-run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { privateLock } from "../../src/kitlib/lock.ts";
@@ -122,6 +123,58 @@ test("CACHERETAIN1 the actual scheduled service body removes an expired fixture 
 	expect(existsSync(old)).toBe(false);
 	expect(readFileSync(fresh, "utf8")).toBe("fresh");
 }, 180_000);
+
+// SVCLAUNCHHOME1: launcher scoping runs through the same `run` seam as ps, so the
+// whole rule is unit-testable: a candidate whose lsof footprint touches nothing of
+// ours is dropped; anything of unknown ownership is kept (fail closed).
+test("CACHERETAIN1 scoped observation drops only a provably foreign launcher", () => {
+ const f = fixture();
+ const homeReal = realpathSync(f.home);
+ const stateReal = realpathSync(f.root);
+ const scope = { home: f.home, stateRoot: f.root };
+ const psLine = (pid: number) => `  ${pid} /opt/bin/omp-kit service run cache-retain --json`;
+ const lsofOut = (pid: number, rows: string[]) => [`p${pid}`, ...rows].join("\n") + "\n";
+ const lsofByPid: Record<number, { code: number; stdout: string }> = {
+  111: { code: 0, stdout: lsofOut(111, ["fcwd", "n/foreign/home", "ftxt", "n/foreign/home/bin/omp-kit"]) },
+  222: { code: 0, stdout: lsofOut(222, ["fcwd", `n${homeReal}/jobs`, "ftxt", "n/usr/bin/omp-kit"]) },
+  333: { code: 0, stdout: lsofOut(333, ["fcwd", "n/foreign/work", "f12", `n${stateReal}/jobs/cache-retain.lock/pid`]) },
+  444: { code: 1, stdout: "" },
+  555: { code: 0, stdout: lsofOut(555, ["ftxt", "n/usr/bin/omp-kit"]) },
+  // A parallel fixture run: same repository cwd as this process, its own HOME elsewhere.
+  666: { code: 0, stdout: lsofOut(666, ["fcwd", `n${realpathSync(process.cwd())}`, "f9", "n/sibling/home/.local/state/omp-kit/jobs/cache-retain.lock/pid"]) },
+  // A launcher that exited between ps and lsof (a 1 ms run cap): lsof fails and ps no longer lists it.
+  777: { code: 1, stdout: "" },
+ };
+ const seen: string[] = [];
+ const fakeRun = (args: readonly string[]) => {
+  if (args[0] === "ps" && args[1] === "-p") return args[2] === "777" ? { code: 1, stdout: "" } : { code: 0, stdout: `${args[2]}\n` };
+  if (args[0] === "ps") return { code: 0, stdout: [psLine(111), psLine(222), psLine(333), psLine(444), psLine(555), psLine(666), psLine(777)].join("\n") + "\n" };
+  if (args[0] === "lsof") {
+   const pid = Number(args[2]);
+   seen.push(args[2]!);
+   const out = lsofByPid[pid];
+   if (!out) throw new Error(`unexpected lsof pid ${args[2]}`);
+   return out;
+  }
+  throw new Error(`unexpected command ${args[0]}`);
+ };
+ // Planted: the foreign-HOME launcher, the shared-cwd sibling and the exited launcher are dropped; every other launcher is kept.
+ const observed = observeServiceLaunchers(fakeRun, "cache-retain", scope);
+ if (!("launchers" in observed)) throw new Error("expected launchers, got " + JSON.stringify(observed));
+ expect(observed.launchers.map(member => member.pid).sort((a, b) => a - b)).toEqual([222, 333, 444, 555]);
+ expect(observed.launchers).toEqual(observed.launchers.map(member => ({ pid: member.pid, command: "service run cache-retain" })));
+ // Controls: no scope keeps everything; the admitting process itself is never probed.
+ const unscoped = observeServiceLaunchers(fakeRun, "cache-retain");
+ if (!("launchers" in unscoped)) throw new Error("expected launchers, got " + JSON.stringify(unscoped));
+ expect(unscoped.launchers.map(member => member.pid).sort((a, b) => a - b)).toEqual([111, 222, 333, 444, 555, 666, 777]);
+ const ownLine = `  ${process.pid} /opt/bin/omp-kit service run cache-retain --json`;
+ const withOwn = observeServiceLaunchers(args => args[0] === "ps"
+  ? { code: 0, stdout: ownLine + "\n" }
+  : (() => { throw new Error("own pid must never be probed"); })(), "cache-retain", scope);
+ if (!("launchers" in withOwn)) throw new Error("expected launchers, got " + JSON.stringify(withOwn));
+ expect(withOwn.launchers).toEqual([{ pid: process.pid, command: "service run cache-retain" }]);
+ expect(seen.sort()).toEqual(["111", "222", "333", "444", "555", "666", "777"]);
+});
 
 test("CACHERETAIN1 selected state root expires only its receipts, not the default state's receipts", async () => {
 	const f = fixture();

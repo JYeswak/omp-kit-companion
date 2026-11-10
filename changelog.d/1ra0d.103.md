@@ -1,0 +1,1 @@
+- Scheduled service runs no longer refuse with SKIPPED-ADMISSION when the only other matching launcher belongs to a different HOME; a second launcher under the same HOME still refuses.
