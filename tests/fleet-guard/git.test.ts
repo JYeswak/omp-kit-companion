@@ -194,6 +194,23 @@ describe("fleet guard main-only git checks", () => {
 		expect(gitState()).toBe(gitBefore);
 	});
 
+	test("PRIVATECHECKOUT1: --only in a private object-borrowing checkout needs no reservation read; the canonical repo still does", () => {
+		// The ovnfs shape: a .git pointer file to a private git dir whose objects/info/alternates borrow the canonical repo.
+		const checkout = join(scratch, "only-private-checkout");
+		const cloned = runFixture(["git", "clone", "-q", "--shared", "--separate-git-dir", join(scratch, "only-private-gitdir"), repo, checkout], {
+			cwd: scratch, env: { ...gitEnv, GIT_CEILING_DIRECTORIES: scratch },
+		});
+		expect(cloned.rc, new TextDecoder().decode(cloned.stderr)).toBe(0);
+		expect(readFileSync(join(checkout, ".git"), "utf8")).toStartWith("gitdir: ");
+		// No identity and an Agent Mail that cannot answer: the 2026-11-10 FoggyValley shape ("project not found").
+		withOnlyFixture(onlyHolds(), "fail", undefined, () => {
+			expect(check(event("git commit --only -m msg -- ownA.txt"), { cwd: checkout })).toBeUndefined();
+			const canonical = check(event("git commit --only -m msg -- ownA.txt"), context);
+			expect(canonical?.block, "canonical --only admitted without identity").toBe(true);
+			expect(canonical?.reason).toContain("AGENT_NAME");
+		});
+	});
+
 	test("COMMITTRAILER1: --trailer and other value options are metadata; every path after -- is still judged", () => {
 		withOnlyFixture(onlyHolds("some/path"), "ok", "FixtureAgent", () => {
 			for (const command of [

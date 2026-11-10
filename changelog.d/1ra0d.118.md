@@ -1,0 +1,1 @@
+- `git commit --only` inside a private checkout (`ovnfs new`, or a `git clone --shared` with a separate git dir) is no longer refused with "project not found": like writes there, it needs no Agent Mail reservation, and custody is checked when the work lands in the canonical repository.

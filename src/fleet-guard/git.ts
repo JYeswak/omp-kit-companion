@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface FleetGuardEvent {
@@ -759,8 +759,33 @@ function relativeRepoPath(root: string, base: string, value: string): string | n
 	return pathFromRoot.split(sep).join("/");
 }
 
+/**
+ * PRIVATECHECKOUT1: a private checkout of a canonical repository (`ovnfs new`, or `git clone --shared` with a
+ * separate git dir) has exactly one writer, its creator, so shared-checkout reservations do not apply inside it.
+ * Shape: `.git` is a gitdir pointer file to a git dir that is not a linked worktree (no commondir) and borrows
+ * its objects from another repository through objects/info/alternates. A canonical checkout has a .git
+ * directory, so it never matches; anything unreadable is judged as canonical (fail closed).
+ * CFS seats hit 11 WRITE_OWN_LOOKUP_UNAVAILABLE refusals in 2 h on 2026-11-10 writing in their ovnfs checkouts.
+ */
+export function privateCheckout(root: string): boolean {
+	try {
+		const pointer = readFileSync(join(root, ".git"), "utf8").trim();
+		if (!pointer.startsWith("gitdir: ")) return false;
+		const gitDir = realpathSync(resolve(root, pointer.slice("gitdir: ".length)));
+		try { statSync(join(gitDir, "commondir")); return false; } catch { /* not a linked worktree */ }
+		const alternates = readFileSync(join(gitDir, "objects", "info", "alternates"), "utf8").split("\n").map(line => line.trim()).filter(Boolean);
+		return alternates.length > 0 && alternates.every(path => isAbsolute(path) && !realpathSync(path).startsWith(`${gitDir}${sep}`));
+	} catch {
+		return false;
+	}
+}
+
 function checkOnlyCoverage(paths: string[], root: string, base: string): FleetGuardBlock | undefined {
 	if (paths.length === 0) return undefined;
+	// PRIVATECHECKOUT1 also covers `git commit --only`: the commit lands only in the checkout's private git dir, and
+	// custody is judged when it lands in the canonical repository. Agent Mail knows the canonical project, not the
+	// checkout path, so the lookup could only refuse (FoggyValley 2026-11-10T17:36Z: "project not found").
+	if (privateCheckout(root)) return undefined;
 	const relativePaths = paths.map((value) => relativeRepoPath(root, base, value));
 	const gaps = reservationGaps(root, relativePaths.filter((path): path is string => path !== null));
 	if (gaps.kind === "identity") return { block: true, reason: ONLY_IDENTITY_REASON };
