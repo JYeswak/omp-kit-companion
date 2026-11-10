@@ -158,7 +158,9 @@ test("replacement edit evaluates resulting bytes, while native structural edits 
 	expect(await check(edit, f.context)).toBeUndefined();
 	f.index("src/original.ts", "export const sample = 2;\n");
 	expect((await check(edit, f.context))?.block).toBe(true);
-	expect((await check({ toolName: "edit", input: `*** Begin Patch\n[${path}#ABCD]\nPUT 1.=1:\n+export const sample = 3;\n*** End Patch` }, f.context))?.reason).toContain("payload variant");
+	// EDITREJECT1: a stale-tag patch is rejected by OMP's own engine and writes nothing, so the guard leaves
+	// the refusal to the tool, whose error names the fix (re-read), instead of an unreadable-payload refusal.
+	expect(await check({ toolName: "edit", input: `*** Begin Patch\n[${path}#ABCD]\nPUT 1.=1:\n+export const sample = 3;\n*** End Patch` }, f.context)).toBeUndefined();
 });
 
 test("PAYLOADSIM1 a hashline edit is judged on its resulting bytes: a notes edit passes, a source copy or a new shebang is refused", async () => {
@@ -187,7 +189,8 @@ test("native hashline move destinations retain canonical source refusal, includi
 	expect(await check(move("src/renamed.ts"), f.context)).toBeUndefined();
 	const target = join(f.scratch, "src", "canonical.ts");
 	expect((await check(move(target), f.context))?.reason).toContain("tracked-source-copy path");
-	expect((await check(move(join(f.scratch, "renamed source.ts")), f.context))?.reason).toContain("content cannot be established");
+	// EDITREJECT1: the stale source tag makes the engine reject the move, so nothing reaches scratch.
+	expect(await check(move(join(f.scratch, "renamed source.ts")), f.context)).toBeUndefined();
 });
 
 test("clean CRLF materialization is canonical source even when index bytes differ", async () => {

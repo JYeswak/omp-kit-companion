@@ -1,1 +1,2 @@
 - Writing into a `var/agent-tmp/<dir>` that `omp-kit scratch new` did not create is refused with the exact `omp-kit scratch new --label ...` command to run, instead of an UNKNOWN read error.
+- A hashline edit that OMP's edit engine itself rejects (for example a stale tag) inside owned scratch is no longer refused by the scratch guard as an unreadable payload; the edit tool reports its own error with the fix.

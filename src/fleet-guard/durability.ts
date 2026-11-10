@@ -189,16 +189,19 @@ function patchText(event: FleetGuardEvent): string | undefined {
 /**
  * PAYLOADSIM1: final bytes of every file a hashline patch writes, computed by OMP's own edit engine
  * (native EditSession) against the files' current bytes, in memory: the host writer only records the
- * requested content and never touches disk. A patch the engine rejects (stale tag, bad anchor) yields
- * nothing, so its targets keep the "content cannot be established" refusal, as the real tool would refuse it.
+ * requested content and never touches disk. A patch the engine rejects (stale tag, bad anchor) writes
+ * nothing, so `rejected` is set and the caller lets the real tool report its own error (EDITREJECT1:
+ * CFS seats got 79 "content cannot be established" refusals in 24 h on 2026-11-10 instead of the
+ * engine's stale-tag message, and retried blind).
  */
-async function simulatedContents(patch: string, cwd: string, paths: readonly string[]): Promise<Map<string, string>> {
+async function simulatedContents(patch: string, cwd: string, paths: readonly string[]): Promise<{ contents: Map<string, string>; rejected: boolean }> {
 	const contents = new Map<string, string>();
+	const unavailable = { contents, rejected: false };
 	const nativeRoot = resolveOmpIdentity().nativeRoot;
-	if (!nativeRoot) return contents;
+	if (!nativeRoot) return unavailable;
 	// Runtime-selected like patchTargets: the owning OMP installation provides this module.
 	const native = await import(pathToFileURL(join(nativeRoot, "native", "index.js")).href);
-	if (typeof native.EditStore !== "function" || typeof native.EditSession !== "function") return contents;
+	if (typeof native.EditStore !== "function" || typeof native.EditSession !== "function") return unavailable;
 	const store = new native.EditStore();
 	for (const path of paths) store.recordSnapshotFile(resolve(cwd, path));
 	const session = new native.EditSession(store, { cwd, mode: "hashline", allowFuzzy: false, fuzzyThreshold: 1,
@@ -212,10 +215,10 @@ async function simulatedContents(patch: string, cwd: string, paths: readonly str
 			requested.push(request);
 			return { written: request.content ?? "" };
 		});
-		if (outcome.isError) return contents;
+		if (outcome.isError) return { contents, rejected: true };
 		for (const request of requested) if (typeof request.content === "string") contents.set(request.moveTo ?? request.path, request.content);
 	} finally { session.close(); }
-	return contents;
+	return { contents, rejected: false };
 }
 
 /** Physical path of a possibly-missing target: the nearest existing ancestor's realpath plus the missing tail. */
@@ -249,7 +252,7 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 		const entries = await targets(event);
 		if (entries.length === 0) return refuse("filesystem targets cannot be established from this payload variant");
 		const patch = event.toolName === "edit" ? patchText(event) : undefined;
-		let simulated: Map<string, string> | undefined;
+		let simulated: { contents: Map<string, string>; rejected: boolean } | undefined;
 		let referenceRepo: string | undefined;
 		for (const entry of entries) {
 			const path = resolveFilesystemWriteTarget(cwd, entry.path, context);
@@ -316,7 +319,9 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 			if (content === undefined && !entry.replacement && patch !== undefined) {
 				read = "edit result simulation";
 				simulated ??= await simulatedContents(patch, cwd, entries.map(target => target.path));
-				content = simulated.get(path) ?? simulated.get(physical);
+				// EDITREJECT1: the engine refuses this patch, so the real tool writes nothing; its own error names the fix.
+				if (simulated.rejected) continue;
+				content = simulated.contents.get(path) ?? simulated.contents.get(physical);
 			}
 			if (entry.replacement) {
 				read = "scratch edit content read";
