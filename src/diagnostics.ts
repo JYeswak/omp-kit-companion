@@ -1861,7 +1861,7 @@ export interface RchReachabilityDeps {
  * `lsof` reports no inode for a unix socket, so a path replaced by a different
  * socket is invisible to path-existence checks. The doctor records the inode it
  * sees on a healthy (RUNNING) read and compares it on later reads. */
-export interface RchSocketBaseline { path: string; ino: number; at: string }
+export interface RchSocketBaseline { path: string; ino: number; at: string; pid?: number }
 export const RCH_SOCKET_BASELINE_FILE = "rch-socket-ino.json";
 /** A baseline older than this is refreshed on the next healthy read, never failed. */
 export const RCH_SOCKET_BASELINE_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
@@ -1882,7 +1882,8 @@ export function readRchSocketBaseline(stateRoot: string): RchSocketBaseline | nu
 	if (typeof record["path"] !== "string" || record["path"] === "" ||
 		typeof record["ino"] !== "number" || !Number.isFinite(record["ino"]) ||
 		typeof record["at"] !== "string" || Number.isNaN(Date.parse(record["at"]))) return null;
-	return { path: record["path"], ino: record["ino"], at: record["at"] };
+	const pid = typeof record["pid"] === "number" && Number.isInteger(record["pid"]) ? record["pid"] : undefined;
+	return { path: record["path"], ino: record["ino"], at: record["at"], ...(pid === undefined ? {} : { pid }) };
 }
 
 /** Persists the baseline into the private kit state root; false when the root is unsafe. Never throws and never fails the finding. */
@@ -1926,7 +1927,10 @@ type RchSocketView = { kind: "socket" | "other" | "missing"; ino: number | null 
 
 function inspectRchSocketIno(input: { path: string; pid: number; bound: boolean; stat: RchSocketView; restore: string; baseline: RchSocketBaseline | null; record: ((baseline: RchSocketBaseline) => void) | undefined; now: () => number }): Finding {
 	const base = { socket_path: input.path };
-	const fresh = input.baseline !== null && input.baseline.path === input.path &&
+	// RCHBOOT1: a baseline belongs to the daemon incarnation that bound the socket. A restarted rchd (new pid,
+	// e.g. after a reboot) binds a new inode by design, so a baseline from another pid (or one recorded before
+	// pids were recorded) is retaken, never compared; 2026-11-10 every doctor after a reboot read rch FAIL.
+	const fresh = input.baseline !== null && input.baseline.path === input.path && input.baseline.pid === input.pid &&
 		Number.isFinite(input.baseline.ino) && !Number.isNaN(Date.parse(input.baseline.at)) &&
 		input.now() - Date.parse(input.baseline.at) <= RCH_SOCKET_BASELINE_MAX_AGE_MS;
 	const baseline = fresh ? (input.baseline as RchSocketBaseline) : null;
@@ -1955,7 +1959,7 @@ function inspectRchSocketIno(input: { path: string; pid: number; bound: boolean;
 			return finding("rch", "OK", `rchd pid ${input.pid} is reachable on ${input.path}; no current socket inode baseline (omp-kit doctor records one)`,
 				"No action required.", { ...base, state: "RUNNING", pid: input.pid, ino: input.stat.ino, baseline: "absent" });
 		}
-		input.record({ path: input.path, ino: input.stat.ino, at: new Date(input.now()).toISOString() });
+		input.record({ path: input.path, ino: input.stat.ino, at: new Date(input.now()).toISOString(), pid: input.pid });
 		return finding("rch", "OK", `rchd pid ${input.pid} is reachable on ${input.path}; socket inode baseline just taken (ino ${input.stat.ino})`,
 			"No action required.", { ...base, state: "RUNNING", pid: input.pid, ino: input.stat.ino, baseline: "recorded" });
 	}

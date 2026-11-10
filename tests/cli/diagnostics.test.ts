@@ -1512,7 +1512,7 @@ test("rch: path replaced by a different socket (same path, new ino) is SOCKET_UN
 	const server = await unixListener(sock);
 	try {
 		const { deps, written } = rchInoDeps(sock,
-			{ path: sock, ino: 11, at: new Date().toISOString() },
+			{ path: sock, ino: 11, at: new Date().toISOString(), pid: 424242 },
 			{ statSocket: () => ({ kind: "socket", ino: 22 }) });
 		const row = inspectRchReachability(deps);
 		expect(row.status).toBe("FAIL");
@@ -1531,7 +1531,7 @@ test("rch: same path and same ino stays RUNNING; a stale or moved baseline is re
 	const server = await unixListener(sock);
 	try {
 		const fresh = rchInoDeps(sock,
-			{ path: sock, ino: 7, at: new Date().toISOString() },
+			{ path: sock, ino: 7, at: new Date().toISOString(), pid: 424242 },
 			{ statSocket: () => ({ kind: "socket", ino: 7 }) });
 		const row = inspectRchReachability(fresh.deps);
 		expect(row.status).toBe("OK");
@@ -1539,7 +1539,7 @@ test("rch: same path and same ino stays RUNNING; a stale or moved baseline is re
 		expect(fresh.written).toEqual([]);
 		noCapacity(row);
 		const stale = rchInoDeps(sock,
-			{ path: sock, ino: 7, at: new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString() },
+			{ path: sock, ino: 7, at: new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString(), pid: 424242 },
 			{ statSocket: () => ({ kind: "socket", ino: 7 }) });
 		const refreshed = inspectRchReachability(stale.deps);
 		expect(refreshed.status).toBe("OK");
@@ -1547,7 +1547,7 @@ test("rch: same path and same ino stays RUNNING; a stale or moved baseline is re
 		expect(refreshed.reason).toContain("baseline");
 		expect(stale.written).toHaveLength(1);
 		const moved = rchInoDeps(sock,
-			{ path: join(dir, "old.sock"), ino: 7, at: new Date().toISOString() },
+			{ path: join(dir, "old.sock"), ino: 7, at: new Date().toISOString(), pid: 424242 },
 			{ statSocket: () => ({ kind: "socket", ino: 7 }) });
 		const rerecorded = inspectRchReachability(moved.deps);
 		expect(rerecorded.status).toBe("OK");
@@ -1558,11 +1558,34 @@ test("rch: same path and same ino stays RUNNING; a stale or moved baseline is re
 	}
 });
 
+test("RCHBOOT1: a restarted rchd (new pid, new inode) retakes the baseline; the same pid with a new inode still fails", async () => {
+	const dir = ownedFixture("rch-ino-reboot");
+	const sock = join(dir, "rch.sock");
+	const server = await unixListener(sock);
+	try {
+		// 2026-11-10: after a reboot rchd 3600 bound ino 2950512536; the baseline held another daemon's ino.
+		for (const prior of [{ path: sock, ino: 11, at: new Date().toISOString(), pid: 1111 }, { path: sock, ino: 11, at: new Date().toISOString() }]) {
+			const store = rchInoDeps(sock, prior, { statSocket: () => ({ kind: "socket", ino: 22 }) });
+			const row = inspectRchReachability(store.deps);
+			expect(row.status, JSON.stringify(prior)).toBe("OK");
+			expect(row.evidence?.state).toBe("RUNNING");
+			expect(store.written).toEqual([expect.objectContaining({ path: sock, ino: 22, pid: 424242 })]);
+		}
+		// Planted: the same daemon pid with a replaced inode is still SOCKET_UNLINKED.
+		const same = rchInoDeps(sock, { path: sock, ino: 11, at: new Date().toISOString(), pid: 424242 },
+			{ statSocket: () => ({ kind: "socket", ino: 22 }) });
+		expect(inspectRchReachability(same.deps).evidence?.state).toBe("SOCKET_UNLINKED");
+		expect(same.written).toEqual([]);
+	} finally {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
+});
+
 test("rch: missing path after a healthy baseline is SOCKET_UNLINKED", () => {
 	const dir = ownedFixture("rch-ino-missing");
 	const sock = join(dir, "rch.sock");
 	const { deps, written } = rchInoDeps(sock,
-		{ path: sock, ino: 7, at: new Date().toISOString() });
+		{ path: sock, ino: 7, at: new Date().toISOString(), pid: 424242 });
 	const row = inspectRchReachability(deps);
 	expect(row.status).toBe("FAIL");
 	expect(row.evidence?.state).toBe("SOCKET_UNLINKED");
@@ -1600,7 +1623,7 @@ test("rch: socket ino baseline round-trips through the state root file; corrupt 
 	const dir = ownedFixture("rch-ino-state");
 	const root = join(dir, "state");
 	expect(readRchSocketBaseline(root)).toBeNull();
-	const baseline: RchSocketBaseline = { path: join(dir, "rch.sock"), ino: 42, at: new Date().toISOString() };
+	const baseline: RchSocketBaseline = { path: join(dir, "rch.sock"), ino: 42, at: new Date().toISOString(), pid: 4242 };
 	expect(writeRchSocketBaseline(root, baseline)).toBe(true);
 	expect(readRchSocketBaseline(root)).toEqual(baseline);
 	writeFileSync(join(root, "rch-socket-ino.json"), "not json\n");
@@ -1641,7 +1664,7 @@ test("rch: only a recording diagnose writes the socket baseline; a read-only one
 		expect(readdirSync(dir)).not.toContain("state");
 		expect(await rch(true)).toMatchObject({ status: "OK", evidence: { state: "RUNNING", ino, baseline: "recorded" } });
 		expect(readRchSocketBaseline(state)).toMatchObject({ path: sock, ino });
-		const replaced: RchSocketBaseline = { path: sock, ino: ino + 1, at: new Date().toISOString() };
+		const replaced: RchSocketBaseline = { ...readRchSocketBaseline(state)!, ino: ino + 1, at: new Date().toISOString() };
 		expect(writeRchSocketBaseline(state, replaced)).toBe(true);
 		const planted = readFileSync(baselineFile);
 		expect(await rch(false)).toMatchObject({ status: "FAIL", evidence: { state: "SOCKET_UNLINKED", ino, expected_ino: ino + 1 } });

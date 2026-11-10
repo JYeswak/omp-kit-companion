@@ -1,0 +1,1 @@
+- `omp-kit doctor` no longer reports rch FAIL after a reboot or rchd restart: the socket baseline belongs to the daemon pid that bound it and is retaken for a new daemon.
