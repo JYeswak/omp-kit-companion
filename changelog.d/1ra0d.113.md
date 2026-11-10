@@ -1,1 +1,0 @@
-- The hourly claude-save job now reads the branch and gitlink baselines from `~/.config/omp-kit/claude-save.json`; before, it ignored that file and refused every save with NEW_BRANCH, even on `main`. A malformed config refuses with CLAUDE_SAVE_CONFIG.

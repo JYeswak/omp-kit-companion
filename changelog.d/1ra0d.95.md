@@ -1,3 +1,0 @@
-- The OMP source cache now refuses with OMP_SOURCE_NPM_LAG (naming the launcher and newest published versions) when the registry has not published the installed OMP yet, and the full-suite runtime identity binds the resolved OMP version.
-- A host whose `omp --version` fails or prints no release labels the suite identity `unavailable` instead of failing the shard (a remote Linux shard's failed probe had turned a release verdict RED).
-- A suite-runtime mismatch now names a differing OMP version among its fields.

@@ -1,1 +1,0 @@
-- The load watchdog (`com.omp-kit.load-watch`) now runs under any load instead of skipping itself above 2.5x cores, and two consecutive overloaded samples raise a desktop notification naming the top CPU process groups and how many were orphaned (adopted by launchd).

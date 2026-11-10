@@ -1,2 +1,0 @@
-- Retire Fleet Watch seat nudges, idle escalations and queued-steering submissions, and remove its installable service job. Keep fleet-watch.json project coordinator routes and operator job settings for admission and other consumers.
-- Project registration no longer promises monitoring; project status reports each named seat's latest mail-wake outcome and timestamp, or no wake recorded.

@@ -1,1 +1,0 @@
-- Added `omp-kit project add` (with undo) and `omp-kit project status`: make a repo a managed, monitored project in one act — mint seats, write the opt-in, roster and fleet-watch entries, start seats, deliver the first goal with proof.

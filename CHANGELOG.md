@@ -4,6 +4,33 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.113] - 2026-11-10
+
+### Changed
+
+- Added `omp-kit project add` (with undo) and `omp-kit project status`: make a repo a managed, monitored project in one act — mint seats, write the opt-in, roster and fleet-watch entries, start seats, deliver the first goal with proof.
+- `omp-kit send --ack-pending` now also clears an ordinary unproven send attempt once it is an hour old (ledgered, never resent); a younger one refuses `PENDING_ACK_TOO_EARLY`, and the `SUPPRESSED_PENDING` detail names the command or the time it becomes available. Before, an unlanded send suppressed every later send to that seat until the seat restarted.
+- The release full suite runs six timing-bound test files on the Mac host instead of the shared 4-core Linux shards, where each one failed a 120 s or CPU/wall-clock budget on some verdict of an unchanged tree.
+- `tests/cli/send.test.ts` keeps its tmux sockets within the 103-byte socket-path limit (falling back to the platform temp root), so a deep suite-worker checkout no longer kills the TMUX1 fixture server.
+- Each tmux test in `send.test.ts` gets its own socket root, and the mutations parent-replacement test renames the old directory away, so neither depends on server-exit timing or inode reuse.
+- Release qualification reruns at most three failing test files once on the local host, retaining the original evidence. A passing rerun is a named flake printed by the release; twice-failing files and broader failures still block.
+- A repository whose archived base judge predates the hermetic helpers lands again: the verdict store loads its rerun helper only when it reruns.
+- The load watchdog (`com.omp-kit.load-watch`) now runs under any load instead of skipping itself above 2.5x cores, and two consecutive overloaded samples raise a desktop notification naming the top CPU process groups and how many were orphaned (adopted by launchd).
+- The release full suite judges the two kitlib lock conformance test files on the Mac host while LOCKLINUX1 investigates their intermittent Linux-only failure; Linux CI still runs them.
+- Lock conformance tests wait for the child's FIFO reader before releasing the holder, avoiding Linux's vfork/CLOEXEC race; unexpected acquisition deadlines now include Linux lock-holder diagnostics.
+- Retire Fleet Watch seat nudges, idle escalations and queued-steering submissions, and remove its installable service job. Keep fleet-watch.json project coordinator routes and operator job settings for admission and other consumers.
+- Project registration no longer promises monitoring; project status reports each named seat's latest mail-wake outcome and timestamp, or no wake recorded.
+- The hourly claude-save job now reads the branch and gitlink baselines from `~/.config/omp-kit/claude-save.json`; before, it ignored that file and refused every save with NEW_BRANCH, even on `main`. A malformed config refuses with CLAUDE_SAVE_CONFIG.
+- Admitted `br update --claim` and `br create --title` now attach a PRIOR ART block (decisions, tracker, deleted work) naming prior art that reads like the decision at hand, instead of reinventing deleted or already-decided work.
+- Decisions come from the register you name with `decisionsDir` in `$XDG_CONFIG_HOME/omp-kit/prior-art.json` (or `OMP_KIT_DECISIONS_DIR`), read from its end so the newest decisions show; unset, the block says decisions are not configured.
+- `doctor --scope activation` no longer reports the extension manifest invalid after this release: `extensions/prior-art.ts` is listed as a library module.
+- Give land candidate commits a configurable `OMP_KIT_LAND_COMMIT_DEADLINE_S` bound (default 2400 seconds, clamped to 1..7200), and report `LAND_COMMIT_TIMEOUT` with hook and retry guidance instead of unknown attribution when it expires.
+- The OMP source cache now refuses with OMP_SOURCE_NPM_LAG (naming the launcher and newest published versions) when the registry has not published the installed OMP yet, and the full-suite runtime identity binds the resolved OMP version.
+- A host whose `omp --version` fails or prints no release labels the suite identity `unavailable` instead of failing the shard (a remote Linux shard's failed probe had turned a release verdict RED).
+- A suite-runtime mismatch now names a differing OMP version among its fields.
+- `omp-kit skill-mine` no longer mines kit notices, goal-continuation steers or injected prompts as your turns: an oversize session still on disk is sampled from its own JSONL, where those are `custom_message` records, and a `custom_message` is never a human turn. `cass view` (role only) now serves only archive-only sessions.
+- Main pushes now qualify a settled batch in the background after 10 quiet minutes, reusing exact-tree verdicts and running qualifications. A newer fetched main supersedes the pending run; `OMP_KIT_RELEASE_VERDICT=0` opts out.
+
 ## [0.2.112] - 2026-11-10
 
 ### Changed

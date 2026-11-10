@@ -1,1 +1,0 @@
-- `omp-kit send --ack-pending` now also clears an ordinary unproven send attempt once it is an hour old (ledgered, never resent); a younger one refuses `PENDING_ACK_TOO_EARLY`, and the `SUPPRESSED_PENDING` detail names the command or the time it becomes available. Before, an unlanded send suppressed every later send to that seat until the seat restarted.
