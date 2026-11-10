@@ -88,8 +88,9 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 	// A successful search may contain any of these diagnostic prefixes as quoted source.
 	if (!failed && timedOut !== true && outcome !== "timeout") return null;
 	const lines = diagnostics.flatMap(diagnostic => diagnostic.split("\n").map(line => line.trim()));
-	const mcp = lines.map(line => line.match(/^MCP failure server: ([a-zA-Z0-9_-]+) tool: ([a-zA-Z0-9_.-]+) transport: \S+ stage: \S+ failure: \S+ retryable:/)).find(Boolean);
-	if (mcp) return finding(`mcp-transport:mcp__${mcp[1]!.replace(/-/g, "_")}_${mcp[2]}`, lines.find(line => line.startsWith("MCP failure server:")));
+	// OMP prints its MCP failure envelope one field per line; the single-line form is matched too.
+	const mcp = /(?:^|\s)MCP failure server: ([a-zA-Z0-9_-]+) tool: ([a-zA-Z0-9_.-]+) transport: \S+ stage: \S+ failure: \S+ retryable:/.exec(lines.join(" "));
+	if (mcp) return finding(`mcp-transport:mcp__${mcp[1]!.replace(/-/g, "_")}_${mcp[2]}`, mcp[0].trim());
 	const guard = lines.map(line => line.match(/^(?:Error: )?fleet-guard [a-zA-Z0-9_.-]+ \(([A-Z][A-Z0-9_]+)\):/)).find(Boolean);
 	const refusal = lines.map(line => line.match(/^(?:(?:omp-kit|commit)[ :\-]+)?(MEMBER_REFUSED|REFUSED)\b/)).find(Boolean);
 	const code = text(first(["code", "guard_rule", "rule", "gate"]));
@@ -196,13 +197,15 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 		[/^(?:Path|File) (?:not found:|"[^"]*" not found|'[^']*' not found)/, "path-not-found"],
 		[/:\s*unbound variable/, "unbound-variable"],
 		[/error TS\d+:/, "type-error"],
-		[/Cannot find module\b|\bModule not found\b|MODULE_NOT_FOUND/, "module-not-found"],
+		[/Cannot find module\b|\bModule not found\b|MODULE_NOT_FOUND|Cannot find package '/, "module-not-found"],
 		[/Agent not found:/, "unknown-agent"],
 		[/Artifact \d+ not found|Background job or service not found|Tool \S+ not found\. Did you mean|Did you mean:|Unknown skill:/, "unknown-reference"],
 		[/unknown revision|unable to resolve revision|not a git repository|ambiguous argument/, "bad-git-state"],
 		[/syntax error near unexpected token/, "syntax-error"],
 		[/blocked: covered by/, "element-covered"],
 		[/"code"\s*:\s*"INVALID_ARGUMENTS"/, "invalid-arguments"],
+		// A JS eval cell that threw prints its stack frame inside the cell (js-cell-<id>).
+		[/(?:^|\s)at <anonymous> \(js-cell-[0-9a-f-]+/, "thrown-error"],
 	];
 	for (const line of lines) for (const [pattern, cause] of agentText) {
 		if (pattern.test(line)) return finding(`agent-input:${toolName(tool)}:${cause}`, line);
@@ -212,7 +215,10 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 	const toolText: readonly [RegExp, string][] = [
 		[/No pages to adopt here/, "no-browser-target"],
 		[/relay .* is out of date/, "stale-relay"],
-		[/Tool execution was aborted:/, "aborted"],
+		[/Tool execution was aborted:|^Command aborted$/, "aborted"],
+		[/^\[Kernel died during execution\b/, "kernel-died"],
+		// diff exits 1 when inputs differ: its own answer, not a broken tool.
+		[/^Files \S+ and \S+ differ$|^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|^\d+(?:,\d+)?[acd]\d+(?:,\d+)?$/, "diff-differs"],
 		[/DeprecationWarning|MODULE_TYPELESS_PACKAGE_JSON|\(\!\) Your \S+ config uses|^Warning: /, "warning"],
 		[/"status"\s*:\s*"RED"/, "red-verdict"],
 		[/"outcome"\s*:\s*"(?:partial|unavailable)"|'outcome':\s*'(?:partial|unavailable)'|no cursor to advance/, "incomplete-result"],

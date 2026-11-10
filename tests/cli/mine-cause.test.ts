@@ -177,6 +177,8 @@ test("LEDGERCLASS1: agent input errors name the agent's mistake", () => {
 		["bash", "error: unexpected argument '--fields' found", "agent-input:bash:invalid-arguments"],
 		["bash", "error: pathspec 'x.ts' did not match any file(s) known to git", "agent-input:bash:path-not-found"],
 		["bash", '{"code":"INVALID_ARGUMENTS","message":"bad grammar"}', "agent-input:bash:invalid-arguments"],
+		["eval", "Error: R2 anchor count=0\n    at <anonymous> (js-cell-8757c316-adf4-4c1a:12:9)", "agent-input:eval:thrown-error"],
+		["eval", "Error: Cannot find package '@noble/hashes' imported from /x/cell.ts", "agent-input:eval:module-not-found"],
 	];
 	for (const [tool, content, id] of cases) {
 		expect(classifyMineResult({ tool, result: { isError: true, content } })?.class_id, content).toBe(id);
@@ -217,6 +219,12 @@ test("LEDGERCLASS1: tool and environment failures stay tool-error rows with name
 		["bash", "bun test v1.4.3 test/g.test.ts: # Unhandled error between tests --- error: boom", "tool-error:bash:test-failure"],
 		["bash", "rc=1 error: fixture plan rejected (fail) update derives the denominator", "tool-error:bash:test-failure"],
 		["bash", "not ok 3 - retains native commits", "tool-error:bash:test-failure"],
+		["bash", "Command aborted", "tool-error:bash:aborted"],
+		["eval", "[Kernel died during execution; completion is uncertain]", "tool-error:eval:kernel-died"],
+		["bash", "--- a/report.json\n+++ b/report.json\n@@ -1,3 +1,3 @@\n-old\n+new", "tool-error:bash:diff-differs"],
+		["bash", "Files out/a.json and out/b.json differ", "tool-error:bash:diff-differs"],
+		["bash", '1c1\n< {"expectations":1}\n---\n> {"expectations":2}', "tool-error:bash:diff-differs"],
+		["mcp__mcp_agent_mail_whois", "MCP failure\nserver: mcp-agent-mail\ntool: whois\ntransport: http\nstage: send\nfailure: timeout\nretryable: no\nmessage: Request timeout after 30000ms", "mcp-transport:mcp__mcp_agent_mail_whois"],
 	];
 	for (const [tool, content, id] of cases) {
 		expect(classifyMineResult({ tool, result: { isError: true, content } })?.class_id, content).toBe(id);
@@ -232,6 +240,10 @@ test("LEDGERCLASS1 boundaries: generic errors, bare exits and redacted bodies st
 	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: "This edit anchors to lines " + "x".repeat(65_536) + " timeout" } })?.class_id).toBe("tool-error:unclassified");
 	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: "Rule: " + "y".repeat(65_536) + " timeout" } })?.class_id).toBe("tool-error:unclassified");
 	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: '{"overall":"NOT_RUN"}' } })?.class_id).toBe("tool-error:unclassified");
+	// Boundaries of the diff/eval/MCP shapes: a stack frame outside a JS cell, a "Files ... differ" with a spaced
+	// path, prose mentioning a command abort and a lone "MCP failure" line name nothing.
+	for (const content of ["Error: boom\n    at main (/x/app.ts:3:1)", "Files my report.json and b.json differ", "the Command aborted earlier", "MCP failure\nmessage: boom"])
+		expect(classifyMineResult({ tool: "bash", result: { isError: true, content } })?.class_id, content).toBe("tool-error:unclassified");
 });
 
 test("LEDGERCLASS1: a fully redacted body stays unclassified without leaking", () => {
