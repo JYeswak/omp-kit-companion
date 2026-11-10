@@ -797,7 +797,8 @@ esac
 }
 
 test("HANDOFFPUSHCHECK1 a GREEN push-check row admits the handoff; no row, an rc 1 row and a stale check_sha256 row refuse", async () => {
-	const f = await pushCheckHandoffRepo("#!/bin/sh\nexit 0\n");
+	// /bin/bash, not /bin/sh: land's interpreter rule probes `--version`, which Debian's dash (/bin/sh) lacks.
+	const f = await pushCheckHandoffRepo("#!/bin/bash\nexit 0\n");
 	try {
 		const refused = await f.handoff("hh-owned", f.done);
 		expect(refused.rc, decoder.decode(refused.stderr)).toBe(4);
