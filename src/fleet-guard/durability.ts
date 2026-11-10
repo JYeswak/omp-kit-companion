@@ -281,7 +281,14 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 			const scratch = join(scratchRoot, beneath[0]!);
 			const ownerPath = join(scratch, ".owner");
 			read = "scratch ownership metadata lstat";
-			if ((await lstat(ownerPath)).isSymbolicLink()) return refuse("scratch ownership metadata is a symlink");
+			// SCRATCHNEW1: a missing .owner is not an unreadable fact, it is a dir nobody made with `scratch new`
+			// (CFS: 14 UNKNOWN refusals in 3 h, each agent retrying the same hand-made dir). Name the command.
+			const ownerStat = await lstat(ownerPath).catch(error => {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+				throw error;
+			});
+			if (ownerStat === null) return refuse(`var/agent-tmp/${beneath[0]} was not created by \`omp-kit scratch new\` (it has no .owner). Run \`omp-kit scratch new --label ${beneath[0]!.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 40)} --json\` in this repository and write under the dir it prints`);
+			if (ownerStat.isSymbolicLink()) return refuse("scratch ownership metadata is a symlink");
 			// The one owner parser the kit writes against: the seat owner (agent/session/bin) and the JSON owner
 			// from `omp-kit scratch new` are both owned scratch, not invalid metadata (ompkit-26xhq).
 			read = "scratch ownership metadata read";

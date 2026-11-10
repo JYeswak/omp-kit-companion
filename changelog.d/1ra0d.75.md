@@ -1,0 +1,1 @@
+- Writing into a `var/agent-tmp/<dir>` that `omp-kit scratch new` did not create is refused with the exact `omp-kit scratch new --label ...` command to run, instead of an UNKNOWN read error.

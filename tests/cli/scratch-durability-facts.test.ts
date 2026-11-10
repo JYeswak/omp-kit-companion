@@ -139,7 +139,11 @@ test("missing, malformed, or redirected ownership facts never admit scratch", as
 	writeFileSync(f.owner, "pid=1\nlabel=facts\nrepo=/unavailable\ncreated=invalid\n");
 	expect((await check(event, f.context))?.block).toBe(true);
 	rmSync(f.owner);
-	expect((await check(event, f.context))?.block).toBe(true);
+	// SCRATCHNEW1: a hand-made dir still blocks, now naming the command that makes an owned one, never UNKNOWN.
+	const missing = await check(event, f.context);
+	expect(missing?.block).toBe(true);
+	expect(missing?.status).toBeUndefined();
+	expect(missing?.reason).toContain("was not created by `omp-kit scratch new` (it has no .owner). Run `omp-kit scratch new --label");
 	const alternate = join(f.repo, "owner-data");
 	writeFileSync(alternate, `pid=1\nlabel=facts\nrepo=${f.repo}\ncreated=2026-10-17T00:00:00Z\n`);
 	symlinkSync(alternate, f.owner);
