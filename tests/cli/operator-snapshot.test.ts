@@ -238,6 +238,8 @@ test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, ot
 	mkdirSync(join(state, "receipts"), { recursive: true });
 	mkdirSync(join(state, "inbox-wake"), { recursive: true });
 	mkdirSync(join(state, "scratch-users"), { recursive: true });
+	mkdirSync(join(state, "send-drop"), { recursive: true });
+	mkdirSync(join(state, "write-ledger"), { recursive: true });
 	writeFileSync(join(state, "gate-events.jsonl"), "{\"open\":1}\n");
 	writeFileSync(join(state, "mail-wake.jsonl"), "{\"open\":1}\n");
 	writeFileSync(join(state, "scratch-budgets.json"), "{}\n");
@@ -252,6 +254,10 @@ test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, ot
 	appendFileSync(join(state, "scratch-users", "def456.lock"), "2\n");
 	writeFileSync(join(state, "kit-update-job-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.json"), "{}\n");
 	writeFileSync(join(state, "git-lock-rate.1.json.tmp.12345"), "{}\n");
+	// 0.2.109 install: seats' send drops, write-ledger appends and upgrade notices landed mid-postcheck.
+	writeFileSync(join(state, "send-drop", "cfsios-1-kit-send-ce1bd6d1a31e.md"), "drop\n");
+	writeFileSync(join(state, "write-ledger", "2026-11-10.jsonl"), "{}\n");
+	writeFileSync(join(state, "upgrade-notice-4cfb58040454d8b4.json"), "[]\n");
 	const quiet = compareWatched(before, snapshotWatched(paths), home);
 	expect(quiet, JSON.stringify(quiet)).toMatchObject({ unchanged: true, complete: true, changed_paths: [], incomplete_paths: [] });
 	expect(quiet.live_state_paths).toEqual([
@@ -264,6 +270,9 @@ test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, ot
 		"~/.local/state/omp-kit/mail-wake.jsonl",
 		"~/.local/state/omp-kit/scratch-budgets.json",
 		"~/.local/state/omp-kit/scratch-users",
+		"~/.local/state/omp-kit/send-drop",
+		"~/.local/state/omp-kit/upgrade-notice-4cfb58040454d8b4.json",
+		"~/.local/state/omp-kit/write-ledger",
 	]);
 	// Planted: a kit receipt the fleet never writes is still reported beside the live state.
 	writeFileSync(join(state, "receipts", "x.json"), "{}\n");

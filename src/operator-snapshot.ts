@@ -35,15 +35,16 @@ const VOLATILE_CACHE_DIR_NAMES: Record<string, true> = {
 };
 
 /**
- * Live-fleet namespaces of the kit state root: every seat's guard/wake extensions append the wake ledgers,
- * scratch accounting churns on its own clock, and the installed kit-update job records its own runs. None
- * are kit install writes, and the post-run concurrent-writer probe cannot catch writes minutes apart, so the
- * snapshot does not judge them. Matched by exact top-level name or literal prefix (never a broad pattern);
- * the two named subdirectories skip wholesale. Everything else under the state root stays watched.
+ * Live-fleet namespaces of the kit state root: every seat's guard/wake/write-ledger/upgrade-notice extensions
+ * append their own records, seats' `omp-kit send` drops land in send-drop, scratch accounting churns on its own
+ * clock, and the installed kit-update job records its own runs. None are kit install writes, and the post-run
+ * concurrent-writer probe cannot catch writes minutes apart, so the snapshot does not judge them. Matched by
+ * exact top-level name or literal prefix (never a broad pattern); the named subdirectories skip wholesale.
+ * Everything else under the state root stays watched.
  */
 const LIVE_FLEET_TOP_FILES: Record<string, true> = { "gate-events.jsonl": true, "mail-wake.jsonl": true, "scratch-budgets.json": true };
-const LIVE_FLEET_TOP_PREFIXES: readonly string[] = ["kit-update-job-", "git-lock-rate."];
-const LIVE_FLEET_SUBDIRS: Record<string, true> = { "inbox-wake": true, "scratch-users": true };
+const LIVE_FLEET_TOP_PREFIXES: readonly string[] = ["kit-update-job-", "git-lock-rate.", "upgrade-notice-"];
+const LIVE_FLEET_SUBDIRS: Record<string, true> = { "inbox-wake": true, "scratch-users": true, "send-drop": true, "write-ledger": true };
 
 /**
  * The live-fleet anchor for a path under the state root, or null when the path stays watched. Top-level
