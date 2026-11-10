@@ -87,6 +87,12 @@ export interface SkillMineCoverage {
 	sessions_seen: number;
 	sessions_mined: number;
 	skipped_oversize: number;
+	project_filtered: number;
+	no_path: number;
+	advisor_sidecar: number;
+	per_project_cap: number;
+	session_cap: number;
+	not_reached: number;
 	stopped_early: boolean;
 	list_truncated: boolean;
 	projects: Record<string, number>;
@@ -123,6 +129,9 @@ export interface SkillMineOptions {
 	sink?: string;
 	maxNew?: number;
 	wallBudgetS?: number;
+	/** Test-only seam: lower the pick caps for SKILLMINE3 fixtures without touching the module constants. */
+	sessionCap?: number;
+	perProjectCap?: number;
 	apply?: boolean;
 	home: string;
 	pathValue: string;
@@ -629,6 +638,7 @@ async function sampleLocalSession(path: string): Promise<unknown[] | null> {
 async function mineCass(options: SkillMineOptions, sinceMs: number): Promise<{ status: SkillMineSourceReport; observations: Observation[]; coverage: SkillMineCoverage }> {
 	const emptyCoverage = (extra: Partial<SkillMineCoverage> = {}): SkillMineCoverage => ({
 		sessions_in_window: 0, sessions_seen: 0, sessions_mined: 0, skipped_oversize: 0,
+		project_filtered: 0, no_path: 0, advisor_sidecar: 0, per_project_cap: 0, session_cap: 0, not_reached: 0,
 		stopped_early: false, list_truncated: false, projects: {}, ...extra,
 	});
 	const cassBin = findOnPath("cass", options.pathValue);
@@ -651,18 +661,27 @@ async function mineCass(options: SkillMineOptions, sinceMs: number): Promise<{ s
 		? listed.rows.filter(row => options.projects!.some(p => sessionProject(row, "").includes(p) || p.includes(sessionProject(row, ""))))
 		: listed.rows;
 	const wallBudgetS = options.wallBudgetS ?? SKILL_MINE_WALL_BUDGET_S;
+	const sessionCap = options.sessionCap ?? SKILL_MINE_SESSION_CAP;
+	const perProjectCap = options.perProjectCap ?? SKILL_MINE_SESSIONS_PER_PROJECT_CAP;
 	const deadlineMs = Date.now() + Math.max(0, wallBudgetS) * 1000;
+	const projectFiltered = listed.rows.length - wanted.length;
+	let noPath = 0;
+	let advisorSidecar = 0;
+	let perProjectDropped = 0;
+	let sessionCapDropped = 0;
 	const perProject = new Map<string, number>();
 	const picked: { project: string; path: string; size: number; count: number }[] = [];
 	for (const row of wanted) {
-		if (picked.length >= SKILL_MINE_SESSION_CAP) break;
+		// The global cap takes precedence: every row past it counts as session_cap, whatever else fits.
+		if (picked.length >= sessionCap) { sessionCapDropped++; continue; }
 		const path = typeof row.source_path === "string" ? row.source_path : typeof row.path === "string" ? row.path : "";
+		if (!path) { noPath++; continue; }
 		// Advisor sidecars (`__advisor.<name>.jsonl`) replay their parent session's tool output and summaries;
 		// mining them counts the same work twice and turns harness text into "recurring procedures".
-		if (!path || /(?:^|\/)__advisor\.[^/]*\.jsonl$/.test(path)) continue;
+		if (/(?:^|\/)__advisor\.[^/]*\.jsonl$/.test(path)) { advisorSidecar++; continue; }
 		const project = sessionProject(row, options.cwd);
 		const count = perProject.get(project) ?? 0;
-		if (count >= SKILL_MINE_SESSIONS_PER_PROJECT_CAP) continue;
+		if (count >= perProjectCap) { perProjectDropped++; continue; }
 		perProject.set(project, count + 1);
 		picked.push({
 			project, path,
@@ -700,11 +719,23 @@ async function mineCass(options: SkillMineOptions, sinceMs: number): Promise<{ s
 		observations.push(...observationsFromSession(session.project, session.path, flat));
 	}
 	const seen = mined + skippedOversize + failures;
-	const parts = [`mined ${mined} session(s)`, ...(skippedOversize > 0 ? [`sampled/skipped ${skippedOversize} oversize`] : []), ...(failures > 0 ? [`${failures} export(s) unreadable`] : []), ...(stoppedEarly ? ["wall budget reached"] : [])];
+	const notReached = picked.length - seen;
+	const parts = [`mined ${mined} session(s)`,
+		...(skippedOversize > 0 ? [`sampled/skipped ${skippedOversize} oversize`] : []),
+		...(failures > 0 ? [`${failures} export(s) unreadable`] : []),
+		...(projectFiltered > 0 ? [`${projectFiltered} filtered by project`] : []),
+		...(noPath > 0 ? [`${noPath} without a session path`] : []),
+		...(advisorSidecar > 0 ? [`${advisorSidecar} advisor sidecar(s)`] : []),
+		...(perProjectDropped > 0 ? [`${perProjectDropped} over the per-project cap`] : []),
+		...(sessionCapDropped > 0 ? [`${sessionCapDropped} over the session cap`] : []),
+		...(notReached > 0 ? [`${notReached} picked but never visited (wall budget)`] : []),
+		...(stoppedEarly ? ["wall budget reached"] : [])];
 	const reason = parts.join("; ");
 	const coverage: SkillMineCoverage = {
 		sessions_in_window: listed.rows.length, sessions_seen: seen, sessions_mined: mined,
-		skipped_oversize: skippedOversize, stopped_early: stoppedEarly, list_truncated: listed.truncated, projects,
+		skipped_oversize: skippedOversize, project_filtered: projectFiltered, no_path: noPath,
+		advisor_sidecar: advisorSidecar, per_project_cap: perProjectDropped, session_cap: sessionCapDropped,
+		not_reached: notReached, stopped_early: stoppedEarly, list_truncated: listed.truncated, projects,
 	};
 	return { status: { status: "OK", reason, sessions: mined, messages }, observations, coverage };
 }

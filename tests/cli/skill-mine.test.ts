@@ -557,3 +557,51 @@ test("SKILLMINE1: harness render lines and injected blocks never become evidence
 	expect(stripInjected("<filesystem> is not a tag we strip")).toBe("<filesystem> is not a tag we strip");
 	expect(stripInjected("x".repeat(40_000) + "<irc")).toBe("x".repeat(40_000) + "<irc");
 });
+
+// SKILLMINE3: every listed session is either seen or counted under exactly one
+// drop reason, so sessions_in_window equals sessions_seen plus all drop counts.
+test("SKILLMINE3: caps, sidecar, missing path and project filter all count and add up", async () => {
+	const f = makeFixture("skill-mine-drops");
+	put(join(f.root, "cassdata", "sessions.json"), `${JSON.stringify([
+		{ source_path: "sess-a1", workspace: f.projA },
+		{ source_path: "sess-a2", workspace: f.projA },
+		{ source_path: "sess-a3", workspace: f.projA },
+		{ source_path: "sessions/__advisor.helper.jsonl", workspace: f.projA },
+		{ workspace: f.projA },
+		{ source_path: "sess-b1", workspace: f.projB },
+		{ source_path: "sess-b2", workspace: f.projB },
+		{ source_path: "sess-c1", workspace: "/filtered-out/proj-c" },
+	])}\n`);
+	const report = await runSkillMine({
+		...f.options, projects: [f.projA, f.projB], sessionCap: 3, perProjectCap: 2,
+	});
+	const c = report.coverage;
+	expect(c.sessions_in_window).toBe(8);
+	expect(c.sessions_mined).toBe(3);
+	expect(c.sessions_seen).toBe(3);
+	expect(c.project_filtered).toBe(1);
+	expect(c.advisor_sidecar).toBe(1);
+	expect(c.no_path).toBe(1);
+	expect(c.per_project_cap).toBe(1);
+	expect(c.session_cap).toBe(1);
+	expect(c.not_reached).toBe(0);
+	expect(c.sessions_seen + c.project_filtered + c.no_path + c.advisor_sidecar + c.per_project_cap + c.session_cap + c.not_reached).toBe(c.sessions_in_window);
+	const reason = report.sources.cass.reason;
+	expect(reason).toContain("1 filtered by project");
+	expect(reason).toContain("1 without a session path");
+	expect(reason).toContain("1 advisor sidecar(s)");
+	expect(reason).toContain("1 over the per-project cap");
+	expect(reason).toContain("1 over the session cap");
+});
+
+test("SKILLMINE3: wall budget exhaustion counts picked-but-unvisited sessions and still adds up", async () => {
+	const f = makeFixture("skill-mine-notreached");
+	const emptyMail = join(f.root, "empty-mail", "projects");
+	mkdirSync(emptyMail, { recursive: true });
+	const report = await runSkillMine({ ...f.options, mailArchive: join(f.root, "empty-mail"), wallBudgetS: 0 });
+	const c = report.coverage;
+	expect(c.stopped_early).toBe(true);
+	expect(c.not_reached).toBeGreaterThanOrEqual(3);
+	expect(c.sessions_seen + c.project_filtered + c.no_path + c.advisor_sidecar + c.per_project_cap + c.session_cap + c.not_reached).toBe(c.sessions_in_window);
+	expect(report.sources.cass.reason).toContain("wall budget");
+});
