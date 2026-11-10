@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { runSync } from "./kitlib/run.ts";
 
 const PACKAGE_NAME = "@oh-my-pi/pi-coding-agent";
 const MATCHER_FILES = ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"];
@@ -12,8 +13,34 @@ const KEEP_VERSIONS = 2;
 export interface SourceCacheDeps {
 	/** Runs `bun add`; injectable so tests never touch the network. */
 	install?: (cwd: string, spec: string, env: Record<string, string | undefined>) => { status: number | null; output: string };
+	/** Newest version the npm registry publishes; stubbed in tests, `npm view` in production. */
+	latestPublished?: () => string | null;
 	now?: () => Date;
 }
+
+/** Numeric X.Y.Z ordering: negative when a < b, zero when equal, positive when a > b. */
+function compareRelease(a: string, b: string): number {
+	const [x, y] = [a, b].map(version => version.split(".").map(Number));
+	return x[0]! - y[0]! || x[1]! - y[1]! || x[2]! - y[2]!;
+}
+
+/** Newest `@oh-my-pi/pi-coding-agent` the npm registry publishes, or null when unknowable. */
+function defaultLatestPublished(): string | null {
+	try {
+		const view = runSync(["npm", "view", PACKAGE_NAME, "dist-tags.latest"], {
+			// product-deadline: one npm registry read; a hung registry returns null and the caller keeps the plain bun error.
+			deadline_s: 60, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+		});
+		if (view.rc !== 0 || view.timed_out || view.truncated) return null;
+		const version = new TextDecoder().decode(view.stdout).trim();
+		return VERSION_RE.test(version) ? version : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Bun's missing-version wording, e.g. `No version matching "1.2.3" found ... (but package exists)`. */
+const NO_VERSION_RE = /no version matching .* found|failed to resolve/i;
 
 /**
  * Tern (and any compiled OMP) ships one binary with no TypeScript beside it, but the kit matcher runs
@@ -107,6 +134,8 @@ function prune(root: string, keep: string): void {
  * Return the package root for exactly `version`, installing it into the cache when absent.
  * OMP_KIT_OMP_SRC_FETCH=0 stops installs only; an already verified entry is still served.
  * Throws with the reason when no cache root exists, the install fails, or the result is not that version.
+ * A version the registry has not published yet refuses OMP_SOURCE_NPM_LAG naming the launcher version
+ * and the newest published one, so a Tern-installed OMP newer than npm does not look like a broken cache.
  */
 export function ensureOmpSource(version: string, env: Record<string, string | undefined>, deps: SourceCacheDeps = {}): string {
 	if (!VERSION_RE.test(version)) throw new Error(`refusing to fetch OMP source for a non-release version: ${version}`);
@@ -123,7 +152,20 @@ export function ensureOmpSource(version: string, env: Record<string, string | un
 		writeFileSync(join(staging, "package.json"), `${JSON.stringify({ name: "omp-kit-omp-src", private: true })}\n`);
 		const spec = `${PACKAGE_NAME}@${version}`;
 		const result = (deps.install ?? defaultInstall)(staging, spec, env);
-		if (result.status !== 0) throw new Error(`bun add ${spec} failed (exit ${result.status}): ${result.output.trim().slice(-400)}`);
+		if (result.status !== 0) {
+			if (NO_VERSION_RE.test(result.output)) {
+				let latest: string | null = null;
+				try {
+					latest = (deps.latestPublished ?? defaultLatestPublished)();
+				} catch {
+					latest = null;
+				}
+				if (latest !== null && compareRelease(version, latest) > 0) {
+					throw new Error(`OMP_SOURCE_NPM_LAG: npm has no ${spec} (newest published is ${PACKAGE_NAME}@${latest}); the launcher is newer than the registry — retry once npm publishes it`);
+				}
+			}
+			throw new Error(`bun add ${spec} failed (exit ${result.status}): ${result.output.trim().slice(-400)}`);
+		}
 		const got = manifestVersion(packageDir(staging));
 		if (got !== version) throw new Error(`installed ${PACKAGE_NAME} reports version ${String(got)}, not ${version}`);
 		const missing = MATCHER_FILES.filter(file => !existsSync(join(packageDir(staging), "src", file)));

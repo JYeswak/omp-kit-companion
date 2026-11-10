@@ -1,0 +1,1 @@
+- The OMP source cache now refuses with OMP_SOURCE_NPM_LAG (naming the launcher and newest published versions) when the registry has not published the installed OMP yet, and the full-suite runtime identity binds the resolved OMP version.

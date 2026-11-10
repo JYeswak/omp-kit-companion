@@ -121,6 +121,31 @@ def suite_environment() -> dict[str, str]:
     return qualification_environment()
 
 
+def runtime_prefix(bun_version: str, python_version: str, omp_version: str) -> str:
+    """Pure identity prefix; two prefixes differing only in the OMP version differ."""
+    return (f"{platform.system()}/{platform.machine()}/bun-{bun_version}"
+            f"/python-{python_version}/omp-{omp_version}")
+
+
+def resolve_omp_version(environment: dict[str, str]) -> str:
+    """The OMP release the suite environment resolves, e.g. `omp/18.18.6` -> `18.18.6`; `none` on a host
+    with no `omp` (a commit gate there must still run), a distinct identity rather than a failure."""
+    try:
+        omp = run(["omp", "--version"], env=environment, deadline_s=10)
+    except FileNotFoundError:
+        return "none"
+    if omp.rc == 127:
+        return "none"
+    if omp.rc != 0 or omp.timed_out or omp.truncated:
+        raise ValueError("omp version is unavailable or incomplete")
+    raw = omp.stdout.decode("utf-8", errors="strict").splitlines()
+    text = raw[0].strip() if raw else ""
+    version = text[4:] if text.startswith("omp/") else text
+    if len(version.split(".")) != 3 or any(not part.isdigit() for part in version.split(".")):
+        raise ValueError(f"omp version is not a release: {text!r}")
+    return version
+
+
 def runtime_parts() -> tuple[str, dict[str, str]]:
     """Bind versions observed under exactly the constructed suite environment."""
     environment = suite_environment()
@@ -136,8 +161,7 @@ def runtime_parts() -> tuple[str, dict[str, str]]:
     python_version = python.stdout.decode("utf-8", errors="strict").strip().removeprefix("Python ")
     if not python_version:
         raise ValueError("python3 version is empty")
-    return (f"{platform.system()}/{platform.machine()}/bun-{bun_version}"
-            f"/python-{python_version}"), environment
+    return runtime_prefix(bun_version, python_version, resolve_omp_version(environment)), environment
 
 
 def environment_digest(environment: dict[str, str]) -> str:
@@ -150,6 +174,31 @@ def runtime_identity() -> str:
     """Bind executable versions and the environment inputs admitted to the full-suite runner."""
     prefix, environment = runtime_parts()
     return f"{prefix}/env-{environment_digest(environment)}"
+
+
+def selftest() -> int:
+    """OMPSRCLAG1: the runtime identity binds the resolved OMP version. Two
+    identities differing only in it differ; identical inputs give identical
+    identities. Prints one SELFTEST line and returns 0 on success."""
+    try:
+        first = runtime_identity()
+        if runtime_identity() != first:
+            print("SELFTEST1 FAIL: identical inputs gave different runtime identities")
+            return 1
+        if f"/omp-{resolve_omp_version(suite_environment())}" not in first:
+            print("SELFTEST1 FAIL: runtime identity does not name the resolved OMP version")
+            return 1
+        if runtime_prefix("bun", "python", "18.18.5") == runtime_prefix("bun", "python", "18.18.6"):
+            print("SELFTEST1 FAIL: identities differing only in OMP version are equal")
+            return 1
+        if runtime_prefix("bun", "python", "18.18.6") != runtime_prefix("bun", "python", "18.18.6"):
+            print("SELFTEST1 FAIL: identical inputs gave different runtime prefixes")
+            return 1
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        print(f"SELFTEST1 FAIL: {error}")
+        return 1
+    print(f"SELFTEST1 ok identity binds resolved OMP: {first.split('/omp-')[1].split('/')[0] if '/omp-' in first else '?'}")
+    return 0
 
 
 def pin_runtime() -> None:
@@ -574,6 +623,9 @@ def judging_file_copies(paths: list[Path]) -> list[str]:
     return findings
 
 def main() -> int:
+    # OMPSRCLAG1: standalone self-check; handled before argparse because the action subparsers are required.
+    if "--selftest" in sys.argv[1:]:
+        return selftest()
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest="action", required=True)
     identity = subs.add_parser("identity")

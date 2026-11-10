@@ -264,3 +264,19 @@ test("planted: a Tern package missing matcher source still refuses", () => {
 	expect(() => resolveOmpIdentity({ PATH: path, BUN_INSTALL: join(base, "no-bun"), OMP_KIT_OMP_SRC_CACHE: cache, OMP_KIT_OMP_SRC_FETCH: "0" }))
 		.toThrow("cannot locate @oh-my-pi/pi-coding-agent 9.9.9 for OMP launcher");
 });
+
+test("OMPSRCLAG1 a registry without the launcher version refuses naming the npm lag and newest published version", () => {
+	const env = { OMP_KIT_OMP_SRC_CACHE: fresh() };
+	const missing = { status: 1, output: 'error: No version matching "18.18.6" found for specifier "@oh-my-pi/pi-coding-agent" (but package exists)\nerror: @oh-my-pi/pi-coding-agent@18.18.6 failed to resolve\n' };
+	expect(() => ensureOmpSource("18.18.6", env, { install: () => missing, latestPublished: () => "18.18.5" }))
+		.toThrow("OMP_SOURCE_NPM_LAG: npm has no @oh-my-pi/pi-coding-agent@18.18.6 (newest published is @oh-my-pi/pi-coding-agent@18.18.5)");
+	expect(readdirSync(env.OMP_KIT_OMP_SRC_CACHE).filter(name => name.includes("staging"))).toEqual([]);
+	// Control: a registry that publishes the version keeps the plain bun error, and so does an unreadable registry.
+	expect(() => ensureOmpSource("18.18.6", env, { install: () => missing, latestPublished: () => "18.18.6" }))
+		.toThrow("bun add @oh-my-pi/pi-coding-agent@18.18.6 failed (exit 1)");
+	expect(() => ensureOmpSource("18.18.7", env, { install: () => missing, latestPublished: () => null }))
+		.toThrow("bun add @oh-my-pi/pi-coding-agent@18.18.7 failed (exit 1)");
+	expect(() => ensureOmpSource("18.18.8", env, { install: () => missing, latestPublished: () => { throw new Error("registry down"); } }))
+		.toThrow("bun add @oh-my-pi/pi-coding-agent@18.18.8 failed (exit 1)");
+	expect(readdirSync(env.OMP_KIT_OMP_SRC_CACHE)).toEqual([]);
+});
