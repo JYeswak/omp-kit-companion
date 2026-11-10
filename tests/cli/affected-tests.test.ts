@@ -408,3 +408,24 @@ test.skipIf(!AMPLE)("EMBEDDEP1 a deferral while ci.yml is paused prints DEFERRED
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
 }, 240_000);
+
+test("EXTLOADGATE1 a staged extensions/*.ts or package.json change selects the package load gate suite", () => {
+	const dir = tree({
+		...FILES,
+		"extensions/kit-mail-wake.ts": 'import { woken } from "../src/plane-tern.ts";\nexport const woken = 1;\n',
+		"src/plane-tern.ts": "export const woken = 1;\n",
+		"src/only.ts": "export const only = 1;\n",
+		"tests/cli/only.test.ts": 'import { only } from "../../src/only.ts";\nonly;\n',
+		"tests/cli/package-release.test.ts": 'import { expect, test } from "bun:test";\ntest("loads", () => { expect(1).toBe(1); });\n',
+		"package.json": '{ "name": "fixture" }\n',
+	});
+	try {
+		// Planted: the shipped extension is imported by no test, yet the load gate suite is selected.
+		expect(select(dir, ["extensions/kit-mail-wake.ts"]).tests).toEqual(["tests/cli/package-release.test.ts"]);
+		expect(select(dir, ["package.json"]).tests).toEqual(["tests/cli/package-release.test.ts"]);
+		// Control: a src-only change no extension imports selects only its own suite.
+		expect(select(dir, ["src/only.ts"]).tests).toEqual(["tests/cli/only.test.ts"]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

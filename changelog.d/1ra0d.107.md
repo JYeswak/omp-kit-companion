@@ -1,0 +1,1 @@
+- The commit gate now selects the package load gate suite when a staged change touches any extensions/*.ts source or the root package.json, so a shipped extension importing outside the package can no longer land untested.

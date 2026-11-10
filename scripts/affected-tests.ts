@@ -291,6 +291,13 @@ export function selectAffected(root: string, changed: readonly string[]): Select
 		reach(start, start, 0);
 		// A generated output changes with its input, so every test reaching the output is affected.
 		for (const output of embedOutputs.get(start) ?? []) reach(output, start, 1);
+		// EXTLOADGATE1 (ompkit-1ra0d.107): shipped extensions load unbundled in the package with src/
+		// outside it, so any change to an extensions/*.ts source or the packaged root package.json
+		// affects the extension load gate suite even when no static edge reaches it (a8374beb7f
+		// shipped a ../src/ import the commit gate never ran).
+		if (start === "package.json" || (start.startsWith("extensions/") && start.endsWith(".ts"))) {
+			select("tests/cli/package-release.test.ts", start, 1);
+		}
 		// A rule file PACK/ID.md: tests that load ID through a loader, and the sources loading the
 		// whole PACK with the tests that import or spawn them (one hop: the harness's own suites).
 		const parts = start.split("/");
