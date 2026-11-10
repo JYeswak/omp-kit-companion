@@ -1301,6 +1301,23 @@ test("CLOSEPASS1: two passing [build] boxes and an unticked [live] box close und
 	const children = JSON.parse((await brun(["list", "--status", "all", "--label", LIVE_READBACK_LABEL, "--limit", "0", "--json"], t.dir, env)).out) as { issues?: unknown[] } | unknown[];
 	expect((Array.isArray(children) ? children : children.issues ?? []).length).toBe(1);
 }, fixtureDeadlineS(120) * 1_000);
+test("READBACKREUSE1: a retry reuses the open LIVEREADBACK child an earlier failed attempt left, never a second child", async () => {
+	const code = await repo("readback-reuse");
+	const t = await policyTracker("readback-reuse-t");
+	const env = trackerEnv(t);
+	const live = "- [ ] [c] [live] on the installed kit `sh scripts/t.sh` -> 16 pass";
+	const epic = await createBead(t, "reuse epic");
+	const id = await reviewBead(t, "reuse parent", `${BUILD_BOXES}\n${live}`, epic);
+	// The child a verify created before a later act failed (2026-11-10: ompkit-1ra0d.68 -> .91).
+	const left = await createBead(t, "LIVEREADBACK: reuse parent", ["-t", "task", "-l", LIVE_READBACK_LABEL, "--parent", epic, "--deps", `related:${id}`, "--acceptance-criteria", live]);
+	const res = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)", lesson: "reuse fixture" });
+	expect(res.code, res.log).toBe("CLOSED");
+	expect(res.child).toBe(left);
+	expect(JSON.stringify(await row(t, id))).toContain(`deferred [c] to ${left} (LIVEREADBACK`);
+	const children = JSON.parse((await brun(["list", "--status", "all", "--label", LIVE_READBACK_LABEL, "--limit", "0", "--json"], t.dir, env)).out) as { issues?: unknown[] } | unknown[];
+	expect((Array.isArray(children) ? children : children.issues ?? []).length).toBe(1);
+	expect(await row(t, left)).toMatchObject({ status: "open", acceptance_criteria: live });
+}, fixtureDeadlineS(120) * 1_000);
 test("CLOSEPASS1: a commandless [v][build] judgement stays on the parent when executable build boxes pass", async () => {
 	const code = await repo("closepass-v-build");
 	const t = await policyTracker("closepass-v-build-t");

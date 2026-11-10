@@ -500,26 +500,29 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const ticks = boxes.filter(b => ranIndexes.has(b.index)).map(b => b.item - deferred.filter(d => d.item < b.item).length);
 	const family = input.family ?? "unknown (set --family)";
 	const deferredTags = deferred.map(b => tag(b)).join(" ");
-	const reason = `verified by ${input.actor} (family: ${family}) on export ${input.exportSha}: ${ran.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}${deferred.length ? `; deferred ${deferredTags} to ${CHILD} (LIVEREADBACK, child of ${homeNote || home}, related to ${input.bead})` : ""}`;
+	const reuse = deferred.length > 0 ? row?.readbacks[0] : undefined;
+	const childRef = reuse ?? CHILD;
+	const reason = `verified by ${input.actor} (family: ${family}) on export ${input.exportSha}: ${ran.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}${deferred.length ? `; deferred ${deferredTags} to ${childRef} (LIVEREADBACK, child of ${homeNote || home}, related to ${input.bead})` : ""}`;
 	if (deferred.length > 0) {
 		const moved = new Set(deferred.map(b => b.item));
 		let item = 0;
 		const remaining = acceptance.split("\n").filter(raw => !CHECKLIST_ITEM.test(raw.trim()) || !moved.has(++item)).join("\n");
 		const childDescription = `WHAT: read back, on the installed kit, the boxes omp-kit verify deferred when it closed ${input.bead} on export ${input.exportSha}: \`omp-kit verify <this bead> --live-readback\`. A pass ticks them and closes this bead; a failure reopens ${input.bead} with REWORK naming the box.\n\nWHY: ${input.bead}'s executed boxes passed, and br closes a bead only with every box ticked (CLOSEPASS1 ompkit-774u.52, J-2026-10-29-20), so these boxes stay open, visible debt until they are read back.\n\nVerified bead: ${input.bead} (related link)`;
-		acts.push(["br", "create", `LIVEREADBACK: ${title}`, "-t", "task", "-l", LIVE_READBACK_LABEL, "--parent", home, "--deps", `related:${input.bead}`, "--description", childDescription, "--acceptance-criteria", deferred.map(b => b.line).join("\n"), "--json", "--actor", input.actor]);
+		if (reuse === undefined) acts.push(["br", "create", `LIVEREADBACK: ${title}`, "-t", "task", "-l", LIVE_READBACK_LABEL, "--parent", home, "--deps", `related:${input.bead}`, "--description", childDescription, "--acceptance-criteria", deferred.map(b => b.line).join("\n"), "--json", "--actor", input.actor]);
+		else acts.push(["br", "update", reuse, "--acceptance-criteria", deferred.map(b => b.line).join("\n"), "--actor", input.actor]);
 		// br refuses, without --force, a rewrite that keeps less than half of a field's length; only acceptance shrinks.
 		const shrinks = [...remaining].length * 2 < [...acceptance].length + 4;
-		acts.push(["br", "update", input.bead, "--description", `${description}\n\n## Original acceptance (before omp-kit verify moved ${deferredTags} to ${CHILD})\n${acceptance}`, "--acceptance-criteria", remaining, ...(shrinks ? ["--force"] : []), "--actor", input.actor]);
+		acts.push(["br", "update", input.bead, "--description", `${description}\n\n## Original acceptance (before omp-kit verify moved ${deferredTags} to ${childRef})\n${acceptance}`, "--acceptance-criteria", remaining, ...(shrinks ? ["--force"] : []), "--actor", input.actor]);
 	}
 	acts.push(["br", "update", input.bead, "--check-acceptance", ticks.join(","), "--actor", input.actor]);
 	acts.push(["br", "gate", "report", input.bead, "--gate", "min_reviewers", "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
 	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${input.actor} (family: ${family})\n${lesson}\n${log.join("\n")}`, "--actor", input.actor]);
 	if (homeNote) log.push(`LIVEREADBACK child placed under ${homeNote}`);
-	const child = deferred.length > 0 ? CHILD : undefined;
+	const child = deferred.length > 0 ? childRef : undefined;
 	if (input.dryRun) return { ok: true, code: "DRY_RUN", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts, child };
 	const done = await executeActs(acts, input.repo, env, { bead: row, actor: input.actor });
-	if (done.failure !== null) return { ok: false, code: "ACT_FAILED", bead: input.bead, export: input.exportSha, replays, log: log.concat(done.failure).join("\n"), acts: done.acts, child: done.child, rollback: done.rollback };
-	return { ok: true, code: "CLOSED", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: done.acts, child: done.child };
+	if (done.failure !== null) return { ok: false, code: "ACT_FAILED", bead: input.bead, export: input.exportSha, replays, log: log.concat(done.failure).join("\n"), acts: done.acts, child: done.child ?? reuse, rollback: done.rollback };
+	return { ok: true, code: "CLOSED", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: done.acts, child: done.child ?? reuse };
 }
 
 /**
@@ -597,8 +600,8 @@ async function executeActs(acts: string[][], cwd: string, env: Record<string, st
 	return { acts: ranActs, child, rollback, failure: `${failure}\nrollback: ${rollback.status}` };
 }
 
-/** The fields verify reads from one `br show --json` row, or null when br names no such bead. `related` lists the ids its `related` dependencies point at. */
-interface BeadRow { id: string; title: string; description: string; acceptance: string; status: string; assignee: string | null; createdBy: string | null; updatedAt: string | null; labels: string[]; parent: string | null; related: string[] }
+/** The fields verify reads from one `br show --json` row, or null when br names no such bead. `related` lists the ids its `related` dependencies point at; `readbacks` lists open or in-progress live-readback beads related back to it. */
+interface BeadRow { id: string; title: string; description: string; acceptance: string; status: string; assignee: string | null; createdBy: string | null; updatedAt: string | null; labels: string[]; parent: string | null; related: string[]; readbacks: string[] }
 
 async function showBead(id: string, repo: string, env: Record<string, string>): Promise<BeadRow | null> {
 	const show = await run(["br", "show", id, "--json"], { cwd: repo, deadline_s: 60, env, max_output_bytes: 4 * 1024 * 1024 });
@@ -613,7 +616,15 @@ async function showBead(id: string, repo: string, env: Record<string, string>): 
 	const related = (Array.isArray(record.dependencies) ? record.dependencies : [])
 		.map((dep: unknown) => dep !== null && typeof dep === "object" && "dependency_type" in dep && dep.dependency_type === "related" && "id" in dep && typeof dep.id === "string" ? dep.id : "")
 		.filter(dep => dep !== "");
-	return { id: field("id") ?? id, title: field("title") ?? "", description: field("description") ?? "", acceptance: field("acceptance_criteria") ?? "", status: field("status") ?? "", assignee: field("assignee"), createdBy: field("created_by"), updatedAt: field("updated_at"), labels, parent: field("parent"), related };
+	const title = field("title") ?? "";
+	// READBACKREUSE1: a verify whose later act failed left its created child behind (.68 -> .91), and every
+	// retry then hit br's duplicate refusal. An open child titled exactly for this bead is reused instead.
+	const readbacks = (Array.isArray(record.dependents) ? record.dependents : [])
+		.map((dep: unknown) => dep !== null && typeof dep === "object" && "dependency_type" in dep && dep.dependency_type === "related"
+			&& "title" in dep && dep.title === `LIVEREADBACK: ${title}` && "status" in dep && (dep.status === "open" || dep.status === "in_progress")
+			&& "id" in dep && typeof dep.id === "string" ? dep.id : "")
+		.filter(dep => dep !== "");
+	return { id: field("id") ?? id, title, description: field("description") ?? "", acceptance: field("acceptance_criteria") ?? "", status: field("status") ?? "", assignee: field("assignee"), createdBy: field("created_by"), updatedAt: field("updated_at"), labels, parent: field("parent"), related, readbacks };
 }
 
 export interface LiveReadbackInput { bead: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; lesson?: string }
