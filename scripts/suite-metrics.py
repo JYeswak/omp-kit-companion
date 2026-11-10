@@ -128,8 +128,9 @@ def runtime_prefix(bun_version: str, python_version: str, omp_version: str) -> s
 
 
 def resolve_omp_version(environment: dict[str, str]) -> str:
-    """The OMP release the suite environment resolves, e.g. `omp/18.18.6` -> `18.18.6`; `none` on a host
-    with no `omp` (a commit gate there must still run), a distinct identity rather than a failure."""
+    """The OMP release the suite environment resolves, e.g. `omp/18.18.6` -> `18.18.6`. It only labels the
+    identity, so it never fails the run: `none` when the host has no `omp`, `unavailable` when `omp --version`
+    fails or prints no release (seen on remote Linux shards, 2026-11-10), each distinct from every release."""
     try:
         omp = run(["omp", "--version"], env=environment, deadline_s=10)
     except FileNotFoundError:
@@ -137,12 +138,12 @@ def resolve_omp_version(environment: dict[str, str]) -> str:
     if omp.rc == 127:
         return "none"
     if omp.rc != 0 or omp.timed_out or omp.truncated:
-        raise ValueError("omp version is unavailable or incomplete")
-    raw = omp.stdout.decode("utf-8", errors="strict").splitlines()
+        return "unavailable"
+    raw = omp.stdout.decode("utf-8", errors="replace").splitlines()
     text = raw[0].strip() if raw else ""
     version = text[4:] if text.startswith("omp/") else text
     if len(version.split(".")) != 3 or any(not part.isdigit() for part in version.split(".")):
-        raise ValueError(f"omp version is not a release: {text!r}")
+        return "unavailable"
     return version
 
 
