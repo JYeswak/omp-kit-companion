@@ -591,7 +591,7 @@ ${releaseStage("substep verdict.signing-preflight", "# -------------------------
 		expect(stdout + new TextDecoder().decode(result.stderr)).not.toContain("private-password-input");
 	} finally { rmSync(work, { recursive: true, force: true }); }
 }, fixtureDeadlineS(30) * 1_000);
-for (const verdict of ["cached", "missing-main", "queued", "failure"] as const) {
+for (const verdict of ["cached", "flaked", "missing-main", "queued", "failure"] as const) {
 	test(`release qualification ${verdict} uses the exact-source main verdict`, async () => {
 		const work = realpathSync(ownedTmp("release-verdict-wait", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
 		const env = gitFixtureEnv(work);
@@ -601,7 +601,11 @@ for (const verdict of ["cached", "missing-main", "queued", "failure"] as const) 
 		// The producer's queue acknowledgement alone cannot prove qualification.
 		writeFileSync(join(bin, "python3"), `#!/bin/sh
 echo "$*" >>"$RELEASE_TEST_WORK/reads"
-if [ "$RELEASE_TEST_VERDICT" = cached ]; then echo PASS; exit 0; fi
+if [ "$2" = flakes ]; then
+  [ "$RELEASE_TEST_VERDICT" != flaked ] || printf 'tests/cli/once_test.py\\n'
+  exit 0
+fi
+if [ "$RELEASE_TEST_VERDICT" = cached ] || [ "$RELEASE_TEST_VERDICT" = flaked ]; then echo PASS; exit 0; fi
 if [ -f "$RELEASE_TEST_WORK/triggered" ]; then
   if [ "$RELEASE_TEST_VERDICT" = failure ]; then echo FAIL; exit 1; fi
   echo PASS; exit 0
@@ -625,10 +629,12 @@ substep ''`, "release-verdict-test", work], {
 			if (verdict !== "failure") {
 				const stdout = new TextDecoder().decode(result.stdout);
 				for (const step of ["verdict.store-lookup", "verdict.readback",
-					...(verdict === "cached" ? [] : ["verdict.producer", "verdict.polling"])])
+					...(verdict === "cached" || verdict === "flaked" ? [] : ["verdict.producer", "verdict.polling"])])
 					expectSubstepTiming(stdout, step);
+				if (verdict === "flaked") expect(stdout).toContain("== full-suite flake: tests/cli/once_test.py (passed on single rerun)");
+				else expect(stdout).not.toContain("full-suite flake:");
 			}
-			if (verdict === "cached") expect(existsSync(join(work, "producer"))).toBe(false);
+			if (verdict === "cached" || verdict === "flaked") expect(existsSync(join(work, "producer"))).toBe(false);
 			else expect(readFileSync(join(work, "producer"), "utf8")).toContain("--commit 0123456789012345678901234567890123456789 --no-fetch");
 			const reads = readFileSync(join(work, "reads"), "utf8");
 			expect(reads).toContain("require-pass --repo");

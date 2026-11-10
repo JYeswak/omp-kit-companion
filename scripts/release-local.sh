@@ -656,6 +656,12 @@ if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass 
 fi
 [ "$(cat "$WORK/full-suite-verdict.out")" = PASS ] || die "source tree $source_tree full-suite readback is not PASS"
 say "full-suite verdict $source_tree: PASS (main role)"
+bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" flakes \
+	--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" \
+	>"$WORK/full-suite-flakes.out" || die "cannot read flake evidence for $source_tree"
+while IFS= read -r flake; do
+	say "full-suite flake: $flake (passed on single rerun)"
+done <"$WORK/full-suite-flakes.out"
 substep verdict.signing-preflight
 
 [ -f "$KEYCHAIN" ] || die "signing keychain $KEYCHAIN not found"

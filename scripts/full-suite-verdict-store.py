@@ -16,6 +16,10 @@ from urllib.parse import unquote, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kitlib_run import run
 import pysafe
+from kitlib_tmp import owned_tmp
+
+# RELFLAKE1 (J-2026-11-10-04): four red files indicate a broad failure, not a flake.
+MAX_FLAKE_FILES = 3
 
 ROLES = ("base", "main")
 # VERDICTSIZE1: a main-role record holds per-file evidence for ~380 suites and grew past 1 MiB on 2026-11-02 (1,065,616
@@ -99,6 +103,76 @@ def validate_culprit(value: object, verdict: object) -> None:
             raise ValueError("an unattributed culprit has no reason")
     else:
         raise ValueError("culprit method is invalid")
+
+
+def validate_flakes(entry: dict, metrics) -> set[str]:
+    """Keep original failed rows intact; only complete, local single reruns excuse them."""
+    flakes = entry.get("flakes", [])
+    reruns = entry["evidence"].get("reruns", [])
+    if not isinstance(flakes, list) or not isinstance(reruns, list):
+        raise ValueError("single-rerun evidence must be lists")
+    if not flakes and not reruns:
+        return set()
+    failed = {row["path"]: row for row in entry["evidence"]["files"] if row["rc"] != 0}
+    if (entry["judge_role"] != "main" or not 0 < len(failed) <= MAX_FLAKE_FILES
+            or not metrics.complete_records(reruns, sorted(failed))):
+        raise ValueError("single-rerun evidence is incomplete")
+    expected = []
+    for row in reruns:
+        if row["closure"]["tree"] != entry["tree"] or row.get("origin") == "remote":
+            raise ValueError("single rerun is not local evidence for this tree")
+        if row["rc"] == 0:
+            first = failed[row["path"]]
+            expected.append({"file": row["path"], "first_fail_tests": max(1, first.get("test_failures", 1)),
+                             "rerun": "pass"})
+    if flakes != expected:
+        raise ValueError("flake names differ from successful single reruns")
+    return {row["file"] for row in flakes}
+
+
+def rerun_failures(args: argparse.Namespace) -> dict:
+    """Use producer rows, never log prose, to select at most three files for one local rerun."""
+    root = Path(__file__).resolve().parent.parent
+    rows = json_value(Path(args.rows))
+    failed = sorted((row for row in rows if row["rc"] != 0), key=lambda row: row["path"])
+    result = {"flakes": [], "reruns": [], "twice_failing_files": []}
+    if not 0 < len(failed) <= MAX_FLAKE_FILES:
+        return result
+    metrics = load_metrics(root)
+    archive = Path(args.archive).resolve()
+    # Use the same measured hermetic runner, tool policy and archive as the first pass.
+    # The enclosing full-suite invocation still holds its suite lease.
+    with owned_tmp("full-suite-single-rerun") as scratch:
+        for index, first in enumerate(failed):
+            path = first["path"]
+            runner = first["runner"]
+            if runner == "bun":
+                config = archive / "bunfig.toml"
+                command = ["bun", f"--config={config if config.is_file() else '/dev/null'}",
+                           "test", "--timeout=120000", "./" + path]
+            else:
+                command = [runner, path]
+            record = Path(scratch) / f"{index}.json"
+            child = run(["nice", "-n", "10", sys.executable, str(root / "scripts/suite-metrics.py"),
+                         "run", "--record", str(record), "--path", path, "--runner", runner,
+                         "--tree", args.tree, "--cwd", str(archive), "--workers", "1",
+                         "--deadline", str(args.deadline), "--", *command],
+                        cwd=archive, deadline_s=args.deadline + 15, max_output_bytes=MAX_COMMAND_OUTPUT)
+            with Path(args.log).open("ab") as log:
+                log.write(f"\nFULL-SUITE: single rerun: {path}\n".encode())
+                log.write(child.stdout)
+                log.write(child.stderr)
+            row = json_file(record)
+            if (child.timed_out or child.killed or child.truncated
+                    or not metrics.complete_records([row], [path])):
+                raise ValueError("single rerun did not finish completely: " + path)
+            result["reruns"].append(row)
+            if row["rc"] == 0:
+                result["flakes"].append({"file": path, "first_fail_tests": max(1, first.get("test_failures", 1)),
+                                         "rerun": "pass"})
+            else:
+                result["twice_failing_files"].append(path)
+    return result
 
 
 def load_factor() -> tuple[float, float]:
@@ -525,9 +599,12 @@ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, ro
                 raise ValueError("measured row does not bind the candidate tree")
         # Older records may carry the retired qualification; it is not a current gate.
         minimum_failures = isinstance(entry.get("minimum_run"), dict) and entry["minimum_run"].get("status") == "FAIL"
+        flaked = validate_flakes(entry, metrics)
         if entry["verdict"] == "PASS":
-            if exit_code != 0 or bun_fail or shell_fail or py_fail or minimum_failures or any(row.get("rc") != 0 for row in files):
-                raise ValueError("PASS contains a failing suite")
+            failed_files = {row["path"] for row in files if row["rc"] != 0}
+            if (exit_code != 0 or minimum_failures or failed_files != flaked
+                    or ((bun_fail or shell_fail or py_fail) and not flaked)):
+                raise ValueError("PASS contains a failing suite without a passing single rerun")
         elif exit_code == 0 or not (bun_fail or shell_fail or py_fail or minimum_failures):
             raise ValueError("FAIL has no recorded failure")
         if "culprit" in entry:
@@ -711,10 +788,27 @@ def main() -> int:
     list_cmd.add_argument("--tree")
     list_cmd.add_argument("--judge-root")
     failing_cmd = actions.add_parser("failing-tests")
+    rerun_cmd = actions.add_parser("rerun-failures")
+    for option in ("rows", "archive", "tree", "log"):
+        rerun_cmd.add_argument("--" + option, required=True)
+    rerun_cmd.add_argument("--deadline", type=float, required=True)
+    flakes_cmd = actions.add_parser("flakes")
+    add_store_options(flakes_cmd)
+    flakes_cmd.add_argument("--tree", required=True)
+    flakes_cmd.add_argument("--role", choices=ROLES, required=True)
+    flakes_cmd.add_argument("--judge-root", required=True)
+    flakes_cmd.add_argument("--suite-root", required=True)
     failing_cmd.add_argument("--log", required=True)
     required_cmd = actions.add_parser("local-required")
     required_cmd.add_argument("--suite-root", required=True)
     args = parser.parse_args()
+    if args.action == "rerun-failures":
+        try:
+            print(json.dumps(rerun_failures(args), sort_keys=True))
+            return 0
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            print("VERDICT_STORE_ERROR: " + str(error), file=sys.stderr)
+            return 2
     if args.action == "local-required":
         # SUITEREMOTE1: the declared files of this source tree a composed record judges on this host.
         for name in local_required(declared_suite_files(Path(args.suite_root).expanduser().resolve(), "main")):
@@ -761,12 +855,18 @@ def main() -> int:
             else:
                 print(f"FAIL {entry['exit_code']}")
             return 0
-        if args.action == "require-pass":
+        if args.action in ("require-pass", "flakes"):
             judge_root = Path(args.judge_root).expanduser().resolve()
             checks, runtime = command_identity(args, judge_root)
             entry, _reason = lookup(repo, args.tree, args.role, checks, runtime,
                                    judge_root=judge_root, cache_dir=args.cache_dir,
                                    suite_root=Path(args.suite_root).expanduser().resolve(), commit=None)
+            if args.action == "flakes":
+                if entry is None or entry["verdict"] != "PASS":
+                    return 1
+                for flake in entry.get("flakes", []):
+                    print(flake["file"])
+                return 0
             if entry is None:
                 tree, role, checks, runtime = normalized_identity(args.tree, args.role, checks, runtime)
                 suite_root = Path(args.suite_root).expanduser().resolve()

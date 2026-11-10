@@ -11,8 +11,8 @@
 #
 # The complete declared repo suite runs against the exact-commit archive: every bun test under
 # tests/cli and tests/fleet-guard, every shell suite tests/cli/*.test.sh, and every python suite
-# tests/cli + tests/scripts (*_test.py, *.test.py). Focused selection, wall-budget deferral, SKIP
-# and CI deferral never substitute: only a finished run with every enumerated suite green is PASS.
+# tests/cli + tests/scripts (*_test.py, *.test.py). Only a complete measured run can be PASS.
+# Main-role failures in at most three files get one local rerun under the same suite lease (RELFLAKE1).
 # Rows of scripts/gate-ci-only.tsv stay excluded from base-role local checks.
 # Main-role qualification runs every declared file, including those rows.
 #
@@ -1035,9 +1035,24 @@ PYSHARD
 	echo "FULL-SUITE: SHARD COMPLETE tree=$tree role=$JUDGE_ROLE runtime=$runtime verdict=$verdict bun_fail=$bun_fail shell_red=$shell_red py_red=$py_red"
 	exit 0
 fi
+# RELFLAKE1 (J-2026-11-10-04): select failures from complete producer rows, not log prose.
+# Keep the first rows and log; passing reruns are additional evidence, never replacement results.
+FLAKE_RESULT=""
+if [ "$JUDGE_ROLE" = main ] && [ "$verdict" = FAIL ]; then
+	FLAKE_RESULT="${entry%.json}.single-rerun.$$.json"
+	if ! (cd "$SCRIPT_DIR" && python3 ./full-suite-verdict-store.py rerun-failures \
+		--rows "$METRICS_ROWS" --archive "$ARCHIVE_DIR" --tree "$tree" --log "$SUITE_OUT" \
+		--deadline "$TIMEOUT_SECS") >"$FLAKE_RESULT"; then
+		finish_logs "$incomplete_log"
+		cleanup_archive
+		fail "single rerun evidence is incomplete; nothing was cached; partial log: $incomplete_log"
+		exit 1
+	fi
+	python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); [print("FULL-SUITE: twice-failing file: " + p, file=sys.stderr) for p in r["twice_failing_files"]]' "$FLAKE_RESULT"
+fi
 finish_logs "$log_entry"
 write_complete_verdict() {
-METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" REMOTE_EVIDENCE="$REMOTE_EVIDENCE" python3 - <<'PYEOF'
+FLAKE_RESULT="$FLAKE_RESULT" METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" REMOTE_EVIDENCE="$REMOTE_EVIDENCE" python3 - <<'PYEOF'
 import hashlib, json, math, os
 environment = json.loads(os.environ["RUNTIME_ENVIRONMENT"])["environment"]
 log_digest = hashlib.sha256()
@@ -1112,6 +1127,16 @@ entry = {
 if os.environ.get("REMOTE_EVIDENCE"):
     with open(os.environ["REMOTE_EVIDENCE"]) as handle:
         entry["evidence"]["remote"] = json.load(handle)
+# RELFLAKE1: preserve schema-3 records without this optional evidence unchanged.
+# culprit is FAIL-only historical attribution, so it cannot represent a flake-qualified PASS.
+if os.environ.get("FLAKE_RESULT"):
+    with open(os.environ["FLAKE_RESULT"]) as handle:
+        single = json.load(handle)
+    entry["flakes"] = single["flakes"]
+    entry["evidence"]["reruns"] = single["reruns"]
+    if single["reruns"] and not single["twice_failing_files"]:
+        entry["verdict"] = "PASS"
+        entry["exit_code"] = 0
 # FSRERUN1 (ompkit-t7cn7.4): a rerun of a cached FAIL records why, who and what it superseded.
 # A run without --rerun-reason records no rerun block, so the lookup above still matches.
 if os.environ.get("RERUN_FLAG") == "1":
@@ -1133,12 +1158,13 @@ PYEOF
 }
 recorded_verdict=$(write_complete_verdict) || { rm -f "$log_entry" "$REMOTE_EVIDENCE"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
 case "$recorded_verdict" in
-	PASS) verdict=PASS ;;
+	PASS) verdict=PASS; code=0 ;;
 	FAIL) verdict=FAIL; [ "$code" -ne 0 ] || code=1 ;;
 	*) cleanup_archive; fail "recorded verdict is invalid"; exit 1 ;;
 esac
 rm -f "$METRICS_ROWS" "$METRICS_DECLARED"
 [ -z "$REMOTE_EVIDENCE" ] || rm -f "$REMOTE_EVIDENCE"
+[ -z "$FLAKE_RESULT" ] || rm -f "$FLAKE_RESULT"
 cleanup_archive
 if [ "$verdict" = "PASS" ]; then
 	set -- $covered_bun $covered_shell $covered_py; covered_count=$#

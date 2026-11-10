@@ -1,3 +1,4 @@
 - The release full suite runs six timing-bound test files on the Mac host instead of the shared 4-core Linux shards, where each one failed a 120 s or CPU/wall-clock budget on some verdict of an unchanged tree.
 - `tests/cli/send.test.ts` keeps its tmux sockets within the 103-byte socket-path limit (falling back to the platform temp root), so a deep suite-worker checkout no longer kills the TMUX1 fixture server.
 - Each tmux test in `send.test.ts` gets its own socket root, and the mutations parent-replacement test renames the old directory away, so neither depends on server-exit timing or inode reuse.
+- Release qualification reruns at most three failing test files once on the local host, retaining the original evidence. A passing rerun is a named flake printed by the release; twice-failing files and broader failures still block.
