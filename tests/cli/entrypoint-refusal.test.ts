@@ -72,30 +72,4 @@ test("[b] planted via CLI: unreadable lock source refuses overlap with no work",
 	expect(existsSync(join(stateRoot(home), "load"))).toBe(false);
 });
 
-test("[b] planted via CLI: disabled fleet-watch runs zero sends", () => {
-	const home = fixtureHome();
-	const configPath = join(home, "fleet-watch.json");
-	writeFileSync(configPath, JSON.stringify({
-		enabled: false, intervalSeconds: 60, noDecisionChecks: 5,
-		sessions: [{ session: "omp-test", coordinatorPane: "%54", coordinatorSession: "omp-test", repo: "/repo", workerPanes: ["%1"] }],
-	}));
-	const result = cli(["service", "run", "fleet-watch"], home, namespace(), {
-		OMP_KIT_FLEET_WATCH_CONFIG: configPath,
-		OMP_KIT_LOAD_OVERRIDE: "0.5/8",
-	});
-	expect(result.code).toBe(0);
-	expect(result.envelope.data.actions).toEqual([]);
-	expect(existsSync(join(stateRoot(home), "fleet-watch.jsonl"))).toBe(false);
-});
-
-test("[b] planted via CLI: missing fleet-watch config refuses before any run", () => {
-	const home = fixtureHome();
-	const result = cli(["service", "run", "fleet-watch"], home, namespace(), {
-		OMP_KIT_FLEET_WATCH_CONFIG: join(home, "absent.json"),
-		OMP_KIT_LOAD_OVERRIDE: "0.5/8",
-	});
-	expect(result.envelope.errors?.[0]?.code).toBe("FLEET_WATCH_CONFIG_MISSING");
-	expect(existsSync(join(stateRoot(home), "fleet-watch.jsonl"))).toBe(false);
-});
-
 afterAll(() => cleanupAllOwnedTmp());

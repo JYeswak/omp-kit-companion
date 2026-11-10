@@ -19,7 +19,7 @@ test("census names leftover owners, zombie parents and aged per-session MCP cand
 		`31 30 0 0 ${old} Z <defunct>`,
 		`42 1 90 100 ${old} T bun test grader`,
 		`50 1 5 100 ${old} S foreign-service`,
-		`60 1 1 100 ${old} S omp-kit service run fleet-watch`,
+		`60 1 1 100 ${old} S omp-kit service run load-watch`,
 		`70 1 1 100 ${old} S omp --resume /fixture/old-session.jsonl --profile codex`,
 		`71 70 2 100 ${old} S sympy-mcp`,
 	].join("\n"), true);
@@ -28,7 +28,7 @@ test("census names leftover owners, zombie parents and aged per-session MCP cand
 	expect(report.processes.find(p => p.pid === 30)).toMatchObject({ owner: "com.omp-kit.loop-sentinel", cause_class: "unreaped-children", zombie_children: 1 });
 	expect(report.processes.find(p => p.pid === 42)).toMatchObject({ cause_class: "suspended-work", command: "bun test grader" });
 	expect(report.processes.find(p => p.pid === 50)).toMatchObject({ owner: "unattributed", cause_class: "active" });
-	expect(report.processes.find(p => p.pid === 60)).toMatchObject({ owner: "com.omp-kit.fleet-watch", cause_class: "over-budget" });
+	expect(report.processes.find(p => p.pid === 60)).toMatchObject({ owner: "com.omp-kit.load-watch", cause_class: "over-budget" });
 	expect(report.processes.find(p => p.pid === 71)).toMatchObject({ owner: "session=/fixture/old-session.jsonl", cause_class: "aged-session-mcp" });
 	expect(report.cause_classes).toContain("leftover-process");
 });

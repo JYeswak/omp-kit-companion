@@ -151,7 +151,7 @@ test("absent watched paths are a recorded state; creating one is a change", () =
 });
 
 test("writes by installed service jobs under the state root are not changes; any other state write is", () => {
-	const { home, paths } = operatorHome(["ci-poller", "load-watch", "fleet-watch", "fleet-flush", "claude-save", "scratch-reaper"]);
+	const { home, paths } = operatorHome(["ci-poller", "load-watch", "fleet-flush", "claude-save", "scratch-reaper"]);
 	const state = join(home, ".local", "state", "omp-kit");
 	mkdirSync(join(state, "load"), { recursive: true });
 	mkdirSync(join(state, "jobs"), { recursive: true });
@@ -165,8 +165,6 @@ test("writes by installed service jobs under the state root are not changes; any
 	writeFileSync(join(state, "jobs", "ci-poller.json"), "{}\n");
 	writeFileSync(join(state, "jobs", "scratch-reaper.lock"), "1\n");
 	mkdirSync(join(state, "service-tmp"));
-	writeFileSync(join(state, "fleet-watch-state.json"), "{}\n");
-	appendFileSync(join(state, "fleet-watch.jsonl"), "{}\n");
 	appendFileSync(join(state, "fleet-flush.jsonl"), "{}\n");
 	writeFileSync(join(state, "claude-save-abc123.json"), "{}\n");
 	appendFileSync(join(state, "scratch-reap-log.jsonl"), "{}\n");
