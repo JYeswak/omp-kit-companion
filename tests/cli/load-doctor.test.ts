@@ -1,7 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { expect, test } from "bun:test";
-import { censusLoad, measureCpuMs, parseDiskIops, parseMemoryPressure, parsePsSnapshot, parseTmuxSnapshot, writeCensus } from "../../src/load-doctor.ts";
+import { afterAll, expect, test } from "bun:test";
+import { censusLoad, loadAlert, measureCpuMs, parseDiskIops, parseMemoryPressure, parsePsSnapshot, parseTmuxSnapshot, writeCensus } from "../../src/load-doctor.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+
+afterAll(cleanupAllOwnedTmp);
+// RELFLAKE1 (ompkit-1ra0d.109): both state-root tests shared one fixed var/agent-tmp/load2-fixture, so overlapping
+// runs (the commit gate's affected tests beside a suite) clobbered each other's ledger and streak files.
+const fixtureRoot = () => ownedTmp("load2-fixture", { root: join(process.cwd(), "var", "agent-tmp") }).path;
 
 test("maps process ancestry to pane and ledger job", () => {
 	const processes = parsePsSnapshot(" 42 10 60.0 1000 Sun Oct  4 00:00:00 2026 bun worker\n 10 1 2.0 100 Sun Oct  4 00:00:00 2026 tmux\n 77 1 30.0 500 Sun Oct  4 00:00:00 2026 tsserver");
@@ -39,6 +45,24 @@ test("census contention follows only the machine load rule", () => {
 	expect(censusLoad({ processes, panes: [], jobs: [], machine: { load1: 1.6, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60 } }).verdict).toBe("OK");
 	expect(censusLoad({ processes, panes: [], jobs: [], machine: { load1: 10.01, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60 } }).verdict).toBe("CONTENDED");
 });
+
+// 2026-11-10: 96 launchd-adopted `python3 -c while 1: pass` loops (~40% each) drove load to 385 on 32 cores; the
+// census `top=` listed aged Tern seats first and nobody was told.
+test("LOADWATCH1: a sustained overload alerts once at the second sample and names the adopted loop group first", () => {
+	const loops = Array.from({ length: 96 }, (_, i) => ({ pid: 1000 + i, ppid: 1, cpu_pct: 40, rss_bytes: 1, command: "/usr/bin/python3 -c while 1: pass",
+		owner: "unattributed", elapsed_s: 7000, cause_class: "active" as const, zombie_children: 0 }));
+	const seat = { pid: 3443, ppid: 900, cpu_pct: 18, rss_bytes: 1, command: "/Tern/omp/versions/18.18.6 --restore /s.jsonl",
+		owner: "unattributed", elapsed_s: 31663, cause_class: "unreaped-children" as const, zombie_children: 2 };
+	const machine = { load1: 385, load5: 1, load15: 1, ncpu: 32, cpu_user_pct: null, cpu_sys_pct: null, cpu_idle_pct: null, memory_pressure: { level: "normal" as const, free_pct: 90 }, disk_iops: null };
+	const processes = [seat, ...loops];
+	expect(loadAlert({ verdict: "CONTENDED", contention_streak: 1, processes, machine })).toBeNull();
+	const alert = loadAlert({ verdict: "CONTENDED", contention_streak: 2, processes, machine });
+	expect(alert).toStartWith("Load 385 on 32 cores for 2 min. Top CPU: 3840% x96 (96 adopted by launchd): /usr/bin/python3 -c while 1: pass");
+	expect(alert).toContain("18% x1: /Tern/omp/versions/18.18.6");
+	expect(loadAlert({ verdict: "CONTENDED", contention_streak: 3, processes, machine })).toBeNull();
+	expect(loadAlert({ verdict: "CONTENDED", contention_streak: 12, processes, machine })).not.toBeNull();
+	expect(loadAlert({ verdict: "OK", contention_streak: 0, processes, machine })).toBeNull();
+});
 test("keeps system groups separate", () => {
 	const processes = parsePsSnapshot(" 42 10 60.0 1000 bun worker\n 10 1 2.0 100 tmux\n 99 1 80.0 200 WindowServer");
 	const report = censusLoad({ processes, panes: parseTmuxSnapshot("omp-test|0.1|10\n"), jobs: [], machine: { load1: 1, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60 } });
@@ -48,10 +72,9 @@ test("keeps system groups separate", () => {
 });
 
 test("reaps dead and process-reused ledger entries", () => {
-	const stateRoot = join(process.cwd(), "var", "agent-tmp", "load2-fixture");
+	const stateRoot = fixtureRoot();
 	const jobsRoot = join(stateRoot, "jobs");
 	mkdirSync(jobsRoot, { recursive: true, mode: 0o700 });
-	writeFileSync(join(stateRoot, ".owner"), `pid=${process.pid} label=load2-fixture repo=${process.cwd()} created=${new Date().toISOString()}\n`);
 	writeFileSync(join(jobsRoot, "dead.json"), JSON.stringify({ id: "dead", pid: 999999, process_start: "old", label: "dead", repo: "/repo", cwd: "/repo", agent: "a", tmux_pane: "x", state: "running" }));
 	writeFileSync(join(jobsRoot, "reused.json"), JSON.stringify({ id: "reused", pid: process.pid, process_start: "old", label: "reused", repo: "/repo", cwd: "/repo", agent: "a", tmux_pane: "x", state: "queued" }));
 	const processes = parsePsSnapshot(` ${process.pid} 1 0.0 1 Sun Oct  4 00:00:00 2026 bun test`);
@@ -65,8 +88,7 @@ test("reaps dead and process-reused ledger entries", () => {
 });
 
 test("reports absent LOAD1 ledger and counts three contended samples", () => {
-	const stateRoot = join(process.cwd(), "var", "agent-tmp", "load2-fixture");
-	mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+	const stateRoot = fixtureRoot();
 	writeFileSync(join(stateRoot, "contention.json"), JSON.stringify({ streak: 0 }));
 	const idle = { processes: [], panes: [], jobs: [], machine: { load1: 12, load5: 0, load15: 0, ncpu: 4, cpu_idle_pct: 5 } } as const;
 	const reports = [censusLoad(idle), censusLoad(idle), censusLoad(idle)];

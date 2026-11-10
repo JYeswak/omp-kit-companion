@@ -36,7 +36,7 @@ import { githubFinding, probeGithubCapabilities } from "./gh-doctor.ts";
 import { inspectWorkFleet, resolveWorkRoots } from "./work-doctor.ts";
 import { applyBrowserReap, collectBrowserProcesses, inspectBrowserProcesses, planBrowserReap } from "./browser-doctor.ts";
 import { inspectOmpSessions } from "./session-doctor.ts";
-import { censusLoad } from "./load-doctor.ts";
+import { censusLoad, loadAlert } from "./load-doctor.ts";
 import { inspectSecrets, secretsScanInputFromEnv } from "./secrets-doctor.ts";
 import { inspectStaleWorktree } from "./stale-worktree-doctor.ts";
 import { inspectPushLatency } from "./push-latency.ts";
@@ -3192,7 +3192,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			load1 = loads[0] ?? 0;
 			ncpu = cpus().length;
 		}
-		const gate = gateRunLoad(load1, ncpu);
+		const gate = gateRunLoad(load1, ncpu, job.name);
 		if (!gate.proceed) {
 			lock.release();
 			const receipt = { started_at: new Date().toISOString(), finished_at: new Date().toISOString(), exit: gate.exit, omp_version: null, status: "SKIPPED-LOAD" };
@@ -3247,7 +3247,10 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			const stateRoot = join(process.env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit", "load");
 			const report = runLoadWatch(stateRoot);
 			lock.release();
-			return { code: 0, data: { overall: report.verdict, job: job.name, ...report }, verification: "UNVERIFIED" };
+			const alert = loadAlert(report);
+			const alerted = alert === null ? null : notifyJobFailure({ title: "omp-kit: machine overloaded", message: alert,
+				platform: process.platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null });
+			return { code: 0, data: { overall: report.verdict, job: job.name, ...report, alert, alerted }, verification: "UNVERIFIED" };
  		}
  		if (job.name === "ci-poller") {
  			const stateDir = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");

@@ -291,6 +291,27 @@ test("SVC1: a run under normal load proceeds", () => {
 	expect(gateRunLoad(80, 32).proceed).toBe(true);
 });
 
+test("LOADWATCH1: the load watchdog is exempt from the load gate; every other job still skips", () => {
+	expect(gateRunLoad(385, 32, "load-watch")).toEqual({ proceed: true });
+	expect(gateRunLoad(385, 32, "kit-update").proceed).toBe(false);
+	expect(gateRunLoad(385, 32).proceed).toBe(false);
+});
+
+test("LOADWATCH1 planted: under 999/1 load `service run load-watch` samples while `service run am-retain` skips", async () => {
+	const home = jobsDir();
+	const env = { ...process.env, HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), OMP_KIT_LOAD_OVERRIDE: "999/1" } as Record<string, string>;
+	const argv = (job: string) => [process.execPath, join(repoRoot, "src", "cli.ts"), "service", "run", job, "--json"];
+	const options = { cwd: repoRoot, env, deadline_s: fixtureDeadlineS(120), max_output_bytes: 8 << 20 };
+	const watched = await run(argv("load-watch"), options);
+	const watchedOut = JSON.parse(new TextDecoder().decode(watched.stdout));
+	expect(watchedOut.data.job, new TextDecoder().decode(watched.stderr)).toBe("load-watch");
+	expect(watchedOut.data.status).toBeUndefined();
+	expect(["OK", "CONTENDED"]).toContain(watchedOut.data.verdict);
+	expect(existsSync(join(home, ".local", "state", "omp-kit", "load", "census.json"))).toBe(true);
+	const skipped = JSON.parse(new TextDecoder().decode((await run(argv("am-retain"), options)).stdout));
+	expect(skipped.data).toMatchObject({ job: "am-retain", status: "SKIPPED-LOAD" });
+}, fixtureDeadlineS(240) * 1000);
+
 
 test("SVC1: a fast run returns OK with elapsed time and output", async () => {
 	const seen: string[][] = [];

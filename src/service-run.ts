@@ -336,11 +336,19 @@ export type RunLoadGate =
 	| { proceed: false; status: "SKIPPED-LOAD"; exit: number; detail: string };
 
 /**
+ * Jobs that measure load and must run under it. LOADWATCH1 (ompkit-1ra0d.110): on 2026-11-10 the gate below skipped
+ * load-watch 452 times while load reached 385 on 32 cores, so the one job meant to see the overload went silent.
+ * A load-watch sample costs ~50 ms of CPU.
+ */
+export const LOAD_GATE_EXEMPT_JOBS: Readonly<Record<string, true>> = { "load-watch": true };
+
+/**
  * SVC1 load gate: a service run starts only when the 1-minute load is at or
  * under 2.5x cores. Binds the contract's threshold (distinct from TOOL1's
  * 1.5x ladder gate) and shapes the skip verdict the run handler reports.
  */
-export function gateRunLoad(load1: number, ncpu: number): RunLoadGate {
+export function gateRunLoad(load1: number, ncpu: number, job?: string): RunLoadGate {
+	if (job !== undefined && LOAD_GATE_EXEMPT_JOBS[job] === true) return { proceed: true };
 	const gate = loadGate(load1, ncpu, LOAD_GATE_FACTOR);
 	if (gate.ok) return { proceed: true };
 	return { proceed: false, status: "SKIPPED-LOAD", exit: SKIPPED_LOAD_EXIT,

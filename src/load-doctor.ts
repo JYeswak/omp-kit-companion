@@ -318,3 +318,32 @@ export function writeCensus(stateRoot: string, census: LoadCensus): void {
 	writeFileSync(join(stateRoot, "census.json"), `${JSON.stringify(census)}\n`, { mode: 0o600 });
 	writeFileSync(jsonl, `${JSON.stringify(census)}\n`, { flag: "a", mode: 0o600 });
 }
+
+/** Samples a CONTENDED streak must reach before the first alert, and the repeat period while it lasts (60 s samples). */
+export const LOAD_ALERT_AFTER_SAMPLES = 2;
+export const LOAD_ALERT_EVERY_SAMPLES = 10;
+
+/**
+ * LOADWATCH1 (ompkit-1ra0d.110): the operator alert for a sustained overload, or null. It names the top CPU groups
+ * by identical command line with their process count, and how many of them launchd adopted (ppid 1): on 2026-11-10
+ * 96 orphaned `python3 -c while 1: pass` loops at ~40% each ranked below aged Tern seats in `top=` and were never
+ * named. Fires at the second consecutive CONTENDED sample, then every tenth while the streak lasts.
+ */
+export function loadAlert(census: Pick<LoadCensus, "verdict" | "contention_streak" | "machine" | "processes">): string | null {
+	const streak = census.contention_streak;
+	if (census.verdict !== "CONTENDED" || streak < LOAD_ALERT_AFTER_SAMPLES
+		|| (streak - LOAD_ALERT_AFTER_SAMPLES) % LOAD_ALERT_EVERY_SAMPLES !== 0) return null;
+	const groups = new Map<string, { cpu: number; count: number; orphans: number }>();
+	for (const item of census.processes) {
+		const key = item.command.slice(0, 120).replace(/\s+/g, " ");
+		const group = groups.get(key) ?? { cpu: 0, count: 0, orphans: 0 };
+		group.cpu += item.cpu_pct;
+		group.count += 1;
+		if (item.ppid === 1) group.orphans += 1;
+		groups.set(key, group);
+	}
+	const top = [...groups.entries()].sort((a, b) => b[1].cpu - a[1].cpu).slice(0, 3)
+		.map(([command, group]) => `${group.cpu.toFixed(0)}% x${group.count}${group.orphans ? ` (${group.orphans} adopted by launchd)` : ""}: ${command}`);
+	const { load1, ncpu } = census.machine;
+	return `Load ${load1.toFixed(0)} on ${ncpu} cores for ${streak} min. Top CPU: ${top.join(" | ") || "none sampled"}`;
+}
