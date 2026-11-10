@@ -330,3 +330,20 @@ test("HANDOFFPUSHCHECK1 land with a GREEN push-check appends the ledger row for 
 	const skipLedger = join(git(skipped.work, ["rev-parse", "--absolute-git-dir"]).trim(), "omp-kit", "push-check-runs.jsonl");
 	expect(existsSync(skipLedger)).toBe(false);
 });
+
+test("HANDOFFPUSHCHECK1 the push-check runs with its own owned TMPDIR, removed when the check ends", () => {
+	// The check records the TMPDIR it saw only when it is a push-check-tmp dir that exists, else fails the land.
+	const checkBody = "#!/bin/bash\nset -eu\ncase \"$TMPDIR\" in */push-check-tmp.*) ;; *) exit 3 ;; esac\ntest -d \"$TMPDIR\"\nprintf '%s' \"$TMPDIR\" > \"$OMP_LAND_REPOSITORY/.git/push-check-tmpdir\"\nexit 0\n";
+	const f = fixture();
+	registerPushCheck(f.work, checkBody);
+	writeFileSync(join(f.work, "owned.txt"), "base owned\nowner change\n");
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(f.work, landArgs("owned.txt"), hold, { amDir: f.fakeBin });
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	const data = run.body.data as { overall: string; check: { status: string } };
+	expect(data.check.status).toBe("PASS");
+	expect(data.overall).toBe("PUSHED");
+	const seen = readFileSync(join(f.work, ".git", "push-check-tmpdir"), "utf8");
+	expect(seen).toContain("push-check-tmp.");
+	expect(existsSync(seen)).toBe(false);
+});

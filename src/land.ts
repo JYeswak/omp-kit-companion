@@ -1,5 +1,5 @@
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { ownedTmp } from "./kitlib/tmp.ts";
+import { ownedTmp, type OwnedTmp } from "./kitlib/tmp.ts";
 import { run as kitlibRun, runSync as kitlibRunSync } from "./kitlib/run.ts";
 import type { RunResult } from "./kitlib/run.ts";
 import { loadFactor } from "./kitlib/load.ts";
@@ -196,11 +196,19 @@ export async function executePushCheckScript(repo: string, script: Buffer, execu
 	env.OMP_LAND_CHECK_PATH = PUSH_CHECK_PATH;
 	env.OMP_LAND_CHECK_SHA256 = checkSha256;
 	const common = { ...base, selected_executable: executable, selected_version: version, candidate_sha: candidateSha, checked_sha: candidateSha };
+	// The check's temporary files go to an owned dir of its own, removed when it ends (never an
+	// unowned system temp dir, never the caller's scratch).
+	let scratch: OwnedTmp;
+	try { scratch = ownedTmp("push-check-tmp"); }
+	catch { return { ...common, exit_code: null, status: "UNRUN", reason: "check_execution_unavailable" }; }
+	env.TMPDIR = scratch.path;
 	let run: RunResult;
 	try {
 		run = await kitlibRun([executable, "-s"], { cwd, env, stdin: script, deadline_s: Math.max(1, Math.floor(deadlineS)), max_output_bytes: 8 * 1024 * 1024 });
 	} catch {
 		return { ...common, exit_code: null, status: "UNRUN", reason: "check_execution_unavailable" };
+	} finally {
+		try { scratch.cleanup(); } catch { /* the owned-temp exit hook retries */ }
 	}
 	const exitCode = run.rc !== null && run.rc >= 0 ? run.rc : null;
 	if (run.timed_out || exitCode === null) return { ...common, exit_code: exitCode, status: "UNRUN", reason: "check_execution_unavailable" };
