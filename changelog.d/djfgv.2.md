@@ -1,0 +1,1 @@
+- `omp-kit skill-mine` no longer mines kit notices, goal-continuation steers or injected prompts as your turns: an oversize session still on disk is sampled from its own JSONL, where those are `custom_message` records, and a `custom_message` is never a human turn. `cass view` (role only) now serves only archive-only sessions.

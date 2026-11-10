@@ -1,4 +1,5 @@
-import { accessSync, appendFileSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, constants, createReadStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
 import { delimiter, dirname, join } from "node:path";
 import { run } from "./kitlib/run.ts";
@@ -193,6 +194,9 @@ function textOf(value: unknown, depth = 0): string {
 function roleOf(message: unknown): "user" | "assistant" | "tool" | "unknown" {
 	if (message === null || typeof message !== "object" || Array.isArray(message)) return "unknown";
 	const record = message as Record<string, unknown>;
+	// SKILLMINE2: an OMP `custom_message` (kit upgrade notice, goal-continuation steer, injected prompt) is written by
+	// the harness or the kit, whatever role a viewer later gives it; only a typed message is a human or agent turn.
+	if (record["type"] === "custom_message") return "unknown";
 	for (const key of ["role", "type", "kind", "author"]) {
 		const value = record[key];
 		if (typeof value === "string" && (key !== "type" || !/^(message|text|thinking)$/i.test(value))) {
@@ -593,6 +597,35 @@ async function viewChunk(cassBin: string, path: string, count: number, options: 
 	return out;
 }
 
+/**
+ * SKILLMINE2: an oversize session still on disk is sampled from its own JSONL, at the same evenly spaced windows as
+ * viewChunk, because its records keep their type: `cass view` lines carry only a role, so a kit notice or a
+ * continuation steer reads there as a user turn. null when the file is not a readable local JSONL (archive-only).
+ */
+async function sampleLocalSession(path: string): Promise<unknown[] | null> {
+	if (!path.endsWith(".jsonl") || !existsSync(path)) return null;
+	const eachLine = async (visit: (line: string, index: number) => void): Promise<boolean> => {
+		try {
+			let index = 0;
+			for await (const line of createInterface({ input: createReadStream(path), crlfDelay: Infinity })) visit(line, index++);
+			return true;
+		} catch { return false; }
+	};
+	let count = 0;
+	if (!await eachLine(() => { count++; })) return null;
+	const keep = new Set<number>();
+	for (let point = 1; point <= SKILL_MINE_VIEW_POINTS; point++) {
+		const center = Math.round(count * point / (SKILL_MINE_VIEW_POINTS + 1));
+		for (let index = Math.max(0, center - SKILL_MINE_VIEW_CONTEXT); index <= Math.min(count - 1, center + SKILL_MINE_VIEW_CONTEXT); index++) keep.add(index);
+	}
+	const out: unknown[] = [];
+	const read = await eachLine((line, index) => {
+		if (!keep.has(index)) return;
+		try { out.push(JSON.parse(line)); } catch { /* a torn or non-JSON line is not a record */ }
+	});
+	return read ? out : null;
+}
+
 async function mineCass(options: SkillMineOptions, sinceMs: number): Promise<{ status: SkillMineSourceReport; observations: Observation[]; coverage: SkillMineCoverage }> {
 	const emptyCoverage = (extra: Partial<SkillMineCoverage> = {}): SkillMineCoverage => ({
 		sessions_in_window: 0, sessions_seen: 0, sessions_mined: 0, skipped_oversize: 0,
@@ -647,7 +680,8 @@ async function mineCass(options: SkillMineOptions, sinceMs: number): Promise<{ s
 		if (Date.now() > deadlineMs) { stoppedEarly = true; break; }
 		let flat: unknown[] | null = null;
 		if (session.size > SKILL_MINE_SESSION_BYTES_CAP) {
-			if (session.count > 0) {
+			flat = await sampleLocalSession(session.path);
+			if (flat === null && session.count > 0) {
 				flat = await viewChunk(cassBin, session.path, session.count, options);
 			}
 			if (flat === null) { skippedOversize++; continue; }

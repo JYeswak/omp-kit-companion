@@ -33,6 +33,7 @@ const CASS_SH = `#!/bin/sh
 here="$(dirname "$0")"
 if [ "$1" = "sessions" ]; then cat "$here/../cassdata/sessions.json"; exit 0; fi
 if [ "$1" = "export" ]; then cat "$here/../cassdata/exports/$(basename "$2").json"; exit 0; fi
+if [ "$1" = "view" ]; then cat "$here/../cassdata/views/$(basename "$2").json"; exit 0; fi
 echo "unexpected cass argv: $*" >&2; exit 2
 `;
 
@@ -277,6 +278,46 @@ test("SKILLMINE1: live cass 0.11.0 envelope mines through the same path", async 
 	const workflows = report.candidates.map(candidate => candidate.workflow);
 	expect(workflows).toEqual(expect.arrayContaining([expect.stringContaining("non-author-grader"), expect.stringContaining("correction")]));
 	expect(sinkLines(f.sink).join("\n").includes(SECRET)).toBe(false);
+});
+
+// Live 2026-11-10 pack: kit notices, goal-continuation steers and identity prompts clustered as shared text and as
+// "corrections" because oversize sessions were sampled through `cass view`, whose lines carry only a role.
+test("SKILLMINE2: injected custom_message turns never cluster; a human correction in the same sessions still does", async () => {
+	const f = makeFixture("skill-mine-injected");
+	const notice = "kit-upgrade-notice UPGRADE_NOTICE: omp-kit 0.2.110 is installed; this seat runs 0.2.109; upgrade now.\n"
+		+ "At your next turn boundary, without starting new work, restart this seat yourself:";
+	const steer = "<!-- Hidden continuation steer. role=user, suppressed from visible transcript. --> Continue active goal. Do not stop until the objective is done.";
+	const identity = "Continue as registered BrownPrairie under /skill:omp-kit-orchestration: do not start new work before your published beads are verified.";
+	const injected = (customType: string, content: string) => ({ type: "custom_message", customType, content, display: true, attribution: "agent" });
+	const records = [
+		{ type: "session", id: "s" },
+		liveTurn("user", [liveText("Work the milestone as the builder and report evidence.")]),
+		injected("kit-upgrade-notice", notice), injected("goal-continuation", steer), injected("irc", identity),
+		liveTurn("assistant", [liveText("checking"), liveCall("git status --porcelain")]),
+		liveTurn("user", [liveText(COMPLAINT)]),
+	];
+	const sessions = ["big-a.jsonl", "big-b.jsonl"].map((name, index) => {
+		const path = join(f.root, "sessions", name);
+		put(path, records.map(record => JSON.stringify(record)).join("\n") + "\n");
+		// What live cass view returns for the same file: every record a role, the record type gone.
+		put(join(f.root, "cassdata", "views", `${name}.json`), `${JSON.stringify({ lines: records.slice(1).map(record =>
+			"content" in record ? { role: "user", content: record.content } : record) })}\n`);
+		return { path, workspace: index === 0 ? f.projA : f.projB, size_bytes: 64 * 1024 * 1024, message_count: records.length };
+	});
+	put(join(f.root, "cassdata", "sessions.json"), `${JSON.stringify(sessions)}\n`);
+	const report = await runSkillMine(f.options);
+	expect(report.coverage.sessions_mined).toBe(2);
+	const quoted = report.candidates.flatMap(candidate => candidate.evidence.map(evidence => JSON.stringify(evidence))).join("\n");
+	expect(quoted).not.toContain("UPGRADE_NOTICE");
+	expect(quoted).not.toContain("next turn boundary");
+	expect(quoted).not.toContain("Hidden continuation steer");
+	expect(quoted).not.toContain("Continue as registered");
+	// Record #6 is the human-typed complaint (its quote is redacted: it carries the planted secret).
+	const corrections = report.candidates.filter(candidate => candidate.workflow.includes("correction"));
+	expect(corrections.length).toBeGreaterThan(0);
+	expect(corrections.flatMap(candidate => candidate.evidence.map(evidence => evidence.ref.split("/").at(-1))))
+		.toEqual(expect.arrayContaining(["big-a.jsonl#6", "big-b.jsonl#6"]));
+	expect(corrections.every(candidate => candidate.evidence.every(evidence => evidence.ref.endsWith("#6")))).toBe(true);
 });
 
 test("SKILLMINE1: CLI run renders the envelope and status reads it back", async () => {
