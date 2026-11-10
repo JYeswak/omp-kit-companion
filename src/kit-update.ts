@@ -358,7 +358,13 @@ async function authenticateUpdateArchive(plan: KitUpdatePlan, archive: Buffer): 
  */
 export function judgeKitPostcheck(report: FullTestReport, omp: { identityKnown: boolean; changed: boolean }): KitPostcheck {
  const matcher = report.fast.status === "PASS" && report.fast.proofs.G1_registration.status === "PASS" && report.fast.proofs.G2_payload.status === "PASS" && report.fast.proofs.G3_quiet_prefix.status === "PASS" ? "PASS" : "FAIL";
- const deferred = report.status === "DEFERRED";
+ // POSTCHECKLOAD1: a regex-budget stage DEFERRED because the host was too slow to judge
+ // (REFERENCE_RATIO_ABOVE_CLAMP, carried in the stage reason by classifyLadder) is an unverified release,
+ // exactly like a heavy-admission deferral — but only when it is the sole non-PASS stage.
+ const slowHostTiming = report.stages["regex-budget"]?.status === "DEFERRED"
+  && (report.stages["regex-budget"]?.reason ?? "").includes("REFERENCE_RATIO_ABOVE_CLAMP")
+  && Object.entries(report.stages).every(([name, stage]) => name === "regex-budget" || stage.status === "PASS");
+ const deferred = report.status === "DEFERRED" || slowHostTiming;
  const live = deferred ? "NOT_RUN" : report.proofs.G4_live.status === "PASS" && Object.values(report.stages).every(stage => stage.status === "PASS") ? "PASS" : "FAIL";
  const reason = !omp.identityKnown
   ? report.omp_version === null ? "OMP_VERSION_UNVERIFIED" : "OMP_VERSION_MISMATCH"
@@ -489,13 +495,15 @@ export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult)
   ...(activationUnverified ? { errors: [{ code: "KIT_ACTIVATION_UNVERIFIED",
    message: `Kit update to ${plan.release.version} left activation unverified; see postcheck_detail`,
    remediation: "Use a known-good release binary to inspect the activation receipt and repair the stable link; keep the pending receipt until its postimage is verified." }] }
-   : recover ? { commands: [reconcile ?? recover], errors: [{ code: outcome.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
-   message: deferred
-    ? `Kit update to ${plan.release.version} is active but unverified: heavy admission deferred its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`
-    : `Kit update to ${plan.release.version} did not pass its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`,
-   remediation: deferred
-    ? `Run omp-kit test --full --record when load allows heavy work. To return to ${plan.current.version} and clear the pending receipt: ${recover}`
-    : `${reconcile ? `Only excluded live browser state was observed; reconcile the pending update: ${reconcile}. ` : ""}Inspect postcheck_detail (--json). To return to ${plan.current.version} and clear the pending receipt: ${recover}` }] } : {}),
+  : recover ? { commands: [reconcile ?? recover], errors: [{ code: outcome.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
+  message: deferred
+   ? (postcheckDetail?.failures[0] ?? "").includes("REFERENCE_RATIO_ABOVE_CLAMP")
+    ? `Kit update to ${plan.release.version} is active but unverified: this host was too slow to judge its postcheck timing; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`
+    : `Kit update to ${plan.release.version} is active but unverified: heavy admission deferred its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`
+   : `Kit update to ${plan.release.version} did not pass its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`,
+  remediation: deferred
+   ? `Run omp-kit test --full --record when load allows heavy work. To return to ${plan.current.version} and clear the pending receipt: ${recover}`
+   : `${reconcile ? `Only excluded live browser state was observed; reconcile the pending update: ${reconcile}. ` : ""}Inspect postcheck_detail (--json). To return to ${plan.current.version} and clear the pending receipt: ${recover}` }] } : {}),
   verification: "UNVERIFIED" };
 }
 

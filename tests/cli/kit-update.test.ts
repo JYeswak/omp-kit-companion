@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { runFullTest } from "../../src/full-test-runner.ts";
+import { classifyLadder, fullTestVerdict, runFullTest } from "../../src/full-test-runner.ts";
 import { runIsolatedShell } from "../../src/runtime.ts";
 import { activeConcurrentWriterPaths, compareWatched, operatorWatchedPaths, snapshotWatched } from "../../src/operator-snapshot.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
@@ -685,6 +685,73 @@ test("planted: a heavy-deferred postcheck reports DEFERRED, not FAIL, and never 
 	// The unattended job never reports a deferred postcheck as a clean cycle.
 	expect(kitUpdateJobOverall({ status: "UPDATED", receiptId: result.receiptId, activeVersion: "1.2.3", notification: true, postcheck: postcheck.status })).toBe("FINDINGS");
 }));
+
+// ompkit-1ra0d.100: a regex-budget INCONCLUSIVE because the host is too slow to judge
+// (REFERENCE_RATIO_ABOVE_CLAMP) defers the postcheck instead of failing the release; a genuinely
+// over-budget rule at nominal load, and any other non-PASS stage, still fails it.
+test("POSTCHECKLOAD1 planted: a too-slow-host regex-budget stage reports DEFERRED and keeps the release", async () => fixture(async ctx => {
+ const planned = await planKitUpdate(input(ctx));
+ if (planned.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+ const result = await applyKitUpdate(planned);
+ const report = result.postcheck.report;
+ if (result.status !== "PARTIAL" || !report) throw new Error("expected a PARTIAL outcome carrying its full-test report");
+ const proofs = report.fast.proofs;
+ const fast = { ...report.fast, status: "PASS" as const, proofs: { ...proofs, G1_registration: { ...proofs.G1_registration, status: "PASS" as const },
+  G2_payload: { ...proofs.G2_payload, status: "PASS" as const }, G3_quiet_prefix: { ...proofs.G3_quiet_prefix, status: "PASS" as const } } };
+ const stages = Object.fromEntries(Object.entries(report.stages).map(([name, stage]) => [name, { ...stage, status: "NOT_RUN" as const }])) as typeof report.stages;
+ stages.manifest = { status: "PASS", producer_rc: 0, duration_ms: 1 };
+ stages["regex-budget"] = { status: "DEFERRED", producer_rc: 75, duration_ms: 1,
+  reason: "regex-budget INCONCLUSIVE on a too-slow host: REGEX-BUDGET: INCONCLUSIVE REFERENCE_RATIO_ABOVE_CLAMP (reference ratio 13.30 exceeds 8; this host is too slow to judge; not judged, not PASS)" };
+ const deferral = "Stage regex-budget deferred: host too slow to judge (REFERENCE_RATIO_ABOVE_CLAMP)";
+ // A candidate-owned report carries the slow-host stage without promoting report.status itself.
+ const slowReport = { ...report, fast, stages, status: "FAIL" as const, exitCode: 1 as const, omp_version: "18.12.1", failures: [deferral] };
+ const known = { identityKnown: true, changed: false };
+
+ const postcheck = judgeKitPostcheck(slowReport, known);
+ expect(postcheck).toMatchObject({ status: "DEFERRED", matcher: "PASS", live: "NOT_RUN", reason: "KIT_POSTCHECK_DEFERRED" });
+ // Control: a genuinely over-budget rule at nominal load still fails the postcheck.
+ const failedStages = { ...stages, "regex-budget": { status: "FAIL" as const, producer_rc: 1, duration_ms: 1,
+  reason: "REGEX-BUDGET: FAIL rule slow-rule took 2.10x budget on the live stream at nominal reference ratio" } };
+ expect(judgeKitPostcheck({ ...slowReport, stages: failedStages }, known))
+  .toMatchObject({ status: "FAIL", live: "FAIL", reason: "KIT_LIVE_TEST_FAILED" });
+ // Control: a DEFERRED regex-budget for any other INCONCLUSIVE reason still fails.
+ const otherStages = { ...stages, "regex-budget": { status: "DEFERRED" as const, producer_rc: 75, duration_ms: 1,
+  reason: "regex-budget INCONCLUSIVE: REFERENCE_TRACKING_DIVERGED (rule-mix ratio and reference ratio differ 9.40x)" } };
+ expect(judgeKitPostcheck({ ...slowReport, stages: otherStages }, known).status).toBe("FAIL");
+ expect(judgeKitPostcheck(slowReport, { identityKnown: true, changed: true }).status).toBe("FAIL");
+ expect(judgeKitPostcheck(slowReport, { identityKnown: false, changed: false }).status).toBe("FAIL");
+
+ const envelope = kitUpdateEnvelope(planned, { ...result, postcheck });
+ expect(envelope.data, JSON.stringify(envelope.data)).toMatchObject({ overall: "UNVERIFIED", action: "PARTIAL", postcheck: "DEFERRED",
+  live: "NOT_RUN", reason: "KIT_POSTCHECK_DEFERRED" });
+ expect(envelope.data.postcheck_detail).toMatchObject({ deferred_stages: ["regex-budget"], failed_stages: [], failures: [deferral] });
+ expect(envelope.errors?.[0]).toMatchObject({ code: "KIT_POSTCHECK_DEFERRED" });
+ expect(envelope.errors?.[0]?.message).toContain(`Kit update to 1.2.3 is active but unverified: this host was too slow to judge its postcheck timing; ${deferral}`);
+ expect(envelope.commands).toEqual([`omp-kit undo ${result.receiptId} --yes`]);
+ // The unattended job never reports a deferred postcheck as a clean cycle.
+ expect(kitUpdateJobOverall({ status: "UPDATED", receiptId: result.receiptId, activeVersion: "1.2.3", notification: true, postcheck: postcheck.status })).toBe("FINDINGS");
+}));
+
+test("POSTCHECKLOAD1: classifyLadder maps only a clamp-exceeding regex-budget INCONCLUSIVE to DEFERRED", async () => {
+ const green = (name: string) => `OMP_KIT_STAGE_START name=${name}\n${name} ok\n\nGREEN ${name} producer_rc=0 duration_ms=10\n`;
+ const ladder = (tail: string) => ["manifest", "harness-gate", "harness-selftest", "flywheel-invariants"].map(green).join("") + tail;
+ const slowStdout = ladder("OMP_KIT_STAGE_START name=regex-budget\nREGEX-BUDGET: INCONCLUSIVE REFERENCE_RATIO_ABOVE_CLAMP (reference ratio 13.30 exceeds 8; this host is too slow to judge; not judged, not PASS)\n\nRED   regex-budget producer_rc=75 duration_ms=20\n");
+ const slow = classifyLadder({ code: 75, stdout: slowStdout, stderr: "" }, []);
+ expect(slow.stages["regex-budget"].status).toBe("DEFERRED");
+ expect(slow.stages["regex-budget"].reason).toContain("REFERENCE_RATIO_ABOVE_CLAMP");
+ expect(slow.failures).toEqual(["Stage regex-budget deferred: host too slow to judge (REFERENCE_RATIO_ABOVE_CLAMP)"]);
+ expect(fullTestVerdict({ passed: false, blocked: false, cause: null, failures: slow.failures, stages: slow.stages }))
+  .toEqual({ status: "DEFERRED", exitCode: 3 });
+ // Control: an over-budget FAIL at nominal load stays FAIL.
+ const failStdout = ladder("OMP_KIT_STAGE_START name=regex-budget\nREGEX-BUDGET: FAIL rule slow-rule took 2.10x budget on the live stream at nominal reference ratio\n\nRED   regex-budget producer_rc=1 duration_ms=20\n");
+ const failed = classifyLadder({ code: 1, stdout: failStdout, stderr: "" }, []);
+ expect(failed.stages["regex-budget"].status).toBe("FAIL");
+ expect(fullTestVerdict({ passed: false, blocked: false, cause: null, failures: failed.failures, stages: failed.stages }).status).toBe("FAIL");
+ // Control: an INCONCLUSIVE for any other reason stays FAIL.
+ const otherStdout = ladder("OMP_KIT_STAGE_START name=regex-budget\nREGEX-BUDGET: INCONCLUSIVE REFERENCE_TRACKING_DIVERGED (rule-mix ratio and reference ratio differ 9.40x; not judged, not PASS)\n\nRED   regex-budget producer_rc=75 duration_ms=20\n");
+ const other = classifyLadder({ code: 75, stdout: otherStdout, stderr: "" }, []);
+ expect(other.stages["regex-budget"].status).toBe("FAIL");
+});
 
 // A later edit to the activated binary or link defeats post-image-based undo.
 test("undo refuses an edited postimage and leaves the update receipt pending", async () => fixture(async ctx => {

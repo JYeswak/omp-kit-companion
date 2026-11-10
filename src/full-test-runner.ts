@@ -444,6 +444,7 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[],
    stages[name] = { status: match[1] === "GREEN" ? "PASS" : "FAIL", producer_rc: Number(match[3]),
     duration_ms: match[4] === undefined ? null : Number(match[4]) };
    let deferral: string | null = null;
+   let slowHost: string | null = null;
    if (match[1] === "RED") {
     const marker = `OMP_KIT_STAGE_START name=${name}\n`;
     const start = output.stdout.startsWith(marker) ? 0 : output.stdout.indexOf("\n" + marker);
@@ -462,18 +463,27 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[],
       stdout_tail: output.stdout.slice(Math.max(begin, until - 2500), until),
       stderr_tail: output.stderr.slice(-1000),
      };
-     // ladder.sh wraps every stage after manifest in `omp-kit heavy`, whose refusal to admit work under load is
-     // exit 75 with a RESOURCE_DEFERRED line (merged into the stage's stdout). The stage never ran its check.
-     if (match[3] === "75") deferral = output.stdout.slice(begin, until).split("\n")
-      .find(text => text.startsWith("RESOURCE_DEFERRED: "))?.slice("RESOURCE_DEFERRED: ".length).trim() ?? null;
-    }
+    // ladder.sh wraps every stage after manifest in `omp-kit heavy`, whose refusal to admit work under load is
+    // exit 75 with a RESOURCE_DEFERRED line (merged into the stage's stdout). The stage never ran its check.
+    if (match[3] === "75") deferral = output.stdout.slice(begin, until).split("\n")
+     .find(text => text.startsWith("RESOURCE_DEFERRED: "))?.slice("RESOURCE_DEFERRED: ".length).trim() ?? null;
+    // POSTCHECKLOAD1: regex-budget exits 75 (INCONCLUSIVE_EXIT_CODE) when the host is too slow to judge
+    // (reference ratio above clamp). Like a heavy deferral, the release was never judged on timing — but only
+    // for that reason; every other INCONCLUSIVE or FAIL verdict still fails the run.
+    slowHost = deferral === null && name === "regex-budget" && match[3] === "75" ? output.stdout.slice(begin, until).split("\n")
+     .find(text => text.includes("REGEX-BUDGET: INCONCLUSIVE") && text.includes("REFERENCE_RATIO_ABOVE_CLAMP"))?.trim() ?? null : null;
     if (deferral !== null) {
      stages[name].status = "DEFERRED";
      stages[name].reason = `omp-kit heavy deferred the stage before it ran: ${deferral}`;
+    } else if (slowHost !== null) {
+     stages[name].status = "DEFERRED";
+     stages[name].reason = `regex-budget INCONCLUSIVE on a too-slow host: ${slowHost}`;
     }
+   }
    }
    next++;
    if (deferral !== null) { failures.push(`Stage ${name} deferred by heavy admission (producer_rc=75): ${deferral}`); break; }
+   if (slowHost !== null) { failures.push(`Stage ${name} deferred: host too slow to judge (REFERENCE_RATIO_ABOVE_CLAMP)`); break; }
   }
   if (match[1] === "RED") { failures.push(`Stage ${name} returned producer_rc=${match[3]}`, ...evidence); break; }
  }
