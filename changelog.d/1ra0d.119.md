@@ -1,0 +1,1 @@
+- The regexploit check that runs on commits and pushes no longer leaves a `var/agent-tmp/regexploit-gate.<pid>` folder behind on every run, so seats are no longer told at session end that they owe disposal of scratch they never made.
