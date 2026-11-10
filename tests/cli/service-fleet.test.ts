@@ -164,13 +164,14 @@ test("SVC1 planted: an overlapping run exits SKIPPED-OVERLAP with no work", () =
 	expect(existsSync(join(home, ".local", "state", "omp-kit", "load"))).toBe(false);
 });
 
+// load-watch is exempt from the load gate since LOADWATCH1 (ompkit-1ra0d.110): it must sample the overload it reports.
 test("SVC1 planted: a run under high load writes SKIPPED-LOAD and does no work", () => {
 	const home = fixtureHome();
-	const result = cli(["service", "run", "load-watch"], home, namespace(), { OMP_KIT_LOAD_OVERRIDE: "87/32" });
+	const result = cli(["service", "run", "am-retain"], home, namespace(), { OMP_KIT_LOAD_OVERRIDE: "87/32" });
 	expect(result.envelope.data.status).toBe("SKIPPED-LOAD");
 	expect(result.code).toBe(4);
-	expect(readReceipt(home, "load-watch")).toMatchObject({ status: "SKIPPED-LOAD" });
-	expect(existsSync(join(home, ".local", "state", "omp-kit", "load"))).toBe(false);
+	expect(readReceipt(home, "am-retain")).toMatchObject({ status: "SKIPPED-LOAD" });
+	expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "am-retain.log.jsonl"))).toBe(false);
 });
 
 test("SVC1 planted: a slow run is killed at the cap and recorded TIMEOUT", () => {
