@@ -1,5 +1,5 @@
-import { statSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { physicalTarget, targets } from "./durability.ts";
 import { commandFromEvent, commandName, executedShellCommands, repositoryRoot, reservationGaps, type ShellInspection, type ShellWord } from "./git.ts";
 import { resolveFilesystemWriteTarget, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent } from "./scratch.ts";
@@ -281,6 +281,27 @@ function shellCandidates(inspection: ShellInspection, cwd: string): Candidate[] 
 	return candidates;
 }
 
+/**
+ * PRIVATECHECKOUT1: a private checkout of a canonical repository (`ovnfs new`, or `git clone --shared` with a
+ * separate git dir) has exactly one writer, its creator, so shared-checkout reservations do not apply inside it.
+ * Shape: `.git` is a gitdir pointer file to a git dir that is not a linked worktree (no commondir) and borrows
+ * its objects from another repository through objects/info/alternates. A canonical checkout has a .git
+ * directory, so it never matches; anything unreadable is judged as canonical (fail closed).
+ * CFS seats hit 11 WRITE_OWN_LOOKUP_UNAVAILABLE refusals in 2 h on 2026-11-10 writing in their ovnfs checkouts.
+ */
+function privateCheckout(root: string): boolean {
+	try {
+		const pointer = readFileSync(join(root, ".git"), "utf8").trim();
+		if (!pointer.startsWith("gitdir: ")) return false;
+		const gitDir = realpathSync(resolve(root, pointer.slice("gitdir: ".length)));
+		try { statSync(join(gitDir, "commondir")); return false; } catch { /* not a linked worktree */ }
+		const alternates = readFileSync(join(gitDir, "objects", "info", "alternates"), "utf8").split("\n").map(line => line.trim()).filter(Boolean);
+		return alternates.length > 0 && alternates.every(path => isAbsolute(path) && !realpathSync(path).startsWith(`${gitDir}${sep}`));
+	} catch {
+		return false;
+	}
+}
+
 interface Judged { candidate: Candidate; rel: string; probe: string }
 
 async function judge(candidates: readonly Candidate[], context: WriteOwnContext): Promise<FleetGuardBlock | undefined> {
@@ -293,7 +314,7 @@ async function judge(candidates: readonly Candidate[], context: WriteOwnContext)
 		try { physical = await physicalTarget(candidate.path); }
 		catch (error) { return refuse("WRITE_OWN_UNRESOLVED", `cannot resolve write target ${candidate.spelled} (${String(error)})`); }
 		const root = repositoryRoot(physical);
-		if (!root) continue;
+		if (!root || privateCheckout(root)) continue;
 		// A fixture repository created inside owned scratch (its own git init beneath var/agent-tmp) is scratch,
 		// not a canonical checkout: a root inside the calling repository's var/agent-tmp is skipped like scratch
 		// itself. The calling repository bounds the skip so a simulated canonical checkout nested under another

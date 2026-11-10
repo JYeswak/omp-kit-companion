@@ -344,3 +344,24 @@ describe("CFSFALSEREF1 (ompkit-1ra0d.75): fixture repos in scratch and omp inter
 		});
 	}, fixtureDeadlineS(30) * 1_000);
 });
+
+describe("PRIVATECHECKOUT1 (ompkit-1ra0d.75): a private object-borrowing checkout has one writer, so no reservation", () => {
+	test("a write in a separate-git-dir shared clone is admitted with no lookup; the canonical checkout it borrows from is still judged", async () => {
+		// The ovnfs shape: a .git pointer file to a private git dir whose objects/info/alternates borrow the canonical repo's objects.
+		const checkout = join(scratch, "private-checkout");
+		mkdirSync(join(scratch, "private-gitdirs"), { recursive: true });
+		const gitDir = join(scratch, "private-gitdirs", "private-checkout");
+		const cloned = await run(["git", "clone", "-q", "--shared", "--separate-git-dir", gitDir, repo, checkout], { env: gitEnv, deadline_s: fixtureDeadlineS(30), max_output_bytes: 1 << 16 });
+		expect(cloned.rc).toBe(0);
+		expect(readFileSync(join(checkout, ".git"), "utf8")).toStartWith("gitdir: ");
+		await withAm(holds("Intruder"), "ok", "Intruder", async () => {
+			expect((await write(join(checkout, "scripts", "x.py"), "private edit\n", checkout))?.reason ?? "").toBe("");
+			expect(lookups()).toEqual([]);
+			// Control: the canonical checkout itself still needs the reservation.
+			const refused = await write(join(repo, "scripts", "x.py"));
+			expect(refused?.block).toBe(true);
+			expect(refused?.reason).toContain("WRITE_OWN_UNRESERVED");
+		});
+		expect(readFileSync(join(repo, "scripts", "x.py"), "utf8")).toBe("print('canonical')\n");
+	}, fixtureDeadlineS(30) * 1_000);
+});
