@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { abortCompensatedKitUpdateReceipt, acquireKitUpdateLock, applyMutation, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate, inspectPendingMutations, planMutation, reconcileKitUpdateReceipt, recoverMutation } from "../../src/mutations.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -126,7 +126,9 @@ test("replacing a parent directory after planning cannot redirect a new file", (
 	const folder = join(root, "sub");
 	mkdirSync(folder);
 	const prepared = plan(state, root, "sub/new.md", "managed");
-	rmSync(folder, { recursive: true });
+	// Rename the old parent away before creating its replacement: rm + mkdir let Linux reuse the inode number, so the
+	// plan's identity check saw the "same" directory and this test flaked on suite workers (RELFLAKE1 ompkit-1ra0d.109).
+	renameSync(folder, `${folder}.replaced`);
 	mkdirSync(folder);
 	expect(() => applyMutation(prepared)).toThrow(/FRESH_PLAN/);
 	expect(readdirSync(folder)).toEqual([]);

@@ -35,9 +35,15 @@ function socketFixture() {
 	}
 	throw new Error(`no owned temp root keeps the tmux socket within sun_path (${SUN_PATH_MAX} bytes)`);
 }
-const socketFixtureTmp = socketFixture();
-const socketFixtureRoot = realpathSync(socketFixtureTmp.path);
-afterAll(() => socketFixtureTmp.cleanup());
+// Each tmux test gets its own root: `tmux kill-server` returns before the server finishes exiting, so a next test
+// starting a server on the same socket path raced the dying one ("server exited unexpectedly", RELFLAKE1).
+const socketFixtures: { cleanup: () => void }[] = [];
+function socketFixtureRoot(): string {
+	const owned = socketFixture();
+	socketFixtures.push(owned);
+	return realpathSync(owned.path);
+}
+afterAll(() => { for (const owned of socketFixtures) owned.cleanup(); });
 
 const noWait = async (_ms: number) => {};
 
@@ -310,8 +316,8 @@ function capturePrivate(socket: string, pane: string): string {
 // Real private tmux servers; macOS CI runners ship no tmux (same guard as fleet-watch and tracker-recovery).
 const tmuxAvailable = spawnSync("tmux", ["-V"]).status === 0;
 test.skipIf(!tmuxAvailable)("TMUX1: without socket environment, send selects the sole live private server and reports its socket", async () => {
-	const home = socketFixtureRoot;
-	const tmp = join(socketFixtureRoot, "tmp");
+	const home = socketFixtureRoot();
+	const tmp = join(home, "tmp");
 	const socket = join(home, ".tmux-sockets", `tmux-${tmuxUid}`, "default");
 	const server = livePrivateServer(socket, home, tmp, "one");
 	try {
@@ -328,8 +334,8 @@ test.skipIf(!tmuxAvailable)("TMUX1: without socket environment, send selects the
 });
 
 test.skipIf(!tmuxAvailable)("TMUX1 planted: two live private servers refuse with both sockets and do not change either pane", async () => {
-	const home = socketFixtureRoot;
-	const tmp = join(socketFixtureRoot, "tmp");
+	const home = socketFixtureRoot();
+	const tmp = join(home, "tmp");
 	const homeSocket = join(home, ".tmux-sockets", `tmux-${tmuxUid}`, "default");
 	const tmpSocket = join(tmp, `tmux-${tmuxUid}`, "default");
 	const first = livePrivateServer(homeSocket, home, tmp, "first");
@@ -350,8 +356,8 @@ test.skipIf(!tmuxAvailable)("TMUX1 planted: two live private servers refuse with
 });
 
 test.skipIf(!tmuxAvailable)("TMUX1 unchanged: explicit TMUX_TMPDIR is honored and its socket is reported", async () => {
-	const home = socketFixtureRoot;
-	const socketRoot = join(socketFixtureRoot, "custom");
+	const home = socketFixtureRoot();
+	const socketRoot = join(home, "custom");
 	const socket = join(socketRoot, `tmux-${tmuxUid}`, "default");
 	const server = livePrivateServer(socket, home, socketRoot, "set");
 	try {
