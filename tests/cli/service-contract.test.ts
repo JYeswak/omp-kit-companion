@@ -139,6 +139,18 @@ test("autocut renders the operator argv hourly; planted: unconfigured it refuses
 	expect(() => renderLaunchdPlist(HOME, { ...job }, LAUNCHER, null)).toThrow("AUTOCUT_UNCONFIGURED");
 });
 
+// CCCOMPRESS1: the daily spool compression runs the operator's argv under the run lock; its cap ends before the next start.
+test("cc-compress renders a daily locked run of the operator argv; planted: unconfigured it refuses to render", () => {
+	const job = KNOWN_JOBS["cc-compress"]!;
+	expect(job).toMatchObject({ label: "com.omp-kit.cc-compress", kind: "interval", intervalSeconds: 86400, runAtLoad: false, commandConfigKey: "ccCompress", lockedRun: true });
+	expect(RUN_TIME_CAPS_MS["cc-compress"]!).toBeLessThan(job.intervalSeconds * 1000);
+	const program = { argv: ["/usr/bin/python3", "/repo/scripts/cc/cc_spool_gzip.py", "--apply"], cwd: "/repo" };
+	const text = renderLaunchdPlist(HOME, { ...job, program }, LAUNCHER, null).text;
+	expect(text).toContain("<key>StartInterval</key>\n\t<integer>86400</integer>");
+	expect(text).toContain("<string>service</string>\n\t\t<string>run</string>\n\t\t<string>cc-compress</string>");
+	expect(() => renderLaunchdPlist(HOME, { ...job }, LAUNCHER, null)).toThrow("CC_COMPRESS_UNCONFIGURED");
+});
+
 // CLOSEPASS1b (ompkit-774u.52.1): the close pass runs every 5 min from the operator's closePass argv, never a kit path.
 test("close-pass is a 300 s interval job whose argv and cwd come from fleet-watch.json closePass; planted: keyless install refuses CLOSE_PASS_UNCONFIGURED", () => {
 	const job = KNOWN_JOBS["close-pass"]!;

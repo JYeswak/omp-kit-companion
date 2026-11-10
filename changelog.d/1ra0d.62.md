@@ -1,1 +1,2 @@
 - `omp-kit update --reconcile` now prunes old releases like a completed update: the active release, the five before it, pinned and running releases stay.
+- New daily `cc-compress` service job: gzips the command center's sealed spool days (about 10x smaller) from the operator's `ccCompress` command in fleet-watch.json.

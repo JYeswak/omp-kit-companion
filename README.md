@@ -241,11 +241,11 @@ mapping fields, activation commands and read-only verification.
 
 ### Service jobs and kit updates
 
-17 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
+18 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
 `load-watch`, `ci-poller`, `fleet-flush`; 120 s: `fleet-watch`; 300 s:
 `kit-update`, `close-pass`; hourly: `claude-save`, [`am-retain`](docs/service-contract.md#agent-mail-retention),
 `session-retain`, `cache-retain`, `autocut`; 6 h: `scratch-reaper`,
-`fleet-lessons`; weekly: `gate-rationalize`; daemon: `cc`.
+`fleet-lessons`; daily: `cc-compress`; weekly: `gate-rationalize`; daemon: `cc`.
 Install previews a diff first, keeps a backup, and retires installed lifecycle definitions.
 
 ```sh

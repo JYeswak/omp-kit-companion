@@ -300,6 +300,7 @@ export const RUN_TIME_CAPS_MS: Record<string, number> = {
 	"load-watch": 45_000,
 	"cache-retain": 120_000,
 	"gate-rationalize": 600_000,
+	"cc-compress": 3_600_000,
 	"autocut": 3_300_000,
 };
 

@@ -130,6 +130,11 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	// kit command appends spool/kit while the store exists) are its CC_STATE.
 	// SVCQOS1: deadline QoS; its fast lane must finish in 10 s every 15 s.
 	"cc": { name: "cc", label: "com.omp-kit.cc", kind: "daemon", intervalSeconds: 0, qos: "deadline", ownedState: home => [{ path: ccStateDir(home) }] },
+	// CCCOMPRESS1: daily, gzip the command center's sealed spool days in place (verified against each day's cursor
+	// seal; the ingester reads <day>.jsonl.gz natively), so the 90-day rebuild source stays ~10x smaller. Its command
+	// is operator data (fleet-watch.json `ccCompress`: python3 <repo>/scripts/cc/cc_spool_gzip.py --apply), never a
+	// kit path; UNCONFIGURED until set. lockedRun: a slow day never starts a second pass over the same files.
+	"cc-compress": { name: "cc-compress", label: "com.omp-kit.cc-compress", kind: "interval", intervalSeconds: 86400, runAtLoad: false, commandConfigKey: "ccCompress", lockedRun: true },
 	// GATEEVENTS1 (ompkit-fp72.135.3.12): weekly gate rationalization over the live gate-events ledger. Its
 	// command is operator data (fleet-watch.json `gateRationalize`: python3 gate_registry.py rationalize --out ...),
 	// so the kit never hardcodes a repo path; UNCONFIGURED until the operator sets it.
