@@ -1554,3 +1554,128 @@ export function submitQueuedToTernSeat(_seat: TernSeatBinding): TernDeliverResul
 	return { status: "REFUSED", marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null,
 		detail: `submitQueued disabled pending native queue admission qualification (F6); zero sends`, code: "SUBMITQUEUED_DISABLED" };
 }
+
+export interface FirstSeatGoalResult {
+	status: "OK" | "PENDING_CONSUME" | "NOT_DELIVERED" | "REFUSED";
+	sends: number;
+	sessionFile: string | null;
+	offset: number | null;
+	detail: string;
+	code: string;
+}
+
+/**
+ * PROJECTADD1: first goal (or orientation) for a brand-new seat whose session
+ * file does not exist yet. `omp-kit send` refuses those seats
+ * (SESSION_FILE_UNAVAILABLE: omp writes its session file only after the first
+ * prompt), so a new seat can never receive its first goal through the kit.
+ * This path pastes the payload with Enter into the virgin seat, then proves
+ * consumption from the new session file with the same proof machinery
+ * (buildTernProofKey/proveTernEntry). It refuses when the seat already has a
+ * session file on disk (use deliverToTernSeat), when the payload is not a
+ * goal-set or plain message, and when proof does not arrive before the
+ * deadline (never claims consumption without proof). No composer gating: a
+ * virgin seat has no composer state to clobber.
+ */
+export async function deliverFirstSeatGoal(input: {
+	seat: Omit<TernSeatBinding, "windowKey"> & { windowKey?: string };
+	text: string;
+	io?: TernObserverIo;
+	observe?: (seat: TernSeatBinding, io: TernObserverIo) => Promise<{ sessionFile: string | null }>;
+	pollMs?: number;
+	deadlineMs?: number;
+	wait?: (ms: number) => Promise<void>;
+}): Promise<FirstSeatGoalResult> {
+	const io = input.io ?? defaultTernIo();
+	const windowKey = typeof input.seat.windowKey === "string" ? input.seat.windowKey.trim() : "";
+	const seat: TernSeatBinding = { session: input.seat.session, pane: input.seat.pane, windowKey, cwd: input.seat.cwd };
+	const observe = input.observe ?? (async (seat, io) => {
+		try { return { sessionFile: (await observeTernSeat(seat, io)).sessionFile }; }
+		catch { return { sessionFile: null }; }
+	});
+	const fail = (code: string, detail: string, sessionFile: string | null = null): FirstSeatGoalResult =>
+		({ status: "REFUSED", sends: 0, sessionFile, offset: null, detail, code });
+	const payloadKind = classifyTernPayload(input.text);
+	if (payloadKind.kind === "slash") {
+		return fail(isBareGoalDirective(input.text) ? "GOAL_REQUIRES_SET_FORM" : "SLASH_UNPROVABLE",
+			"first delivery needs /goal set BODY or a plain message; zero sends");
+	}
+	if (!input.text.trim()) return fail("EMPTY_PAYLOAD", "blank text is never sent; zero sends");
+	if (payloadKind.kind === "shell-escape") return fail("OMP_SHELL_ESCAPE", "payload would run in the OMP composer; zero sends");
+	if (typeof seat.session !== "string" || !seat.session.trim() || typeof seat.pane !== "string") {
+		return fail("PLANE_SEAT_UNBOUND", "seat needs a configured session and pane; zero sends");
+	}
+	const block = ternPaneId(seat.pane);
+	if (block === null) return fail("PLANE_SEAT_UNBOUND", "seat pane must be an exact decimal block id or tern:<id>; zero sends");
+	let known: string | null;
+	try {
+		known = (await observe(seat, io)).sessionFile;
+	} catch {
+		return fail("OBSERVATION_UNKNOWN", "seat observation failed; zero sends");
+	}
+	if (known !== null) {
+		let existing: string | null = null;
+		try { existing = io.readSessionFile(known); } catch { existing = null; }
+		if (existing !== null) {
+			return fail("FIRST_SEAT_TAKEN", "seat already has a session file; deliver through omp-kit send",
+				known);
+		}
+	}
+	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
+	const payload = payloadKind.kind === "goal-set" ? input.text.trim() : `${input.text.trim()}\n[${marker}]`;
+	const objective = payloadKind.kind === "goal-set" ? payloadKind.objective : "";
+	const window = windowKey !== "" ? ["--window", windowKey] : [];
+	try {
+		const pasted = io.run([ternCtlBin(), ...window, "send", block, "paste", payload]);
+		if (pasted.code !== 0) {
+			return { status: "PENDING_CONSUME", sends: 1, sessionFile: known, offset: null,
+				detail: `paste exited ${pasted.code}, effect unknown; proof never attempted`, code: "SEND_AMBIGUOUS" };
+		}
+		const entered = io.run([ternCtlBin(), ...window, "send", block, "keys", "Enter"]);
+		if (entered.code !== 0) {
+			return { status: "PENDING_CONSUME", sends: 1, sessionFile: known, offset: null,
+				detail: `submit exited ${entered.code}, effect unknown; proof never attempted`, code: "SEND_AMBIGUOUS" };
+		}
+	} catch (error) {
+		return { status: "PENDING_CONSUME", sends: 1, sessionFile: known, offset: null,
+			detail: `dispatch threw (${error instanceof Error ? error.message : String(error)}), effect unknown; proof never attempted`,
+			code: "SEND_AMBIGUOUS" };
+	}
+	const pollMs = input.pollMs ?? TERN_PROOF_POLL_MS;
+	const deadlineMs = input.deadlineMs ?? TERN_PROOF_DEADLINE_MS;
+	const wait = input.wait ?? (async (ms: number) => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); });
+	const polls = Math.max(1, Math.ceil(deadlineMs / pollMs));
+	let path: string | null = known;
+	let key: TernProofKey | null = null;
+	for (let poll = 0; poll < polls; poll++) {
+		try {
+			const seen = (await observe(seat, io)).sessionFile;
+			if (seen !== null) path = seen;
+		} catch { /* keep the last known path; an unobservable seat proves nothing new */ }
+		if (path !== null) {
+			const view = readSessionView(io, path);
+			if (view !== null) {
+				const journal = parseSessionView(view);
+				if (journal.status === "KNOWN") {
+					if (key === null) {
+						key = buildTernProofKey(view, journal, { kind: payloadKind.kind, payload, marker, objective });
+					}
+					const proof = proveTernEntry(view, key);
+					if (proof.status === "PROVEN") {
+						return { status: "OK", sends: 1, sessionFile: path, offset: proof.offset,
+							detail: payloadKind.kind === "goal-set"
+								? `goal adopted at offset ${proof.offset} in the new session file`
+								: `USER entry proven at offset ${proof.offset} in the new session file`,
+							code: "PROVEN" };
+					}
+				}
+			}
+		}
+		if (poll + 1 >= polls) break;
+		await wait(pollMs);
+	}
+	return { status: "PENDING_CONSUME", sends: 1, sessionFile: path, offset: null,
+		detail: key === null ? "new session file never settled for proof; effect unknown"
+			: "proof never completed on the new session file; effect unknown",
+		code: payloadKind.kind === "goal-set" ? "GOAL_NOT_ADOPTED" : "PROOF_TIMEOUT" };
+}

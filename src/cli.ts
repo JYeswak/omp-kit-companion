@@ -57,6 +57,7 @@ import { claudeSaveJobEnabled, runClaudeSaveJob, runGitleaksScan, type GitleaksS
 import { ensureMutationStateRoot, writePrivate, type PendingInspection } from "./mutations.ts";
 import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
 import { inspectProjectTrust } from "./project-trust.ts";
+import { applyProjectAdd, planProjectAdd, projectStatus, undoProjectAdd } from "./project-add.ts";
 import { PROFILE_RECIPE_KINDS, renderRecipe } from "./profile-recipes.ts";
 import { confirmMutation, renderOutput, type PresentationResult } from "./output.ts";
 import { redactFullTestCause, runFullTest, type FullTestCause, type FullTestReport } from "./full-test-runner.ts";
@@ -1174,7 +1175,7 @@ const STATE_ROOT_COMMANDS: Record<string, true> = {
 	audit: true, why: true, undo: true, repair: true, update: true,
 	"apply rules": true, "apply policy": true, "apply extensions": true, "apply plugin": true, "apply mcp": true,
 	"skill-mine": true, "skill-mine status": true,
-	"service install": true, "service uninstall": true, "service run": true,
+	"service install": true, "service uninstall": true, "service run": true, "project add": true, "project status": true,
 };
 
 function stateRootRefusal(issue: StateRootIssue): CliResult {
@@ -1629,6 +1630,87 @@ function migrateCommand(request: ParsedCommand): CliResult {
 }
 
 registerCommandHandler("migrate", migrateCommand);
+
+async function projectAddCommand(request: ParsedCommand): Promise<CliResult> {
+	const home = process.env.HOME;
+	if (!home || !isAbsolute(home) || resolve(home) !== home) {
+		return refusal("PROJECT_HOME_UNAVAILABLE", "A canonical absolute HOME is required", "Set HOME to an absolute path with no symlinks.");
+	}
+	try {
+		const undoId = request.flags.get("--undo");
+		if (typeof undoId === "string") {
+			if (!request.flags.has("--yes")) {
+				return refusal("PROJECT_UNDO_UNCONFIRMED", "Undo needs explicit confirmation", "Re-run with --yes to restore every store byte-identically and close the created seats.");
+			}
+			const undone = await undoProjectAdd({ receiptId: undoId, env: process.env });
+			if (!undone.ok) {
+				return { code: 2, data: { overall: "FAIL", scope: "project", action: "UNDO" }, errors: [{ code: undone.code, message: undone.detail, remediation: undone.remediation }], verification: "UNVERIFIED" };
+			}
+			return { code: 0, data: { overall: "OK", scope: "project", action: "UNDONE", session: undone.undone.session, files: undone.undone.files, panes: undone.undone.panes, agents: undone.undone.agents }, verification: "UNVERIFIED" };
+		}
+		const repo = request.argument;
+		if (!repo) return refusal("PROJECT_REPO_MISSING", "A repo path is required", "Pass project add REPO --session NAME.");
+		const session = request.flags.get("--session");
+		if (typeof session !== "string" || session.trim() === "") {
+			return refusal("PROJECT_SESSION_MISSING", "A --session NAME is required", "Pass --session like skillgrowth.");
+		}
+		const workersRaw = request.flags.get("--workers");
+		const workers = workersRaw === undefined ? 1 : Number(workersRaw);
+		if (!Number.isSafeInteger(workers)) {
+			return refusal("PROJECT_WORKERS_INVALID", "workers must be an integer 0..16", "Pass --workers N with 0 to 16 worker seats beside the director.");
+		}
+		const profile = request.flags.get("--profile");
+		const model = request.flags.get("--model");
+		const mission = request.flags.get("--mission");
+		const goal = request.flags.get("--goal");
+		const orientation = request.flags.get("--orientation");
+		const input = {
+			repo, session: session.trim(), workers, profile: typeof profile === "string" ? profile : "default",
+			...(model === undefined ? {} : { model }), ...(mission === undefined ? {} : { mission }),
+			...(goal === undefined ? {} : { goal }), ...(orientation === undefined ? {} : { orientation }), env: process.env,
+		};
+		if (!request.flags.has("--apply")) {
+			const planned = planProjectAdd(input);
+			if (!planned.ok) {
+				return { code: 2, data: { overall: "FAIL", scope: "project", action: "PLAN" }, errors: [{ code: planned.code, message: planned.detail, remediation: planned.remediation }], verification: "UNVERIFIED" };
+			}
+			return { code: 0, data: { overall: "UNVERIFIED", scope: "project", action: "PLAN", session: planned.plan.session, repo: planned.plan.repo, seats: planned.plan.seats, stores: planned.plan.stores, turnOn: planned.plan.turnOn, deliveries: planned.plan.deliveries }, verification: "UNVERIFIED" };
+		}
+		const applied = await applyProjectAdd(input);
+		if (!applied.ok) {
+			return { code: applied.receiptId === undefined ? 2 : 1, data: { overall: "FAIL", scope: "project", action: "APPLY", ...(applied.receiptId === undefined ? {} : { receipt_id: applied.receiptId }) }, errors: [{ code: applied.code, message: applied.detail, remediation: applied.remediation }], verification: "UNVERIFIED" };
+		}
+		return { code: 0, data: { overall: "OK", scope: "project", action: "APPLIED", session: applied.result.session, agents: applied.result.agents, receipt_id: applied.result.receiptId, census: applied.result.census }, verification: "UNVERIFIED" };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		const code = /^[A-Z][A-Z_0-9]+$/.test(message) ? message : "PROJECT_FAILED";
+		return refusal(code, `project add failed: ${message.slice(0, 300)}`, "Inspect the named store or seat host; a PARTIAL run leaves a receipt for project add --undo RECEIPT --yes.");
+	}
+}
+
+async function projectStatusCommand(request: ParsedCommand): Promise<CliResult> {
+	const home = process.env.HOME;
+	if (!home || !isAbsolute(home) || resolve(home) !== home) {
+		return refusal("PROJECT_HOME_UNAVAILABLE", "A canonical absolute HOME is required", "Set HOME to an absolute path with no symlinks.");
+	}
+	const session = request.argument;
+	if (!session) return refusal("PROJECT_SESSION_MISSING", "A session name is required", "Pass project status SESSION.");
+	try {
+		const status = await projectStatus({ session, env: process.env });
+		if (!status.ok) {
+			return { code: 2, data: { overall: "FAIL", scope: "project", action: "STATUS" }, errors: [{ code: status.code, message: status.detail, remediation: status.remediation }], verification: "UNVERIFIED" };
+		}
+		const named = status.status.seats.filter((seat) => seat.named).length;
+		return { code: 0, data: { overall: "OK", scope: "project", action: "STATUS", session: status.status.session, repo: status.status.repo, seats: status.status.seats, beads: status.status.beads, last_commit: status.status.lastCommit, census: { named: `${named}/${status.status.seats.length}` } }, verification: "UNVERIFIED" };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		const code = /^[A-Z][A-Z_0-9]+$/.test(message) ? message : "PROJECT_FAILED";
+		return refusal(code, `project status failed: ${message.slice(0, 300)}`, "Inspect the fleet-watch config and seat host.");
+	}
+}
+
+registerCommandHandler("project add", projectAddCommand);
+registerCommandHandler("project status", projectStatusCommand);
 
 function extensionCommand(request: ParsedCommand): CliResult {
 	const root = kitIdentity().release.root, home = process.env.HOME;
