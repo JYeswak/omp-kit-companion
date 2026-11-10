@@ -50,6 +50,15 @@ LOCAL_REQUIRED = (
     "tests/cli/full-suite-complement.test.sh",  # Linux failure, ompkit-ltawi
     "tests/cli/kit-update-nplus-two.test.ts",  # Linux failure, ompkit-ltawi
     "tests/cli/package-release-live.test.ts",  # Linux failure, ompkit-ltawi
+    # RELFLAKE1 (ompkit-1ra0d.109): on the shared 4-core shards these hit bun's 120 s per-test limit (each takes
+    # 20-45 s here) or failed a wall-clock/CPU budget, a different one per verdict of one unchanged tree; every
+    # one passes alone on Linux and on this host. Six 2026-11-10 verdicts named them.
+    "tests/cli/package-release.test.ts",  # native full-test hit 120 s on 3 verdicts
+    "tests/cli/apply-policy-settings.test.ts",  # hit 120 s
+    "tests/cli/output-ids.test.ts",  # hit 120 s
+    "tests/cli/fleet-watch-pull.test.ts",  # linear-near-miss timing, 3 verdicts
+    "tests/cli/test-runner.test.ts",  # long-token CPU budget, 21 historic failure lines
+    "tests/cli/regex-budget.test.ts",  # stream budget timing
 )
 
 

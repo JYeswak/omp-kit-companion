@@ -1,0 +1,1 @@
+- The release full suite runs six timing-bound test files on the Mac host instead of the shared 4-core Linux shards, where each one failed a 120 s or CPU/wall-clock budget on some verdict of an unchanged tree.
