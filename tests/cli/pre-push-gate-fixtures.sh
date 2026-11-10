@@ -748,7 +748,8 @@ mkdir -p "$realrepo/.git/hooks"
 cp "$ADAPTER" "$realrepo/scripts/pre-push-gate.sh"
 cp "$KITREPO/scripts/regexploit-gate.py" "$realrepo/scripts/regexploit-gate.py"
 cp "$KITREPO/scripts/pysafe.py" "$realrepo/scripts/pysafe.py"
-git -C "$realrepo" add -- scripts/pre-push-gate.sh scripts/regexploit-gate.py scripts/pysafe.py
+cp "$KITREPO/scripts/kitlib_tmp.py" "$realrepo/scripts/kitlib_tmp.py"
+git -C "$realrepo" add -- scripts/pre-push-gate.sh scripts/regexploit-gate.py scripts/pysafe.py scripts/kitlib_tmp.py
 git -C "$realrepo" commit -qm "[test] ompkit-xade baseline"
 git init --template= -q --bare "$remote"
 git -C "$realrepo" remote add origin "$remote"
