@@ -1,0 +1,1 @@
+- `omp-kit project status` and `project add` work again on a fleet-watch.json that lists stopped projects (`pullEnabled: false`): the pause-owner fields the retired pull nudging required are no longer demanded, and an invalid config now names the actual problem instead of saying the file does not parse.

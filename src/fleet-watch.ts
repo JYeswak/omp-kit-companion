@@ -29,11 +29,8 @@ export type FleetWatchSession = {
 	mission?: string;
 	round?: string | number;
 	phase?: string;
-	/** false prevents worker goal changes; owned pauses still report supply and overdue expiry. */
+	/** false marks a stopped project: mail wake and the upgrade notice leave its seats alone. */
 	pullEnabled?: boolean;
-	pausedBy?: string;
-	pauseReason?: string;
-	pausedUntil?: string;
 	/** A declared cut selects single-bead goals instead of broad pull nudges. */
 	milestone?: { epic: string; declaredAt: string; pinned: string[] };
 };
@@ -212,11 +209,6 @@ export class FleetWatcher {
 const MISSION_REF = /^[^\n:][^\n]*:[1-9][0-9]{0,6}$/;
 
 function validateSessionSupply(session: FleetWatchSession, index: number): void {
-	if (session.pullEnabled === false && (
-		typeof session.pausedBy !== "string" || !session.pausedBy.trim()
-		|| typeof session.pauseReason !== "string" || !session.pauseReason.trim()
-		|| typeof session.pausedUntil !== "string" || !Number.isFinite(Date.parse(session.pausedUntil))
-	)) throw new Error(`PAUSE_UNOWNED: sessions[${index}] requires pausedBy, pauseReason and a valid pausedUntil`);
 	if (session.milestone !== undefined && (
 		!session.milestone || typeof session.milestone !== "object"
 		|| typeof session.milestone.epic !== "string" || !session.milestone.epic.trim()

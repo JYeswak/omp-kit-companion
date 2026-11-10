@@ -107,36 +107,14 @@ test("planted GITLOCK1: tick reaps a stale lock and ledgers the receipt; null di
 	}
 });
 
-test.each(["pausedBy", "pauseReason", "pausedUntil"])("SUPPLYARM1 refuses a paused session missing %s", (field: string) => {
-	const task = ownedTmp("supplyarm1-pause-config");
-	try {
-		const paused: Record<string, unknown> = {
-			...session, pullEnabled: false, pausedBy: "Operator", pauseReason: "maintenance",
-			pausedUntil: "2030-01-01T00:00:00Z",
-		};
-		delete paused[field];
-		const path = join(task.path, "fleet-watch.json");
-		writeFileSync(path, JSON.stringify({ ...config, sessions: [paused] }));
-		expect(() => loadFleetWatchConfig(path)).toThrow("PAUSE_UNOWNED");
-	} finally {
-		task.cleanup();
-	}
-});
-
-test("SUPPLYARM1 refuses empty pause ownership and an unusable expiry", () => {
-	const task = ownedTmp("supplyarm1-pause-metadata");
+test("a stopped project (pullEnabled false, no pause owner) loads: the pull-pause ownership rule retired with pull nudging", () => {
+	const task = ownedTmp("stopped-project-config");
 	try {
 		const path = join(task.path, "fleet-watch.json");
-		for (const invalid of [{ pausedBy: " " }, { pauseReason: "" }, { pausedUntil: "not-a-date" }]) {
-			writeFileSync(path, JSON.stringify({
-				...config,
-				sessions: [{
-					...session, pullEnabled: false, pausedBy: "Operator", pauseReason: "maintenance",
-					pausedUntil: "2030-01-01T00:00:00Z", ...invalid,
-				}],
-			}));
-			expect(() => loadFleetWatchConfig(path)).toThrow("PAUSE_UNOWNED");
-		}
+		writeFileSync(path, JSON.stringify({ ...config, sessions: [{ ...session, pullEnabled: false }] }));
+		expect(loadFleetWatchConfig(path).sessions[0]?.pullEnabled).toBe(false);
+		writeFileSync(path, JSON.stringify({ ...config, sessions: [{ ...session, pullEnabled: "no" }] }));
+		expect(() => loadFleetWatchConfig(path)).toThrow("FLEET_WATCH_CONFIG_INVALID: sessions[0].pullEnabled");
 	} finally {
 		task.cleanup();
 	}

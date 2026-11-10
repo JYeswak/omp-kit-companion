@@ -415,8 +415,8 @@ export async function applyProjectAdd(input: ProjectAddInput): Promise<{ ok: tru
 		try {
 			const parsed = loadFleetWatchConfig(paths.fleetWatchPath);
 			existing = parsed.sessions.find((row) => row.session === session) ?? null;
-		} catch {
-			return failed("PROJECT_FLEET_WATCH_INVALID", `fleet-watch config ${paths.fleetWatchPath} does not parse`, "Repair the JSON file; the run changed nothing.");
+		} catch (error) {
+			return failed("PROJECT_FLEET_WATCH_INVALID", `fleet-watch config ${paths.fleetWatchPath} is invalid: ${error instanceof Error ? error.message : String(error)}`, "Repair the file; the run changed nothing.");
 		}
 		if (existing !== null && existing.coordinatorPane.trim() !== "") {
 			return failed("PROJECT_SESSION_EXISTS", `session ${session} is already a managed project`, "Undo it first (project add --undo RECEIPT) or pick another --session.");
@@ -732,8 +732,8 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 	let config: { sessions: FleetWatchSession[] };
 	try {
 		config = loadFleetWatchConfig(paths.fleetWatchPath);
-	} catch {
-		return failed("PROJECT_FLEET_WATCH_INVALID", `fleet-watch config ${paths.fleetWatchPath} does not parse`, "Repair the JSON file.");
+	} catch (error) {
+		return failed("PROJECT_FLEET_WATCH_INVALID", `fleet-watch config ${paths.fleetWatchPath} is invalid: ${error instanceof Error ? error.message : String(error)}`, "Repair the file.");
 	}
 	const entry = config.sessions.find((row) => row.session === input.session) ?? null;
 	if (entry === null) return failed("PROJECT_SESSION_UNKNOWN", `session ${input.session} is not a managed project`, "Add it first with project add.");
