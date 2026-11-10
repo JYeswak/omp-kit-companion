@@ -477,9 +477,9 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit why` | `why RUN_ID` | Explain one recorded run | `omp-kit why RUN_ID --json` |
 | `omp-kit update` | `update [--plan\|--apply] --version X.Y.Z --index PATH --archive PATH` or `update --reconcile RECEIPT --yes [--prefix PATH]` | Guarded update from a local index + archive; never infers latest (`LOCAL_SOURCE_REQUIRED` names a missing file) | `omp-kit update --plan --version X.Y.Z --index /abs/release-index.json --archive /abs/omp-kit.tar --json` |
 | `omp-kit review` | `review rules\|reduce` | Compare two rule versions on the union of their witnesses, or minimize a reproduced false fire | `omp-kit review rules --incumbent-rules /old/rules --incumbent-cases /old/cases.tsv --candidate-rules /new/rules --candidate-cases /new/cases.tsv --json` |
-| `omp-kit corpus` | `corpus --sessions ABS_DIR [--out ABS_FILE] [--plan]` | Per-rule fire rates over transcripts; never uploads | `omp-kit corpus --sessions /absolute/sessions --json` |
-| `omp-kit skill-mine` | `skill-mine [--since 21d] [--apply] \| status` | Mine sessions and mail for recurring procedures; writes an evidence pack | `omp-kit skill-mine --json` |
-| `omp-kit lsp` | `lsp setup --plan [--project PATH] [--file PATH]` | Readiness only, never installs; full readiness needs a source-backed OMP | `omp-kit lsp setup --plan --json` |
+| `omp-kit corpus` | `corpus --sessions ABS_DIR [--out ABS_FILE] [--plan]` | Per-rule fire rates over transcripts; never uploads; `--sessions` must exist (fresh HOMEs have none) | `omp-kit corpus --sessions /absolute/sessions --json` |
+| `omp-kit skill-mine` | `skill-mine [--since 21d] [--apply] \| status` | Mine sessions and mail for skill candidates | `omp-kit skill-mine --json` |
+| `omp-kit lsp` | `lsp setup --plan [--project PATH] [--file PATH]` | Readiness only; full readiness needs a source-backed OMP | `omp-kit lsp setup --plan --json` |
 | `omp-kit memory` | `memory audit --store-root PATH --yes` | Separately consented audit of a Mnemopi store | `omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json` |
 | `omp-kit planning` | `planning score\|convert` | Score planning evidence; convert a plan into native beads (dry run or `--apply`) | `omp-kit planning score --fleet --json` |
 | `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and check hashes; `anchor` compares the live-doc Mission statement with the record (`AGREE`/`DRIFT`) | `omp-kit mission anchor --json` |
