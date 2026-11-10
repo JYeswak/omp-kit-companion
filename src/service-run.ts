@@ -362,6 +362,7 @@ export const RUN_TIME_CAPS_MS: Record<string, number> = {
 	"cache-retain": 120_000,
 	"gate-rationalize": 600_000,
 	"cc-compress": 3_600_000,
+	"skill-mine": 1_800_000,
 	"autocut": 3_300_000,
 };
 

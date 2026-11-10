@@ -1,0 +1,1250 @@
+import { accessSync, appendFileSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { delimiter, dirname, join } from "node:path";
+import { run } from "./kitlib/run.ts";
+import { captureMineReplay } from "./mine-replay.ts";
+// Read-only by default. Every external read is bounded (session caps, file
+
+export const SKILL_MINE_VERSION = 1;
+export const SKILL_MINE_SINCE_DEFAULT = "21d";
+export const SKILL_MINE_MAX_NEW_DEFAULT = 3;
+export const SKILL_MINE_SESSION_CAP = 2000;
+export const SKILL_MINE_SESSIONS_PER_PROJECT_CAP = 200;
+export const SKILL_MINE_MESSAGES_PER_SESSION_CAP = 2000;
+export const SKILL_MINE_MAIL_FILES_CAP = 3000;
+export const SKILL_MINE_MAIL_FILE_BYTES_CAP = 64 * 1024;
+export const SKILL_MINE_MAIL_THREADS_CAP = 500;
+export const SKILL_MINE_SKILLS_CAP = 2000;
+export const SKILL_MINE_SKILL_FILE_BYTES_CAP = 8 * 1024;
+export const SKILL_MINE_QUOTE_CHARS = 200;
+export const SKILL_MINE_DEDUPE_OVERLAP = 0.35;
+/** Sessions larger than this are sampled via `cass view` instead of a full export. */
+export const SKILL_MINE_SESSION_BYTES_CAP = 8 * 1024 * 1024;
+/** Export output cap: a capped session's JSON export stays under this. */
+export const SKILL_MINE_EXPORT_BYTES_CAP = 12 * 1024 * 1024;
+/** `cass sessions` page size; a full page triggers per-workspace merging. */
+export const SKILL_MINE_SESSIONS_PAGE = 5000;
+/** View-chunk sample points per oversize session and context lines per point. */
+export const SKILL_MINE_VIEW_POINTS = 6;
+export const SKILL_MINE_VIEW_CONTEXT = 60;
+/** Steps in a procedure sequence; single command skeletons never rank alone. */
+export const SKILL_MINE_SEQ_STEPS = 3;
+/** Verbatim procedure text blocks cluster only in this normalized length band. */
+export const SKILL_MINE_TEXT_MIN = 32;
+export const SKILL_MINE_TEXT_MAX = 400;
+/** Kit/tool verbs are infrastructure: dropped from procedure signatures. */
+export const INFRA_HEAD_RE = /^(omp-kit|br|am|ovnfs|cass|python3|cat|sed|rg)\b|^git (status|diff|log|show)\b/;
+/** Default wall budget for the session-mining pass, in seconds. */
+export const SKILL_MINE_WALL_BUDGET_S = 600;
+export type SkillMineSourceStatus = "OK" | "UNAVAILABLE";
+
+export interface SkillMineSourceReport {
+	status: SkillMineSourceStatus;
+	reason: string;
+	sessions?: number;
+	messages?: number;
+	threads?: number;
+	files?: number;
+	skills?: number;
+}
+
+export interface SkillMineEvidence {
+	source: "cass" | "mail";
+	ref: string;
+	quote: string;
+}
+
+export interface SkillMineCandidate {
+	workflow: string;
+	summary: string;
+	projects: string[];
+	occurrences: number;
+	why_skill: string;
+	evidence: SkillMineEvidence[];
+	nearest_existing_skill: string | null;
+	fingerprint: string;
+	score: number;
+	first_seen: string;
+}
+
+export interface SkillMineReject {
+	workflow: string;
+	covering_skill: string;
+	overlap: number;
+	score: number;
+}
+
+export interface SkillMineBeadFiled {
+	candidate: string;
+	fingerprint: string;
+	project: string;
+	bead: string;
+}
+
+export interface SkillMineCoverage {
+	sessions_in_window: number;
+	sessions_seen: number;
+	sessions_mined: number;
+	skipped_oversize: number;
+	stopped_early: boolean;
+	list_truncated: boolean;
+	projects: Record<string, number>;
+}
+
+export interface SkillMineReport {
+	overall: "OK" | "UNVERIFIED";
+	sources: { cass: SkillMineSourceReport; mail: SkillMineSourceReport };
+	coverage: SkillMineCoverage;
+	pack: string;
+	candidates: SkillMineCandidate[];
+	rejects: SkillMineReject[];
+	projects_with_candidates: number;
+	beads_filed: SkillMineBeadFiled[];
+	unfiled: { candidate: string; reason: string }[];
+	sink: string;
+	elapsed_ms: number;
+}
+
+export interface SkillMineStatusReport {
+	configured: boolean;
+	last_run: string | null;
+	sources: { cass: SkillMineSourceReport; mail: SkillMineSourceReport } | null;
+	candidates_total: number;
+	projects_with_candidates: number;
+	beads_filed: string[];
+}
+
+export interface SkillMineOptions {
+	since?: string;
+	projects?: string[];
+	skillsDirs?: string[];
+	mailArchive?: string;
+	sink?: string;
+	maxNew?: number;
+	wallBudgetS?: number;
+	apply?: boolean;
+	home: string;
+	pathValue: string;
+	cwd: string;
+	stateDir: string;
+	now?: number;
+}
+
+interface Observation {
+	kind: "sequence" | "text-block" | "correction" | "fix-arc" | "mail-thread";
+	signature: string;
+	workflow: string;
+	summary: string;
+	firstUser?: boolean;
+	project: string;
+	session: string;
+	ref: string;
+	quote: string;
+	recent: boolean;
+}
+
+const STOPWORDS = new Set("a,an,the,and,or,of,to,in,on,for,with,how,what,when,why,do,does,did,is,are,was,were,be,been,by,from,at,as,it,its,this,that,these,those,you,your,we,our,they,their,i,me,my,please,thanks,thank,again,just,like,get,got,use,using,used,into,over,under,via,can,could,should,would,there,here,which,who,whom,having,has,have,had,will,shall,may,might,must,not,no,yes,if,then,else,when,where,while,about,above,after,before,between,during,throughout,within,without,all,any,both,each,few,more,most,other,some,such,only,own,same,so,than,too,very,s,t,don,now".split(","));
+
+// Every pattern below runs on message text truncated to MESSAGE_TEXT_CAP chars
+// (see observationsFromSession), so no match can scan an unbounded buffer.
+export const MESSAGE_TEXT_CAP = 8000;
+const CORRECTION_RE = /\b(no,|i told you|again\?|stop\b|why did you|don't\b|do not\b|that's wrong|that is wrong|you keep|not what i|wrong (file|branch|command|directory|repo)|please (stop|don't)|incorrect|mistake)\b/i;
+const NEVER_AGAIN_RE = /never\b[\s\S]{0,200}?\bagain\b/i;
+
+const FAIL_RE = /(exit (code )?([1-9][0-9]*)|rc=[1-9]\b|failed|failure|error:|traceback|command not found|no such file|ENOENT|panic:|timed out|timeout)/i;
+const SUCCESS_RE = /(exit (code )?0\b|rc=0\b|ok\b|success|passed|done\b|created|updated|landed)/i;
+
+function textOf(value: unknown, depth = 0): string {
+	if (typeof value === "string") return value;
+	if (depth > 3 || value === null || value === undefined) return "";
+	if (Array.isArray(value)) return value.map(item => textOf(item, depth + 1)).filter(Boolean).join("\n");
+	if (typeof value === "object") {
+		const record = value as Record<string, unknown>;
+		const parts: string[] = [];
+		for (const key of ["text", "content", "body", "output", "result", "message", "command", "cmd"]) {
+			if (record[key] !== undefined) {
+				const part = textOf(record[key], depth + 1);
+				if (part) parts.push(part);
+			}
+		}
+		const calls = record["tool_calls"];
+		if (Array.isArray(calls)) {
+			for (const call of calls) {
+				if (call !== null && typeof call === "object") {
+					const callRecord = call as Record<string, unknown>;
+					const name = typeof callRecord["name"] === "string" ? callRecord["name"] : "";
+					const args = callRecord["arguments"] ?? callRecord["args"] ?? callRecord["input"];
+					parts.push(`tool:${name} ${typeof args === "string" ? args : JSON.stringify(args ?? "")}`.trim());
+				}
+			}
+		}
+		// Live OMP exports embed calls as content items: {type:"toolCall", name, arguments}.
+		if (typeof record["type"] === "string" && /tool.?call|function/i.test(record["type"])) {
+			const name = typeof record["name"] === "string" ? record["name"]
+				: typeof record["toolName"] === "string" ? record["toolName"] : "";
+			const args = record["arguments"] ?? record["args"] ?? record["input"] ?? record["command"];
+			parts.push(`tool:${name} ${typeof args === "string" ? args : textOf(args, depth + 1)}`.trim());
+		}
+		return parts.join("\n");
+	}
+	return "";
+}
+
+function roleOf(message: unknown): "user" | "assistant" | "tool" | "unknown" {
+	if (message === null || typeof message !== "object" || Array.isArray(message)) return "unknown";
+	const record = message as Record<string, unknown>;
+	for (const key of ["role", "type", "kind", "author"]) {
+		const value = record[key];
+		if (typeof value === "string" && (key !== "type" || !/^(message|text|thinking)$/i.test(value))) {
+			const mapped = mapRole(value);
+			if (mapped !== "unknown") return mapped;
+		}
+	}
+	// Live OMP exports wrap the turn: {type:"message", message:{role:"user"|"assistant"|"toolResult"}}.
+	const inner = record["message"];
+	if (inner !== null && typeof inner === "object" && !Array.isArray(inner)) {
+		const innerRole = (inner as Record<string, unknown>)["role"];
+		if (typeof innerRole === "string") {
+			const mapped = mapRole(innerRole);
+			if (mapped !== "unknown") return mapped;
+		}
+	}
+	if (record["tool_calls"] !== undefined || record["tool_call_id"] !== undefined || record["toolCallId"] !== undefined) return "tool";
+	return "unknown";
+}
+
+function mapRole(value: string): "user" | "assistant" | "tool" | "unknown" {
+	const lower = value.toLowerCase();
+	if (lower.includes("user") || lower.includes("human")) return "user";
+	if (lower.includes("assistant") || lower.includes("agent") || lower.includes("model")) return "assistant";
+	if (lower.includes("tool") || lower.includes("function") || lower.includes("observation") || lower.includes("result")) return "tool";
+	return "unknown";
+}
+
+/** Normalize a shell command to a skeleton: paths, ids, numbers and quoted strings become slots. */
+export function normalizeSkeleton(command: string): string {
+	return command.trim().split("\n")[0]!
+		.replace(/^[a-zA-Z0-9_.-]*[$#%>❯]\s*/, "")
+		.replace(/"[^"]*"/g, " <q>")
+		.replace(/'[^']*'/g, " <q>")
+		.replace(/`[^`]*`/g, " <q>")
+		.replace(/~?\/[\w.~-]+(?:\/[\w.~-]+)+/g, " <path>")
+		.replace(/\b[a-f0-9]{7,64}\b/gi, " <id>")
+		.replace(/\b\d[\w.-]*\b/g, " <n>")
+		.replace(/\s+/g, " ")
+		.trim()
+		.split(" ")
+		.slice(0, 6)
+		.join(" ")
+		.slice(0, 120);
+}
+
+export function tokensOf(text: string): string[] {
+	return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter(token => token.length > 2 && !STOPWORDS.has(token));
+}
+
+export function fingerprintOf(workflow: string): string {
+	return createHash("sha1").update(`skill-mine:v${SKILL_MINE_VERSION}:${workflow}`).digest("hex").slice(0, 16);
+}
+
+function slugOf(signature: string): string {
+	return signature.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "recurring-procedure";
+}
+
+/** Redact a verbatim quote with the kit's secret screen and bound its length. */
+export function redactedQuote(raw: string): string {
+	const replay = captureMineReplay({ message: raw });
+	const text = (replay.message ?? "").replace(/\s+/g, " ").trim();
+	return text.slice(0, SKILL_MINE_QUOTE_CHARS);
+}
+
+function findOnPath(name: string, pathValue: string): string | null {
+	for (const directory of pathValue.split(delimiter)) {
+		if (!directory) continue;
+		const candidate = join(directory, name);
+		try {
+			accessSync(candidate, constants.X_OK);
+			if (lstatSync(candidate).isFile()) return candidate;
+		} catch { /* not here */ }
+	}
+	return null;
+}
+
+export function parseSinceMs(since: string | undefined, now: number): number {
+	const raw = (since ?? "").trim() || SKILL_MINE_SINCE_DEFAULT;
+	const days = /^(\d+)d$/.exec(raw);
+	if (days) return now - Number(days[1]) * 86_400_000;
+	const absolute = Date.parse(raw);
+	if (!Number.isNaN(absolute)) return absolute;
+	throw new Error(`skill-mine: --since needs Nd (days) or an ISO date, got ${JSON.stringify(raw)}`);
+}
+
+function extractCommandStrings(text: string): string[] {
+	const found: string[] = [];
+	// Bare `$`/`%`/`❯` lines are pasted terminal output. `#` is a root prompt
+	// but also a Markdown heading, and `>` a blockquote: live transcripts are
+	// dominated by the prose readings, so neither is a command signal.
+	for (const line of text.split("\n")) {
+		const prompted = /^\s*[$%❯]\s+(\S.*)$/.exec(line);
+		if (prompted?.[1]) found.push(prompted[1]);
+	}
+	// Fences default to prose (pasted liturgy, checklists): only $-prompt
+	// lines inside a fence are commands, whatever the fence language.
+	const fence = /```(?:sh|bash|shell|console)?\n([\s\S]*?)```/g;
+	let match: RegExpExecArray | null;
+	while ((match = fence.exec(text)) !== null) {
+		for (const line of (match[1] ?? "").split("\n")) {
+			const shell = /^\s*\$\s+(\S.*)$/.exec(line);
+			if (shell?.[1]) found.push(shell[1]);
+		}
+	}
+	return found;
+}
+
+/** Shell commands from structured tool calls, wherever they nest (fixture
+ * `tool_calls` arrays and live OMP `toolCall` content items alike). The walk
+ * is depth-bounded so a hostile transcript cannot blow the stack. */
+function toolCommandStrings(message: unknown): string[] {
+	const out: string[] = [];
+	const visit = (value: unknown, depth: number): void => {
+		if (depth > 4 || value === null || typeof value !== "object") return;
+		if (Array.isArray(value)) {
+			for (const item of value) visit(item, depth + 1);
+			return;
+		}
+		const record = value as Record<string, unknown>;
+		const kind = typeof record["type"] === "string" ? record["type"] : "";
+		const name = typeof record["name"] === "string" ? record["name"]
+			: typeof record["toolName"] === "string" ? record["toolName"] : "";
+		const args = record["arguments"] ?? record["args"] ?? record["input"];
+		const shellish = /tool.?call|function/i.test(kind) || (name !== "" && args !== undefined);
+		if (shellish && name !== "" && /bash|exec|shell|command|run/i.test(name)) {
+			const shape = commandOf(args);
+			if (shape.trim()) out.push(shape.trim().split("\n")[0]!);
+		}
+		for (const child of Object.values(record)) visit(child, depth + 1);
+	};
+	visit(message, 0);
+	return out;
+}
+/** Prefer a structured `command` argument; decode JSON-encoded argument strings. */
+function commandOf(args: unknown): string {
+	const direct = commandKey(args);
+	if (direct !== null) return direct;
+	if (typeof args === "string") {
+		const trimmed = args.trim();
+		if (trimmed.startsWith("{")) {
+			try {
+				const nested = commandKey(JSON.parse(trimmed) as unknown);
+				if (nested !== null) return nested;
+			} catch { /* fall through to the raw string */ }
+		}
+		return args;
+	}
+	return textOf(args);
+}
+
+function commandKey(value: unknown): string | null {
+	if (value !== null && typeof value === "object" && !Array.isArray(value)
+		&& "command" in value && typeof value.command === "string") return value.command;
+	return null;
+}
+
+interface Step { skeleton: string; command: string; index: number }
+
+/** Exported as a test seam: infrastructure verbs never form procedure signatures. */
+export function isInfra(skeleton: string): boolean {
+	return INFRA_HEAD_RE.test(skeleton);
+}
+
+/** Normalized distinctive-line key, or null when the line is not procedure text.
+ * Commands, quotes, headings, bullets, numbered steps, JSON and tool: lines
+ * are structural, not procedural wording; short lines are noise. */
+export function textBlockKey(line: string): string | null {
+	const collapsed = line.replace(/\s+/g, " ").trim();
+	if (collapsed.length < SKILL_MINE_TEXT_MIN || collapsed.length > SKILL_MINE_TEXT_MAX) return null;
+	if (!/[a-zA-Z]/.test(collapsed)) return null;
+	if (/^[$%❯#> \-*[\]{`]|^\d+[.)]|^tool:/.test(collapsed)) return null;
+	// Harness render furniture, not anyone's wording: tool-call echo lines (`→ read(...) ⇒ ok`), shell notices,
+	// todo phase banners and injected skill file headers.
+	if (/^→ |⇒ (?:ok|error)\b|^Ran in a (?:temporary|copy of)|^Active phase \d|^\[Skill file: |^### Session update\b/.test(collapsed)) return null;
+	const key = collapsed.toLowerCase()
+		.replace(/"[^"]*"/g, " <q>").replace(/'[^']*'/g, " <q>").replace(/`[^`]*`/g, " <q>")
+		.replace(/~?\/[\w.~-]+(?:\/[\w.~-]+)+/g, " <path>")
+		.replace(/\b[a-f0-9]{7,64}\b/gi, " <id>").replace(/\b\d[\w.-]*\b/g, " <n>");
+	// Gate the masked key, not the raw line: a long line of pure quoted
+	// strings, paths or ids would otherwise cluster under a stub key.
+	if (key.length < 16) return null;
+	if (key.split(" ").filter(token => /[a-z]{3,}/.test(token)).length < 2) return null;
+	return key;
+}
+
+/** Tags the harness wraps around text it injects into a user turn (reminders, notices, file dumps, peer messages). */
+const INJECTED_TAGS = ["system-reminder", "system-notice", "system-interrupt", "files", "irc", "memories", "task-result"];
+
+/**
+ * Remove harness-injected blocks (`<tag ...>…</tag>` for INJECTED_TAGS) from a message so only words a person or
+ * agent wrote remain. A linear indexOf scan, not a backtracking regex: an unclosed tag drops the rest of the text.
+ * Exported as a test seam.
+ */
+export function stripInjected(text: string): string {
+	let out = "";
+	let at = 0;
+	for (;;) {
+		let next = -1;
+		let tag = "";
+		for (const name of INJECTED_TAGS) {
+			const found = text.indexOf(`<${name}`, at);
+			const after = found < 0 ? "" : text.charAt(found + name.length + 1);
+			if (found >= 0 && (after === ">" || after === " ") && (next < 0 || found < next)) { next = found; tag = name; }
+		}
+		if (next < 0) return out + text.slice(at);
+		out += text.slice(at, next);
+		const close = text.indexOf(`</${tag}>`, next);
+		if (close < 0) return out;
+		at = close + tag.length + 3;
+	}
+}
+
+function observationsFromSession(project: string, sessionRef: string, messages: unknown[]): Observation[] {
+	const observations: Observation[] = [];
+	const bounded = messages.slice(0, SKILL_MINE_MESSAGES_PER_SESSION_CAP);
+	// Injected skill/rule files are documentation the agent was shown, not work it did: they never become evidence.
+	const texts = bounded.map(message => {
+		const text = stripInjected(textOf(message).slice(0, MESSAGE_TEXT_CAP));
+		return { role: roleOf(message), text: /^\s*\[(?:Skill|Rule) file: /.test(text) ? "" : text };
+	});
+	let previousAssistantAction = "";
+	const firstUserIdx = texts.findIndex(row => row.role === "user");
+	const steps: Step[] = [];
+	const fails: { index: number; failed: string; text: string }[] = [];
+	for (let index = 0; index < texts.length; index++) {
+		const row = texts[index]!;
+		// A session's first user message is its dispatch prompt (task, rules, template), not a correction of work done.
+		if (row.role === "user" && index !== firstUserIdx && (CORRECTION_RE.test(row.text) || NEVER_AGAIN_RE.test(row.text))) {
+			const complaint = row.text.replace(/\s+/g, " ").trim().slice(0, 160);
+			const actionSkeleton = previousAssistantAction ? normalizeSkeleton(previousAssistantAction) : "";
+			const signature = `correction:${normalizeSkeleton(complaint).split(" ").slice(0, 8).join(" ")}`;
+			observations.push({
+				kind: "correction", signature,
+				workflow: slugOf(actionSkeleton ? `${actionSkeleton}-correction` : `correction-${complaint.slice(0, 40)}`),
+				summary: actionSkeleton
+					? `Users correct \`${actionSkeleton}\`; capture the constraint so the next run gets it right.`
+					: "Users repeat the same correction; capture the constraint as a skill.",
+				project, session: sessionRef, ref: `${sessionRef}#${index}`,
+				quote: redactedQuote(`user: ${complaint}${actionSkeleton ? ` (after: ${actionSkeleton})` : ""}`),
+				recent: true,
+			});
+		}
+		if (row.role === "assistant" || row.role === "tool") {
+			const commands = [...extractCommandStrings(row.text), ...toolCommandStrings(bounded[index])];
+			for (const command of commands) {
+				const skeleton = normalizeSkeleton(command);
+				if (skeleton.length < 3) continue;
+				previousAssistantAction = command;
+				// Single skeletons never rank; they feed sequences and arcs below.
+				steps.push({ skeleton, command, index });
+			}
+			if (FAIL_RE.test(row.text)) {
+				const failed = [...extractCommandStrings(row.text), ...toolCommandStrings(bounded[index])].map(normalizeSkeleton)[0] ?? "";
+				if (failed && !isInfra(failed)) fails.push({ index, failed, text: row.text });
+			}
+		}
+		if (row.role === "user" || row.role === "assistant") {
+			for (const line of row.text.split("\n")) {
+				const key = textBlockKey(line);
+				if (key === null) continue;
+				observations.push({
+					kind: "text-block", signature: `text:${key.slice(0, 200)}`,
+					workflow: slugOf(key.split(" ").slice(0, 6).join(" ")),
+					summary: "Recurring verbatim procedure text; bottle the wording and its follow-up steps.",
+					project, session: sessionRef, ref: `${sessionRef}#${index}`,
+					quote: redactedQuote(line.replace(/\s+/g, " ").trim()),
+					firstUser: index === firstUserIdx,
+					recent: true,
+				});
+			}
+		}
+	}
+	// Ordered multi-step procedures over non-infra steps; infrastructure verbs
+	// (kit CLIs, git plumbing, pagers) carry no procedure of their own.
+	const runnable = steps.filter(step => !isInfra(step.skeleton));
+	for (let start = 0; start + SKILL_MINE_SEQ_STEPS <= runnable.length; start++) {
+		const window = runnable.slice(start, start + SKILL_MINE_SEQ_STEPS);
+		// A retry loop (the same command re-run) is not a procedure: require at least two distinct steps.
+		if (new Set(window.map(step => step.skeleton)).size < 2) continue;
+		const first = window[0]!, last = window[window.length - 1]!;
+		const signature = `seq:${window.map(step => step.skeleton).join(" > ")}`;
+		observations.push({
+			kind: "sequence", signature,
+			workflow: slugOf(window.map(step => step.skeleton).join(" ")),
+			summary: `Recurring ${SKILL_MINE_SEQ_STEPS}-step procedure: ${window.map(step => `\`${step.skeleton}\``).join(" → ")}; package the sequence, branches and checks.`,
+			project, session: sessionRef, ref: `${sessionRef}#${first.index}-${last.index}`,
+			quote: redactedQuote(window.map(step => step.command).join(" → ")),
+			recent: true,
+		});
+	}
+	for (const fail of fails) {
+		const window = texts.slice(fail.index + 1, fail.index + 7);
+		const fixed = window.find(w => SUCCESS_RE.test(w.text) || extractCommandStrings(w.text).length > 0);
+		const fixCommands = fixed ? extractCommandStrings(fixed.text) : [];
+		if (fixCommands.length === 0) continue;
+		const fixSkeleton = normalizeSkeleton(fixCommands[0]!);
+		if (isInfra(fixSkeleton)) continue;
+		observations.push({
+			kind: "fix-arc", signature: `fix:${fail.failed}->${fixSkeleton}`,
+			workflow: slugOf(`recover-${fail.failed || fixSkeleton}`),
+			summary: `Error->fix arc: \`${fail.failed || "a failing step"}\` resolved by \`${fixSkeleton}\`; bottle the diagnosis.`,
+			project, session: sessionRef, ref: `${sessionRef}#${fail.index}`,
+			quote: redactedQuote(`${fail.text.replace(/\s+/g, " ").trim().slice(0, 120)} => ${fixCommands[0]}`),
+			recent: true,
+		});
+	}
+	return observations;
+}
+
+interface CassSessionRow {
+	source_path?: unknown;
+	path?: unknown;
+	workspace?: unknown;
+	project?: unknown;
+	updated_at?: unknown;
+	size_bytes?: unknown;
+	message_count?: unknown;
+	started_at?: unknown;
+}
+
+function sessionProject(row: CassSessionRow, fallback: string): string {
+	for (const key of ["workspace", "project"] as const) {
+		const value = row[key];
+		if (typeof value === "string" && value) return value;
+	}
+	return fallback;
+}
+
+async function runCass(cassBin: string, args: string[], options: SkillMineOptions, maxBytes: number): Promise<{ ok: boolean; stdout: string; reason: string }> {
+	try {
+		const result = await run([cassBin, ...args], {
+			cwd: options.cwd, env: { HOME: options.home, PATH: options.pathValue },
+			deadline_s: 30, max_output_bytes: maxBytes,
+		});
+		if (result.timed_out) return { ok: false, stdout: "", reason: "cass timed out after 30 s" };
+		if (result.rc !== 0) return { ok: false, stdout: "", reason: `cass exited ${result.rc}: ${Buffer.from(result.stderr).toString("utf8").slice(0, 300)}` };
+		return { ok: true, stdout: Buffer.from(result.stdout).toString("utf8"), reason: "" };
+	} catch (error) {
+		return { ok: false, stdout: "", reason: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+async function listSessions(cassBin: string, sinceISO: string, options: SkillMineOptions): Promise<{ rows: CassSessionRow[]; truncated: boolean }> {
+	const first = await runCass(cassBin, ["sessions", "--since", sinceISO, "--json", "--limit", String(SKILL_MINE_SESSIONS_PAGE)], options, 4 * 1024 * 1024);
+	if (!first.ok) throw new Error(first.reason);
+	let rows: unknown;
+	try {
+		rows = JSON.parse(first.stdout);
+	} catch {
+		throw new Error("cass sessions printed unparseable JSON");
+	}
+	// Live 0.11.0 wraps the list: {sessions: [{path, workspace, ...}]}; older shapes print a bare array.
+	const primary = (Array.isArray(rows) ? rows : sessionsOf(rows)) as CassSessionRow[];
+	if (primary.length < SKILL_MINE_SESSIONS_PAGE) return { rows: primary, truncated: false };
+	// Full page: list per workspace and merge, so projects beyond the page cap still count.
+	const seen = new Map<string, CassSessionRow>();
+	for (const row of primary) {
+		const key = typeof row.source_path === "string" ? row.source_path : typeof row.path === "string" ? row.path : "";
+		if (key && !seen.has(key)) seen.set(key, row);
+	}
+	const workspaces = [...new Set(primary.map(row => sessionProject(row, "")).filter(Boolean))];
+	for (const workspace of workspaces) {
+		const extra = await runCass(cassBin, ["sessions", "--since", sinceISO, "--json", "--limit", String(SKILL_MINE_SESSIONS_PAGE), "--workspace", workspace], options, 4 * 1024 * 1024);
+		if (!extra.ok) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(extra.stdout);
+		} catch { continue; }
+		const more = (Array.isArray(parsed) ? parsed : sessionsOf(parsed)) as CassSessionRow[];
+		for (const row of more) {
+			const key = typeof row.source_path === "string" ? row.source_path : typeof row.path === "string" ? row.path : "";
+			if (key && !seen.has(key)) seen.set(key, row);
+		}
+	}
+	return { rows: [...seen.values()], truncated: true };
+}
+
+/** Narrow a `cass view` payload to its message lines. */
+function viewLinesOf(value: unknown): unknown[] {
+	if (value !== null && typeof value === "object" && "lines" in value && Array.isArray(value.lines)) return value.lines;
+	return [];
+}
+
+/** Sample an oversize session at evenly spaced message ordinals instead of dropping it. */
+async function viewChunk(cassBin: string, path: string, count: number, options: SkillMineOptions): Promise<unknown[] | null> {
+	const out: unknown[] = [];
+	for (let point = 1; point <= SKILL_MINE_VIEW_POINTS; point++) {
+		const index = Math.max(1, Math.round(count * point / (SKILL_MINE_VIEW_POINTS + 1)));
+		const result = await runCass(cassBin, ["view", path, "--message-index", String(index), "-C", String(SKILL_MINE_VIEW_CONTEXT), "--json", "--timeout", "10000"], options, 4 * 1024 * 1024);
+		if (!result.ok) return null;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(result.stdout);
+		} catch { return null; }
+		out.push(...viewLinesOf(parsed));
+	}
+	return out;
+}
+
+async function mineCass(options: SkillMineOptions, sinceMs: number): Promise<{ status: SkillMineSourceReport; observations: Observation[]; coverage: SkillMineCoverage }> {
+	const emptyCoverage = (extra: Partial<SkillMineCoverage> = {}): SkillMineCoverage => ({
+		sessions_in_window: 0, sessions_seen: 0, sessions_mined: 0, skipped_oversize: 0,
+		stopped_early: false, list_truncated: false, projects: {}, ...extra,
+	});
+	const cassBin = findOnPath("cass", options.pathValue);
+	if (cassBin === null) {
+		return { status: { status: "UNAVAILABLE", reason: "cass is not on PATH; install cass or pass --project mail only" }, observations: [], coverage: emptyCoverage() };
+	}
+	const sinceISO = new Date(sinceMs).toISOString();
+	let listed: { rows: CassSessionRow[]; truncated: boolean };
+	try {
+		listed = await listSessions(cassBin, sinceISO, options);
+	} catch (error) {
+		return { status: { status: "UNAVAILABLE", reason: error instanceof Error ? error.message : String(error) }, observations: [], coverage: emptyCoverage() };
+	}
+	const projects: Record<string, number> = {};
+	for (const row of listed.rows) {
+		const project = sessionProject(row, options.cwd);
+		projects[project] = (projects[project] ?? 0) + 1;
+	}
+	const wanted = options.projects && options.projects.length > 0
+		? listed.rows.filter(row => options.projects!.some(p => sessionProject(row, "").includes(p) || p.includes(sessionProject(row, ""))))
+		: listed.rows;
+	const wallBudgetS = options.wallBudgetS ?? SKILL_MINE_WALL_BUDGET_S;
+	const deadlineMs = Date.now() + Math.max(0, wallBudgetS) * 1000;
+	const perProject = new Map<string, number>();
+	const picked: { project: string; path: string; size: number; count: number }[] = [];
+	for (const row of wanted) {
+		if (picked.length >= SKILL_MINE_SESSION_CAP) break;
+		const path = typeof row.source_path === "string" ? row.source_path : typeof row.path === "string" ? row.path : "";
+		// Advisor sidecars (`__advisor.<name>.jsonl`) replay their parent session's tool output and summaries;
+		// mining them counts the same work twice and turns harness text into "recurring procedures".
+		if (!path || /(?:^|\/)__advisor\.[^/]*\.jsonl$/.test(path)) continue;
+		const project = sessionProject(row, options.cwd);
+		const count = perProject.get(project) ?? 0;
+		if (count >= SKILL_MINE_SESSIONS_PER_PROJECT_CAP) continue;
+		perProject.set(project, count + 1);
+		picked.push({
+			project, path,
+			size: typeof row.size_bytes === "number" ? row.size_bytes : 0,
+			count: typeof row.message_count === "number" ? row.message_count : 0,
+		});
+	}
+	const observations: Observation[] = [];
+	let messages = 0;
+	let failures = 0;
+	let skippedOversize = 0;
+	let mined = 0;
+	let stoppedEarly = false;
+	for (const session of picked) {
+		if (Date.now() > deadlineMs) { stoppedEarly = true; break; }
+		let flat: unknown[] | null = null;
+		if (session.size > SKILL_MINE_SESSION_BYTES_CAP) {
+			if (session.count > 0) {
+				flat = await viewChunk(cassBin, session.path, session.count, options);
+			}
+			if (flat === null) { skippedOversize++; continue; }
+		} else {
+			const exported = await runCass(cassBin, ["export", session.path, "--format", "json"], options, SKILL_MINE_EXPORT_BYTES_CAP);
+			if (!exported.ok) { failures++; continue; }
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(exported.stdout);
+			} catch { failures++; continue; }
+			const list = Array.isArray(parsed) ? parsed : messagesOf(parsed);
+			flat = (Array.isArray(list) ? list : []).flatMap(item => Array.isArray(item) ? item : [item]);
+		}
+		messages += flat.length;
+		mined++;
+		observations.push(...observationsFromSession(session.project, session.path, flat));
+	}
+	const seen = mined + skippedOversize + failures;
+	const parts = [`mined ${mined} session(s)`, ...(skippedOversize > 0 ? [`sampled/skipped ${skippedOversize} oversize`] : []), ...(failures > 0 ? [`${failures} export(s) unreadable`] : []), ...(stoppedEarly ? ["wall budget reached"] : [])];
+	const reason = parts.join("; ");
+	const coverage: SkillMineCoverage = {
+		sessions_in_window: listed.rows.length, sessions_seen: seen, sessions_mined: mined,
+		skipped_oversize: skippedOversize, stopped_early: stoppedEarly, list_truncated: listed.truncated, projects,
+	};
+	return { status: { status: "OK", reason, sessions: mined, messages }, observations, coverage };
+}
+/** Narrow the live sessions envelope without asserting an unchecked shape. */
+function sessionsOf(value: unknown): unknown[] {
+	if (value !== null && typeof value === "object" && "sessions" in value && Array.isArray(value.sessions)) return value.sessions;
+	return [];
+}
+/** Narrow an export envelope without asserting an unchecked shape. */
+function messagesOf(value: unknown): unknown[] {
+	if (value !== null && typeof value === "object" && "messages" in value && Array.isArray(value.messages)) return value.messages;
+	return [value];
+}
+
+interface MailThread {
+	project: string;
+	id: string;
+	subject: string;
+	messages: { ref: string; body: string }[];
+}
+
+const TEACHING_SUBJECT_RE = /(how[ -]?to|howto|question|help|guide|playbook|reusable|lesson|pattern|procedure|checklist|runbook|tip)/i;
+const NUMBERED_STEPS_RE = /(^|\n)\s*\d+[.)]\s+\S/;
+const BACKTICK_CMD_RE = /`[^`\n]{2,80}`/;
+
+// Line-based front-matter reader: the first line opens with `---json`, the
+// block ends at the first later line that is exactly `---` (or at a trailing
+// `---` on the opening line). No pattern matching: nested JSON braces and
+// `---` inside quoted strings never confuse a line-boundary scan.
+export function parseMailFile(text: string): { front: Record<string, unknown>; body: string } | null {
+	const lines = text.split("\n");
+	const head = lines.slice(0, 200);
+	if (!head[0]?.startsWith("---json")) return null;
+	const opened = head[0]!.slice("---json".length).trim();
+	let raw: string;
+	let body: string;
+	if (opened.endsWith("---")) {
+		raw = opened.slice(0, -3).trim();
+		body = lines.slice(1).join("\n");
+	} else {
+		let end = -1;
+		for (let index = 1; index < head.length; index++) {
+			if (head[index]!.trim() === "---") { end = index; break; }
+		}
+		if (end < 0) return null;
+		const rest = head.slice(1, end).join("\n").trim();
+		raw = opened ? `${opened}\n${rest}` : rest;
+		body = lines.slice(end + 1).join("\n");
+	}
+	try {
+		const front = JSON.parse(raw) as Record<string, unknown>;
+		return { front, body };
+	} catch {
+		return null;
+	}
+}
+
+function mailArchiveRoot(options: SkillMineOptions): string {
+	if (options.mailArchive) return options.mailArchive;
+	return join(options.home, ".mcp_agent_mail_git_mailbox_repo");
+}
+
+/**
+ * The live Agent Mail storage root, as the running server reports it (`am robot status --json` storage_root),
+ * so mining reads current mail rather than a retired archive copy. Runtime-detected: am absent, failing or
+ * silent yields null and the caller keeps --mail-archive or the legacy default. Exported as a test seam.
+ */
+export async function liveMailRoot(options: SkillMineOptions): Promise<string | null> {
+	const am = findOnPath("am", options.pathValue);
+	if (am === null) return null;
+	try {
+		const result = await run([am, "robot", "status", "--json"], { cwd: options.cwd, env: { HOME: options.home, PATH: options.pathValue }, deadline_s: 20, max_output_bytes: 4 << 20 });
+		if (result.timed_out || result.rc !== 0) return null;
+		const match = /"storage_root"\s*:\s*"([^"\\]{1,4096})"/.exec(Buffer.from(result.stdout).toString("utf8"));
+		if (!match || !match[1]!.startsWith("/") || !existsSync(join(match[1]!, "projects"))) return null;
+		return match[1]!;
+	} catch {
+		return null;
+	}
+}
+
+function mineMail(options: SkillMineOptions, sinceMs: number): { status: SkillMineSourceReport; observations: Observation[] } {
+	const root = mailArchiveRoot(options);
+	const projectsDir = join(root, "projects");
+	let slugs: string[];
+	try {
+		slugs = readdirSync(projectsDir).filter(slug => {
+			try { return lstatSync(join(projectsDir, slug)).isDirectory(); } catch { return false; }
+		});
+	} catch {
+		return { status: { status: "UNAVAILABLE", reason: `mail archive not found at ${projectsDir}; pass --mail-archive DIR` }, observations: [] };
+	}
+	const wantedSlugs = options.projects && options.projects.length > 0
+		? slugs.filter(slug => options.projects!.some(p => slug.includes(p) || p.includes(slug)))
+		: slugs;
+	const threads = new Map<string, MailThread>();
+	let files = 0;
+	let scanned = 0;
+	outer: for (const slug of wantedSlugs) {
+		const messagesDir = join(projectsDir, slug, "messages");
+		let years: string[];
+		try {
+			years = readdirSync(messagesDir);
+		} catch { continue; }
+		for (const year of years) {
+			let months: string[];
+			try {
+				months = readdirSync(join(messagesDir, year));
+			} catch { continue; }
+			for (const month of months) {
+				let names: string[];
+				try {
+					names = readdirSync(join(messagesDir, year, month));
+				} catch { continue; }
+				for (const name of names) {
+					if (!name.endsWith(".md")) continue;
+					if (scanned >= SKILL_MINE_MAIL_FILES_CAP) break outer;
+					scanned++;
+					const path = join(messagesDir, year, month, name);
+					let stat: { size: number; mtimeMs: number };
+					try {
+						stat = statSync(path);
+					} catch { continue; }
+					if (stat.size > SKILL_MINE_MAIL_FILE_BYTES_CAP) continue;
+					let text: string;
+					try {
+						text = readFileSync(path, "utf8");
+					} catch { continue; }
+					const parsed = parseMailFile(text);
+					if (!parsed) continue;
+					files++;
+					const created = typeof parsed.front["created"] === "string" ? Date.parse(parsed.front["created"] as string) : NaN;
+					if (!Number.isNaN(created) && created < sinceMs) continue;
+					const threadId = typeof parsed.front["thread_id"] === "string" ? parsed.front["thread_id"] as string : name;
+					const subject = typeof parsed.front["subject"] === "string" ? parsed.front["subject"] as string : "";
+					const key = `${slug}\n${threadId}`;
+					let thread = threads.get(key);
+					if (!thread) {
+						thread = { project: slug, id: threadId, subject, messages: [] };
+						threads.set(key, thread);
+					}
+					if (subject && !thread.subject) thread.subject = subject;
+					thread.messages.push({ ref: `${slug}:${name.replace(/\.md$/, "")}`, body: parsed.body });
+					if (threads.size >= SKILL_MINE_MAIL_THREADS_CAP) break outer;
+				}
+			}
+		}
+	}
+	const observations: Observation[] = [];
+	for (const thread of threads.values()) {
+		if (thread.messages.length < 2) continue;
+		const first = thread.messages[0]!.body;
+		const teaching = TEACHING_SUBJECT_RE.test(thread.subject)
+			|| TEACHING_SUBJECT_RE.test(first.slice(0, 500))
+			|| (NUMBERED_STEPS_RE.test(first) && BACKTICK_CMD_RE.test(first));
+		if (!teaching) continue;
+		const steps = NUMBERED_STEPS_RE.test(first);
+		const signature = `mail:${tokensOf(thread.subject || first.slice(0, 120)).slice(0, 6).join(" ")}`;
+		const workflow = slugOf(`mail-${tokensOf(thread.subject).slice(0, 4).join("-") || thread.project}`);
+		const summary = `Mail-taught procedure "${thread.subject || thread.id}" (${thread.messages.length} messages${steps ? ", numbered steps" : ""}); bottle it as a skill.`;
+		for (const message of thread.messages.slice(0, 5)) {
+			const snippet = message.body.replace(/\s+/g, " ").trim().slice(0, 120);
+			observations.push({
+				kind: "mail-thread", signature, workflow, summary,
+				project: thread.project, session: thread.id, ref: message.ref,
+				quote: redactedQuote(message === thread.messages[0] ? `${thread.subject}: ${snippet}` : snippet),
+				recent: true,
+			});
+		}
+	}
+	return { status: { status: "OK", reason: `scanned ${scanned} file(s) in ${wantedSlugs.length} project(s)`, threads: threads.size, files }, observations };
+}
+
+interface SkillIndexEntry {
+	name: string;
+	description: string;
+}
+
+export function readSkillsIndex(directories: string[]): { skills: SkillIndexEntry[]; count: number } {
+	const skills: SkillIndexEntry[] = [];
+	for (const directory of directories) {
+		let entries: string[];
+		try {
+			entries = readdirSync(directory);
+		} catch { continue; }
+		for (const entry of entries) {
+			if (skills.length >= SKILL_MINE_SKILLS_CAP) break;
+			const readme = join(directory, entry, "SKILL.md");
+			let text: string;
+			try {
+				if (!statSync(readme).isFile()) continue;
+				text = readFileSync(readme, "utf8").slice(0, SKILL_MINE_SKILL_FILE_BYTES_CAP);
+			} catch { continue; }
+			const front = /^---\s*\n([\s\S]*?)\n---/.exec(text)?.[1] ?? "";
+			const name = /^name:\s*(.+)$/m.exec(front)?.[1]?.trim().replace(/^["']|["']$/g, "") || entry;
+			const description = /^description:\s*(.+)$/m.exec(front)?.[1]?.trim().replace(/^["']|["']$/g, "") || "";
+			skills.push({ name, description });
+		}
+	}
+	return { skills, count: skills.length };
+}
+
+/**
+ * Installed-skill roots to dedupe against: `OMP_KIT_SKILLS_DIRS` (path-delimiter list) when set, else the OMP-native
+ * roots. Other harnesses' skill dirs are operator data: pass them with --skills-dir or the env, never hardcoded here.
+ */
+export function defaultSkillsDirs(home: string, env: Record<string, string | undefined> = process.env): string[] {
+	const configured = (env.OMP_KIT_SKILLS_DIRS ?? "").split(delimiter).map(part => part.trim()).filter(Boolean);
+	return configured.length > 0 ? configured : [join(home, ".agents", "skills"), join(home, ".omp", "agent", "skills")];
+}
+
+/** Token overlap of a candidate against one skill; the covering skill is the max. */
+export function skillOverlap(candidateTokens: string[], skill: SkillIndexEntry): number {
+	if (candidateTokens.length === 0) return 0;
+	const skillTokens = new Set(tokensOf(`${skill.name} ${skill.description}`));
+	if (skillTokens.size === 0) return 0;
+	const hits = candidateTokens.filter(token => skillTokens.has(token)).length;
+	return hits / candidateTokens.length;
+}
+
+interface Cluster {
+	observations: Observation[];
+	projects: Set<string>;
+	sessions: Set<string>;
+	corrections: number;
+}
+
+export function clusterObservations(observations: Observation[]): Map<string, Cluster> {
+	const clusters = new Map<string, Cluster>();
+	for (const observation of observations) {
+		let cluster = clusters.get(observation.signature);
+		if (!cluster) {
+			cluster = { observations: [], projects: new Set(), sessions: new Set(), corrections: 0 };
+			clusters.set(observation.signature, cluster);
+		}
+		cluster.observations.push(observation);
+		cluster.projects.add(observation.project);
+		cluster.sessions.add(`${observation.project}\n${observation.session}`);
+		if (observation.kind === "correction") cluster.corrections++;
+	}
+	return clusters;
+}
+
+/** Corrections and cross-project recurrence weigh highest; single command
+ * skeletons never reach this function as candidates. */
+const KIND_BOOST: Record<Observation["kind"], number> = {
+	correction: 3, "fix-arc": 2, "mail-thread": 2, sequence: 1.5, "text-block": 1.5,
+};
+
+function clusterScore(cluster: Cluster): number {
+	const recent = cluster.observations.filter(o => o.recent).length;
+	const total = cluster.observations.length;
+	const first = cluster.observations[0]!;
+	const recency = total > 0 ? 1 + recent / total : 1;
+	return Math.round(cluster.projects.size * cluster.projects.size * cluster.sessions.size * recency * KIND_BOOST[first.kind] * 100) / 100;
+}
+
+export function rankClusters(clusters: Map<string, Cluster>, firstSeen: Map<string, string>, nowISO: string): { candidates: SkillMineCandidate[]; dropped: number } {
+	const candidates: SkillMineCandidate[] = [];
+	let dropped = 0;
+	for (const [signature, cluster] of clusters) {
+		const first = cluster.observations[0]!;
+		const sessions = cluster.sessions.size;
+		const mailVoices = cluster.observations.filter(o => o.kind === "mail-thread").length;
+		const keep = first.kind === "sequence" ? sessions >= 2
+			// Boilerplate discount: first-user dispatch templates recurring widely,
+			// and seat-bootstrap text confined to agent-tmp checkouts, never rank.
+			: first.kind === "text-block" ? sessions >= 2 && !(cluster.observations.some(o => o.firstUser === true) && sessions >= 3)
+				&& !(cluster.projects.size > 0 && [...cluster.projects].every(p => p.includes("/var/agent-tmp/")) && sessions >= 4)
+			: first.kind === "correction" ? cluster.corrections >= 1
+			: first.kind === "fix-arc" ? sessions >= 2
+			: mailVoices >= 2;
+		if (!keep) { dropped++; continue; }
+		const projects = [...cluster.projects].sort();
+		const evidence = cluster.observations.slice(0, 5).map(o => ({ source: (o.kind === "mail-thread" ? "mail" : "cass") as "cass" | "mail", ref: o.ref, quote: o.quote }));
+		const fingerprint = fingerprintOf(first.workflow);
+		const kinds = new Set(cluster.observations.map(o => o.kind));
+		const why = [
+			`seen in ${cluster.projects.size} project(s) across ${sessions} session(s)`,
+			cluster.projects.size > 1 ? "cross-project" : null,
+			cluster.corrections > 0 ? `${cluster.corrections} user correction(s)` : null,
+			kinds.has("sequence") ? "ordered multi-step sequence" : null,
+			kinds.has("text-block") ? "shared verbatim procedure text" : null,
+			kinds.has("fix-arc") ? "error->fix arc" : null,
+			kinds.has("mail-thread") ? "taught over mail" : null,
+		].filter(Boolean).join("; ");
+		candidates.push({
+			workflow: first.workflow, summary: first.summary, projects,
+			occurrences: cluster.observations.length,
+			why_skill: `Same procedure ${why}; worth packaging. Signature: ${signature.slice(0, 100)}`,
+			evidence, nearest_existing_skill: null, fingerprint,
+			score: Math.round(clusterScore(cluster) * (first.kind === "text-block" && cluster.projects.size === 1 ? 0.5 : 1) * 100) / 100,
+			first_seen: firstSeen.get(fingerprint) ?? nowISO,
+		});
+	}
+	candidates.sort((a, b) => b.score - a.score || a.workflow.localeCompare(b.workflow));
+	return { candidates, dropped };
+}
+
+export function dedupeCandidates(candidates: SkillMineCandidate[], skills: SkillIndexEntry[]): { kept: SkillMineCandidate[]; rejects: SkillMineReject[] } {
+	const kept: SkillMineCandidate[] = [];
+	const rejects: SkillMineReject[] = [];
+	for (const candidate of candidates) {
+		const candidateTokens = tokensOf(`${candidate.workflow} ${candidate.summary}`);
+		let best: SkillIndexEntry | null = null;
+		let bestOverlap = 0;
+		for (const skill of skills) {
+			const overlap = skillOverlap(candidateTokens, skill);
+			if (overlap > bestOverlap) { bestOverlap = overlap; best = skill; }
+		}
+		if (best && bestOverlap >= SKILL_MINE_DEDUPE_OVERLAP) {
+			candidate.nearest_existing_skill = best.name;
+			rejects.push({ workflow: candidate.workflow, covering_skill: best.name, overlap: Math.round(bestOverlap * 100) / 100, score: candidate.score });
+		} else {
+			if (best) candidate.nearest_existing_skill = best.name;
+			kept.push(candidate);
+		}
+	}
+	return { kept, rejects };
+}
+
+type Ledger = Record<string, { first_seen: string; filed_bead?: string; filed_at?: string }>;
+
+function ledgerPath(stateDir: string): string {
+	return join(stateDir, "skill-mine", "ledger.json");
+}
+
+export function loadLedger(stateDir: string): Ledger {
+	try {
+		const raw = readFileSync(ledgerPath(stateDir), "utf8");
+		const parsed = JSON.parse(raw) as unknown;
+		if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Ledger;
+	} catch { /* first run */ }
+	return {};
+}
+
+function saveLedger(stateDir: string, ledger: Ledger): void {
+	mkdirSync(join(stateDir, "skill-mine"), { recursive: true, mode: 0o700 });
+	writeFileSync(ledgerPath(stateDir), `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
+}
+
+function sinkPath(options: SkillMineOptions): string {
+	if (options.sink) return options.sink;
+	return join(options.stateDir, "skill-mine", "candidates.jsonl");
+}
+
+function appendSink(path: string, candidates: SkillMineCandidate[]): void {
+	if (candidates.length === 0) return;
+	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+	const lines = candidates.map(candidate => `${JSON.stringify(candidate)}\n`).join("");
+	appendFileSync(path, lines, { mode: 0o600 });
+}
+
+function owningProject(candidate: SkillMineCandidate): string | null {
+	const counts = new Map<string, number>();
+	for (const project of candidate.projects) counts.set(project, (counts.get(project) ?? 0) + 1);
+	for (const [project] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
+		try {
+			if (statSync(project).isDirectory() && existsSync(join(project, ".beads"))) return project;
+		} catch { /* not a local checkout */ }
+	}
+	return null;
+}
+
+/** Exported as a test seam for the per-project cap and max-new bound. */
+export async function fileBeads(candidates: SkillMineCandidate[], options: SkillMineOptions, maxNew: number): Promise<{ filed: SkillMineBeadFiled[]; unfiled: { candidate: string; reason: string }[] }> {
+	const filed: SkillMineBeadFiled[] = [];
+	const unfiled: { candidate: string; reason: string }[] = [];
+	if (!options.apply) return { filed, unfiled };
+	const brBin = findOnPath("br", options.pathValue);
+	if (brBin === null) {
+		return { filed, unfiled: candidates.slice(0, maxNew).map(candidate => ({ candidate: candidate.workflow, reason: "br is not on PATH; filed nothing" })) };
+	}
+	const usedProjects = new Set<string>();
+	for (const candidate of candidates.slice(0, maxNew)) {
+		const project = owningProject(candidate);
+		if (project === null) {
+			unfiled.push({ candidate: candidate.workflow, reason: "no evidence project with a .beads dir; filed nothing" });
+			continue;
+		}
+		if (usedProjects.has(project)) {
+			unfiled.push({ candidate: candidate.workflow, reason: `max 1 bead per project per run; ${project} already used` });
+			continue;
+		}
+		const title = `SKILLCAND: ${candidate.workflow}`;
+		const description = `${candidate.summary}\n\nEvidence:\n${candidate.evidence.map(e => `- [${e.source}] ${e.ref}: ${e.quote}`).join("\n")}\nFingerprint: ${candidate.fingerprint}`;
+		// The first resolved skills root is where an admitted skill lands; the box checks that exact path.
+		const skillsRoot = (options.skillsDirs ?? defaultSkillsDirs(options.home))[0] ?? join(options.home, ".agents", "skills");
+		const acceptance = `- [ ] [landed] skill pack exists: test -f "${join(skillsRoot, candidate.workflow, "SKILL.md")}" -> rc 0`;
+		let result;
+		try {
+			result = await run([brBin, "create", "--title", title, "--type", "task", "--description", description, "--acceptance-criteria", acceptance],
+				{ cwd: project, env: { HOME: options.home, PATH: options.pathValue }, deadline_s: 30, max_output_bytes: 64 * 1024 });
+		} catch (error) {
+			unfiled.push({ candidate: candidate.workflow, reason: error instanceof Error ? error.message : String(error) });
+			continue;
+		}
+		if (result.timed_out || result.rc !== 0) {
+			unfiled.push({ candidate: candidate.workflow, reason: `br create exited ${result.rc}: ${Buffer.from(result.stderr).toString("utf8").slice(0, 200)}` });
+			continue;
+		}
+		const id = /([A-Za-z0-9._-]{3,64})/.exec(Buffer.from(result.stdout).toString("utf8"))?.[1] ?? "unknown";
+		usedProjects.add(project);
+		filed.push({ candidate: candidate.workflow, fingerprint: candidate.fingerprint, project, bead: id });
+	}
+	return { filed, unfiled };
+}
+
+function lastRunPath(stateDir: string): string {
+	return join(stateDir, "skill-mine", "last-run.json");
+}
+
+export async function runSkillMine(options: SkillMineOptions): Promise<SkillMineReport> {
+	const started = Date.now();
+	const now = options.now ?? started;
+	const nowISO = new Date(now).toISOString();
+	const sinceMs = parseSinceMs(options.since, now);
+	const cass = await mineCass(options, sinceMs);
+	const mailArchive = options.mailArchive ?? await liveMailRoot(options) ?? undefined;
+	const mail = mineMail(mailArchive === undefined ? options : { ...options, mailArchive }, sinceMs);
+	const observations = [...cass.observations, ...mail.observations];
+	const { skills, count: skillCount } = readSkillsIndex(options.skillsDirs ?? defaultSkillsDirs(options.home));
+	const ledger = loadLedger(options.stateDir);
+	const firstSeen = new Map<string, string>(Object.entries(ledger).map(([fp, row]) => [fp, row.first_seen]));
+	const clusters = clusterObservations(observations);
+	const { candidates: ranked } = rankClusters(clusters, firstSeen, nowISO);
+	const { kept, rejects } = dedupeCandidates(ranked, skills);
+	const fresh = kept.filter(candidate => ledger[candidate.fingerprint] === undefined);
+	for (const candidate of fresh) ledger[candidate.fingerprint] = { first_seen: candidate.first_seen };
+	const sink = sinkPath(options);
+	appendSink(sink, fresh);
+	const maxNew = Math.min(Math.max(options.maxNew ?? SKILL_MINE_MAX_NEW_DEFAULT, 0), 25);
+	const { filed, unfiled } = await fileBeads(fresh, options, maxNew);
+	for (const row of filed) {
+		const entry = ledger[row.fingerprint];
+		if (entry) {
+			entry.filed_bead = row.bead;
+			entry.filed_at = nowISO;
+		}
+	}
+	saveLedger(options.stateDir, ledger);
+	const projects = new Set<string>();
+	for (const candidate of fresh) for (const project of candidate.projects) projects.add(project);
+	// The pack is the judging agent's daily read: it carries the current top clusters (kept, ranked), so a cluster
+	// recurring every day stays visible; the sink and --apply stay limited to never-seen fingerprints.
+	const pack = writeSkillMinePack(options.stateDir, nowISO.slice(0, 10), kept);
+	const report: SkillMineReport = {
+		overall: cass.status.status === "OK" || mail.status.status === "OK" ? "OK" : "UNVERIFIED",
+		sources: {
+			cass: cass.status.status === "OK" ? { ...cass.status, reason: `${cass.status.reason}; skills indexed: ${skillCount}` } : cass.status,
+			mail: mail.status,
+		},
+		candidates: fresh, rejects,
+		projects_with_candidates: projects.size,
+		beads_filed: filed, unfiled, sink,
+		coverage: cass.coverage,
+		pack,
+		elapsed_ms: Date.now() - started,
+	};
+	try {
+		mkdirSync(join(options.stateDir, "skill-mine"), { recursive: true, mode: 0o700 });
+		writeFileSync(lastRunPath(options.stateDir), `${JSON.stringify({
+			last_run: nowISO, sources: report.sources,
+			candidates_total: fresh.length, projects_with_candidates: projects.size,
+			beads_filed: filed.map(row => row.bead),
+		})}\n`, { mode: 0o600 });
+	} catch { /* status is best effort */ }
+	return report;
+}
+
+export function readSkillMineStatus(stateDir: string): SkillMineStatusReport {
+	try {
+		const raw = JSON.parse(readFileSync(lastRunPath(stateDir), "utf8")) as {
+			last_run?: unknown; sources?: unknown; candidates_total?: unknown; projects_with_candidates?: unknown; beads_filed?: unknown;
+		};
+		return {
+			configured: true,
+			last_run: typeof raw.last_run === "string" ? raw.last_run : null,
+			sources: (raw.sources ?? null) as SkillMineStatusReport["sources"],
+			candidates_total: typeof raw.candidates_total === "number" ? raw.candidates_total : 0,
+			projects_with_candidates: typeof raw.projects_with_candidates === "number" ? raw.projects_with_candidates : 0,
+			beads_filed: Array.isArray(raw.beads_filed) ? raw.beads_filed.filter((b): b is string => typeof b === "string") : [],
+		};
+	} catch {
+		return { configured: false, last_run: null, sources: null, candidates_total: 0, projects_with_candidates: 0, beads_filed: [] };
+	}
+}
+
+export function renderSkillMineText(report: SkillMineReport): string {
+	const lines = [
+		`skill-mine: ${report.overall} in ${report.elapsed_ms} ms; sink ${report.sink}`,
+		`cass: ${report.sources.cass.status} (${report.sources.cass.reason})`,
+		`mail: ${report.sources.mail.status} (${report.sources.mail.reason})`,
+		`coverage: ${report.coverage.sessions_mined}/${report.coverage.sessions_in_window} mined, ${report.coverage.skipped_oversize} oversize, stopped_early=${report.coverage.stopped_early}, truncated=${report.coverage.list_truncated}`,
+		`candidates: ${report.candidates.length}; rejects: ${report.rejects.length}; projects: ${report.projects_with_candidates}; beads filed: ${report.beads_filed.length}`,
+	];
+	for (const candidate of report.candidates.slice(0, 10)) {
+		lines.push(`- ${candidate.workflow} score=${candidate.score} projects=${candidate.projects.length} occ=${candidate.occurrences} fp=${candidate.fingerprint}`);
+		lines.push(`  ${candidate.summary}`);
+		for (const evidence of candidate.evidence.slice(0, 2)) lines.push(`  [${evidence.source}] ${evidence.ref}: ${evidence.quote}`);
+	}
+	for (const reject of report.rejects.slice(0, 10)) {
+		lines.push(`x ${reject.workflow} covered by ${reject.covering_skill} (overlap ${reject.overlap})`);
+	}
+	return lines.join("\n");
+}
+
+
+/** Maximum evidence-pack bytes: a cold agent reads this without negotiation. */
+export const SKILL_MINE_PACK_BYTES_CAP = 60 * 1024;
+/** Top clusters per procedure kind included in the pack. */
+export const SKILL_MINE_PACK_PER_KIND = 5;
+
+const PACK_KINDS: Observation["kind"][] = ["sequence", "text-block", "correction", "fix-arc", "mail-thread"];
+
+const PACK_KIND_TITLE: Record<Observation["kind"], string> = {
+	sequence: "Ordered multi-step sequences",
+	"text-block": "Shared verbatim procedure text",
+	correction: "Correction clusters",
+	"fix-arc": "Error->fix arcs",
+	"mail-thread": "Mail teaching threads",
+};
+
+/** Evidence pack for the judging agent: top clusters per procedure kind with
+ * verbatim redacted quotes, refs, projects, counts and nearest-skill notes.
+ * Bounded to SKILL_MINE_PACK_BYTES_CAP; excess clusters are cut with a marker. */
+export function buildSkillMinePack(candidates: SkillMineCandidate[]): string {
+	const lines = [
+		"# skill-mine evidence pack",
+		"",
+		"Procedures mined from agent history for skill abstraction. Each cluster lists",
+		"verbatim quotes (secret-redacted), evidence refs (session path + message index,",
+		"or mail project + message id), projects, occurrence counts and the nearest",
+		"installed skill (null means no installed skill covers it).",
+		"",
+	];
+	const byKind = new Map<Observation["kind"], SkillMineCandidate[]>();
+	for (const candidate of candidates) {
+		const kind = PACK_KINDS.find(kind => candidate.why_skill.includes(kind === "sequence" ? "ordered multi-step"
+			: kind === "text-block" ? "verbatim"
+			: kind === "correction" ? "correction"
+			: kind === "fix-arc" ? "error->fix" : "taught over mail"));
+		if (kind === undefined) continue;
+		const list = byKind.get(kind) ?? [];
+		list.push(candidate);
+		byKind.set(kind, list);
+	}
+	let truncated = false;
+	outer: for (const kind of PACK_KINDS) {
+		const list = (byKind.get(kind) ?? []).sort((a, b) => b.score - a.score).slice(0, SKILL_MINE_PACK_PER_KIND);
+		if (list.length === 0) continue;
+		lines.push(`## ${PACK_KIND_TITLE[kind]}`, "");
+		for (const candidate of list) {
+			lines.push(`### ${candidate.workflow}`, "", candidate.summary, "",
+				`projects: ${candidate.projects.join(", ") || "(none)"}`,
+				`occurrences: ${candidate.occurrences}; score: ${candidate.score}; first_seen: ${candidate.first_seen}`,
+				`nearest_existing_skill: ${candidate.nearest_existing_skill ?? "null"}`,
+				"evidence:");
+			for (const evidence of candidate.evidence.slice(0, 4)) {
+				lines.push(`- [${evidence.source}] ${evidence.ref}: ${evidence.quote.slice(0, 300)}`);
+			}
+			lines.push("");
+			if (Buffer.byteLength(lines.join("\n"), "utf8") > SKILL_MINE_PACK_BYTES_CAP) { truncated = true; break outer; }
+		}
+	}
+	if (truncated) lines.push("[pack truncated at 60 KB; remaining clusters omitted]");
+	return lines.join("\n");
+}
+
+/** Write the evidence pack beside the sink and ledger; returns its path. */
+export function writeSkillMinePack(stateDir: string, dateISO: string, candidates: SkillMineCandidate[]): string {
+	const path = join(stateDir, "skill-mine", `pack-${dateISO}.md`);
+	mkdirSync(join(stateDir, "skill-mine"), { recursive: true, mode: 0o700 });
+	const body = buildSkillMinePack(candidates).slice(0, SKILL_MINE_PACK_BYTES_CAP);
+	writeFileSync(path, body.endsWith("\n") ? body : `${body}\n`, { mode: 0o600 });
+	return path;
+}

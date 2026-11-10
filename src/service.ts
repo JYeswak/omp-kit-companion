@@ -135,6 +135,10 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	// is operator data (fleet-watch.json `ccCompress`: python3 <repo>/scripts/cc/cc_spool_gzip.py --apply), never a
 	// kit path; UNCONFIGURED until set. lockedRun: a slow day never starts a second pass over the same files.
 	"cc-compress": { name: "cc-compress", label: "com.omp-kit.cc-compress", kind: "interval", intervalSeconds: 86400, runAtLoad: false, commandConfigKey: "ccCompress", lockedRun: true },
+	// SKILLMINE1 (ompkit-djfgv.1): daily, mine agent history for skill candidates. Its command
+	// is operator data (fleet-watch.json `skillMine`: omp-kit skill-mine --apply), never a
+	// kit path; UNCONFIGURED until set. lockedRun: a slow day never starts a second pass over the same sessions.
+	"skill-mine": { name: "skill-mine", label: "com.omp-kit.skill-mine", kind: "interval", intervalSeconds: 86400, runAtLoad: false, commandConfigKey: "skillMine", lockedRun: true },
 	// GATEEVENTS1 (ompkit-fp72.135.3.12): weekly gate rationalization over the live gate-events ledger. Its
 	// command is operator data (fleet-watch.json `gateRationalize`: python3 gate_registry.py rationalize --out ...),
 	// so the kit never hardcodes a repo path; UNCONFIGURED until the operator sets it.

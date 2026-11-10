@@ -109,6 +109,7 @@ import { type RunLock } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, isLessonClass, latestCheckinAt, lessonIdentity, lessonRecordId, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput } from "./lessons.ts";
 import { buildFleetLessonsReport, FleetRepoSnapshot, readFleetRepoSnapshot, runFleetLessonsOnce } from "./fleet-lessons.ts";
 import { renderMine, runMine } from "./mine.ts";
+import { readSkillMineStatus, renderSkillMineText, runSkillMine } from "./skill-mine.ts";
 import { runMilestone } from "./milestone.ts";
 import { ccSpool, type CcSpool } from "./cc-spool.ts";
 import { custodyCheckCommand } from "./custody.ts";
@@ -1172,6 +1173,7 @@ function receiptStateRoot(): string | null {
 const STATE_ROOT_COMMANDS: Record<string, true> = {
 	audit: true, why: true, undo: true, repair: true, update: true,
 	"apply rules": true, "apply policy": true, "apply extensions": true, "apply plugin": true, "apply mcp": true,
+	"skill-mine": true, "skill-mine status": true,
 	"service install": true, "service uninstall": true, "service run": true,
 };
 
@@ -4865,6 +4867,61 @@ registerCommandHandler("mine", async request => {
 		all: request.flags.has("--all"), ...(typeof project === "string" ? { project } : {}), ...(root ? { root } : {}),
 	});
 	return { code: 0, data: { ...report, ...(!request.json && !request.robot ? { text: renderMine(report) } : {}) }, verification: "PERFORMED" };
+});
+
+registerCommandHandler("skill-mine", async request => {
+	const home = process.env.HOME;
+	const stateRoot = receiptStateRoot();
+	if (!home || !stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
+		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset; no mining was performed.");
+	const repeated = (value: string | true | undefined): string[] | undefined =>
+		typeof value === "string" ? value.split("\n").map(part => part.trim()).filter(Boolean) : undefined;
+	const nonNegativeInt = (raw: string | true | undefined, flag: string): number | undefined => {
+		if (typeof raw !== "string") return undefined;
+		const value = Number(raw);
+		if (!Number.isInteger(value) || value < 0) throw new Error(`${flag} needs a non-negative integer`);
+		return value;
+	};
+	let maxNew: number | undefined;
+	let wallBudgetS: number | undefined;
+	try {
+		maxNew = nonNegativeInt(request.flags.get("--max-new"), "--max-new");
+		wallBudgetS = nonNegativeInt(request.flags.get("--wall-budget-s"), "--wall-budget-s");
+	} catch (error) {
+		return refusal("INVALID_FLAG", error instanceof Error ? error.message : String(error),
+			"Pass --max-new N and --wall-budget-s S with N, S >= 0; no mining was performed.");
+	}
+	const since = request.flags.get("--since");
+	let report;
+	try {
+		report = await runSkillMine({
+			...(typeof since === "string" ? { since } : {}),
+			...(repeated(request.flags.get("--project")) ? { projects: repeated(request.flags.get("--project")) } : {}),
+			...(repeated(request.flags.get("--skills-dir")) ? { skillsDirs: repeated(request.flags.get("--skills-dir")) } : {}),
+			...(typeof request.flags.get("--mail-archive") === "string" ? { mailArchive: request.flags.get("--mail-archive") as string } : {}),
+			...(typeof request.flags.get("--sink") === "string" ? { sink: request.flags.get("--sink") as string } : {}),
+			...(maxNew !== undefined ? { maxNew } : {}),
+			...(wallBudgetS !== undefined ? { wallBudgetS } : {}),
+			apply: request.flags.has("--apply"),
+			home, pathValue: process.env.PATH ?? "", cwd: process.cwd(), stateDir: stateRoot,
+		});
+	} catch (error) {
+		return refusal("INVALID_FLAG", error instanceof Error ? error.message : String(error),
+			"Pass --since Nd or an ISO date; no mining was performed.");
+	}
+	return {
+		code: report.overall === "OK" ? 0 : 1,
+		data: { ...report, ...(!request.json && !request.robot ? { text: renderSkillMineText(report) } : {}) },
+		verification: "PERFORMED",
+	};
+});
+
+registerCommandHandler("skill-mine status", () => {
+	const stateRoot = receiptStateRoot();
+	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
+		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset; nothing was read.");
+	const status = readSkillMineStatus(stateRoot);
+	return { code: 0, data: { overall: status.configured ? "OK" : "UNVERIFIED", status }, verification: "PERFORMED" };
 });
 
 async function dispatch(request: ParsedCommand, version: string): Promise<CliResult> {

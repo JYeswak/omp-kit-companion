@@ -591,6 +591,23 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--project", value: "P", description: "Fleet name, repository basename or absolute checkout path (default: current directory)" },
 		{ name: "--all", description: "Every configured and observed project" },
 	], example: "omp-kit mine --since 2026-10-01 --until 2026-11-01 --all --json", runnable: false },
+	{ name: "skill-mine", description: "Mine agent history (cass sessions plus the Agent Mail archive) for recurring procedures worth packaging as skills; read-only unless --apply files SKILLCAND beads", usage: "skill-mine [--since 21d] [--project PATH]... [--skills-dir DIR]... [--mail-archive DIR] [--sink FILE] [--max-new N] [--wall-budget-s S] [--apply] [--json] | skill-mine status [--json]", flags: [
+		{ name: "--since", value: "21d", description: "Lookback window: Nd days or an ISO date (default 21d)" },
+		{ name: "--project", value: "PATH", repeatable: true, description: "Restrict mining to these workspaces/project slugs; repeat for more" },
+		{ name: "--skills-dir", value: "DIR", repeatable: true, description: "Installed-skills root to dedupe against; repeat for more (default: $OMP_KIT_SKILLS_DIRS, else ~/.agents/skills and ~/.omp/agent/skills)" },
+		{ name: "--mail-archive", value: "DIR", description: "Agent Mail storage root (default: the live root `am robot status` reports, else $HOME/.mcp_agent_mail_git_mailbox_repo)" },
+		{ name: "--sink", value: "FILE", description: "JSONL sink for new candidates (default <kit state>/skill-mine/candidates.jsonl)" },
+		{ name: "--max-new", value: "N", description: "Cap on SKILLCAND beads filed with --apply (default 3, max 1 per project per run)" },
+		{ name: "--apply", description: "File at most --max-new SKILLCAND beads in the owning projects; asks for confirmation first" },
+		{ name: "--yes", description: "Confirm the apply in noninteractive mode; valid only with --apply" },
+		{ name: "--wall-budget-s", value: "S", description: "Wall budget in seconds for the session-mining pass (default 600); stops early with coverage reported" },
+	], subcommands: [
+		{ name: "status", description: "Show the last skill-mine run: per-source status, candidate totals, beads filed", usage: "skill-mine status [--json]", flags: [], example: "omp-kit skill-mine status --json", runnable: false },
+	], example: "omp-kit skill-mine --since 21d --json", mutation: true, runnable: false, dataSchema: {
+		type: "object", required: ["overall"], properties: {
+			overall: { enum: ["OK", "UNVERIFIED", "NOT_RUN"] }, candidates: { type: "array" }, rejects: { type: "array" },
+		},
+	} },
 	MILESTONE_COMMAND,
 	{ name: "checkin", description: "Record verified own activity or explicit completed, blocked and next items", usage: "checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]", flags: [
 		{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
