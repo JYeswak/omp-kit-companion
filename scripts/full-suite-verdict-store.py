@@ -16,7 +16,6 @@ from urllib.parse import unquote, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kitlib_run import run
 import pysafe
-from kitlib_tmp import owned_tmp
 
 # RELFLAKE1 (J-2026-11-10-04): four red files indicate a broad failure, not a flake.
 MAX_FLAKE_FILES = 3
@@ -142,6 +141,9 @@ def rerun_failures(args: argparse.Namespace) -> dict:
     archive = Path(args.archive).resolve()
     # Use the same measured hermetic runner, tool policy and archive as the first pass.
     # The enclosing full-suite invocation still holds its suite lease.
+    # Imported here, not at module load: an archived legacy base judge ships no kitlib_tmp.py and still
+    # imports this store for every other action (private-index-land-3 'legacy base without HERMETIC1').
+    from kitlib_tmp import owned_tmp
     with owned_tmp("full-suite-single-rerun") as scratch:
         for index, first in enumerate(failed):
             path = first["path"]
