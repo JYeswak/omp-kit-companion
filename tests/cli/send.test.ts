@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { acknowledgeTernPending, BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, submitQueuedToTernSeat, ternSendSeat, trackerPrefix, TERN_PENDING_ACK_AFTER_MS, TERN_STEER_BOUND_MS, TERN_TURN_BOUNDARY_WAIT_MS, type ComposerVerdict, type SendExec } from "../../src/send.ts";
 import * as sendModule from "../../src/send.ts";
@@ -19,8 +19,24 @@ afterAll(() => scratchTmp.cleanup());
 const testEnv = { ...process.env, TMUX_TMPDIR: join(scratchRoot, "managed") };
 delete testEnv.TMUX;
 
-const socketFixtureTmp = ownedTmp("tw9q", { root: join("var", "agent-tmp") });
-const socketFixtureRoot = socketFixtureTmp.path;
+// RELFLAKE1 (ompkit-1ra0d.109): the longest fixture socket is `<root>/.tmux-sockets/tmux-<uid>/default`, and sun_path
+// caps a socket path at 103 bytes (macOS; Linux 107). Under a suite worker's deep run root it overflowed and tmux
+// died with "server exited unexpectedly" (verdict of tree 6befa0e5f5, 2026-11-10), depending on pid digits. The repo's
+// var/agent-tmp is used when it fits, else /tmp.
+const SUN_PATH_MAX = 103;
+function socketFixture() {
+	const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+	const suffix = `/.tmux-sockets/tmux-${uid}/default`;
+	// /tmp, not the macOS per-user temp root: /private/var/folders/<..>/T/ plus this suffix already exceeds 103 bytes.
+	for (const root of [resolve("var", "agent-tmp"), realpathSync("/tmp")]) {
+		const owned = ownedTmp("tw9q", { root });
+		if (Buffer.byteLength(realpathSync(owned.path) + suffix) <= SUN_PATH_MAX) return owned;
+		owned.cleanup();
+	}
+	throw new Error(`no owned temp root keeps the tmux socket within sun_path (${SUN_PATH_MAX} bytes)`);
+}
+const socketFixtureTmp = socketFixture();
+const socketFixtureRoot = realpathSync(socketFixtureTmp.path);
 afterAll(() => socketFixtureTmp.cleanup());
 
 const noWait = async (_ms: number) => {};

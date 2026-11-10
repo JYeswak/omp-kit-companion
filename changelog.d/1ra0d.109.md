@@ -1,1 +1,2 @@
 - The release full suite runs six timing-bound test files on the Mac host instead of the shared 4-core Linux shards, where each one failed a 120 s or CPU/wall-clock budget on some verdict of an unchanged tree.
+- `tests/cli/send.test.ts` keeps its tmux sockets within the 103-byte socket-path limit (falling back to the platform temp root), so a deep suite-worker checkout no longer kills the TMUX1 fixture server.
