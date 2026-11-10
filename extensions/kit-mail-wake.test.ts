@@ -22,7 +22,7 @@ const REPO = "/abs/fleet/omp-kit";
 interface Call { command: string; args: string[]; options?: FlywheelExecOptions }
 
 /** A fleet: omp-test tab with live blocks 5 (RusticPine, director) and 9 (JadeThrush); GreenRabbit is a background agent. */
-function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<FlywheelExecResult>; fastWaitMs?: number; blocks?: { id: number; cwd: string; live: boolean }[]; extraTabs?: { name: string; blocks: { id: number; cwd: string; live: boolean }[] }[]; panes?: { pane: number; omp_session_file: string }[] } = {}) {
+function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<FlywheelExecResult>; fastWaitMs?: number; blocks?: { id: number; cwd: string; live: boolean }[]; extraTabs?: { name: string; blocks: { id: number; cwd: string; live: boolean }[] }[]; panes?: { pane: number; omp_session_file: string }[]; ternText?: (text: string) => string } = {}) {
 	const home = freshDir(base, "home-");
 	const ident = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(REPO).digest("hex").slice(0, 12));
 	mkdirSync(ident, { recursive: true });
@@ -37,7 +37,10 @@ function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<Flywhe
 	const exec = async (command: string, args: string[], options?: FlywheelExecOptions): Promise<FlywheelExecResult> => {
 		const call = { command, args, options };
 		calls.push(call);
-		if (command === "tern") return { code: 0, stdout: JSON.stringify({ sessions: [{ name: "Default", tabs: [{ name: "omp-test", blocks: opts.blocks ?? [{ id: 5, cwd: REPO, live: true }, { id: 9, cwd: REPO, live: true }] }, ...(opts.extraTabs ?? [])] }], panes: opts.panes }) };
+		if (command === "tern") {
+			const text = JSON.stringify({ sessions: [{ name: "Default", tabs: [{ name: "omp-test", blocks: opts.blocks ?? [{ id: 5, cwd: REPO, live: true }, { id: 9, cwd: REPO, live: true }] }, ...(opts.extraTabs ?? [])] }], panes: opts.panes });
+			return { code: 0, stdout: opts.ternText ? opts.ternText(text) : text };
+		}
 		if (command === "am") return { code: 0, stdout: JSON.stringify([{ name: "GreenRabbit", task_description: "MAILPROTO1 bead ompkit-fp72.134 (roster BuildMailProto)" }, { name: "StormyCove", task_description: "rhy9.16 cutover under CopperTrout" }]) };
 		if (command === "omp-kit") return opts.omp ? opts.omp(call) : { code: 0, stdout: JSON.stringify({ data: { status: "OK", detail: "landed" } }) };
 		return { code: 127, stdout: "", stderr: "unexpected" };
@@ -261,6 +264,23 @@ test("control: a send to a live seat queues exactly one wake keyed by the messag
 	busy.resolve({ code: 0, stdout: JSON.stringify({ data: { status: "DELIVERED", detail: "after busy" } }) });
 	await f.wake.settled();
 	expect(f.ledger().map(row => row.status)).toEqual(["WAKE_QUEUED", "WAKE_DELIVERED"]);
+});
+
+// TERNID1: Tern block ids exceed 2^53 (skillgrowth builder 9374096836001793, 2026-11-10); a bare JSON.parse of
+// `tern inspect` rounded it onto 9374096836001792 and the wake targeted a pane that does not exist.
+test("TERNID1 a block id above 2^53 is woken at its exact pane, never a rounded neighbour", async () => {
+	const big = "9374096836001793";
+	expect(String(Number(big))).not.toBe(big);
+	const f = fleet({ fastWaitMs: 1000, blocks: [{ id: 5, cwd: REPO, live: true }, { id: 4242, cwd: REPO, live: true }],
+		ternText: text => text.replace('"id":4242', `"id":${big}`) });
+	const ident = join(f.home, ".config", "agent-mail", "identity", createHash("sha1").update(REPO).digest("hex").slice(0, 12));
+	writeFileSync(join(ident, `tern-${big}`), JSON.stringify({ name: "FoggyValley" }));
+	const fyi = { project_key: REPO, sender_name: "PeachLeopard", to: ["FoggyValley"], subject: "FYI ompkit-1ra0d.104: kickoff", body_md: "b" };
+	expect(await f.wake.beforeSend("big", "send_message", fyi, REPO)).toBeUndefined();
+	const patch = await f.wake.afterSend({ toolCallId: "big", content: sent(80600), isError: false });
+	expect(f.wakes()).toHaveLength(1);
+	expect(f.wakes()[0].args).toContain(`tern:${big}`);
+	expect(JSON.stringify(patch)).toContain(`FoggyValley at tern:${big}`);
 });
 
 test("a reply without explicit recipients wakes the thread recipient named in the result", async () => {

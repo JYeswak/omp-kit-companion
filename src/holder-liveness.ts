@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { parseTernJson } from "./plane-tern.ts";
 
 export const HOLDER_LIVE_WINDOW_MS = 24 * 3600 * 1000;
 
@@ -78,7 +79,7 @@ const record = (value: unknown): Record<string, unknown> | null =>
 export function liveTernBlockKeys(result: CommandResult): Source<string[]> {
 	if (result.code !== 0) return { ok: false, why: `tern inspect exited ${result.code ?? "without a status"}: ${result.stderr.trim().slice(0, 160)}` };
 	let parsed: Record<string, unknown> | null;
-	try { parsed = record(JSON.parse(result.stdout)); } catch { return { ok: false, why: "tern inspect returned unparseable JSON" }; }
+	try { parsed = record(parseTernJson(result.stdout)); } catch { return { ok: false, why: "tern inspect returned unparseable JSON" }; }
 	if (parsed === null || !Array.isArray(parsed.sessions)) return { ok: false, why: "tern inspect returned no sessions list" };
 	const exited = new Set<string>();
 	for (const pane of Array.isArray(parsed.panes) ? parsed.panes : []) {

@@ -1,0 +1,1 @@
+- Mail wakes and holder liveness read Tern block ids exactly; ids above 2^53 were rounded to a neighbouring pane, so wakes to those seats went nowhere.

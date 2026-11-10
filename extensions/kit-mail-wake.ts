@@ -3,6 +3,7 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { FlywheelExec, FlywheelToolCallResult } from "./kit-flywheel-guard";
+import { parseTernJson } from "../src/plane-tern.ts";
 
 /**
  * kit-mail-wake (MAILWAKE1, ompkit-uk9wn): an Agent Mail send must wake its recipient's live seat,
@@ -191,7 +192,8 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		try { result = await deps.exec(ternBin, ["inspect", "--json"], { timeout: READ_TIMEOUT_MS }); } catch { return null; }
 		if (result.code !== 0) return null;
 		let parsed: unknown;
-		try { parsed = JSON.parse(result.stdout); } catch { return null; }
+		// TERNID1: block ids exceed 2^53; a bare JSON.parse rounded tern:9374096836001793 onto ...792.
+		try { parsed = parseTernJson(result.stdout); } catch { return null; }
 		const out: LiveBlock[] = [];
 		const rawPanes = prop(parsed, "panes");
 		const panes: unknown[] = Array.isArray(rawPanes) ? rawPanes : [];
