@@ -304,7 +304,7 @@ test("merges a concurrent advance to an unrelated path and publishes the merge",
 });
 
 
-test("land --patch --base records Authored-On and lands a peer-line edit; an off-history base is refused by the hook", async () => {
+test("land --patch --base records Authored-On and lands a peer-line edit; an off-history base is refused before any commit", async () => {
 	for (const specimen of ["fresh", "offhistory", "midbody", "duplicate"] as const) {
 		const { work, fakeBin } = fixture();
 		writeFileSync(join(work, "service.txt"), SERVICE_BASE);
@@ -331,8 +331,8 @@ test("land --patch --base records Authored-On and lands a peer-line edit; an off
 		const patch = join(scratch, `stale-hook-base-${specimen}-${fixtureNumber++}.patch`);
 		writeFileSync(patch, git(work, ["diff", "--", "service.txt"]));
 		// The off-history base has exactly the origin tree, so the patch
-		// verifies against it, but it is no ancestor of main: the hook,
-		// not the base proof, refuses the landing.
+		// verifies against it, but it is no ancestor of main: the ancestry
+		// gate refuses before any commit is created.
 		const claim = specimen === "offhistory"
 			? git(work, ["commit-tree", `${base}^{tree}`, "-m", "off-history base"]).trim()
 			: base;
@@ -355,10 +355,11 @@ test("land --patch --base records Authored-On and lands a peer-line edit; an off
 			expect(git(work, ["show", "-s", "--format=%B", data.commit])).toContain(`Authored-On: ${base}`);
 		} else if (specimen === "offhistory") {
 			expect(run.status, JSON.stringify(run.body)).toBe(1);
-			expect(responseCode(run.body)).toBe("COMMIT_CREATION_REFUSED");
-			expect(run.body.data).toMatchObject({ overall: "REFUSED", commit: null });
-			expect(JSON.stringify(run.body.errors)).toContain(`STALE_WORKTREE service.txt reverts ${base}`);
-			expect(JSON.stringify(run.body.errors)).toContain("from bead t-land");
+			expect(responseCode(run.body)).toBe("LAND_BASE_NOT_ANCESTOR");
+			expect(run.body.data).toMatchObject({ overall: "REFUSED" });
+			// refused() carries no candidate commit: assert the absence explicitly.
+			const refusedData = run.body.data as { commit?: unknown };
+			expect(refusedData.commit ?? null).toBe(null);
 			expect(remoteHead(work)).toBe(base);
 			expect(readFileSync(join(work, "service.txt"), "utf8")).toBe(selected);
 		} else {
@@ -369,4 +370,53 @@ test("land --patch --base records Authored-On and lands a peer-line edit; an off
 			expect(readFileSync(join(work, "service.txt"), "utf8")).toBe(selected);
 		}
 	}
+}, LAND_DEFAULT_TIMEOUT_MS);
+
+test("STALETWOHOP1 land --patch --base off-history refuses before any commit is created", async () => {
+	const { work, fakeBin } = fixture();
+	writeFileSync(join(work, "service.txt"), SERVICE_BASE);
+	git(work, ["add", "--", "service.txt"]);
+	git(work, ["commit", "-m", "service landing [test]", "-m", "Bead: t-land"]);
+	git(work, ["push", "origin", "HEAD:refs/heads/main"]);
+	const base = remoteHead(work);
+	const countBefore = git(work, ["rev-list", "--count", "HEAD"]).trim();
+	const mainBefore = git(work, ["rev-parse", "refs/heads/main"]).trim();
+	const common = resolve(work, git(work, ["rev-parse", "--git-common-dir"]).trim());
+	const members = join(common, "hooks", "hooks.d", "commit-msg");
+	mkdirSync(members, { recursive: true });
+	// Use the working source under test, not HEAD's pre-fix hook.
+	writeFileSync(join(members, "49-omp-kit-stale-worktree"),
+		readFileSync(join(repoRoot, "scripts", "check-stale-worktree.sh")), { mode: 0o755 });
+	writeFileSync(join(members, "kitlib-tmp.sh"),
+		readFileSync(join(repoRoot, "scripts", "kitlib-tmp.sh")), { mode: 0o644 });
+	writeFileSync(join(common, "hooks", "commit-msg"), [
+		"#!/bin/sh",
+		"set -eu",
+		'here=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd -P)',
+		'"$here/hooks.d/commit-msg/49-omp-kit-stale-worktree" "$@"',
+	].join("\n") + "\n", { mode: 0o755 });
+	writeServiceLines(work, (lines) => { lines[10] = "caller wording"; });
+	const selected = readFileSync(join(work, "service.txt"), "utf8");
+	const patch = join(scratch, `staletwohop-offhistory-${fixtureNumber++}.patch`);
+	writeFileSync(patch, git(work, ["diff", "--", "service.txt"]));
+	// Same tree as origin, but no ancestry: the patch verifies against it,
+	// so only the new ancestry gate refuses before any commit is created.
+	// On the pre-fix code this lands as COMMIT_CREATION_REFUSED from the hook.
+	const claim = git(work, ["commit-tree", `${base}^{tree}`, "-m", "off-history base"]).trim();
+	const run = command(work, ["--patch", patch, "--base", claim,
+		"--message", "feat(land): STALETWOHOP1 off-history [test]\n\nBead: t-other", "--apply", "--yes"], patchHold(), {
+		amDir: fakeBin,
+	});
+	expect(run.status, JSON.stringify(run.body)).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_BASE_NOT_ANCESTOR");
+	expect(run.body.data).toMatchObject({ overall: "REFUSED" });
+	// refused() carries no candidate commit: assert the absence explicitly.
+	const refusedData = run.body.data as { commit?: unknown };
+	expect(refusedData.commit ?? null).toBe(null);
+	expect(JSON.stringify(run.body.errors)).toContain("not on fresh origin/main history");
+	expect(remoteHead(work)).toBe(base);
+	expect(git(work, ["rev-parse", "refs/heads/main"]).trim()).toBe(mainBefore);
+	expect(git(work, ["rev-list", "--count", "HEAD"]).trim()).toBe(countBefore);
+	expect(git(work, ["log", "--all", "--format=%B"])).not.toContain("STALETWOHOP1 off-history");
+	expect(readFileSync(join(work, "service.txt"), "utf8")).toBe(selected);
 }, LAND_DEFAULT_TIMEOUT_MS);

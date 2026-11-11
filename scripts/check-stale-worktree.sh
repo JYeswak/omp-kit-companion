@@ -245,6 +245,109 @@ blame_lines() {
 	awk '/^[0-9a-f]{40} [0-9]+ [0-9]+/ { print $3, $1 }' "$metadata_dir/blame.raw"
 }
 
+blame_map() {
+	# $1 = path, $2 = revision; reads line numbers (ascending, valid in $2)
+	# on stdin and prints "<final> <orig> <sha>" per line from ONE `git blame`
+	# at $2 restricted with -L to just those lines (STALETWOHOP1 drift fix:
+	# final is the input numbering, orig the numbering in the commit that
+	# wrote the line, so every walk level reads only numbers valid in the
+	# commit being read). Fails closed on unreadable history.
+	# Intended split: the words are only "-L" and "<n>,<m>" (digits, comma).
+	mpath=$1
+	mrev=$2
+	# shellcheck disable=SC2046
+	set -- $(awk 'NR == 1 { s = e = $1; next } $1 == e + 1 { e = $1; next } { printf "-L %d,%d ", s, e; s = e = $1 } END { if (NR) printf "-L %d,%d\n", s, e }')
+	[ "$#" -gt 0 ] || return 0
+	git blame --porcelain "$@" "$mrev" -- "$mpath" > "$metadata_dir/wblame.raw" 2>/dev/null || return 1
+	awk '/^[0-9a-f]{40} [0-9]+ [0-9]+/ { print $3, $2, $1 }' "$metadata_dir/wblame.raw" | sort -u
+}
+
+hunk_preimage() {
+	# $1 = commit W, $2 = path, $3 = owned-lines file (ascending numbers valid
+	# in W), $4 = scratch dir, $5 = hunk seq. Resolves what the owned lines
+	# replaced inside W's own diff (W^..W, -U0): writes the covering hunks'
+	# old-side texts to $4/wpre.$5.$1 and old-side line numbers (valid in W^)
+	# to $4/wnums.$5.$1. Both files always exist afterwards and may be empty
+	# when W only added lines.
+	# Returns 0 resolved, 1 for a root W, 2 with a reason word on stdout when
+	# the level cannot be resolved (binary, empty diff such as a rename the
+	# hook does not follow, or an owned line with no covering addition).
+	# Git failures stay silent; the caller fails closed exactly like every
+	# other unreadable-history observation.
+	wp=$1; wpath=$2; wowned=$3; whdir=$4; whseq=$5
+	: > "$whdir/wpre.$whseq.$wp" || return 3
+	: > "$whdir/wnums.$whseq.$wp" || return 3
+	if ! git rev-parse --verify --quiet "$wp^" > /dev/null 2>&1; then
+		return 1
+	fi
+	if ! git diff -U0 --no-color --no-ext-diff "$wp^" "$wp" -- "$wpath" > "$whdir/wdiff.raw" 2>/dev/null; then
+		return 3
+	fi
+	if grep -q '^Binary files ' "$whdir/wdiff.raw" 2>/dev/null; then
+		printf 'binary\n'
+		return 2
+	fi
+	if ! grep -q '^@@ ' "$whdir/wdiff.raw" 2>/dev/null; then
+		printf 'empty-diff\n'
+		return 2
+	fi
+	if awk -v owned="$wowned" -v otext="$whdir/wpre.$whseq.$wp" -v onums="$whdir/wnums.$whseq.$wp" '
+		BEGIN { while ((getline l < owned) > 0) want[l + 0] = 1; close(owned) }
+		function flush(	i, hit) {
+			hit = 0
+			for (i = 1; i <= nn; i++) if (hnew[i] in want) { hit = 1; break }
+			if (hit) for (i = 1; i <= no; i++) { print hold_t[i] >> otext; print hold_n[i] >> onums }
+			nn = 0; no = 0
+		}
+		/^diff --git / { flush(); in_hunk = 0; next }
+		/^@@ / {
+			flush()
+			hdr = $0; sub(/^@@ -/, "", hdr)
+			n = split(hdr, parts, " ")
+			split(parts[1], o, ","); old_cur = o[1] + 0
+			nw = parts[2]; sub(/^\+/, "", nw); split(nw, w, ","); new_cur = w[1] + 0
+			in_hunk = 1; nn = 0; no = 0
+			next
+		}
+		{
+			if (!in_hunk) next
+			c = substr($0, 1, 1)
+			if (c == "-") { no++; hold_t[no] = substr($0, 2); hold_n[no] = old_cur; old_cur++ }
+			else if (c == "+") { nn++; hnew[nn] = new_cur; if (new_cur in want) covered[new_cur] = 1; new_cur++ }
+			else if (c == " ") { old_cur++; new_cur++ }
+			else if (c == "\\") { next }
+			else { flush(); in_hunk = 0 }
+			next
+		}
+		END { flush(); for (k in want) if (!(k in covered)) exit 1 }
+	' "$whdir/wdiff.raw"; then
+		:;
+	else
+		printf 'uncovered\n'
+		return 2
+	fi
+	return 0
+}
+
+walk_group_next() {
+	# $1 = scratch dir, $2 = hunk seq. Groups $1/nextmap.$2 lines
+	# ("<final> <orig> <sha>", orig valid in the next commit's own
+	# numbering) into per-sha $1/wlines.$2.<sha> files for shas not yet on
+	# $1/chain.$2, appends them to the chain, and prints the new shas one
+	# per line. Returns 1 when nothing new was found.
+	awk '{ print $3 }' "$1/nextmap.$2" | sort -u > "$1/nextshas.$2" || return 1
+	comm -23 "$1/nextshas.$2" "$1/chain.$2" > "$1/new.$2" || return 1
+	[ -s "$1/new.$2" ] || return 1
+	while IFS= read -r wsha; do
+		[ -n "$wsha" ] || continue
+		awk -v s="$wsha" '$3 == s { print $2 }' "$1/nextmap.$2" | sort -n > "$1/wlines.$2.$wsha" || return 1
+	done < "$1/new.$2" || return 1
+	cat "$1/new.$2" >> "$1/chain.$2" || return 1
+	sort -u -o "$1/chain.$2" "$1/chain.$2" || return 1
+	cat "$1/new.$2"
+	return 0
+}
+
 # Commit facts are immutable within this pinned invocation, not per removed
 # line (ompkit-axz7m.9). The cache survives the path-loop subshell and is owned
 # by the existing temp primitive; unsuccessful Git observations are not cached.
@@ -517,6 +620,19 @@ while IFS= read -r path; do
 	# blamed commit already contained in the proven Authored-On base passes;
 	# one that landed after the base (the stale case), or any candidate
 	# with no (or no valid) Authored-On trailer, refuses exactly as before.
+	# STALETWOHOP1: a hunk that restores content two or three edits old
+	# dodges R1 (its HEAD blame is only the newest edit) and a current base
+	# then exempts it. When R1 does not fire and at least one blamed commit
+	# would be exempted, walk up to two further pre-image levels (depth cap
+	# 3 total): each owned line is mapped to the numbering of the commit
+	# that wrote it and resolved through that commit's own diff, so later
+	# insertions/deletions above the hunk cannot shift or misroute the walk;
+	# a level whose combined pre-image is a sub-multiset of the hunk's added
+	# lines (trimmed, count-aware, as R1) refuses naming every commit on the
+	# walked chain. A level that cannot be resolved (binary, root commit, a
+	# rename the hook does not follow) ends the walk there without refusing
+	# and is named in review output. Only hunks that reach R2 pay for the
+	# extra blame plus diff.
 	# Pre-images are cached per (sha, path); unreadable history fails
 	# closed like every other observation.
 	if [ -s "$hdir/fsites" ]; then
@@ -539,9 +655,126 @@ while IFS= read -r path; do
 			if [ -s "$hdir/preall.$hseq" ] && awk 'function trim(s) { sub(/[ \t\r]+$/, "", s); return s } FILENAME == ARGV[1] { add[trim($0)]++; next } { line = trim($0); if (++used[line] > add[line]) { missing = 1; exit 1 } } END { exit (missing ? 1 : 0) }' "$hdir/hadd.$hseq" "$hdir/preall.$hseq"; then
 				r1_restores=1
 			fi
+			twohop_max=3
+			twohop_restores=0
+			: > "$hdir/chain.$hseq" || exit 1
 			if [ "$r1_restores" -eq 0 ]; then
 				prove_authored_base || { printf 'stale-worktree: unreadable authoring base: %s\n' "$path" >&2; exit 1; }
 			fi
+			if [ "$r1_restores" -eq 0 ]; then
+				exempt_found=0
+				for hsha in $hunk_shas; do
+					if base_contains "$hsha"; then exempt_found=1; break; fi
+				done
+				if [ "$exempt_found" -eq 1 ] && [ "$twohop_max" -ge 2 ]; then
+					printf '%s\n' "$hunk_shas" | sort -u > "$hdir/chain.$hseq" || exit 1
+					awk -v s="$hseq" '$2 == s { print $1 }' "$hdir/hunkmap" | sort -n > "$hdir/rlines.$hseq" || exit 1
+					# Level 1 in HEAD numbering: map the hunk's removed lines to
+					# the numbering of the commit that wrote each one. Line
+					# numbers drift between commits (insertions/deletions
+					# above the hunk), so no deeper level may reuse HEAD
+					# numbers: every level reads only numbers valid in the
+					# commit being read, translated through that commit's own
+					# diff. R1 already judged the one-hop pre-image, so the
+					# walk primes depth 2 from it and then judges the two
+					# further levels (depth cap 3 total). A level whose
+					# combined pre-image is a sub-multiset of the hunk's added
+					# lines (trimmed, count-aware, as R1) refuses naming every
+					# commit on the walked chain. A level that cannot be
+					# resolved (binary, root commit, a rename the hook does
+					# not follow) ends the walk there without refusing and is
+					# named in review output.
+					blame_map "$path" "$HEAD" < "$hdir/rlines.$hseq" > "$hdir/map.1.$hseq" || { printf 'stale-worktree: unreadable attribution: %s\n' "$path" >&2; exit 1; }
+					for hsha in $hunk_shas; do
+						awk -v s="$hsha" '$3 == s { print $2 }' "$hdir/map.1.$hseq" | sort -n > "$hdir/wlines.$hseq.$hsha" || exit 1
+					done
+					# Prime depth 2 from depth 1 without judging it: resolve
+					# what depth 1 owns into parent ranges and blame them.
+					: > "$hdir/nextmap.$hseq" || exit 1
+					prime_ok=1
+					prime_shas=$(cat "$hdir/chain.$hseq") || exit 1
+					for psha in $prime_shas; do
+						[ -n "$psha" ] || continue
+						[ -s "$hdir/wlines.$hseq.$psha" ] || continue
+						wp_out=$(hunk_preimage "$psha" "$path" "$hdir/wlines.$hseq.$psha" "$hdir" "$hseq") && wrc=0 || wrc=$?
+						if [ "$wrc" -gt 2 ]; then
+							printf 'stale-worktree: unreadable landed history: %s %s\n' "$path" "$psha" >&2; exit 1
+						elif [ "$wrc" -eq 1 ]; then
+							[ "$review" -eq 0 ] || printf 'REVIEW_WALK_STOPPED\t%s\t%s\troot-commit\n' "$path" "$psha"
+							continue
+						elif [ "$wrc" -ne 0 ]; then
+							[ "$review" -eq 0 ] || printf 'REVIEW_WALK_STOPPED\t%s\t%s\t%s\n' "$path" "$psha" "$wp_out"
+							prime_ok=0
+							break
+						fi
+						if [ -s "$hdir/wnums.$hseq.$psha" ]; then
+							blame_map "$path" "$psha^" < "$hdir/wnums.$hseq.$psha" >> "$hdir/nextmap.$hseq" || { printf 'stale-worktree: unreadable attribution: %s\n' "$path" >&2; exit 1; }
+						fi
+					done
+					if [ "$prime_ok" -eq 1 ]; then
+						if new_shas=$(walk_group_next "$hdir" "$hseq"); then
+							printf '%s\n' "$new_shas" | sort -u > "$hdir/level.$hseq" || exit 1
+						else
+							: > "$hdir/level.$hseq" || exit 1
+						fi
+					else
+						: > "$hdir/level.$hseq" || exit 1
+					fi
+					lvl=2
+					while [ "$lvl" -le "$twohop_max" ]; do
+						[ -s "$hdir/level.$hseq" ] || break
+						: > "$hdir/prewalk.$hseq" || exit 1
+						: > "$hdir/nextmap.$hseq" || exit 1
+						level_shas=$(cat "$hdir/level.$hseq") || exit 1
+						for lsha in $level_shas; do
+							[ -n "$lsha" ] || continue
+							[ -s "$hdir/wlines.$hseq.$lsha" ] || continue
+							wp_out=$(hunk_preimage "$lsha" "$path" "$hdir/wlines.$hseq.$lsha" "$hdir" "$hseq") && wrc=0 || wrc=$?
+							if [ "$wrc" -gt 2 ]; then
+								printf 'stale-worktree: unreadable landed history: %s %s\n' "$path" "$lsha" >&2; exit 1
+							elif [ "$wrc" -eq 1 ]; then
+								[ "$review" -eq 0 ] || printf 'REVIEW_WALK_STOPPED\t%s\t%s\troot-commit\n' "$path" "$lsha"
+								continue
+							elif [ "$wrc" -ne 0 ]; then
+								[ "$review" -eq 0 ] || printf 'REVIEW_WALK_STOPPED\t%s\t%s\t%s\n' "$path" "$lsha" "$wp_out"
+								break 2
+							fi
+							cat "$hdir/wpre.$hseq.$lsha" >> "$hdir/prewalk.$hseq" || exit 1
+							# The hunk's old-side range is already valid in the
+							# parent's numbering: blame it there for the next
+							# level (orig numbers come back in the next commit's
+							# own numbering).
+							if [ -s "$hdir/wnums.$hseq.$lsha" ]; then
+								blame_map "$path" "$lsha^" < "$hdir/wnums.$hseq.$lsha" >> "$hdir/nextmap.$hseq" || { printf 'stale-worktree: unreadable attribution: %s\n' "$path" >&2; exit 1; }
+							fi
+						done
+						if [ -s "$hdir/prewalk.$hseq" ] && awk 'function trim(s) { sub(/[ \t\r]+$/, "", s); return s } FILENAME == ARGV[1] { add[trim($0)]++; next } { line = trim($0); if (++used[line] > add[line]) { missing = 1; exit 1 } } END { exit (missing ? 1 : 0) }' "$hdir/hadd.$hseq" "$hdir/prewalk.$hseq"; then
+							twohop_restores=1
+							break
+						fi
+						if new_shas=$(walk_group_next "$hdir" "$hseq"); then
+							printf '%s\n' "$new_shas" | sort -u > "$hdir/level.$hseq" || exit 1
+						else
+							: > "$hdir/level.$hseq" || exit 1
+						fi
+						lvl=$((lvl + 1))
+					done
+				fi
+			fi
+			if [ "$twohop_restores" -eq 1 ]; then
+				chain_shas=$(cat "$hdir/chain.$hseq") || exit 1
+				for hsha in $chain_shas; do
+					[ -n "$hsha" ] || continue
+					if ! commit_facts "$hsha"; then
+						printf 'UNREADABLE_COMMIT_FACTS %s %s\n' "$path" "$hsha" >&2
+						exit 1
+					fi
+					[ "$review" -eq 0 ] || printf 'REVIEW_CANDIDATE\t%s\t%s\t%s\t%s\n' "$path" "$hsha" "$cbead" "$(awk -v s="$hseq" -v h="$hsha" '$3 == s && $2 == h { print $1; exit }' "$hdir/fsites")"
+					case "$seen" in *"$hsha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s) from bead %s\n' "$path" "$hsha" "$subject" "$cbead" >> "$metadata_dir/report" || exit 1; printf '%s\n' "$hsha" >> "$metadata_dir/shas" || exit 1 ;; esac
+					seen="$seen $hsha"
+					printf '1\n' >> "$metadata_dir/refused" || exit 1
+				done
+			else
 			for hsha in $hunk_shas; do
 				if [ "$r1_restores" -eq 0 ] && base_contains "$hsha"; then
 					continue
@@ -558,6 +791,7 @@ while IFS= read -r path; do
 					printf '1\n' >> "$metadata_dir/r2refused" || exit 1
 				fi
 			done
+			fi
 		done
 	fi
  done < "$metadata_dir/paths.lines" || { printf 'stale-worktree: cannot evaluate removed sites\n' >&2; exit 1; }

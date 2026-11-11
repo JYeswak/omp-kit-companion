@@ -738,5 +738,152 @@ git -C "$R" add pkg/g.txt
 out=$(git -C "$R" commit --message "[test] drop peer g on base" --message "Bead: t-other" --message "Authored-On: $Q" 2>&1)
 check "$?" "0" "STALEEXACT1-r2-delete-based-passes" "$out" ""
 check "$(git -C "$R" rev-list --count HEAD)" "3" "STALEEXACT1-r2-delete-based-landed" "$out" ""
+# 28. STALETWOHOP1: a hunk restoring content two edits old dodges R1 (the
+# HEAD blame is only the newest edit) and a current base would exempt it.
+# The walk refuses naming both commits; three hops refuse naming all three.
+# A genuine edit with a valid base still passes, a declared Revert still
+# passes, and with the walk disabled the restoration passes (planted).
+R=$(new_repo staletwohop-twohop)
+S0=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nC line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer L to C" --message "Bead: t-peer1" --message "Supersedes: $S0"
+P1=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nB line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer C to B" --message "Bead: t-peer2" --message "Supersedes: $P1"
+P2=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nlanded line L\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] restore L two hops" --message "Bead: t-other" --message "Authored-On: $P2" 2>&1)
+check "$?" "1" "STALETWOHOP1-twohop-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P2"
+check "$(printf '%s\n' "$out" | grep -c "reverts $P1")" "1" "STALETWOHOP1-twohop-names-both" "$out" ""
+check "$(git -C "$R" rev-list --count HEAD)" "3" "STALETWOHOP1-twohop-unmoved" "$out" ""
+# Planted negative: with the walk disabled the same restoration passes.
+member="$R/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree"
+norwalk="$TMP/staletwohop-norwalk.sh"
+sed 's/twohop_max=3/twohop_max=1/' "$member" > "$norwalk"
+grep -q 'twohop_max=1' "$norwalk"
+check "$?" "0" "STALETWOHOP1-norwalk-planted" "" ""
+printf '[test] restore L two hops\n\nBead: t-other\n\nAuthored-On: %s\n' "$P2" > "$TMP/staletwohop-nowalk.msg"
+out=$(cd "$R" && sh "$norwalk" "$TMP/staletwohop-nowalk.msg" 2>&1)
+check "$?" "0" "STALETWOHOP1-norwalk-passes-restore" "$out" ""
+# Three hops refuse naming all three commits on the walked chain.
+R=$(new_repo staletwohop-threehop)
+S0=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nC line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer L to C" --message "Bead: t-peer1" --message "Supersedes: $S0"
+P1=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nB line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer C to B" --message "Bead: t-peer2" --message "Supersedes: $P1"
+P2=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nD line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer B to D" --message "Bead: t-peer3" --message "Supersedes: $P2"
+P3=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nlanded line L\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] restore L three hops" --message "Bead: t-other" --message "Authored-On: $P3" 2>&1)
+check "$?" "1" "STALETWOHOP1-threehop-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P3"
+check "$(printf '%s\n' "$out" | grep -c "reverts $P2")" "1" "STALETWOHOP1-threehop-names-p2" "$out" ""
+check "$(printf '%s\n' "$out" | grep -c "reverts $P1")" "1" "STALETWOHOP1-threehop-names-p1" "$out" ""
+check "$(git -C "$R" rev-list --count HEAD)" "4" "STALETWOHOP1-threehop-unmoved" "$out" ""
+# A genuine edit of a peer line with a valid base still passes.
+R=$(new_repo staletwohop-genuine)
+S0=$(git -C "$R" rev-parse HEAD)
+printf 'base line\npeer wording\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer wording" --message "Bead: t-peer" --message "Supersedes: $S0"
+P=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nbrand new\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] genuine edit" --message "Bead: t-other" --message "Authored-On: $P" 2>&1)
+check "$?" "0" "STALETWOHOP1-genuine-passes" "$out" ""
+check "$(git -C "$R" rev-list --count HEAD)" "3" "STALETWOHOP1-genuine-landed" "$out" ""
+# A declared Revert that returns to an old value still passes.
+R=$(new_repo staletwohop-revert)
+S0=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nC line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer L to C" --message "Bead: t-peer1" --message "Supersedes: $S0"
+P1=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nB line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer C to B" --message "Bead: t-peer2" --message "Supersedes: $P1"
+P2=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nlanded line L\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] declared return to L" --message "Bead: t-other" --message "Revert: $P2" 2>&1)
+check "$?" "0" "STALETWOHOP1-declared-revert-passes" "$out" ""
+# 29. STALETWOHOP1 drift: later insertions above the hunk move HEAD numbers,
+# so blaming HEAD numbers at the parent either leaves the range (drift2) or
+# lands on the wrong line (drift3). The walk translates every level through
+# the owning commit's own diff and still refuses naming both commits.
+R=$(new_repo staletwohop-drift2)
+S0=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nC line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer L to C" --message "Bead: t-peer1" --message "Supersedes: $S0"
+P1=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nB line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer C to B" --message "Bead: t-peer2" --message "Supersedes: $P1"
+P2=$(git -C "$R" rev-parse HEAD)
+printf 'drift one\ndrift two\nbase line\nB line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] drift above" --message "Bead: t-peer3" --message "Supersedes: $P2"
+P3=$(git -C "$R" rev-parse HEAD)
+printf 'drift one\ndrift two\nbase line\nlanded line L\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] restore L past drift" --message "Bead: t-other" --message "Authored-On: $P3" 2>&1)
+check "$?" "1" "STALETWOHOP1-drift2-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P2"
+check "$(printf '%s\n' "$out" | grep -c "reverts $P1")" "1" "STALETWOHOP1-drift2-names-both" "$out" ""
+check "$(git -C "$R" rev-list --count HEAD)" "4" "STALETWOHOP1-drift2-unmoved" "$out" ""
+R=$(new_repo staletwohop-drift3)
+S0=$(git -C "$R" rev-parse HEAD)
+printf 'top filler\nbase line\nlanded line L\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] filler above" --message "Bead: t-peer0" --message "Supersedes: $S0"
+F=$(git -C "$R" rev-parse HEAD)
+printf 'top filler\nbase line\nC line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer L to C" --message "Bead: t-peer1" --message "Supersedes: $S0"
+P1=$(git -C "$R" rev-parse HEAD)
+printf 'top filler\nbase line\nB line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer C to B" --message "Bead: t-peer2" --message "Supersedes: $P1"
+P2=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nB line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] drift deletes filler" --message "Bead: t-peer3" --message "Supersedes: $F"
+P3=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nlanded line L\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] restore L past deletion" --message "Bead: t-other" --message "Authored-On: $P3" 2>&1)
+check "$?" "1" "STALETWOHOP1-drift3-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P2"
+check "$(printf '%s\n' "$out" | grep -c "reverts $P1")" "1" "STALETWOHOP1-drift3-names-both" "$out" ""
+check "$(git -C "$R" rev-list --count HEAD)" "5" "STALETWOHOP1-drift3-unmoved" "$out" ""
+# 30. STALETWOHOP1 growth guard: 200 lines inserted above between the blamed
+# commit's parent and HEAD must not turn an honest edit into a refusal.
+R=$(new_repo staletwohop-growth)
+S0=$(git -C "$R" rev-parse HEAD)
+printf 'base line\npeer wording\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer wording" --message "Bead: t-peer" --message "Supersedes: $S0"
+P=$(git -C "$R" rev-parse HEAD)
+i=1; while [ "$i" -le 200 ]; do printf 'pad %d\n' "$i"; i=$((i + 1)); done > "$R/pkg/grown.txt"
+printf 'base line\npeer wording\n' >> "$R/pkg/grown.txt"
+mv "$R/pkg/grown.txt" "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] growth above" --message "Bead: t-filler" --message "Supersedes: $P"
+G=$(git -C "$R" rev-parse HEAD)
+i=1; while [ "$i" -le 200 ]; do printf 'pad %d\n' "$i"; i=$((i + 1)); done > "$R/pkg/f.txt"
+printf 'base line\nbrand new\n' >> "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] genuine edit past growth" --message "Bead: t-other" --message "Authored-On: $G" 2>&1)
+check "$?" "0" "STALETWOHOP1-growth-passes" "$out" ""
+check "$(git -C "$R" rev-list --count HEAD)" "4" "STALETWOHOP1-growth-landed" "$out" ""
 printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

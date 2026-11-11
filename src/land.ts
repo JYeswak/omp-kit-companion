@@ -1036,6 +1036,11 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 		return patchUnrun(repo, "LAND_ORIGIN_UNAVAILABLE", "Fresh origin/main has no readable commit after fetch", "Restore origin reachability and retry; nothing was committed or published.", owner.owner, paths, null, null);
 	const base = mainRef.out.trim();
 	const localMain = git(repo, ["rev-parse", "refs/heads/main"]).out.trim();
+	// STALETWOHOP1: a --base off fresh origin/main history is refused here,
+	// before any commit is created, instead of letting the stale-worktree
+	// hook refuse the constructed candidate later as COMMIT_CREATION_REFUSED.
+	if (authoredOn !== null && isAncestor(repo, authoredOn, base) !== true)
+		return refused("LAND_BASE_NOT_ANCESTOR", `The --base commit is not on fresh origin/main history: ${authoredOn}`, "Pass the commit the patch was produced from on current origin/main history, or drop --base; nothing was committed or published.");
 	let checkPreflight = preparePushCheck(repo, base);
 	if (checkReplaceable(checkPreflight) && paths.includes(PUSH_CHECK_PATH))
 		checkPreflight = { kind: "skip", result: pushCheckResult("SKIP", "hash_changed", checkPreflight.result.sha256) };

@@ -96,8 +96,8 @@ optional `--base SHA`: the commit the patch was produced from. Land checks
 the patch out on that tree and requires it to apply cleanly there — proof
 the patch was authored on it — then records `Authored-On: SHA` in the
 commit message itself, so the stale-worktree hook judges provenance
-instead of bytes. A patch that does not apply to the base, or an unknown
-base, lands nothing; path mode writes no trailer.
+instead of bytes. `--base` must be an ancestor of (or equal to) fresh `origin/main`, or land refuses as `LAND_BASE_NOT_ANCESTOR` before creating any commit. A patch that does not apply to the base, or an unknown
+ base, lands nothing; path mode writes no trailer.
 
 The patch is limited to 4 MiB. The bytes read and parsed are the bytes applied:
 replacing the file during fetch cannot introduce an unselected hunk.
