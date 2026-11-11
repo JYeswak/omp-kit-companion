@@ -116,6 +116,7 @@ import { runMilestone } from "./milestone.ts";
 import { ccSpool, type CcSpool } from "./cc-spool.ts";
 import { custodyCheckCommand } from "./custody.ts";
 import { intakeCommand } from "./intake-verb.ts";
+import { findImsgBin, notifyBlocked, pollBridge, readBridgeConfig, runBrief, sendReply, type BridgeConfig } from "./imessage-bridge.ts";
 import { looksSecret } from "./mcp-sources.ts";
 import { formatNext, next } from "./next.ts";
 import { agentMailRetentionRoot, retainAgentMailRotations } from "./am-retain.ts";
@@ -163,12 +164,17 @@ const TOOL_GATED_COMMANDS: Record<string, readonly string[]> = {
 	"drain close-queue": ["br"],
 	"drain stale-claims": ["br"],
 	"intake": ["br"],
+	"imessage poll": ["imsg"],
+	"imessage send": ["imsg"],
+	"imessage notify-blocked": ["imsg"],
+	"imessage brief": ["imsg"],
 };
 
 const TOOL_UNAVAILABLE_CODES: Record<string, string> = {
 	"am": "AGENT_MAIL_UNAVAILABLE",
 	"ntm": "NTM_UNAVAILABLE",
 	"tmux": "TMUX_UNAVAILABLE",
+	"imsg": "IMSG_UNAVAILABLE",
 	"rch": "RCH_UNAVAILABLE",
 	"tern": "TERN_UNAVAILABLE",
 	"br": "BR_UNAVAILABLE",
@@ -369,8 +375,9 @@ function parse(args: readonly string[]): ParseResult {
 		if (rest.length) return { failure: refusal("UNEXPECTED_ARGUMENT", "Pass the paths to save after `--`", "Use omp-kit save -m MSG -- PATH...; nothing was committed."), json };
 		if (!flags.has("--help") && typeof flags.get("--message") !== "string") return { failure: refusal("MISSING_VALUE", "save needs -m MSG", "Use omp-kit save -m MSG -- PATH...; nothing was committed."), json };
 		if (!flags.has("--help") && (!childArgs || childArgs.length === 0)) return { failure: refusal("MISSING_ARGUMENT", "save needs `-- PATH...`", "Pass each reserved path after `--`; nothing was committed."), json };
-	} else if (command.name === "send") {
+	} else if (command.name === "send" && !parent) {
 		// Sending keeps exactly three positionals; acknowledgement is a separate, zero-positional operation.
+		// The imessage send subcommand (`imessage send TEXT`) carries one positional and skips this gate.
 		if (!flags.has("--help") && rest.length !== (flags.has("--ack-pending") ? 0 : 3)) {
 			return { failure: refusal("MISSING_ARGUMENT", "send needs SESSION PANE MESSAGE, or --ack-pending RECORD alone",
 				"Run omp-kit help send; nothing was sent or cleared."), json };
@@ -3356,6 +3363,75 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				platform: process.platform, run: defaultRunner, notifySendPresent: Bun.which("notify-send") !== null });
 			return { code: 0, data: { overall: report.verdict, job: job.name, ...report, alert, alerted }, verification: "UNVERIFIED" };
  		}
+		if (job.name === "imessage-bridge") {
+			const started = new Date().toISOString();
+			const fail = (code: number, overall: "OK" | "FINDINGS" | "UNAVAILABLE", receipt: Record<string, unknown>, errors?: { code: string; message: string; remediation: string }[]): CliResult => {
+				lock.release();
+				if (!recordJobReceipt(home, job.name, receipt)) {
+					return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+						errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+							remediation: "Repair the state root; the bridge tick did not record." }], verification: "UNVERIFIED" };
+				}
+				return { code, data: { overall, job: job.name, ...receipt }, ...(errors ? { errors } : {}), verification: "UNVERIFIED" };
+			};
+			const resolved = readBridgeConfig(home);
+			if (!resolved.ok) {
+				return fail(1, "FINDINGS", { started_at: started, finished_at: new Date().toISOString(), exit: 1, omp_version: null, status: resolved.code },
+					[{ code: resolved.code, message: resolved.message, remediation: resolved.remediation }]);
+			}
+			const bin = findImsgBin();
+			if (bin === null) {
+				return fail(3, "UNAVAILABLE", { started_at: started, finished_at: new Date().toISOString(), exit: 3, omp_version: null, status: "IMSG_UNAVAILABLE" },
+					[{ code: "IMSG_UNAVAILABLE", message: "imessage-bridge needs the native imsg binary, which is not on PATH",
+						remediation: "Install imsg (brew install steipete/tap/imsg); the next tick retries. Install itself is unaffected." }]);
+			}
+			const dropDir = join(dirname(jobsDir), "send-drop");
+			const poll = await pollBridge({ home, config: resolved.config, imsgBin: bin,
+				deliver: async text => {
+					const proved = await proveSend({ session: resolved.config.seat, pane: resolved.config.pane, message: text, dropDir,
+						noBeadReason: "imessage-bridge relay of Joshua's iMessage text; not a work dispatch", env: process.env });
+					return { ok: proved.status === "OK" || proved.status === "DELIVERED", marker: proved.marker, code: proved.status };
+				} });
+			if (poll.status !== "OK") {
+				return fail(1, "FINDINGS", { started_at: started, finished_at: new Date().toISOString(), exit: 1, omp_version: null, ...poll.receipt },
+					[{ code: poll.status, message: `imessage-bridge tick ended ${poll.status}`, remediation: "Read the receipt; the cursor still guards redelivery." }]);
+			}
+			return fail(0, "OK", { started_at: started, finished_at: new Date().toISOString(), exit: 0, omp_version: null, ...poll.receipt, markers: poll.markers });
+		}
+		if (job.name === "imessage-brief") {
+			const started = new Date().toISOString();
+			const resolved = readBridgeConfig(home);
+			lock.release();
+			if (!resolved.ok) {
+				const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 1, omp_version: null, status: resolved.code };
+				if (!recordJobReceipt(home, job.name, receipt)) {
+					return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+						errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+							remediation: "Repair the state root; the brief did not record." }], verification: "UNVERIFIED" };
+				}
+				return refusal(resolved.code, resolved.message, resolved.remediation);
+			}
+			const bin = findImsgBin();
+			if (bin === null) {
+				const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 3, omp_version: null, status: "IMSG_UNAVAILABLE" };
+				recordJobReceipt(home, job.name, receipt);
+				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name, receipt },
+					errors: [{ code: "IMSG_UNAVAILABLE", message: "imessage-brief needs the native imsg binary, which is not on PATH",
+						remediation: "Install imsg (brew install steipete/tap/imsg); the next tick retries." }], verification: "UNVERIFIED" };
+			}
+			const brief = runBrief({ home, config: resolved.config, imsgBin: bin });
+			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: brief.sent ? 0 : 1, omp_version: null, ...brief.receipt, counts: brief.counts };
+			if (!recordJobReceipt(home, job.name, receipt)) {
+				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+						remediation: "Repair the state root; the brief did not record." }], verification: "UNVERIFIED" };
+			}
+			if (!brief.sent) {
+				return { code: 1, data: { overall: "FINDINGS", job: job.name, ...brief.receipt, counts: brief.counts, receipt },
+					errors: [{ code: String(brief.receipt.status), message: "The daily brief was not sent", remediation: "Read the receipt; nothing was recorded." }], verification: "UNVERIFIED" };
+			}
+			return { code: 0, data: { overall: "OK", job: job.name, ...brief.receipt, counts: brief.counts, keys: brief.keys, receipt }, verification: "UNVERIFIED" };
+		}
  		if (job.name === "ci-poller") {
  			const stateDir = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
  			const cachePath = join(stateDir, "omp-kit", CACHE_NAME);
@@ -4022,6 +4098,94 @@ async function infraCommand(request: ParsedCommand): Promise<CliResult> {
 for (const subcommand of ["list", "install", "uninstall", "status", "doctor", "logs", "run"]) registerCommandHandler(`service ${subcommand}`, serviceCommand);
 registerCommandHandler("load watch", loadWatchCommand);
 registerCommandHandler("send", sendCommand);
+
+/** IMSGCHIEF1: shared resolve for the imessage verbs: absolute HOME, state root, config, imsg. */
+function imessageBase(request: ParsedCommand): { home: string; stateRoot: string; config: BridgeConfig; imsgBin: string } | CliResult {
+	let home: string;
+	try {
+		home = serviceHome();
+	} catch {
+		return { code: 3, data: { overall: "UNAVAILABLE" },
+			errors: [{ code: "HOME_UNAVAILABLE", message: "imessage needs an absolute HOME", remediation: "Run with an absolute HOME; nothing was delivered." }], verification: "UNAVAILABLE" };
+	}
+	const stateRoot = receiptStateRoot();
+	if (!stateRoot) {
+		return { code: 3, data: { overall: "UNAVAILABLE" },
+			errors: [{ code: "INVALID_STATE_ROOT", message: "A canonical absolute HOME and state root are required", remediation: "Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset; nothing was delivered." }], verification: "UNAVAILABLE" };
+	}
+	const resolved = readBridgeConfig(home);
+	if (!resolved.ok) return refusal(resolved.code, resolved.message, resolved.remediation);
+	const imsgBin = findImsgBin();
+	if (imsgBin === null) {
+		return { code: 3, data: { overall: "UNAVAILABLE" },
+			errors: [{ code: "IMSG_UNAVAILABLE", message: `${request.command.name} needs the native imsg binary, which is not on PATH`,
+				remediation: "Install imsg (brew install steipete/tap/imsg), then re-run; nothing was delivered." }], verification: "NOT_RUN" };
+	}
+	return { home, stateRoot, config: resolved.config, imsgBin };
+}
+
+function imessageDeliver(stateRoot: string, config: BridgeConfig): (text: string) => Promise<{ ok: boolean; marker: string; code: string }> {
+	const dropDir = join(stateRoot, "send-drop");
+	return async text => {
+		const proved = await proveSend({ session: config.seat, pane: config.pane, message: text, dropDir,
+			noBeadReason: "imessage-bridge relay of Joshua's iMessage text; not a work dispatch", env: process.env });
+		return { ok: proved.status === "OK" || proved.status === "DELIVERED", marker: proved.marker, code: proved.status };
+	};
+}
+
+async function imessagePollCommand(request: ParsedCommand): Promise<CliResult> {
+	const base = imessageBase(request);
+	if (!("config" in base)) return base;
+	const poll = await pollBridge({ home: base.home, config: base.config, imsgBin: base.imsgBin, deliver: imessageDeliver(base.stateRoot, base.config) });
+	if (poll.status !== "OK") {
+		return { code: 1, data: { overall: "FINDINGS", command: "imessage poll", ...poll.receipt },
+			errors: [{ code: poll.status, message: `imessage poll ended ${poll.status}`, remediation: "Read the receipt fields; the cursor still guards redelivery." }], verification: "UNVERIFIED" };
+	}
+	return { code: 0, data: { overall: "OK", command: "imessage poll", ...poll.receipt, markers: poll.markers }, verification: "UNVERIFIED" };
+}
+
+async function imessageSendCommand(request: ParsedCommand): Promise<CliResult> {
+	const base = imessageBase(request);
+	if (!("config" in base)) return base;
+	const text = request.argument ?? "";
+	const reply = sendReply({ home: base.home, config: base.config, imsgBin: base.imsgBin, text });
+	if (!reply.sent) {
+		return { code: 1, data: { overall: "FINDINGS", command: "imessage send", ...reply.receipt },
+			errors: [{ code: String(reply.receipt.status), message: "The reply was not sent", remediation: "Read the receipt; the lead text is unchanged and nothing was recorded." }], verification: "UNVERIFIED" };
+	}
+	return { code: 0, data: { overall: "OK", command: "imessage send", ...reply.receipt }, verification: "UNVERIFIED" };
+}
+
+async function imessageNotifyCommand(request: ParsedCommand): Promise<CliResult> {
+	const base = imessageBase(request);
+	if (!("config" in base)) return base;
+	const key = request.flags.get("--key");
+	const text = request.flags.get("--text");
+	if (typeof key !== "string" || typeof text !== "string") {
+		return refusal("MISSING_ARGUMENT", "notify-blocked needs --key KEY and --text TEXT", "Run omp-kit imessage notify-blocked --key KEY --text TEXT --json; nothing was pushed.");
+	}
+	const pushed = notifyBlocked({ home: base.home, config: base.config, imsgBin: base.imsgBin, key, text });
+	if (!pushed.sent && !pushed.deduped) {
+		return { code: 1, data: { overall: "FINDINGS", command: "imessage notify-blocked", ...pushed.receipt },
+			errors: [{ code: String(pushed.receipt.status), message: "The blocked push was not sent", remediation: "Read the receipt; the key is undeduped so the next tick retries." }], verification: "UNVERIFIED" };
+	}
+	return { code: 0, data: { overall: "OK", command: "imessage notify-blocked", ...pushed.receipt }, verification: "UNVERIFIED" };
+}
+
+async function imessageBriefCommand(request: ParsedCommand): Promise<CliResult> {
+	const base = imessageBase(request);
+	if (!("config" in base)) return base;
+	const brief = runBrief({ home: base.home, config: base.config, imsgBin: base.imsgBin });
+	if (!brief.sent) {
+		return { code: 1, data: { overall: "FINDINGS", command: "imessage brief", ...brief.receipt, counts: brief.counts },
+			errors: [{ code: String(brief.receipt.status), message: "The daily brief was not sent", remediation: "Read the receipt; nothing was recorded." }], verification: "UNVERIFIED" };
+	}
+	return { code: 0, data: { overall: "OK", command: "imessage brief", ...brief.receipt, counts: brief.counts, keys: brief.keys }, verification: "UNVERIFIED" };
+}
+registerCommandHandler("imessage poll", imessagePollCommand);
+registerCommandHandler("imessage send", imessageSendCommand);
+registerCommandHandler("imessage notify-blocked", imessageNotifyCommand);
+registerCommandHandler("imessage brief", imessageBriefCommand);
 
 function shaCommand(request: ParsedCommand): CliResult {
 	const sha = request.argument ?? "";

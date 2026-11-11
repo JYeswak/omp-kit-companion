@@ -153,6 +153,14 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	// Native body in `service run tool-update` (tools update --apply with high-load swap deferral), not operator
 	// data: the supervisor path is `service run tool-update` and the service-run single-flight lock serializes ticks.
 	"tool-update": { name: "tool-update", label: "com.omp-kit.tool-update", kind: "interval", intervalSeconds: 21600, runAtLoad: false, lockedRun: true },
+	// IMSGCHIEF1 (ompkit-1ra0d.161): opt-in iMessage relay. Every 60 s the native
+	// `service run imessage-bridge` body polls Joshua's configured handle and delivers
+	// new messages to the lead seat; absent `imsg` the tick reports UNAVAILABLE.
+	// lockedRun serializes ticks with hand `imessage poll` runs under the same lock.
+	"imessage-bridge": { name: "imessage-bridge", label: "com.omp-kit.imessage-bridge", kind: "interval", intervalSeconds: 60, runAtLoad: false, lockedRun: true },
+	// IMSGCHIEF1 daily brief: the native `service run imessage-brief` body sends one
+	// summary message; the daily cadence anchors at install (no wall-clock key here).
+	"imessage-brief": { name: "imessage-brief", label: "com.omp-kit.imessage-brief", kind: "interval", intervalSeconds: 86400, runAtLoad: false, lockedRun: true },
 };
 
 /** A claude-save run receipt, `claude-save-<runId>.json`, directly in the kit state root. */

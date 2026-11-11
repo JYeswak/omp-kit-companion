@@ -1042,6 +1042,18 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--director-seat", value: "SEAT", description: "ROUTE target fallback when the roster names no director" },
 		{ name: "--worker-seat", value: "SEAT", description: "ROUTE target fallback when the roster names no worker" },
 	], example: "omp-kit intake --from joshua --text 'fix this test' --seat chief --json", runnable: false, mutation: true, dataSchema: intakeData },
+	{ name: "imessage", description: "Opt-in iMessage relay for Joshua's handle: poll inbound text into the lead seat, reply, push deduplicated blocked-item alerts, send the daily brief", usage: "imessage poll|send TEXT|notify-blocked --key KEY --text TEXT|brief", flags: [], subcommands: [
+		{ name: "poll", description: "Deliver new messages from the configured handle to the lead seat; other senders are dropped and logged by hash", usage: "imessage poll", flags: [],
+		example: "omp-kit imessage poll --json", runnable: false, dataSchema: { type: "object", required: ["overall"], properties: { overall: { type: "string" } } } },
+		{ name: "send", description: "Reply to the configured handle through imsg send", usage: "imessage send TEXT", argument: "TEXT", flags: [],
+		example: "omp-kit imessage send 'on it' --json", runnable: false, mutation: true, dataSchema: { type: "object", required: ["overall"], properties: { overall: { type: "string" } } } },
+		{ name: "notify-blocked", description: "Push one iMessage per blocking key; a repeated key sends nothing", usage: "imessage notify-blocked --key KEY --text TEXT", flags: [
+			{ name: "--key", value: "KEY", description: "Dedupe key for the blocking item" },
+			{ name: "--text", value: "TEXT", description: "Push text" },
+		], example: "omp-kit imessage notify-blocked --key bead-1 --text 'blocked on you' --json", runnable: false, mutation: true, dataSchema: { type: "object", required: ["overall"], properties: { overall: { type: "string" } } } },
+		{ name: "brief", description: "Send the daily bridge summary to the configured handle now", usage: "imessage brief", flags: [],
+		example: "omp-kit imessage brief --json", runnable: false, mutation: true, dataSchema: { type: "object", required: ["overall"], properties: { overall: { type: "string" } } } },
+	], example: "omp-kit imessage poll --json", runnable: false, dataSchema: { type: "object", required: ["overall"], properties: { overall: { type: "string" } } } },
 	{ name: "infra", description: "Pin, check and promote the toolchain the gates run on (test before upgrade, human promotes); plan and verify machine tool/library upgrades against fleet pins and installed dependents", usage: "infra pin|check|promote|undo|upgrade-plan|upgrade-verify", flags: [], subcommands: [
 		{ name: "upgrade-plan", description: "Before upgrading a machine tool or library: list every fleet repo pin (.bun-version/.node-version/.nvmrc/.tool-versions, package.json engines and packageManager, rch --require-tool, rust-toolchain) and every installed dependent (brew uses --installed); refuse naming each pin the --pin-plan does not cover", usage: "infra upgrade-plan --tool NAME [--pin-plan TEXT] [--repo PATH]...", flags: [
 			{ name: "--tool", value: "NAME", description: "Tool or Homebrew formula about to be upgraded" },

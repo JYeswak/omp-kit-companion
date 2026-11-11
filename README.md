@@ -241,11 +241,11 @@ mapping fields, activation commands and read-only verification.
 
 ### Service jobs and kit updates
 
-19 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
-`load-watch`, `ci-poller`, `fleet-flush`; 300 s:
+21 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
+`load-watch`, `ci-poller`, `fleet-flush`, `imessage-bridge`; 300 s:
 `kit-update`, `close-pass`; hourly: `claude-save`, [`am-retain`](docs/service-contract.md#agent-mail-retention),
 `session-retain`, `cache-retain`, `autocut`; 6 h: `scratch-reaper`,
-`fleet-lessons`, `tool-update`; daily: `cc-compress`, `skill-mine`; weekly: `gate-rationalize`; daemon: `cc`.
+`fleet-lessons`, `tool-update`; daily: `cc-compress`, `skill-mine`, `imessage-brief`; weekly: `gate-rationalize`; daemon: `cc`.
 Install previews a diff first, keeps a backup, and retires installed lifecycle definitions.
 
 ```sh
@@ -496,15 +496,13 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit custody` | `custody check --repo PATH [--agent NAME] [--reserve [--ttl SECONDS] [--reason TEXT]] PATH` | Answer whether one repo-relative path may be edited, from git and reservations | `omp-kit custody check --repo /path/to/repo --json doc/README.md` |
 | `omp-kit beads` | `beads migrate [--apply --yes]` | Lossless non-author repair | `omp-kit beads migrate --actor Reviewer` |
 | `omp-kit intake` | `intake --from joshua --text TEXT --seat SEAT [--kind rule\|work]` | Record one request, resolve the receiving seat's role, print DO or ROUTE | `omp-kit intake --from joshua --text 'fix this test' --seat chief --json` |
-| `omp-kit fleet` | `fleet flush-pending [--apply --yes]` | Find idle panes with queued input and frozen turns; `--apply` submits only safe queued bands | `omp-kit fleet flush-pending --json` |
-| `omp-kit fleet` | `fleet respawn [--panes SESSION:W.P,...] [--apply --yes]` | Report panes whose omp predates the latest applied relink; `--apply` respawns named idle panes with `--resume`, strictly serially; busy, frozen, dirty, holding and sessionless panes never touched | `omp-kit fleet respawn --json` |
-| `omp-kit scratch` | `scratch plan\|release DIR\|apply [--apply --yes]` | Release, quarantine and delete scratch; idle 72 h goes to quarantine, quarantine expires after 7 days | `omp-kit scratch plan --json` |
-| `omp-kit scratch` | `scratch index-lock --repo DIR` | HELD: pid/command. Orphan helpers >30 min: start time, report only. `--reap --yes` renames; `--apply` refused | `omp-kit scratch index-lock --repo /repo --json` |
+| `omp-kit imessage` | `imessage poll\|send TEXT\|notify-blocked\|brief` | Poll Joshua's handle into the lead seat (others dropped by hash); reply, push once per key, brief | `omp-kit imessage poll --json` |
+| `omp-kit fleet` | `fleet flush-pending\|respawn [--apply --yes] [--panes SESSION:W.P,...]` | Idle panes with queued input and frozen turns; panes whose omp predates the latest relink (`--apply` respawns named idle panes with `--resume`, strictly serially; busy, frozen, dirty, holding and sessionless panes never touched) | `omp-kit fleet flush-pending --json` |
+| `omp-kit scratch` | `scratch plan\|release DIR\|index-lock --repo DIR [--apply --yes]` | Release, quarantine and delete scratch (idle 72 h to quarantine, 7-day expiry); index-lock reports HELD pid/command and >30 min orphan helpers (`--reap --yes` renames; `--apply` refused) | `omp-kit scratch plan --json` |
 | `omp-kit tern` | `tern catalog\|doctor\|ctl\|script\|native\|api\|sdk\|coverage\|surface\|render` | [Native SDK/control integration](docs/tern-integration.md): context-bound Luau, drift, wire codecs; explicit targets | `omp-kit tern catalog --filter cx.agents` |
 | `omp-kit tern-ref` | `tern-ref build\|query\|validate\|drift [--root DIR]` | Version-pinned local Tern Plugin SDK reference, with blind-label eval and drift re-index | `omp-kit tern-ref query --query 'restyle without rebuild'` |
 | `omp-kit infra` | `infra pin\|check\|promote\|undo\|upgrade-plan\|upgrade-verify` | Pin, test, promote toolchain; gate machine upgrades | `omp-kit infra pin --json` |
-| `omp-kit ci` | `ci status` | Cached CI status per repo; `UNAVAILABLE` when the cache is older than 180 s | `omp-kit ci status --json` |
-| `omp-kit ci wait` | `ci wait --repo OWNER/REPO --sha SHA [--workflow NAME] [--since ISO8601] [--timeout-s N]` | Cache events only; exits 0 success, 1 failure, 3 timeout with age and last row | `omp-kit ci wait --repo owner/repo --sha abc1234 --json` |
+| `omp-kit ci` | `ci status\|wait --repo OWNER/REPO --sha SHA [--workflow NAME] [--since ISO8601] [--timeout-s N]` | Cached CI status per repo (`UNAVAILABLE` past 180 s); wait reads cache events only, exits 0 success, 1 failure, 3 timeout with age and last row | `omp-kit ci status --json` |
 | `omp-kit examples` | `examples [memory-off\|mnemopi-manual\|model-roles\|mcp\|omp-watch\|skill-set --from-history DAYS]` | Read-only profile recipes; never activates a profile | `omp-kit examples skill-set --from-history 7 --json` |
 | `omp-kit quickstart` | `quickstart` | Safe first commands and their limits | `omp-kit quickstart` |
 | `omp-kit help` | `help [TOPIC]` | Grammar for a command | `omp-kit help update` |
@@ -525,11 +523,12 @@ Use repeatable `--done` for explicit reports.
 | `repair --scope rules` / `policy` / `extensions` | Reversible repair (`github` unsupported: `UNSUPPORTED_REPAIR_SCOPE`) | `omp-kit repair --scope policy --plan --json` |
 | `repair --scope state` | Restore the private state root to mode 0700, nothing else | `omp-kit repair --scope state --plan --json` |
 | `service list` / `status [JOB\|--all]` | Known jobs with installed and loaded state. `loaded` true with `installed` false means the label runs from another install | `omp-kit service status --all --json` |
-| `service install JOB` | Render, diff, back up, bootstrap, verify; `--replace` takes over a label loaded from another plist; needs `$HOME/.local/bin/omp-kit` first (copied from the installed kit as above), else `LAUNCHER_UNAVAILABLE` | `omp-kit service install omp-watch --dry-run --json` |
+| `service install JOB` | Render, diff, back up, bootstrap, verify; `--replace` takes over a label loaded from another plist; needs `$HOME/.local/bin/omp-kit` first, else `LAUNCHER_UNAVAILABLE` | `omp-kit service install omp-watch --dry-run --json` |
 | `service uninstall JOB` | Bootout and move the plist to backup; `--purge-logs` deletes logs | `omp-kit service uninstall omp-watch --apply --yes --json` |
 | `service doctor [JOB\|--all]` | Read-only checks; `--fix --apply --yes` reinstalls drifted jobs and rotates logs | `omp-kit service doctor --all --json` |
 | `service logs JOB` | Print out or err logs (`--errors`, `-n N`) | `omp-kit service logs omp-watch -n 50` |
 | `service run JOB` | Run one job now and write a receipt | `omp-kit service run omp-watch --json` |
+| `imessage poll` | Deliver new handle messages; others dropped by hash; no redelivery on restart | `omp-kit imessage poll --json` |
 | `infra pin` | Pinned toolchain versions and drift (`--file PATH`) | `omp-kit infra pin --json` |
 | `infra check` | Run the ladder with a candidate binary first on PATH: `PASS`, `FAIL`, `INCONCLUSIVE`; refuses above 1.5x cores unless `--wait` or `--force` | `omp-kit infra check --tool bun --candidate X.Y.Z --binary /abs/bun --json` |
 | `infra promote` | Certify a checked candidate into the pin file (`--human --apply --yes`) | `omp-kit infra promote --tool bun --candidate X.Y.Z --binary /abs/bun --human --apply --yes` |
