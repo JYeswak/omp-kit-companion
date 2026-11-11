@@ -791,6 +791,21 @@ export function luaCharCodes(text: string): string {
 	for (const b of Buffer.from(text, "utf8")) codes.push(b);
 	return codes.join(",");
 }
+/** Max byte codes per `string.char` call: carly's Lua caps a call at 255 registers (WAKELUAREG1). */
+const LUA_CHAR_CHUNK = 100;
+/**
+ * One `table.insert(var, string.char(...))` statement per <=100-byte chunk of the text's UTF-8 bytes.
+ * `string.char` works on bytes, so splitting a multibyte char across chunks is fine: `table.concat`
+ * restores the exact bytes. Emits nothing for empty text (`table.concat({})` is `""`).
+ */
+function luaCharInserts(varName: string, text: string): string[] {
+	const bytes = Buffer.from(text, "utf8");
+	const lines: string[] = [];
+	for (let i = 0; i < bytes.length; i += LUA_CHAR_CHUNK) {
+		lines.push(`table.insert(${varName}, string.char(${[...bytes.subarray(i, i + LUA_CHAR_CHUNK)].join(",")}))`);
+	}
+	return lines;
+}
 
 /**
  * Tern 0.9.12 AgentsCx native queue, exposed through Carly's Lua control.
@@ -800,9 +815,13 @@ export function luaCharCodes(text: string): string {
 export function buildNativeSendTurn(block: string, payload: string): string | null {
 	if (!/^[0-9]+$/.test(block)) return null;
 	return [
-		`local blk = string.char(${luaCharCodes(block)})`,
+		`local b = {}`,
+		...luaCharInserts("b", block),
+		`local blk = table.concat(b)`,
 		`local agent = cx.agents:get(blk)`,
-		`cx.agents:ask(agent, string.char(${luaCharCodes(payload)}))`,
+		`local p = {}`,
+		...luaCharInserts("p", payload),
+		`cx.agents:ask(agent, table.concat(p))`,
 	].join("\n");
 }
 
@@ -1306,10 +1325,11 @@ export function acknowledgeTernPending(path: string, dropDir: string, now = Date
  * REFUSED (zero effects, decided before any actuation).
  *
  * Actuation transport lessons (verified live 2026-10-16 on owned panes):
- * the turn travels as one plain argv string; the payload rides as
- * `string.char(...)` byte codes so no text can disturb parsing; the block
- * is the bare decimal pane id. Tern binary resolves from `TERN_CTL_BIN` or
- * `$HOME/.local/bin/tern`.
+ * the turn travels as one plain argv string; the payload rides as chunked
+ * `string.char(...)` byte codes (<=100 per call: carly's Lua caps a call at
+ * 255 registers, WAKELUAREG1) assembled with `table.insert`/`table.concat`
+ * so no text can disturb parsing; the block is the bare decimal pane id.
+ * Tern binary resolves from `TERN_CTL_BIN` or `$HOME/.local/bin/tern`.
  */
 export async function deliverToTernSeat(input: {
 	seat: TernSeatBinding;

@@ -1,0 +1,1 @@
+- Native `tern ctl carly lua` sends of payloads longer than ~250 bytes no longer fail to compile (`Out of registers ... limit: 255`): the turn now carries the payload and block id as `table.insert(..., string.char(...))` chunks of at most 100 bytes reassembled with `table.concat`, so long wakes queue byte-exact, including multibyte UTF-8, `]]`, quotes, `#`, and newlines.

@@ -9,7 +9,7 @@ import { classifyTernObservation, parseSessionJournal, readSessionTail, sessionV
 import type { TernIdentityResult, TernObservation, TernObserverIo, TernSeatBinding } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
-import { fixtureDeadlineS } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
@@ -405,11 +405,11 @@ function ternDropDir(): string {
 	return dir;
 }
 
-/** The payload the native turn would emit: the last string.char(...) group, decoded. */
+/** The payload the native turn would emit: every string.char(...) group past the block id, decoded and joined. */
 function sentPayload(argv: string[]): string {
 	const groups = [...argv.join("\n").matchAll(/string\.char\(([0-9,]+)\)/g)];
-	const last = groups.length > 0 ? groups[groups.length - 1]![1]! : "";
-	return Buffer.from(last.split(",").map(Number)).toString("utf8");
+	const bytes = groups.slice(1).flatMap((m) => m[1]!.split(",").map(Number));
+	return Buffer.from(bytes).toString("utf8");
 }
 
 interface TernFake {
@@ -572,7 +572,7 @@ test("SENDX1 on Tern: the native turn targets only the configured window and pan
 	expect(r.status).toBe("OK");
 	const carly = fake.runs.find((argv) => argv.includes("carly"))!;
 	expect(carly.slice(1, 6)).toEqual(["--window", "W", "ctl", "carly", "lua"]);
-	expect(carly[6]!.startsWith(`local blk = string.char(${luaCharCodes("7")})\n`)).toBe(true);
+	expect(carly[6]!.startsWith("local b = {}\ntable.insert(b, string.char(55))\nlocal blk = table.concat(b)\n")).toBe(true);
 	expect(new Set(fake.reads)).toEqual(new Set(["/sf"]));
 });
 
@@ -646,7 +646,7 @@ test("TERN2.4 brackets: payload with ]] proceeds to the turn byte-exact", async 
 test("NATIVESEND1 builder: exact native agent target and encoded payload; malformed targets refuse", () => {
 	const turn = buildNativeSendTurn("1756641624115", "hello ]] world ✓")!;
 	expect(turn).toContain("cx.agents:get(blk)");
-	expect(turn).toContain("cx.agents:ask(agent, string.char(");
+	expect(turn).toContain("cx.agents:ask(agent, table.concat(p))");
 	expect(sentPayload([turn])).toBe("hello ]] world ✓");
 	expect(buildNativeSendTurn("s/p", "hello")).toBeNull();
 	expect(buildNativeSendTurn('7"; evil() --', "hello")).toBeNull();
@@ -657,6 +657,33 @@ test("TERN2.4 luaCharCodes: byte-exact round trip incl multibyte", () => {
 	expect(luaCharCodes("A,B?C")).toBe("65,44,66,63,67");
 	const s = "hi ✓\n";
 	expect(Buffer.from(luaCharCodes(s).split(",").map(Number)).toString("utf8")).toBe(s);
+});
+
+test.skipIf(Bun.which("lua") === null)("WAKELUAREG1: a 2,000-byte payload with multibyte/]]/quotes/#/newlines compiles and runs byte-exact", async () => {
+	const unit = "a✓b\"c#d]]e\nf";
+	const repeats = 142;
+	const payload = unit.repeat(repeats) + "x".repeat(2000 - Buffer.byteLength(unit.repeat(repeats), "utf8"));
+	expect(Buffer.byteLength(payload, "utf8")).toBe(2000);
+	const turn = buildNativeSendTurn("1756641624115", payload)!;
+	expect(turn.includes("..")).toBe(false);
+	expect(turn.includes("#")).toBe(false);
+	const calls = [...turn.matchAll(/string\.char\(([0-9,]*)\)/g)];
+	expect(calls.length).toBeGreaterThan(1);
+	for (const m of calls) {
+		const args = m[1] === "" ? [] : m[1]!.split(",");
+		expect(args.length).toBeLessThanOrEqual(100);
+		expect(args.length).toBeGreaterThan(0);
+	}
+	// Planted negative: the old single-call encoding of the same payload does not compile on carly's Lua.
+	const oldSrc = `return string.char(${[...Buffer.from(payload, "utf8")].join(",")})`;
+	const oldCheck = await runFixtureAsync(["lua", "-e", `assert(load([[${oldSrc}]]))`], { cwd: scratch });
+	expect(oldCheck.rc).not.toBe(0);
+	expect(new TextDecoder().decode(oldCheck.stderr).toLowerCase()).toContain("registers");
+	// The chunked turn runs under real Lua and emits the payload bytes exactly.
+	const stub = "cx = { agents = { get = function(_, b) return b end, ask = function(_, a, s) io.write(s) end } }\n";
+	const ran = await runFixtureAsync(["lua", "-"], { cwd: scratch, stdin: stub + turn });
+	expect(ran.rc).toBe(0);
+	expect(Buffer.compare(Buffer.from(ran.stdout), Buffer.from(payload, "utf8"))).toBe(0);
 });
 
 test("TERN2.4 F5: a failed dispatch is ambiguous (PENDING_CONSUME, sends 1), never NOT_DELIVERED; pending retained", async () => {
