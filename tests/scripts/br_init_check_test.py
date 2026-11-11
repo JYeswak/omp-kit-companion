@@ -40,6 +40,15 @@ class JavaScriptCalls(unittest.TestCase):
         self.assertEqual(active("ts", 'run(["br", "create"], { env: process.env });'), [(1, "inherited-br-call")])
         self.assertEqual(active("ts", 'run(["br", "create"], { env: { BEADS_DB: join(dir, ".beads", "beads.db") } });'), [])
 
+    def test_caller_selected_gate_list_read_passes(self) -> None:
+        self.assertEqual(active("ts", 'run(["br", "gate", "list", bead, "--json"], { cwd: repo, env });'), [(1, "inherited-br-call")])
+        bound = ('const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];\n'
+                 'const listed = await run(["br", "gate", "list", bead, "--json", ...db], { cwd: repo, env });')
+        self.assertEqual(active("ts", bound), [])
+        write = ('const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];\n'
+                 'await run(["br", "gate", "report", bead, "--gate", "min_reviewers", "--provider", "reviewer:Peer", ...db], { cwd: repo, env });')
+        self.assertEqual(active("ts", write), [(2, "inherited-br-call")])
+
     def test_non_init_br_wrappers_are_not_init_sites(self) -> None:
         self.assertEqual(active("ts", 'spawnSync("br", [...args, "--db", database], { cwd });'), [])
 

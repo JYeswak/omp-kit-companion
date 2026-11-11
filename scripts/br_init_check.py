@@ -425,7 +425,9 @@ def _js_selected_db_read(code: str, strings: Dict[int, Tuple[str, int, bool]],
     if len(argv) < 2 or _literal(strings, argv[0]) != "br" or len(arguments) != 2:
         return False
     command = _literal(strings, argv[1])
-    if command == "comments":
+    # VERIFYGATE1: `br gate list` is a metadata read like `br comments list`; any other gate
+    # subcommand (notably `gate report`, a write) stays refused without a fixture binding.
+    if command in {"comments", "gate"}:
         if len(argv) < 3 or _literal(strings, argv[2]) != "list":
             return False
     elif command not in {"show", "list", "ready", "blocked", "stats", "count", "where", "info"}:
