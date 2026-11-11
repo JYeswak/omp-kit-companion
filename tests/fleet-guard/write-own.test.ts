@@ -8,8 +8,9 @@ import { join, relative } from "node:path";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
 import { resolveFilesystemWriteTarget, writeScratchOwner } from "../../src/fleet-guard/scratch.ts";
 
-// WRITEOWN1 (ompkit-vf33j): in an opted-in canonical checkout every write outside var/agent-tmp needs the caller's
-// live exclusive Agent Mail reservation, read through the same `am robot reservations` lookup `git commit --only` uses.
+// WRITEOWN1 (ompkit-vf33j) + WRITEOWNCHILD1 (ompkit-1ra0d.126): in an opted-in canonical checkout every write outside
+// var/agent-tmp needs the caller's live exclusive Agent Mail reservation, read through the same `am robot reservations`
+// lookup `git commit --only` uses — or the guard auto-reserves the free path for the seat itself and admits the write.
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
 const scratch = realpathSync(ownedTmp("fleet-guard-writeown", { root: scratchRoot }).path);
@@ -38,9 +39,69 @@ writeScratchOwner(owned, { pid: process.pid, label: "own", repo, created: new Da
 // Test seam for the Agent Mail CLI only: the guard's real spawn, attestation and hold parsing run unchanged.
 const fixtureBin = join(scratch, "bin");
 mkdirSync(fixtureBin, { recursive: true });
-writeFileSync(join(fixtureBin, "am"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AM_FIXTURE_CALLS\"\nif [ \"$AM_FIXTURE_MODE\" = \"fail\" ]; then echo 'connection refused' >&2; exit 1; fi\nif [ -n \"$AM_FIXTURE_AGENT_MISSING\" ]; then\n  for a in \"$@\"; do\n    if [ \"$prev\" = \"--agent\" ] && [ \"$a\" = \"$AM_FIXTURE_AGENT_MISSING\" ]; then echo \"error: invalid argument: agent not found: $a\" >&2; exit 1; fi\n    prev=\"$a\"\n  done\n  prev=\"\"\nfi\nif [ -n \"$AM_FIXTURE_AGENT\" ]; then\n  for a in \"$@\"; do\n    if [ \"$prev\" = \"--agent\" ] && [ \"$a\" = \"$AM_FIXTURE_AGENT\" ]; then printf '%s' \"$AM_FIXTURE_AGENT_RESPONSE\"; exit 0; fi\n    prev=\"$a\"\n  done\nfi\nif [ -n \"$AM_FIXTURE_PROJECT\" ]; then\n  project=\"\"\n  while [ \"$#\" -gt 0 ]; do\n    if [ \"$1\" = \"--project\" ]; then project=\"$2\"; break; fi\n    shift\n  done\n  if [ \"$project\" != \"$AM_FIXTURE_PROJECT\" ]; then printf '%s' \"$AM_FIXTURE_OTHER_RESPONSE\"; exit 0; fi\nfi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n");
+writeFileSync(join(fixtureBin, "am"), "#!" + process.execPath + "\n" + [
+"import { appendFileSync, existsSync, readFileSync } from 'node:fs';",
+"const calls = process.env.AM_FIXTURE_CALLS || '';",
+"const journalPath = process.env.AM_FIXTURE_JOURNAL || '';",
+"const args = process.argv.slice(2);",
+"if (calls !== '') appendFileSync(calls, args.join(' ') + '\\n');",
+"if (process.env.AM_FIXTURE_MODE === 'fail') { console.error('connection refused'); process.exit(1); }",
+"function flag(name) { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; }",
+"function journaled(base) {",
+"  let response;",
+"  try { response = JSON.parse(base); } catch (e) { return base; }",
+"  if (journalPath === '' || !existsSync(journalPath)) return JSON.stringify(response);",
+"  const project = flag('--project') || '';",
+"  const agent = flag('--agent') || '';",
+"  const mine = Array.isArray(response.my_reservations) ? response.my_reservations.slice() : [];",
+"  const all = Array.isArray(response.all_active) ? response.all_active.slice() : [];",
+"  const lines = readFileSync(journalPath, 'utf8').split('\\n');",
+"  for (const line of lines) {",
+"    const parts = line.split('|');",
+"    if (parts.length < 3 || parts[0] === '' || parts[0] !== project) continue;",
+"    const row = { agent: parts[1], path: parts[2], exclusive: true, remaining_seconds: 3600 };",
+"    if (parts[1] === agent) mine.push(row);",
+"    all.push(row);",
+"  }",
+"  response.my_reservations = mine;",
+"  response.all_active = all;",
+"  return JSON.stringify(response);",
+"}",
+"if (args[0] === 'file_reservations' && args[1] === 'reserve') {",
+"  const agent = args[3] || '';",
+"  const missing = process.env.AM_FIXTURE_AGENT_MISSING || '';",
+"  if (missing !== '' && agent === missing) { console.error('error: invalid argument: agent not found: ' + agent); process.exit(1); }",
+"  const paths = []; let reason = ''; let exclusive = true;",
+"  for (let i = 4; i < args.length; i++) {",
+"    const a = args[i] || '';",
+"    if (a === '--ttl') { i++; continue; }",
+"    if (a === '--reason') { reason = args[i + 1] || ''; i++; continue; }",
+"    if (a === '--shared') { exclusive = false; continue; }",
+"    if (a.indexOf('--') === 0) continue;",
+"    paths.push(a);",
+"  }",
+"  if (journalPath !== '') for (const p of paths) appendFileSync(journalPath, (args[2] || '') + '|' + agent + '|' + p + '\\n');",
+"  const granted = paths.map((p, n) => ({ id: n + 1, path_pattern: p, exclusive, reason, expires_ts: '2030-01-01T00:00:00.000Z' }));",
+"  process.stdout.write(JSON.stringify({ granted, conflicts: [] }));",
+"  process.exit(0);",
+"}",
+"const agent = flag('--agent') || '';",
+"const missing = process.env.AM_FIXTURE_AGENT_MISSING || '';",
+"if (missing !== '' && agent === missing) { console.error('error: invalid argument: agent not found: ' + agent); process.exit(1); }",
+"const perAgent = process.env.AM_FIXTURE_AGENT || '';",
+"if (perAgent !== '' && agent === perAgent) { process.stdout.write(journaled(process.env.AM_FIXTURE_AGENT_RESPONSE || '')); process.exit(0); }",
+"const onlyProject = process.env.AM_FIXTURE_PROJECT || '';",
+"const project = flag('--project') || '';",
+"if (onlyProject !== '' && project !== onlyProject) { process.stdout.write(journaled(process.env.AM_FIXTURE_OTHER_RESPONSE || '')); process.exit(0); }",
+"process.stdout.write(journaled(process.env.AM_FIXTURE_RESPONSE || ''));",
+].join('\n') + '\n');
 chmodSync(join(fixtureBin, "am"), 0o755);
+// The reserve reason reads the seat's held bead from the target tracker; the stub answers no bead (and never
+// hangs), so shared assertions stay reason-agnostic while the reason itself is pinned in src/fleet-guard/write-own.test.ts.
+writeFileSync(join(fixtureBin, "br"), "#!/bin/sh\nexit 1\n");
+chmodSync(join(fixtureBin, "br"), 0o755);
 const callLog = join(scratch, "am-calls.log");
+const journal = join(scratch, "am-journal.log");
 
 const attested = { state: "current", database_matches_server: true, storage_root_matches_server: true };
 const holds = (agent: string, ...paths: string[]) => ({
@@ -52,6 +113,7 @@ async function withAm<T>(response: unknown, mode: "ok" | "fail", agent: string |
 	projectRoute?: { project: string; otherResponse: unknown }): Promise<T> {
 	const saved = { PATH: process.env.PATH, AGENT_NAME: process.env.AGENT_NAME, AM_FIXTURE_RESPONSE: process.env.AM_FIXTURE_RESPONSE,
 		AM_FIXTURE_MODE: process.env.AM_FIXTURE_MODE, AM_FIXTURE_CALLS: process.env.AM_FIXTURE_CALLS,
+		AM_FIXTURE_JOURNAL: process.env.AM_FIXTURE_JOURNAL,
 		AM_FIXTURE_PROJECT: process.env.AM_FIXTURE_PROJECT, AM_FIXTURE_OTHER_RESPONSE: process.env.AM_FIXTURE_OTHER_RESPONSE };
 	process.env.PATH = `${fixtureBin}:${saved.PATH ?? ""}`;
 	if (agent === undefined) delete process.env.AGENT_NAME;
@@ -59,6 +121,7 @@ async function withAm<T>(response: unknown, mode: "ok" | "fail", agent: string |
 	process.env.AM_FIXTURE_RESPONSE = JSON.stringify(response);
 	process.env.AM_FIXTURE_MODE = mode;
 	process.env.AM_FIXTURE_CALLS = callLog;
+	process.env.AM_FIXTURE_JOURNAL = journal;
 	if (projectRoute === undefined) {
 		delete process.env.AM_FIXTURE_PROJECT;
 		delete process.env.AM_FIXTURE_OTHER_RESPONSE;
@@ -67,6 +130,7 @@ async function withAm<T>(response: unknown, mode: "ok" | "fail", agent: string |
 		process.env.AM_FIXTURE_OTHER_RESPONSE = JSON.stringify(projectRoute.otherResponse);
 	}
 	writeFileSync(callLog, "");
+	writeFileSync(journal, "");
 	try { return await run(); }
 	finally {
 		for (const [key, value] of Object.entries(saved)) {
@@ -88,30 +152,31 @@ const write = (path: string, content = "planted\n", cwd = repo) =>
 const edit = (path: string, cwd = repo) =>
 	handleToolCall({ toolName: "edit", input: { input: `[${path}#1A2B]\nPUT >$:\n+planted\n` }, cwd }, { cwd, lookupReservations: neutral });
 
-describe("WRITEOWN1 AC1: unreserved writes in a canonical checkout are refused at the act", () => {
-	test("write and edit tools to a tracked path with no reservation are refused, naming the exact reserve call", async () => {
+describe("WRITEOWNCHILD1: a first write auto-reserves for the seat and is admitted; unscoped staging still refuses", () => {
+	test("write and edit tools to a tracked path with no reservation are admitted with a seat reserve", async () => {
 		await withAm(holds("Intruder"), "ok", "Intruder", async () => {
 			for (const result of [await write("scripts/x.py"), await edit("scripts/x.py"), await write(join(repo, "scripts", "x.py"))]) {
-				expect(result?.block).toBe(true);
-				expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");
-				expect(result?.reason).toContain(`am file_reservations reserve ${repo} Intruder scripts/x.py --exclusive`);
+				expect(result).toBeUndefined();
 			}
-			// Untracked paths are dirt too.
-			expect((await write("scripts/new.py"))?.reason).toContain(`reserve ${repo} Intruder scripts/new.py`);
+			// Untracked paths are dirt too: the first write reserves them as well.
+			expect(await write("scripts/new.py")).toBeUndefined();
+			for (const path of ["scripts/x.py", "scripts/new.py"]) {
+				expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Intruder ${path} --exclusive --ttl 3600 --reason `)), path).toBe(true);
+			}
 		});
 		expect(readFileSync(join(repo, "scripts", "x.py"), "utf8")).toBe("print('canonical')\n");
 	});
 
-	test("git add of a path, bare git add and every pathless staging form are refused in the canonical checkout", async () => {
+	test("git add of a path reserves and admits; bare git add and every pathless staging form are still refused", async () => {
 		await withAm(holds("Intruder"), "ok", "Intruder", async () => {
 			for (const command of ["git add scripts/x.py", "git stage scripts/x.py", `git -C ${repo} add scripts/x.py`,
-				"cd scripts && git add x.py", "git add -f -- scripts/x.py"]) {
-				const result = await bash(command);
-				expect(result?.block, command).toBe(true);
-				expect(result?.reason, command).toContain("am file_reservations reserve");
+				"cd scripts && git add x.py", "git add -f -- scripts/x.py", "git add 'scripts/*.py'"]) {
+				expect(await bash(command), command).toBeUndefined();
 			}
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Intruder scripts/x.py --exclusive --ttl 3600 --reason `))).toBe(true);
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Intruder scripts/* --exclusive --ttl 3600 --reason `))).toBe(true);
 			for (const command of ["git add", "git add -u", "git add --update", "git add -p", "git add ':/'",
-				"git add --pathspec-from-file=list.txt", "git add 'scripts/*.py'", "git -C scripts add ..", "P=scripts/x.py; git add -- $P"]) {
+				"git add --pathspec-from-file=list.txt", "git -C scripts add ..", "P=scripts/x.py; git add -- $P"]) {
 				const result = await bash(command);
 				expect(result?.block, command).toBe(true);
 				expect(result?.reason, command).toMatch(/WRITE_OWN_(?:BLANKET_ADD|UNRESERVED|UNRESOLVED_PATHSPEC)/);
@@ -138,12 +203,14 @@ describe("WRITEOWN1 AC1: unreserved writes in a canonical checkout are refused a
 			for (const result of [await edit(viaHome), await write(viaHome)]) expect(result?.reason ?? "").toBe("");
 		});
 		await withAm(holds("Intruder"), "ok", "Intruder", async () => {
-			expect((await edit(viaHome))?.reason).toContain(`am file_reservations reserve ${repo} Intruder scripts/x.py --exclusive`);
+			expect(await edit(viaHome)).toBeUndefined();
+			expect(await write(viaHome)).toBeUndefined();
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Intruder scripts/x.py --exclusive --ttl 3600 --reason `))).toBe(true);
 		});
 		expect(readFileSync(join(repo, "scripts", "x.py"), "utf8")).toBe("print('canonical')\n");
 	});
 
-	test("bash write targets (redirects, cp/mv/install/tee/sed -i) outside var/agent-tmp are refused", async () => {
+	test("bash write targets (redirects, cp/mv/install/tee/sed -i) outside var/agent-tmp reserve and admit", async () => {
 		await withAm(holds("Intruder"), "ok", "Intruder", async () => {
 			for (const [command, path] of [
 				["echo x > scripts/new.py", "scripts/new.py"],
@@ -165,14 +232,13 @@ describe("WRITEOWN1 AC1: unreserved writes in a canonical checkout are refused a
 				["echo x >&scripts/dup.txt", "scripts/dup.txt"],
 				["bash -c 'echo x > scripts/n.py'", "scripts/n.py"],
 				["echo $(echo x > scripts/s.py)", "scripts/s.py"],
-				["echo x > scripts/out-$RANDOM.txt", "'scripts/*'"],
+				["echo x > scripts/out-$RANDOM.txt", "scripts/*"],
 			] as const) {
-				const result = await bash(command);
-				expect(result?.block, command).toBe(true);
-				expect(result?.reason, command).toContain(`reserve ${repo} Intruder ${path} --exclusive`);
+				expect(await bash(command), command).toBeUndefined();
+				expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Intruder ${path} --exclusive --ttl 3600 --reason `)), `${command} reserves ${path}`).toBe(true);
 			}
 		});
-	});
+	}, fixtureDeadlineS(30) * 1_000);
 	test("bash reservations follow the invoked checkout when its cwd differs from the session", async () => {
 		await withAm(holds("Holder", "README.md"), "ok", "Holder", async () => {
 			expect(await bashAt("echo x > README.md", peer, repo)).toBeUndefined();
@@ -180,12 +246,10 @@ describe("WRITEOWN1 AC1: unreserved writes in a canonical checkout are refused a
 		expect(lookups()).toContain(`robot reservations --project ${peer} --agent Holder --json`);
 	});
 
-	test("a same-path lease in the session checkout does not authorize another bash checkout", async () => {
+	test("a write in another bash checkout reserves under that checkout and is admitted", async () => {
 		await withAm(holds("Holder", "README.md"), "ok", "Holder", async () => {
-			const result = await bashAt("echo x > README.md", peer, repo);
-			expect(result?.block).toBe(true);
-			expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");
-			expect(result?.reason).toContain(`canonical checkout ${peer}`);
+			expect(await bashAt("echo x > README.md", peer, repo)).toBeUndefined();
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${peer} Holder README.md --exclusive --ttl 3600 --reason `))).toBe(true);
 		}, { project: repo, otherResponse: holds("Holder") });
 	});
 
@@ -200,9 +264,11 @@ describe("WRITEOWN1 AC1: unreserved writes in a canonical checkout are refused a
 				"echo x > scripts/sub/out-$RANDOM.txt"]) {
 				expect(await bash(command), command).toBeUndefined();
 			}
-			// The holder's reservation does not stretch to unreserved neighbours.
-			expect((await write("scripts/other.py"))?.reason).toContain("WRITE_OWN_UNRESERVED");
-			expect((await bash("git add scripts"))?.reason).toContain("WRITE_OWN_UNRESERVED");
+			// The holder's reservation does not stretch to unreserved neighbours: the first write there
+			// reserves for the holder instead of refusing.
+			expect(await write("scripts/other.py")).toBeUndefined();
+			expect(await bash("git add scripts")).toBeUndefined();
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Holder scripts/other.py --exclusive --ttl 3600 --reason `))).toBe(true);
 		});
 		await withAm(holds("Holder"), "fail", "Holder", async () => {
 			const savedTmpdir = process.env.TMPDIR;
@@ -266,11 +332,12 @@ describe("NATIVEPREGRADE1 (ompkit-1ra0d.41): a native child writes under its own
 		process.env.AM_FIXTURE_AGENT_RESPONSE = JSON.stringify(childHolds);
 		try { return await run(); } finally { delete process.env.AM_FIXTURE_AGENT; delete process.env.AM_FIXTURE_AGENT_RESPONSE; }
 	}
-	test("the child's own exclusive hold admits its write; the seat holding nothing does not matter", async () => {
+	test("the child's own exclusive hold admits its write; the seat's first write reserves for the seat", async () => {
 		await withAm(holds("Seat"), "ok", "Seat", () => asChild(holds("ChildBuilder", "scripts/x.py"), async () => {
 			expect(await childWrite("scripts/x.py", "ChildBuilder")).toBeUndefined();
-			// The seat itself, without the child's identity, is still refused on the same path.
-			expect((await write("scripts/x.py"))?.reason).toContain("WRITE_OWN_UNRESERVED");
+			// The seat itself writes under its own custody: the free path auto-reserves for the seat.
+			expect(await write("scripts/x.py")).toBeUndefined();
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Seat scripts/x.py --exclusive --ttl 3600 --reason `))).toBe(true);
 		}));
 	});
 	test("control: the seat's hold still covers its child (the parent reserves on the child's behalf)", async () => {
@@ -278,37 +345,40 @@ describe("NATIVEPREGRADE1 (ompkit-1ra0d.41): a native child writes under its own
 			expect(await childWrite("scripts/x.py", "ChildBuilder")).toBeUndefined();
 		}));
 	});
-	test("a failed child lookup (unregistered spawn name) never refuses a write its seat holds; uncovered stays refused", async () => {
+	test("a stale child lookup never refuses: the seat's fresh read governs and a free path auto-reserves", async () => {
 		const unattested = { ...holds("ChildBuilder"), reservation_read_attestation: { ...attested, state: "stale" } };
 		await withAm(holds("Seat", "scripts/x.py"), "ok", "Seat", () => asChild(unattested, async () => {
 			expect(await childWrite("scripts/x.py", "ChildBuilder")).toBeUndefined();
-			// Planted: the seat does not hold this path, so the child's failed lookup is the named refusal.
-			expect((await childWrite("README.md", "ChildBuilder"))?.reason).toContain("WRITE_OWN_LOOKUP_UNAVAILABLE");
+			// The seat does not hold this path but the child read is only stale, so the free path reserves.
+			expect(await childWrite("README.md", "ChildBuilder")).toBeUndefined();
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Seat README.md --exclusive --ttl 3600 --reason `))).toBe(true);
 		}));
 	});
-	test("planted: a path neither the child nor its seat holds is refused, and another child's hold is no cover", async () => {
-		await withAm(holds("Seat"), "ok", "Seat", () => asChild(holds("ChildBuilder", "scripts/other.py"), async () => {
-			const result = await childWrite("scripts/x.py", "ChildBuilder");
-			expect(result?.block).toBe(true);
-			expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");
-			expect((await childWrite("scripts/other.py", "SomeOtherChild"))?.reason).toContain("WRITE_OWN_UNRESERVED");
+	test("planted: a free path auto-reserves for the seat while another child's hold still refuses naming the holder", async () => {
+		const foreign = { ...holds("Seat"), all_active: [{ agent: "ChildBuilder", path: "scripts/other.py", exclusive: true, remaining_seconds: 3600 }] };
+		await withAm(foreign, "ok", "Seat", () => asChild(holds("ChildBuilder", "scripts/other.py"), async () => {
+			expect(await childWrite("scripts/x.py", "ChildBuilder")).toBeUndefined();
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Seat scripts/x.py --exclusive --ttl 3600 --reason `))).toBe(true);
+			const held = await childWrite("scripts/other.py", "SomeOtherChild");
+			expect(held?.block).toBe(true);
+			expect(held?.reason).toContain("WRITE_OWN_UNRESERVED");
+			expect(held?.reason).toContain("ChildBuilder");
 		}));
 	});
-	test("CHILDUNKNOWN1: a child Agent Mail does not know holds nothing, so a write its seat does not cover is UNRESERVED naming the seat, not LOOKUP_UNAVAILABLE", async () => {
+	test("CHILDUNKNOWN1: a child Agent Mail does not know holds nothing, so a free write auto-reserves for the seat", async () => {
 		process.env.AM_FIXTURE_AGENT_MISSING = "WeeklyEditionGates";
 		try {
 			await withAm(holds("Seat", "scripts/x.py"), "ok", "Seat", async () => {
 				expect(await childWrite("scripts/x.py", "WeeklyEditionGates")).toBeUndefined();
-				const result = await childWrite("README.md", "WeeklyEditionGates");
-				expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");
-				expect(result?.reason).toContain("Seat holds no live exclusive");
+				expect(await childWrite("README.md", "WeeklyEditionGates")).toBeUndefined();
+				expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Seat README.md --exclusive --ttl 3600 --reason `))).toBe(true);
 			});
 		} finally { delete process.env.AM_FIXTURE_AGENT_MISSING; }
 	});
 });
 
 describe("CFSFALSEREF1 (ompkit-1ra0d.75): fixture repos in scratch and omp internal URLs are not canonical writes", () => {
-	test("SCRATCHFIXTURE1: a write into a git fixture repo inside owned scratch is admitted with no lookup; canonical writes still refused", async () => {
+	test("SCRATCHFIXTURE1: a write into a git fixture repo inside owned scratch is admitted with no lookup; canonical writes auto-reserve instead", async () => {
 		// A fixture cloned or copied from a checkout carries its .omp/fleet.json opt-in: without the
 		// CFSFALSEREF1 skip the write is treated as a canonical-checkout write and the reservation lookup
 		// runs against the fixture project. A bare `git init` without opt-in would be admitted either way.
@@ -323,11 +393,10 @@ describe("CFSFALSEREF1 (ompkit-1ra0d.75): fixture repos in scratch and omp inter
 			expect(await write(join(fx, "src", "note.txt"), "fixture notes\n")).toBeUndefined();
 			expect(lookups(), "fixture-repo write consulted Agent Mail").toEqual([]);
 		});
-		// Planted: a write in the canonical checkout outside var/agent-tmp is still refused.
+		// Control: a write in the canonical checkout outside var/agent-tmp auto-reserves instead.
 		await withAm(holds("Intruder"), "ok", "Intruder", async () => {
-			const refused = await write("scripts/other.py");
-			expect(refused?.block).toBe(true);
-			expect(refused?.reason).toContain("WRITE_OWN_UNRESERVED");
+			expect(await write("scripts/other.py")).toBeUndefined();
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Intruder scripts/other.py --exclusive --ttl 3600 --reason `))).toBe(true);
 		});
 	}, fixtureDeadlineS(30) * 1_000);
 	test("URLWRITE1: a write to an omp internal URL is admitted with no lookup; a plain relative lookalike is still judged", async () => {
@@ -336,11 +405,10 @@ describe("CFSFALSEREF1 (ompkit-1ra0d.75): fixture repos in scratch and omp inter
 			expect(await write("cfg://ns/key", "value\n")).toBeUndefined();
 			expect(lookups(), "internal-URL writes consulted Agent Mail").toEqual([]);
 		});
-		// Planted: a plain relative path is still a filesystem write and still refused.
+		// Control: a plain relative path is still a filesystem write, so it auto-reserves too.
 		await withAm(holds("Intruder"), "ok", "Intruder", async () => {
-			const refused = await write("out/report.md");
-			expect(refused?.block).toBe(true);
-			expect(refused?.reason).toContain("WRITE_OWN_UNRESERVED");
+			expect(await write("out/report.md")).toBeUndefined();
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Intruder out/report.md --exclusive --ttl 3600 --reason `))).toBe(true);
 		});
 	}, fixtureDeadlineS(30) * 1_000);
 });
@@ -357,10 +425,9 @@ describe("PRIVATECHECKOUT1 (ompkit-1ra0d.75): a private object-borrowing checkou
 		await withAm(holds("Intruder"), "ok", "Intruder", async () => {
 			expect((await write(join(checkout, "scripts", "x.py"), "private edit\n", checkout))?.reason ?? "").toBe("");
 			expect(lookups()).toEqual([]);
-			// Control: the canonical checkout itself still needs the reservation.
-			const refused = await write(join(repo, "scripts", "x.py"));
-			expect(refused?.block).toBe(true);
-			expect(refused?.reason).toContain("WRITE_OWN_UNRESERVED");
+			// Control: the canonical checkout itself auto-reserves on a free path.
+			expect(await write(join(repo, "scripts", "x.py"))).toBeUndefined();
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Intruder scripts/x.py --exclusive --ttl 3600 --reason `))).toBe(true);
 		});
 		expect(readFileSync(join(repo, "scripts", "x.py"), "utf8")).toBe("print('canonical')\n");
 	}, fixtureDeadlineS(30) * 1_000);

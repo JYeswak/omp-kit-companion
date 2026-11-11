@@ -647,10 +647,23 @@ function firstLine(text: unknown): string {
 	const line = String(text ?? "").trim().split("\n")[0]?.trim() ?? "";
 	return line ? `: ${line.slice(0, 200)}` : "";
 }
-
-interface ForeignHold {
-	pattern: string;
-	holder: string;
+/** WRITEOWNCHILD1 (d): `agent not found: <agent>` names a definitive answer — that agent holds
+ * nothing in this project — not a failed read. The marker is matched on any non-blank stderr line,
+ * not just the first (harnesses and wrappers can prefix output), with an exact naming of the queried
+ * agent: the character after the name must end the line or leave the agent-name shape. Every other
+ * failure (timeout, missing binary, unattested read) stays an outage with its named cause. */
+function agentUnknown(stderr: unknown, agent: string): boolean {
+	const marker = `agent not found: ${agent}`;
+	const names = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-";
+	for (const raw of String(stderr ?? "").split("\n")) {
+		const line = raw.trim();
+		if (line === "") continue;
+		const at = line.indexOf(marker);
+		if (at < 0) continue;
+		const next = line.charAt(at + marker.length);
+		if (next === "" || !names.includes(next)) return true;
+	}
+	return false;
 }
 
 /** The caller's live exclusive holds, and every other agent's live exclusive hold (to name a blocker); a row that is
@@ -661,6 +674,7 @@ function readReservationHolds(repoRoot: string, agent: string): { holds: Reserva
 		const code = (run.error as NodeJS.ErrnoException).code;
 		return { why: code === "ETIMEDOUT" ? "am did not answer within 10 s" : code === "ENOENT" ? "am is not on PATH" : `am could not run (${code ?? run.error.message})` };
 	}
+	if (run.status !== 0 && agentUnknown(run.stderr, agent)) return { holds: [], foreign: [] };
 	if (run.status !== 0) return { why: `am exited ${run.status === null ? `on signal ${run.signal}` : run.status}${firstLine(run.stderr)}` };
 	const read = parseReservationRead(String(run.stdout));
 	if ("why" in read) return read;
@@ -739,7 +753,8 @@ export type ReservationGaps =
 /**
  * The one reservation lookup for fleet-guard admissions (`git commit --only`, write ownership): the caller's
  * AGENT_NAME and its live exclusive holds from an attested-current `am robot reservations` read. A failed or
- * unattested read is `unavailable` with its named cause, never an empty hold list.
+ * unattested read is `unavailable` with its named cause, never an empty hold list. `agent not found` naming the
+ * queried agent is the opposite: a definitive answer that the agent holds nothing, so it reads as zero holds.
  */
 export function reservationGaps(root: string, paths: readonly string[], agent = asString(process.env.AGENT_NAME)): ReservationGaps {
 	if (!agent) return { kind: "identity" };

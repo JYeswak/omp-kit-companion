@@ -223,16 +223,64 @@ test("registered handler uses the actual calling context's local mapping", async
 	expect(await handler({ toolName: "write", input: { path: "proc://owned-job/kill" } }, { cwd: callingCwd })).toBeUndefined();
 });
 
-// WRITEOWN1 (ompkit-vf33j) superseded the fail-open tracked-edit path: the decision is the caller's attested
-// `am robot reservations` read, and a failed read refuses. `am` is a PATH test seam; the guard's spawn runs unchanged.
-test("canonical edits follow the caller's attested reservation read; a failed read refuses", async () => {
+// WRITEOWN1 (ompkit-vf33j) + WRITEOWNCHILD1 (ompkit-1ra0d.126): the decision is the caller's attested
+// `am robot reservations` read; a failed read refuses, while a free path auto-reserves for the seat and admits.
+// `am` is a PATH test seam; the guard's spawn runs unchanged.
+test("canonical edits follow the caller's attested reservation read; a free path auto-reserves, a failed read refuses", async () => {
 	const { cwd: dir } = fixture();
 	const target = join(dir, "tracked.md");
 	writeFileSync(target, "x\n");
 	const bin = join(dir, "bin");
 	mkdirSync(bin);
-	writeFileSync(join(bin, "am"), "#!/bin/sh\nif [ \"$AM_FIXTURE_MODE\" = fail ]; then echo 'database is locked' >&2; exit 1; fi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n", { mode: 0o755 });
-	const saved = { PATH: process.env.PATH, AGENT_NAME: process.env.AGENT_NAME, AM_FIXTURE_MODE: process.env.AM_FIXTURE_MODE, AM_FIXTURE_RESPONSE: process.env.AM_FIXTURE_RESPONSE };
+	writeFileSync(join(bin, "am"), "#!" + process.execPath + "\n" + [
+"import { appendFileSync, existsSync, readFileSync } from 'node:fs';",
+"const calls = process.env.AM_FIXTURE_CALLS || '';",
+"const journalPath = process.env.AM_FIXTURE_JOURNAL || '';",
+"const args = process.argv.slice(2);",
+"if (calls !== '') appendFileSync(calls, args.join(' ') + '\\n');",
+"if (process.env.AM_FIXTURE_MODE === 'fail') { console.error('database is locked'); process.exit(1); }",
+"function journaled(base) {",
+"  let response;",
+"  try { response = JSON.parse(base); } catch (e) { return base; }",
+"  if (journalPath === '' || !existsSync(journalPath)) return JSON.stringify(response);",
+"  const project = (function() { const i = args.indexOf('--project'); return i >= 0 ? args[i + 1] : undefined; })() || '';",
+"  const agent = (function() { const i = args.indexOf('--agent'); return i >= 0 ? args[i + 1] : undefined; })() || '';",
+"  const mine = Array.isArray(response.my_reservations) ? response.my_reservations.slice() : [];",
+"  const all = Array.isArray(response.all_active) ? response.all_active.slice() : [];",
+"  const lines = readFileSync(journalPath, 'utf8').split('\\n');",
+"  for (const line of lines) {",
+"    const parts = line.split('|');",
+"    if (parts.length < 3 || parts[0] === '' || parts[0] !== project) continue;",
+"    const row = { agent: parts[1], path: parts[2], exclusive: true, remaining_seconds: 600 };",
+"    if (parts[1] === agent) mine.push(row);",
+"    all.push(row);",
+"  }",
+"  response.my_reservations = mine;",
+"  response.all_active = all;",
+"  return JSON.stringify(response);",
+"}",
+"if (args[0] === 'file_reservations' && args[1] === 'reserve') {",
+"  const agent = args[3] || '';",
+"  const paths = []; let reason = ''; let exclusive = true;",
+"  for (let i = 4; i < args.length; i++) {",
+"    const a = args[i] || '';",
+"    if (a === '--ttl') { i++; continue; }",
+"    if (a === '--reason') { reason = args[i + 1] || ''; i++; continue; }",
+"    if (a === '--shared') { exclusive = false; continue; }",
+"    if (a.indexOf('--') === 0) continue;",
+"    paths.push(a);",
+"  }",
+"  if (journalPath !== '') for (const p of paths) appendFileSync(journalPath, (args[2] || '') + '|' + agent + '|' + p + '\\n');",
+"  const granted = paths.map((p, n) => ({ id: n + 1, path_pattern: p, exclusive, reason, expires_ts: '2030-01-01T00:00:00.000Z' }));",
+"  process.stdout.write(JSON.stringify({ granted, conflicts: [] }));",
+"  process.exit(0);",
+"}",
+"process.stdout.write(journaled(process.env.AM_FIXTURE_RESPONSE || ''));",
+].join('\n') + '\n', { mode: 0o755 });
+	const journal = join(dir, "am-journal.log");
+	writeFileSync(journal, "");
+	process.env.AM_FIXTURE_JOURNAL = journal;
+	const saved = { PATH: process.env.PATH, AGENT_NAME: process.env.AGENT_NAME, AM_FIXTURE_MODE: process.env.AM_FIXTURE_MODE, AM_FIXTURE_RESPONSE: process.env.AM_FIXTURE_RESPONSE, AM_FIXTURE_JOURNAL: process.env.AM_FIXTURE_JOURNAL };
 	const answer = (mode: "ok" | "fail", ...paths: string[]): void => {
 		process.env.AM_FIXTURE_MODE = mode;
 		process.env.AM_FIXTURE_RESPONSE = JSON.stringify({
@@ -253,7 +301,7 @@ test("canonical edits follow the caller's attested reservation read; a failed re
 		answer("ok", "tracked.md");
 		expect(await handleToolCall(event, context)).toBeUndefined();
 		answer("ok");
-		expect((await handleToolCall(event, context))?.reason).toContain("WRITE_OWN_UNRESERVED");
+		expect(await handleToolCall(event, context)).toBeUndefined();
 		answer("fail", "tracked.md");
 		const failed = (await handleToolCall(event, context))?.reason ?? "";
 		expect(failed).toContain("WRITE_OWN_LOOKUP_UNAVAILABLE");
@@ -261,14 +309,12 @@ test("canonical edits follow the caller's attested reservation read; a failed re
 		// ompkit-rz5.158: am omits my_reservations when the agent holds nothing in the project. A current read without
 		// the key is zero holds (reserve it first), never a failed lookup (2026-10-22: RusticPine sent to repair a healthy Agent Mail).
 		raw({ reservation_read_attestation: current, all_active: [] });
-		const none = (await handleToolCall(event, context))?.reason ?? "";
-		expect(none).toContain("WRITE_OWN_UNRESERVED");
-		expect(none).not.toContain("LOOKUP_UNAVAILABLE");
-		// A shared or expired own row covers nothing: refused as unreserved, not as a failed read.
+		expect(await handleToolCall(event, context)).toBeUndefined();
+		// A shared or expired own row covers nothing: the free path auto-reserves instead of refusing.
 		raw({ reservation_read_attestation: current, my_reservations: [
 			{ agent: "tester", path: "tracked.md", exclusive: false, remaining_seconds: 600 },
 			{ agent: "tester", path: "tracked.md", exclusive: true, remaining_seconds: 0 }] });
-		expect((await handleToolCall(event, context))?.reason).toContain("WRITE_OWN_UNRESERVED");
+		expect(await handleToolCall(event, context)).toBeUndefined();
 		// Planted: a stale read still fails closed, and the refusal names the attestation it saw.
 		raw({ reservation_read_attestation: { ...current, state: "stale" }, my_reservations: [{ agent: "tester", path: "tracked.md", exclusive: true, remaining_seconds: 600 }] });
 		const stale = (await handleToolCall(event, context))?.reason ?? "";
