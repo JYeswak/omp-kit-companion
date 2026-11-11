@@ -4175,7 +4175,12 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 			}
 		}
 		if (printDir) return { code: 0, data: { overall: "OK", dir: created.dir, text: created.dir }, verification: "UNVERIFIED" };
-		return { code: 0, data: { overall: "OK", dir: created.dir, ...(exportDir ? { exportDir } : {}), exportLine: created.exportLine, capability: created.capability }, verification: "UNVERIFIED" };
+		// BRIEFSCRATCHIO1 (ompkit-1ra0d.138): the literal dir and its release spell ready to paste. Text mode keeps
+		// returning the capability (PIDIDENT1): the pasted release carries the real token, the same one data.capability
+		// returns in JSON, so a text-mode creator can release with no shell variable at all.
+		const releaseHint = `omp-kit scratch release "${created.dir}" --capability "${created.capability}" --bin throwaway --now`;
+		return { code: 0, data: { overall: "OK", dir: created.dir, ...(exportDir ? { exportDir } : {}), exportLine: created.exportLine, capability: created.capability,
+			text: `scratch dir:\n${created.dir}\n\nrelease when done:\n${releaseHint}` }, commands: [releaseHint], verification: "UNVERIFIED" };
 	}
 	// SCRATCHSIBLING1 (ompkit-fp72.120.16.214): `--session ID` names the calling incarnation for mine and gate. The guard
 	// extensions run in the seat's omp process, whose environment names no session, and pass the calling tool's own session

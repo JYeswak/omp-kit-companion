@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { BRIEF_WINDOW_MINUTES, briefCandidates, briefContract, briefRows, checkTaskBrief, completeTaskBrief, GENERIC_COMPLY, renderBrief } from "../../src/brief.ts";
+import { BRIEF_SCRATCH_CREATE, BRIEF_SCRATCH_RELEASE, BRIEF_SCRATCH_STEP, BRIEF_WINDOW_MINUTES, briefCandidates, briefContract, briefRows, checkTaskBrief, completeTaskBrief, GENERIC_COMPLY, renderBrief } from "../../src/brief.ts";
 import type { BriefExec } from "../../src/brief.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
@@ -315,4 +315,23 @@ test("BRIEFSCOPE1 completion appends exactly the missing contracts, and the comp
 	expect(partial.repos).toEqual([realpathSync(other)]);
 	expect(await completeTaskBrief({ context: `Repo: ${repo}`, tasks: [{ task: "Read-only: count commits" }] }, repo, execute)).toEqual({ repos: [] });
 	expect((await completeTaskBrief({ context: "x".repeat(1_000_001), tasks: input.tasks }, repo, execute)).refusal).toContain("inspection limit");
+});
+
+test("BRIEFSCRATCHIO1 the brief [scratch] row teaches the passing spellings and no variable-path redirect", async () => {
+	// The row keeps the fail-closed create/release forms the PRINTDIRCAP1 tests pin.
+	expect(BRIEF_SCRATCH_STEP).toContain(BRIEF_SCRATCH_CREATE);
+	expect(BRIEF_SCRATCH_STEP).toContain(BRIEF_SCRATCH_RELEASE);
+	// The passing spellings: files via the Python kernel or the edit tool, capability never in a file, release not rm.
+	for (const spelling of ["Python kernel", "edit tool", "never in a file", "never `rm -rf`"]) expect(BRIEF_SCRATCH_STEP).toContain(spelling);
+	// The denied shape is named as denied: a redirect to a $VAR-built path, with no exemption offered.
+	expect(BRIEF_SCRATCH_STEP).toMatch(/Never redirect.*\$VAR/);
+	expect(BRIEF_SCRATCH_STEP).toContain("no exemption");
+	// Still one row within the brief size budget.
+	const repo = await fixture();
+	const text = renderBrief(await briefContract(repo, execute));
+	expect(text.split("\n").filter((line) => line.startsWith("[scratch]")).length).toBe(1);
+	expect(briefRows(await briefContract(repo, execute)).length).toBeLessThanOrEqual(15);
+	// Planted negative: the pre-fix row text (fail-closed create/release only) teaches none of the passing spellings.
+	const oldStep = `[scratch] Hazard: a refused \`scratch new\` piped through \`jq -r .data.dir\` exports TMPDIR=null and writes ./null outside owned scratch, \`export TMPDIR=$(...) || exit 1\` never exits because export returns 0, and \`--print-dir\` returns no release capability, so a dir made that way outside a seat is left to the reaper. Comply: ${BRIEF_SCRATCH_CREATE}, run inside the owning repo; keep CAP unexported and unprinted; when done: ${BRIEF_SCRATCH_RELEASE}.`;
+	for (const spelling of ["Python kernel", "edit tool", "never in a file", "never `rm -rf`", "no exemption"]) expect(oldStep).not.toContain(spelling);
 });

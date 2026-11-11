@@ -224,11 +224,15 @@ export async function briefCandidates(contract: BriefContract, paths: readonly s
  * SCRATCHNULL1 (ompkit-fp72.120.16.194): `jq -r .data.dir` on a refused `scratch new` yields the path `null`; teach the
  * fail-closed form. PRINTDIRCAP1 (ompkit-fp72.120.16.240): the taught form also keeps the release capability in an
  * unexported shell variable, because `--print-dir` returns none and an unseated creator then has no way to release.
+ * BRIEFSCRATCHIO1 (ompkit-1ra0d.138): the row also teaches the spellings the destructive-command guard allows: dcg
+ * denies every redirect to a dynamically built path by design, so scratch files go through the Python kernel or the
+ * edit tool, never `> "$VAR/..."`.
  */
 export const BRIEF_SCRATCH_CREATE = "S=$(omp-kit scratch new --label <x> --json) || { printf '%s\\n' \"$S\" >&2; exit 1; }; TMPDIR=$(printf '%s' \"$S\" | jq -er .data.dir) || exit 1; CAP=$(printf '%s' \"$S\" | jq -er .data.capability) || exit 1; export TMPDIR";
 export const BRIEF_SCRATCH_RELEASE = "omp-kit scratch release \"$TMPDIR\" --capability \"$CAP\" --bin throwaway --now";
 export const BRIEF_SCRATCH_STEP = "[scratch] Hazard: a refused `scratch new` piped through `jq -r .data.dir` exports TMPDIR=null and writes ./null outside owned scratch, `export TMPDIR=$(...) || exit 1` never exits because export returns 0, and `--print-dir` returns no release capability, so a dir made that way outside a seat is left to the reaper. "
-	+ `Comply: ${BRIEF_SCRATCH_CREATE}, run inside the owning repo; keep CAP unexported and unprinted; when done: ${BRIEF_SCRATCH_RELEASE}.`;
+	+ "Never redirect (`>`, `2>`, `: >`, `tee`, `cat >` heredoc) to a `$VAR`-built path: a destructive-command guard such as dcg denies it even inside owned scratch, with no exemption. "
+	+ `Comply: ${BRIEF_SCRATCH_CREATE}, run inside the owning repo; write scratch files from the Python kernel or the edit tool, or to the literal printed dir; keep CAP unexported and unprinted, never in a file; when done: ${BRIEF_SCRATCH_RELEASE}, never \`rm -rf\`.`;
 
 /**
  * BRIEFSCOPE1: one row per topic. Members that teach only "read and satisfy <member>" fold into one closing row:

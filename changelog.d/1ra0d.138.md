@@ -1,0 +1,2 @@
+- The builder brief's [scratch] row now teaches the spellings the destructive-command guard allows: write scratch files from the Python kernel or the edit tool (never redirect to a `$VAR`-built path), never store the release capability in a file, and remove scratch with `scratch release`, never `rm -rf`.
+- `omp-kit scratch new` now prints the literal directory and its release command ready to paste, in both human output and the JSON `commands` hint. The printed release carries the real token, so text mode still returns the capability.

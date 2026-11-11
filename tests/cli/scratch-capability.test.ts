@@ -145,9 +145,15 @@ test("text mode returns the capability too", async () => {
 	const w = world();
 	const made = await cli(w, ["scratch", "new", "--label", "text-mode"], {}, false);
 	expect(made.code).toBe(0);
-	const data = JSON.parse(made.stdout) as { dir: string; capability: string };
-	expect(ownerOf(data.dir).capability_sha256).toBe(sha256(data.capability));
-	expect((await cli(w, ["scratch", "release", data.dir, "--capability", data.capability, "--bin", "throwaway", "--now"])).code).toBe(0);
+	// BRIEFSCRATCHIO1: human output states the literal dir and a ready-to-paste release carrying the real token.
+	const lines = made.stdout.split("\n");
+	const dir = lines[lines.indexOf("scratch dir:") + 1]?.trim() ?? "";
+	const releaseLine = lines.find((line) => line.startsWith("omp-kit scratch release")) ?? "";
+	const capability = releaseLine.split('"')[3] ?? "";
+	expect(dir).toContain("text-mode");
+	expect(releaseLine).toBe(`omp-kit scratch release "${dir}" --capability "${capability}" --bin throwaway --now`);
+	expect(ownerOf(dir).capability_sha256).toBe(sha256(capability));
+	expect((await cli(w, ["scratch", "release", dir, "--capability", capability, "--bin", "throwaway", "--now"])).code).toBe(0);
 }, 180_000);
 
 test("negative: a wrong token, or another agent with no token, is refused caller-not-owner and the dir stays", async () => {
