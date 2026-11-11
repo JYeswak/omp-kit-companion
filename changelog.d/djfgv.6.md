@@ -1,0 +1,1 @@
+- `skill-mine` clamps the live `am` probe to mail's remaining share (skipped when spent), so a hanging `am` server can no longer burn Git's reserved share; a spent Git share stops repository resolution cleanly with `wall budget reached` instead of reporting good repositories as bad ones; `--source` help text now says comma-separated or repeat.

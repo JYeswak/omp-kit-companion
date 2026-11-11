@@ -1030,11 +1030,11 @@ function mailArchiveRoot(options: SkillMineOptions): string {
  * so mining reads current mail rather than a retired archive copy. Runtime-detected: am absent, failing or
  * silent yields null and the caller keeps --mail-archive or the legacy default. Exported as a test seam.
  */
-export async function liveMailRoot(options: SkillMineOptions): Promise<string | null> {
+export async function liveMailRoot(options: SkillMineOptions, timeoutS: number): Promise<string | null> {
 	const am = findOnPath("am", options.pathValue);
 	if (am === null) return null;
 	try {
-		const result = await run([am, "robot", "status", "--json"], { cwd: options.cwd, env: { HOME: options.home, PATH: options.pathValue }, deadline_s: 20, max_output_bytes: 4 << 20 });
+		const result = await run([am, "robot", "status", "--json"], { cwd: options.cwd, env: { HOME: options.home, PATH: options.pathValue }, deadline_s: timeoutS, max_output_bytes: 4 << 20 });
 		if (result.timed_out || result.rc !== 0) return null;
 		const match = /"storage_root"\s*:\s*"([^"\\]{1,4096})"/.exec(Buffer.from(result.stdout).toString("utf8"));
 		if (!match || !match[1]!.startsWith("/") || !existsSync(join(match[1]!, "projects"))) return null;
@@ -1635,18 +1635,31 @@ async function mineGit(options: SkillMineOptions, sinceMs: number, now: number, 
 	}
 	const explicit = options.projects && options.projects.length > 0 ? options.projects : [];
 	const seeds = (explicit.length > 0 ? explicit : [...cassWorkspaces, options.cwd]).map(seed => ({ seed, discover: explicit.length > 0 }));
+	const months = gitMonthKeys(now, sinceMs);
 	const repos = new Map<string, { key: string; display: string }>();
-	for (const { seed, discover } of seeds) {
+	for (let s = 0; s < seeds.length; s++) {
+		const { seed, discover } = seeds[s]!;
 		if (!seed) { coverage.dropped_not_a_repo++; continue; }
+		if (Date.now() >= deadlineMs) {
+			// Spent share: the remaining seeds were never resolved, so their
+			// months were never visited. Count them unreached instead of
+			// reporting good repositories as bad ones.
+			const pending = seeds.slice(s).filter(item => item.seed).length;
+			coverage.not_reached += months.length * pending;
+			coverage.stopped_early = true;
+			break;
+		}
 		const repo = await canonicalGitRepo(gitBin, seed, discover, options, deadlineMs);
 		if (!repo) { coverage.dropped_not_a_repo++; continue; }
 		if (!repos.has(repo.key)) repos.set(repo.key, repo);
 	}
 	coverage.repos = repos.size;
 	if (repos.size === 0) {
+		if (coverage.stopped_early) {
+			return { status: { status: "OK", reason: "mined 0 month(s) across 0 repo(s); 0 commit(s), no chains; wall budget reached", repos: 0, commits: 0, months_mined: 0 }, candidates: [], coverage };
+		}
 		return { status: { status: "UNAVAILABLE", reason: `no git repositories resolved${explicit.length > 0 ? " from --project" : " from session workspaces"}; pass --project PATH` }, candidates: [], coverage };
 	}
-	const months = gitMonthKeys(now, sinceMs);
 	const monthsPerRun = options.gitMonthsPerRun ?? Number.POSITIVE_INFINITY;
 	const state = loadGitState(options.stateDir);
 	// Drop cursor rows for repositories that are no longer registered, after
@@ -2069,7 +2082,11 @@ export async function runSkillMine(options: SkillMineOptions): Promise<SkillMine
 	let mailElapsed = 0;
 	if (enabled.includes("mail")) {
 		const sourceStart = Date.now();
-		const mailArchive = options.mailArchive ?? await liveMailRoot(options) ?? undefined;
+		// The live probe runs inside mail's window: clamp it to the remaining
+		// share and skip it when the share is already spent.
+		const probeTimeoutS = sourceTimeoutS(mailDeadline, 20);
+		const liveRoot = probeTimeoutS === null ? null : await liveMailRoot(options, probeTimeoutS);
+		const mailArchive = options.mailArchive ?? liveRoot ?? undefined;
 		mail = mineMail(mailArchive === undefined ? options : { ...options, mailArchive }, sinceMs, mailDeadline);
 		mailElapsed = Date.now() - sourceStart;
 		mail.status = { ...mail.status, elapsed_ms: mailElapsed, budget_ms: shares.mail };

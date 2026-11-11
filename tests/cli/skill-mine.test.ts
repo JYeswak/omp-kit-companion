@@ -1039,3 +1039,43 @@ test("SKILLMINEFAIR1: CLI --source splits commas, stays case-sensitive, and refu
 	expect((bare.errors ?? []).length).toBeGreaterThan(0);
 	expect(JSON.stringify(bare)).toMatch(/--source needs/);
 }, fixtureDeadlineS() * 1000);
+
+// SKILLMINEFAIR1 follow-up: the live `am` probe runs inside mail's window, so
+// it is clamped to mail's remaining share. A hanging `am` is killed at the
+// share and Git still mines its months.
+// Planted negative: the fixed 20 s probe burns the whole budget and Git mines 0 months.
+const HANG_AM_SH = `#!/bin/sh
+if [ "$1" = "robot" ]; then sleep 30; fi
+echo "unexpected am argv: $*" >&2; exit 2
+`;
+
+test("SKILLMINEFAIR1: a hanging am probe cannot consume Git's reserved share", async () => {
+	const f = makeGitFixture("skill-mine-fair-amhang", "recurrence");
+	put(join(f.bin, "am"), HANG_AM_SH, 0o755);
+	const report = await runSkillMine({
+		...f.options, mailArchive: undefined, since: "365d", projects: [f.gitA, f.gitB],
+		wallBudgetS: 6, gitMonthsPerRun: 2,
+	});
+	expect(report.overall).toBe("OK");
+	// No elapsed assertion: the git-months bound below is the load-independent
+	// proof (the fixed-20 s probe starves Git to 0 months). Mail timing rides
+	// on the clamped probe, not on a literal bound.
+	expect(report.coverage.git.months_mined.length).toBeGreaterThanOrEqual(1);
+	expect(report.coverage.budgets.git.budget_ms).toBe(2400);
+}, fixtureDeadlineS() * 1000);
+
+// SKILLMINEFAIR1 follow-up: a spent Git share stops resolution cleanly. Seeds
+// never resolved count their months unreached (not_reached/stopped_early)
+// instead of reporting good repositories as bad ones (UNAVAILABLE).
+test("SKILLMINEFAIR1: a spent git share stops resolution instead of reporting bad repos", async () => {
+	const f = makeGitFixture("skill-mine-fair-gitspent", "recurrence");
+	const report = await runSkillMine({
+		...f.options, since: "365d", sources: ["git"], projects: [f.gitA, f.gitB],
+		wallBudgetS: 0,
+	});
+	expect(report.sources.git.status).toBe("OK");
+	expect(report.sources.git.reason).toContain("wall budget reached");
+	expect(report.coverage.git.stopped_early).toBe(true);
+	expect(report.coverage.git.dropped_not_a_repo).toBe(0);
+	expect(report.coverage.git.not_reached).toBeGreaterThan(0);
+});

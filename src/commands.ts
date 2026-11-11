@@ -623,7 +623,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--max-new", value: "N", description: "Cap on SKILLCAND beads filed with --apply (default 3, max 1 per project per run)" },
 		{ name: "--apply", description: "File at most --max-new SKILLCAND beads in the owning projects; asks for confirmation first" },
 		{ name: "--yes", description: "Confirm the apply in noninteractive mode; valid only with --apply" },
-		{ name: "--source", value: "cass|mail|git", repeatable: true, description: "Mine only these sources (default all three); repeat the flag or comma-separate, values are case-sensitive; Git keeps a reserved share of the wall budget" },
+		{ name: "--source", value: "cass|mail|git", repeatable: true, description: "Mine only these sources (default all three; comma-separated or repeat), values are case-sensitive; Git keeps a reserved share of the wall budget" },
 		{ name: "--wall-budget-s", value: "S", description: "Wall budget in seconds for the whole pass (default 600); each enabled source gets a reserved share and Git keeps at least 40%; stops early with coverage reported" },
 	], subcommands: [
 		{ name: "status", description: "Show the last skill-mine run: per-source status, per-repository Git month coverage, candidate totals, beads filed", usage: "skill-mine status [--json]", flags: [], example: "omp-kit skill-mine status --json", runnable: false },
