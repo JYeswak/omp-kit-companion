@@ -1,0 +1,1 @@
+- The `br` guard no longer refuses tracker writes when Agent Mail prints a notice line (for example, that the project is not registered in this mailbox) ahead of its "No conflicts detected." answer. A real conflict table after such a notice is still refused, and an unrecognized answer still fails closed.

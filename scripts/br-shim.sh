@@ -250,8 +250,10 @@ if [ "$tracker_write" = 1 ]; then
 	conflict_rc=$?
 	[ "$conflict_rc" -eq 0 ] || fail "BR_SHIM_RESERVATION_UNKNOWN Agent Mail reservation read failed for $tracker_project (rc=$conflict_rc): $conflict_out"
 	case "$conflict_out" in
-		"No conflicts detected."*) ;;
 		*" conflict(s) found:"*)
+			# BRSHIMNOTICE1: drop notice lines above the table; the count line
+			# starts the authoritative answer.
+			conflict_out=$(printf '%s\n' "$conflict_out" | awk '/^[0-9][0-9]* conflict\(s\) found:/ { take=1 } take')
 			conflict_count=${conflict_out%% *}
 			case "$conflict_count" in ''|*[!0-9]*) fail "BR_SHIM_RESERVATION_UNKNOWN malformed Agent Mail conflict count: $conflict_out" ;; esac
 			tracker_tab=$(printf '\t')
@@ -279,6 +281,10 @@ if [ "$tracker_write" = 1 ]; then
 				tracker_db_only=1
 			fi
 			;;
+		# BRSHIMNOTICE1: Agent Mail may print notice lines (e.g. project-not-registered)
+		# before the answer. Admit when a line starts with the documented no-conflict
+		# answer; a real conflict table still matches the arm above first.
+		"No conflicts detected."*|*"$shim_nl""No conflicts detected."*) ;;
 		*) fail "BR_SHIM_RESERVATION_UNKNOWN unrecognized Agent Mail conflict response: $conflict_out" ;;
 	esac
 fi

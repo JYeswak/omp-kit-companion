@@ -1252,6 +1252,69 @@ test("TRACKERLEASE1 lease: DB custody, mixed conflicts and unknown authority rem
 	} finally { fixture.cleanup(); }
 }, fixtureDeadlineS(120) * 1_000);
 
+type NoticeFixture = HermeticFixture & { issue: string };
+
+/** BRSHIMNOTICE1 fixture: native tracker plus an Agent Mail stub whose conflict
+    answer can carry a leading notice line. Setup stops after the native create:
+    this case only needs an admitted write to persist and refused writes to
+    leave no trace, never a flushed export. */
+async function noticeFixture(): Promise<NoticeFixture> {
+	const fixture = hermeticFixture();
+	fixture.env = { ...fixture.env, AGENT_NAME: "NoticePeer", OMP_KIT_CASE_CWD: fixture.path,
+		AM_NOTICE_MODE: "notice-clean" };
+	writeFileSync(join(fixture.path, "bin/am"), `#!/bin/sh
+case "$1:$2" in
+ agents:show) printf '{"name":"NoticePeer"}\\n' ;;
+ file_reservations:conflicts)
+  case "\${AM_NOTICE_MODE:-notice-clean}" in
+   notice-clean) printf 'project fixture-project is not registered in this mailbox, so it has no reservations; check the project name\\nNo conflicts detected.\\nreservation_read_attestation: fixture-notice-clean\\n' ;;
+   notice-database) printf 'project fixture-project is not registered in this mailbox, so it has no reservations; check the project name\\n1 conflict(s) found:\\nPATH HOLDER PATTERN EXPIRES\\n.beads/beads.db ExportKeeper .beads/beads.db 2099-12-31T23:59:59Z\\n' ;;
+   notice-garbage) printf 'project fixture-project is not registered in this mailbox, so it has no reservations; check the project name\\nsomething unexpected\\n' ;;
+   *) printf 'No conflicts detected.\\n' ;;
+  esac ;;
+ file_reservations:list)
+  printf 'ID PATTERN AGENT EXPIRES REASON\\n43 .beads/beads.db ExportKeeper 2099-12-31T23:59:59Z database\\n' ;;
+ *) exit 9 ;;
+esac
+`, { mode: 0o755 });
+	try {
+		const initialized = await hermeticCall(fixture, ["init", "--prefix", "notice"], { native: true });
+		if (initialized.rc !== 0) throw new Error(initialized.output);
+		const created = await hermeticCall(fixture, ["create", "--title", "Notice baseline", "-t", "task",
+			"-l", "kind:intake",
+			"--description", "WHAT: (a) notice fixture. WHY: prove notice-prefixed answers admit clean writes.",
+			"--acceptance-criteria", "- [ ] [a] [build] notice write persists; planted negative: a refused write leaves no comment `true` -> rc 0",
+			"--actor", "NoticePeer", "--json"], { native: true });
+		if (created.rc !== 0) throw new Error(created.output);
+		return { ...fixture, issue: JSON.parse(created.stdout).id };
+	} catch (error) { fixture.cleanup(); throw error; }
+}
+
+test("BRSHIMNOTICE1 notice-prefixed reservation answers admit clean writes but still refuse real conflicts and garbage", async () => {
+	const fixture = await noticeFixture();
+	try {
+		expect(JSON.stringify(await leaseRead(fixture, ["comments", "list", fixture.issue, "--json"]))).toBe("[]");
+		fixture.env.AM_NOTICE_MODE = "notice-clean";
+		const admitted = await hermeticCall(fixture, ["comments", "add", fixture.issue, "-m", "Notice clean write"]);
+		expect({ rc: admitted.rc, timedOut: admitted.timedOut, truncated: admitted.truncated })
+			.toEqual({ rc: 0, timedOut: false, truncated: false });
+		const listed = JSON.stringify(await leaseRead(fixture, ["comments", "list", fixture.issue, "--json"]));
+		expect(listed).not.toBe("[]");
+		fixture.env.AM_NOTICE_MODE = "notice-database";
+		const denied = await hermeticCall(fixture, ["comments", "add", fixture.issue, "-m", "Forbidden notice-database"]);
+		expect({ rc: denied.rc, timedOut: denied.timedOut, truncated: denied.truncated })
+			.toEqual({ rc: 4, timedOut: false, truncated: false });
+		expect(denied.output).toContain("BR_SHIM_TRACKER_RESERVED");
+		expect(JSON.stringify(await leaseRead(fixture, ["comments", "list", fixture.issue, "--json"]))).toBe(listed);
+		fixture.env.AM_NOTICE_MODE = "notice-garbage";
+		const unknown = await hermeticCall(fixture, ["comments", "add", fixture.issue, "-m", "Forbidden notice-garbage"]);
+		expect({ rc: unknown.rc, timedOut: unknown.timedOut, truncated: unknown.truncated })
+			.toEqual({ rc: 4, timedOut: false, truncated: false });
+		expect(unknown.output).toContain("BR_SHIM_RESERVATION_UNKNOWN");
+		expect(JSON.stringify(await leaseRead(fixture, ["comments", "list", fixture.issue, "--json"]))).toBe(listed);
+	} finally { fixture.cleanup(); }
+}, fixtureDeadlineS(120) * 1_000);
+
 test("TRACKERLEASE1 lease: disabling the explicit-flush guard exposes the same native export leak", async () => {
 	const fixture = await nativeLeaseFixture();
 	try {
