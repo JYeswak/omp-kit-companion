@@ -4992,6 +4992,8 @@ registerCommandHandler("skill-mine", async request => {
 		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset; no mining was performed.");
 	const repeated = (value: string | true | undefined): string[] | undefined =>
 		typeof value === "string" ? value.split("\n").map(part => part.trim()).filter(Boolean) : undefined;
+	// --source additionally splits each repetition on commas; a valueless
+	// --source is refused at the use site instead of mining everything.
 	const nonNegativeInt = (raw: string | true | undefined, flag: string): number | undefined => {
 		if (typeof raw !== "string") return undefined;
 		const value = Number(raw);
@@ -5000,13 +5002,28 @@ registerCommandHandler("skill-mine", async request => {
 	};
 	let maxNew: number | undefined;
 	let wallBudgetS: number | undefined;
+	let sources: string[] | undefined;
 	try {
 		maxNew = nonNegativeInt(request.flags.get("--max-new"), "--max-new");
 		wallBudgetS = nonNegativeInt(request.flags.get("--wall-budget-s"), "--wall-budget-s");
+		const sourceRaw = request.flags.get("--source");
+		if (sourceRaw === true) throw new Error("--source needs a value: repeat --source cass|mail|git");
+		sources = typeof sourceRaw === "string"
+			? sourceRaw.split("\n").flatMap(line => line.split(",")).map(part => part.trim()).filter(Boolean)
+			: undefined;
+		if (sources !== undefined) {
+			for (const name of sources) {
+				if (name !== "cass" && name !== "mail" && name !== "git") {
+					throw new Error(`--source must be one of cass, mail, git, got ${JSON.stringify(name)}`);
+				}
+			}
+			if (sources.length === 0) throw new Error("--source must be one of cass, mail, git, got no values");
+		}
 	} catch (error) {
 		return refusal("INVALID_FLAG", error instanceof Error ? error.message : String(error),
-			"Pass --max-new N and --wall-budget-s S with N, S >= 0; no mining was performed.");
+			"Pass --max-new N and --wall-budget-s S with N, S >= 0, and repeat --source cass|mail|git; no mining was performed.");
 	}
+
 	const since = request.flags.get("--since");
 	let report;
 	try {
@@ -5018,19 +5035,22 @@ registerCommandHandler("skill-mine", async request => {
 			...(typeof request.flags.get("--sink") === "string" ? { sink: request.flags.get("--sink") as string } : {}),
 			...(maxNew !== undefined ? { maxNew } : {}),
 			...(wallBudgetS !== undefined ? { wallBudgetS } : {}),
+			...(sources !== undefined ? { sources } : {}),
 			apply: request.flags.has("--apply"),
+
 			home, pathValue: process.env.PATH ?? "", cwd: process.cwd(), stateDir: stateRoot,
 		});
 	} catch (error) {
 		return refusal("INVALID_FLAG", error instanceof Error ? error.message : String(error),
-			"Pass --since Nd or an ISO date; no mining was performed.");
+			"Pass --since Nd or an ISO date and repeat --source cass|mail|git; no mining was performed.");
 	}
 	return {
 		code: report.overall === "OK" ? 0 : 1,
 		data: { ...report, ...(!request.json && !request.robot ? { text: renderSkillMineText(report) } : {}) },
 		verification: "PERFORMED",
 	};
-});
+	});
+
 
 registerCommandHandler("skill-mine status", () => {
 	const stateRoot = receiptStateRoot();

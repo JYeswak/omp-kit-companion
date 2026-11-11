@@ -413,6 +413,15 @@ prints the session schema fields read before reading anything, and an
 unknown schema version refuses with no partial counts. A fire rate is
 not precision: precision needs human labels.
 
+## Mine sessions, mail and Git for skill candidates
+
+`skill-mine [--since 21d] [--source cass|mail|git]... [--wall-budget-s S]`
+reads CASS sessions, Agent Mail and Git history read-only and proposes
+candidates; `--apply` writes them to the sink. Each source has its own share
+of the wall budget (Git keeps at least 40%), so a slow session export cannot
+starve Git. `--source` runs a subset; repeat it or separate values with
+commas; values are case-sensitive. `skill-mine status` shows the last run.
+
 ## Convert a plan into native beads
 
 `planning convert --apply --tracker-root DIR --actor ACTOR --yes` writes only the

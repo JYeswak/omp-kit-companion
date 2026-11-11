@@ -40,6 +40,14 @@ export const INFRA_HEAD_RE = /^(omp-kit|br|am|ovnfs|cass|python3|cat|sed|rg)\b|^
 export const SKILL_MINE_WALL_BUDGET_S = 600;
 /** Trailing calendar months of Git history considered per repository (oldest first). */
 export const SKILL_MINE_GIT_MONTHS = 12;
+/** Selectable mining sources: cass sessions, Agent Mail threads, Git history. */
+export const SKILL_MINE_SOURCES = ["cass", "mail", "git"] as const;
+export type SkillMineSourceName = (typeof SKILL_MINE_SOURCES)[number];
+/** Reserved share of the wall budget for the Git source when enabled (SKILLMINEFAIR1):
+ * cass and mail stop at their own cumulative deadlines so a long cass pass can
+ * never consume the Git share; time a source does not use flows to the next. */
+export const SKILL_MINE_GIT_BUDGET_SHARE = 0.4;
+
 /** Output cap for one `git log` window; an over-cap window splits instead of truncating. */
 export const SKILL_MINE_GIT_LOG_BYTES_CAP = 1024 * 1024;
 /** Persisted admitted chains kept per repository; oldest beyond this are evicted. */
@@ -74,6 +82,11 @@ const GIT_MONTH_RE = /^\d{4}-(?:0[1-9]|1[0-2])$/;
 const GIT_SHA40_RE = /^[0-9a-f]{40}$/;
 export type SkillMineSourceStatus = "OK" | "UNAVAILABLE";
 
+export interface SkillMineSourceBudget {
+	elapsed_ms: number;
+	budget_ms: number;
+}
+
 export interface SkillMineSourceReport {
 	status: SkillMineSourceStatus;
 	reason: string;
@@ -85,7 +98,11 @@ export interface SkillMineSourceReport {
 	repos?: number;
 	commits?: number;
 	months_mined?: number;
+	/** Wall time this source spent and the share it was given (SKILLMINEFAIR1). */
+	elapsed_ms?: number;
+	budget_ms?: number;
 }
+
 
 /** Per-repository Git cursor row: which months are mined and the last error, if any. */
 export interface SkillMineGitRepoCoverage {
@@ -196,7 +213,16 @@ export interface SkillMineCoverage {
 	list_truncated: boolean;
 	projects: Record<string, number>;
 	git: SkillMineGitCoverage;
+	/** Per-source wall time spent and share given, in milliseconds (SKILLMINEFAIR1). */
+	budgets: Record<SkillMineSourceName, SkillMineSourceBudget>;
 }
+
+/** Zero per-source budgets for a run that mined nothing yet. */
+export function emptySkillMineBudgets(): Record<SkillMineSourceName, SkillMineSourceBudget> {
+	const zero = (): SkillMineSourceBudget => ({ elapsed_ms: 0, budget_ms: 0 });
+	return { cass: zero(), mail: zero(), git: zero() };
+}
+
 
 /** Empty per-run Git coverage: zero repositories resolved, nothing mined. */
 export function emptySkillMineGitCoverage(): SkillMineGitCoverage {
@@ -248,6 +274,8 @@ export interface SkillMineOptions {
 	sink?: string;
 	maxNew?: number;
 	wallBudgetS?: number;
+	/** Sources to mine; default is all three. Repeatable --source on the CLI. */
+	sources?: string[];
 	/** Test-only seam: lower the pick caps for SKILLMINE3 fixtures without touching the module constants. */
 	sessionCap?: number;
 	perProjectCap?: number;
@@ -264,6 +292,55 @@ export interface SkillMineOptions {
 	stateDir: string;
 	now?: number;
 }
+
+/**
+ * Enabled sources in canonical cass, mail, git order. Unknown names throw
+ * naming every valid value, so the CLI can refuse with the same list
+ * (SKILLMINEFAIR1).
+ */
+export function normalizeSkillMineSources(raw: string[] | undefined): SkillMineSourceName[] {
+	if (raw === undefined) return ["cass", "mail", "git"];
+	const seen = new Set<SkillMineSourceName>();
+	for (const name of raw) {
+		if (name !== "cass" && name !== "mail" && name !== "git") {
+			throw new Error(`skill-mine: --source must be one of cass, mail, git, got ${JSON.stringify(name)}`);
+		}
+		seen.add(name);
+	}
+	if (seen.size === 0) throw new Error("skill-mine: --source must be one of cass, mail, git, got no values");
+	return (["cass", "mail", "git"] as const).filter(name => seen.has(name));
+}
+
+/**
+ * Reserved wall-budget shares per enabled source, in milliseconds. Git keeps
+ * at least SKILL_MINE_GIT_BUDGET_SHARE of the total; the remainder splits
+ * evenly across the other enabled sources.
+ */
+export function skillMineBudgetShares(enabled: SkillMineSourceName[], totalMs: number): Record<SkillMineSourceName, number> {
+	const shares: Record<SkillMineSourceName, number> = { cass: 0, mail: 0, git: 0 };
+	if (enabled.length === 0) return shares;
+	if (enabled.length === 1) {
+		shares[enabled[0]!] = totalMs;
+		return shares;
+	}
+	if (enabled.includes("git")) {
+		const gitMs = Math.floor(totalMs * SKILL_MINE_GIT_BUDGET_SHARE);
+		shares.git = gitMs;
+		const rest = totalMs - gitMs;
+		const others = enabled.filter(name => name !== "git");
+		const each = Math.floor(rest / others.length);
+		for (let i = 0; i < others.length; i++) {
+			shares[others[i]!] = i === others.length - 1 ? rest - each * (others.length - 1) : each;
+		}
+		return shares;
+	}
+	const each = Math.floor(totalMs / enabled.length);
+	for (let i = 0; i < enabled.length; i++) {
+		shares[enabled[i]!] = i === enabled.length - 1 ? totalMs - each * (enabled.length - 1) : each;
+	}
+	return shares;
+}
+
 
 interface Observation {
 	kind: "sequence" | "text-block" | "correction" | "fix-arc" | "mail-thread" | "git-chain";
@@ -660,13 +737,26 @@ function sessionProject(row: CassSessionRow, fallback: string): string {
 	return fallback;
 }
 
-async function runCass(cassBin: string, args: string[], options: SkillMineOptions, maxBytes: number): Promise<{ ok: boolean; stdout: string; reason: string }> {
+/**
+ * Per-call timeout clamped to a source's remaining share (SKILLMINEFAIR1):
+ * deadlines are otherwise checked only between units, so one fixed 30 s call
+ * could spend the whole wall budget and starve later sources. Null when the
+ * share is already spent: callers stop the source cleanly (stopped_early,
+ * "wall budget reached") instead of starting another call.
+ */
+function sourceTimeoutS(deadlineMs: number, capS: number): number | null {
+	const remainingMs = deadlineMs - Date.now();
+	if (remainingMs <= 0) return null;
+	return Math.min(capS, Math.max(1, Math.ceil(remainingMs / 1000)));
+}
+
+async function runCass(cassBin: string, args: string[], options: SkillMineOptions, maxBytes: number, timeoutS: number): Promise<{ ok: boolean; stdout: string; reason: string }> {
 	try {
 		const result = await run([cassBin, ...args], {
 			cwd: options.cwd, env: { HOME: options.home, PATH: options.pathValue },
-			deadline_s: 30, max_output_bytes: maxBytes,
+			deadline_s: timeoutS, max_output_bytes: maxBytes,
 		});
-		if (result.timed_out) return { ok: false, stdout: "", reason: "cass timed out after 30 s" };
+		if (result.timed_out) return { ok: false, stdout: "", reason: `cass timed out after ${timeoutS} s` };
 		if (result.rc !== 0) return { ok: false, stdout: "", reason: `cass exited ${result.rc}: ${Buffer.from(result.stderr).toString("utf8").slice(0, 300)}` };
 		return { ok: true, stdout: Buffer.from(result.stdout).toString("utf8"), reason: "" };
 	} catch (error) {
@@ -674,8 +764,11 @@ async function runCass(cassBin: string, args: string[], options: SkillMineOption
 	}
 }
 
-async function listSessions(cassBin: string, sinceISO: string, options: SkillMineOptions): Promise<{ rows: CassSessionRow[]; truncated: boolean }> {
-	const first = await runCass(cassBin, ["sessions", "--since", sinceISO, "--json", "--limit", String(SKILL_MINE_SESSIONS_PAGE)], options, 4 * 1024 * 1024);
+async function listSessions(cassBin: string, sinceISO: string, options: SkillMineOptions, deadlineMs: number): Promise<{ rows: CassSessionRow[]; truncated: boolean }> {
+	// One bounded list call even on a spent share, so coverage can still
+	// account picked-but-unvisited sessions (SKILLMINE3 wallBudgetS: 0);
+	// every call after that stops instead of starting.
+	const first = await runCass(cassBin, ["sessions", "--since", sinceISO, "--json", "--limit", String(SKILL_MINE_SESSIONS_PAGE)], options, 4 * 1024 * 1024, sourceTimeoutS(deadlineMs, 30) ?? 1);
 	if (!first.ok) throw new Error(first.reason);
 	let rows: unknown;
 	try {
@@ -694,7 +787,9 @@ async function listSessions(cassBin: string, sinceISO: string, options: SkillMin
 	}
 	const workspaces = [...new Set(primary.map(row => sessionProject(row, "")).filter(Boolean))];
 	for (const workspace of workspaces) {
-		const extra = await runCass(cassBin, ["sessions", "--since", sinceISO, "--json", "--limit", String(SKILL_MINE_SESSIONS_PAGE), "--workspace", workspace], options, 4 * 1024 * 1024);
+		const extraTimeoutS = sourceTimeoutS(deadlineMs, 30);
+		if (extraTimeoutS === null) break;
+		const extra = await runCass(cassBin, ["sessions", "--since", sinceISO, "--json", "--limit", String(SKILL_MINE_SESSIONS_PAGE), "--workspace", workspace], options, 4 * 1024 * 1024, extraTimeoutS);
 		if (!extra.ok) continue;
 		let parsed: unknown;
 		try {
@@ -716,11 +811,13 @@ function viewLinesOf(value: unknown): unknown[] {
 }
 
 /** Sample an oversize session at evenly spaced message ordinals instead of dropping it. */
-async function viewChunk(cassBin: string, path: string, count: number, options: SkillMineOptions): Promise<unknown[] | null> {
+async function viewChunk(cassBin: string, path: string, count: number, options: SkillMineOptions, deadlineMs: number): Promise<unknown[] | null> {
 	const out: unknown[] = [];
 	for (let point = 1; point <= SKILL_MINE_VIEW_POINTS; point++) {
 		const index = Math.max(1, Math.round(count * point / (SKILL_MINE_VIEW_POINTS + 1)));
-		const result = await runCass(cassBin, ["view", path, "--message-index", String(index), "-C", String(SKILL_MINE_VIEW_CONTEXT), "--json", "--timeout", "10000"], options, 4 * 1024 * 1024);
+		const timeoutS = sourceTimeoutS(deadlineMs, 30);
+		if (timeoutS === null) return null;
+		const result = await runCass(cassBin, ["view", path, "--message-index", String(index), "-C", String(SKILL_MINE_VIEW_CONTEXT), "--json", "--timeout", "10000"], options, 4 * 1024 * 1024, timeoutS);
 		if (!result.ok) return null;
 		let parsed: unknown;
 		try {
@@ -764,8 +861,10 @@ async function mineCass(options: SkillMineOptions, sinceMs: number, deadlineMs: 
 	const emptyCoverage = (extra: Partial<SkillMineCoverage> = {}): SkillMineCoverage => ({
 		sessions_in_window: 0, sessions_seen: 0, sessions_mined: 0, skipped_oversize: 0,
 		project_filtered: 0, no_path: 0, advisor_sidecar: 0, per_project_cap: 0, session_cap: 0, not_reached: 0,
-		stopped_early: false, list_truncated: false, projects: {}, git: emptySkillMineGitCoverage(), ...extra,
+		stopped_early: false, list_truncated: false, projects: {}, git: emptySkillMineGitCoverage(),
+		budgets: emptySkillMineBudgets(), ...extra,
 	});
+
 	const cassBin = findOnPath("cass", options.pathValue);
 	if (cassBin === null) {
 		return { status: { status: "UNAVAILABLE", reason: "cass is not on PATH; install cass or pass --project mail only" }, observations: [], coverage: emptyCoverage(), workspaces: [] };
@@ -773,7 +872,7 @@ async function mineCass(options: SkillMineOptions, sinceMs: number, deadlineMs: 
 	const sinceISO = new Date(sinceMs).toISOString();
 	let listed: { rows: CassSessionRow[]; truncated: boolean };
 	try {
-		listed = await listSessions(cassBin, sinceISO, options);
+		listed = await listSessions(cassBin, sinceISO, options, deadlineMs);
 	} catch (error) {
 		return { status: { status: "UNAVAILABLE", reason: error instanceof Error ? error.message : String(error) }, observations: [], coverage: emptyCoverage(), workspaces: [] };
 	}
@@ -820,15 +919,17 @@ async function mineCass(options: SkillMineOptions, sinceMs: number, deadlineMs: 
 	let stoppedEarly = false;
 	for (const session of picked) {
 		if (Date.now() > deadlineMs) { stoppedEarly = true; break; }
+		const timeoutS = sourceTimeoutS(deadlineMs, 30);
+		if (timeoutS === null) { stoppedEarly = true; break; }
 		let flat: unknown[] | null = null;
 		if (session.size > SKILL_MINE_SESSION_BYTES_CAP) {
 			flat = await sampleLocalSession(session.path);
 			if (flat === null && session.count > 0) {
-				flat = await viewChunk(cassBin, session.path, session.count, options);
+				flat = await viewChunk(cassBin, session.path, session.count, options, deadlineMs);
 			}
 			if (flat === null) { skippedOversize++; continue; }
 		} else {
-			const exported = await runCass(cassBin, ["export", session.path, "--format", "json"], options, SKILL_MINE_EXPORT_BYTES_CAP);
+			const exported = await runCass(cassBin, ["export", session.path, "--format", "json"], options, SKILL_MINE_EXPORT_BYTES_CAP, timeoutS);
 			if (!exported.ok) { failures++; continue; }
 			let parsed: unknown;
 			try {
@@ -859,11 +960,12 @@ async function mineCass(options: SkillMineOptions, sinceMs: number, deadlineMs: 
 		skipped_oversize: skippedOversize, project_filtered: projectFiltered, no_path: noPath,
 		advisor_sidecar: advisorSidecar, per_project_cap: perProjectDropped, session_cap: sessionCapDropped,
 		not_reached: notReached, stopped_early: stoppedEarly, list_truncated: listed.truncated, projects,
-		git: emptySkillMineGitCoverage(),
+		git: emptySkillMineGitCoverage(), budgets: emptySkillMineBudgets(),
 	};
 	const workspaces = [...new Set(listed.rows.map(row => sessionProject(row, options.cwd)).filter(Boolean))].sort();
 	return { status: { status: "OK", reason, sessions: mined, messages }, observations, coverage, workspaces };
 }
+
 /** Narrow the live sessions envelope without asserting an unchecked shape. */
 function sessionsOf(value: unknown): unknown[] {
 	if (value !== null && typeof value === "object" && "sessions" in value && Array.isArray(value.sessions)) return value.sessions;
@@ -942,7 +1044,8 @@ export async function liveMailRoot(options: SkillMineOptions): Promise<string | 
 	}
 }
 
-function mineMail(options: SkillMineOptions, sinceMs: number): { status: SkillMineSourceReport; observations: Observation[] } {
+function mineMail(options: SkillMineOptions, sinceMs: number, deadlineMs = Number.POSITIVE_INFINITY): { status: SkillMineSourceReport; observations: Observation[] } {
+
 	const root = mailArchiveRoot(options);
 	const projectsDir = join(root, "projects");
 	let slugs: string[];
@@ -959,6 +1062,8 @@ function mineMail(options: SkillMineOptions, sinceMs: number): { status: SkillMi
 	const threads = new Map<string, MailThread>();
 	let files = 0;
 	let scanned = 0;
+	let stoppedEarly = false;
+
 	outer: for (const slug of wantedSlugs) {
 		const messagesDir = join(projectsDir, slug, "messages");
 		let years: string[];
@@ -978,7 +1083,9 @@ function mineMail(options: SkillMineOptions, sinceMs: number): { status: SkillMi
 				for (const name of names) {
 					if (!name.endsWith(".md")) continue;
 					if (scanned >= SKILL_MINE_MAIL_FILES_CAP) break outer;
+					if (Date.now() > deadlineMs) { stoppedEarly = true; break outer; }
 					scanned++;
+
 					const path = join(messagesDir, year, month, name);
 					let stat: { size: number; mtimeMs: number };
 					try {
@@ -1031,7 +1138,8 @@ function mineMail(options: SkillMineOptions, sinceMs: number): { status: SkillMi
 			});
 		}
 	}
-	return { status: { status: "OK", reason: `scanned ${scanned} file(s) in ${wantedSlugs.length} project(s)`, threads: threads.size, files }, observations };
+	return { status: { status: "OK", reason: `scanned ${scanned} file(s) in ${wantedSlugs.length} project(s)${stoppedEarly ? "; wall budget reached" : ""}`, threads: threads.size, files }, observations };
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1039,9 +1147,8 @@ function mineMail(options: SkillMineOptions, sinceMs: number): { status: SkillMi
 // that Git itself can prove, mined one repository and one month at a time.
 // Read-only: discovery via rev-parse, history via log. Never fetch, checkout,
 // or diff bodies; a commit message line that looks like a credential drops the
-// commit. Per-repository month cursors live in git-cursors.json beside the
-// ledger, so a run mines the next unmined month(s) within the shared wall
-// budget and a later run continues.
+// ledger, so a run mines the next unmined month(s) within its reserved share
+// of the wall budget and a later run continues.
 
 interface GitCommit {
 	sha: string;
@@ -1139,8 +1246,10 @@ export function gitMonthKeys(now: number, sinceMs: number): string[] {
  * dated at or after the window start. A shallow flag alone (an unrelated
  * entry, or a boundary older than the window) never counts as a cut.
  */
-async function gitShallowCut(gitBin: string, display: string, options: SkillMineOptions, windowStartMs: number): Promise<{ sha: string } | null> {
-	const located = await runGit(gitBin, ["rev-parse", "--git-path", "shallow"], display, options, 64 * 1024);
+async function gitShallowCut(gitBin: string, display: string, options: SkillMineOptions, windowStartMs: number, deadlineMs: number): Promise<{ sha: string } | null> {
+	const locateTimeoutS = sourceTimeoutS(deadlineMs, SKILL_MINE_GIT_DEADLINE_S);
+	if (locateTimeoutS === null) return null;
+	const located = await runGit(gitBin, ["rev-parse", "--git-path", "shallow"], display, options, 64 * 1024, locateTimeoutS);
 	if (!located.ok) return null;
 	const rawPath = located.stdout.trim();
 	if (!rawPath) return null;
@@ -1152,9 +1261,13 @@ async function gitShallowCut(gitBin: string, display: string, options: SkillMine
 	} catch { return null; }
 	const shas = entries.split("\n").map(line => line.trim()).filter(line => /^[0-9a-f]{7,40}$/.test(line)).slice(0, 32);
 	for (const sha of shas) {
-		const ancestor = await runGit(gitBin, ["merge-base", "--is-ancestor", sha, "HEAD"], display, options, 64 * 1024);
+		const ancestorTimeoutS = sourceTimeoutS(deadlineMs, SKILL_MINE_GIT_DEADLINE_S);
+		if (ancestorTimeoutS === null) return null;
+		const ancestor = await runGit(gitBin, ["merge-base", "--is-ancestor", sha, "HEAD"], display, options, 64 * 1024, ancestorTimeoutS);
 		if (!ancestor.ok) continue;
-		const dated = await runGit(gitBin, ["show", "-s", "--format=%cI", sha], display, options, 64 * 1024);
+		const datedTimeoutS = sourceTimeoutS(deadlineMs, SKILL_MINE_GIT_DEADLINE_S);
+		if (datedTimeoutS === null) return null;
+		const dated = await runGit(gitBin, ["show", "-s", "--format=%cI", sha], display, options, 64 * 1024, datedTimeoutS);
 		if (!dated.ok) return { sha };
 		const cutAt = Date.parse(dated.stdout.trim());
 		if (!Number.isFinite(cutAt) || cutAt >= windowStartMs) return { sha };
@@ -1168,7 +1281,7 @@ async function gitShallowCut(gitBin: string, display: string, options: SkillMine
  * cannot run its hooks, fsmonitor, pager or config programs through log or
  * rev-parse, and git takes no locks and prompts for nothing.
  */
-async function runGit(gitBin: string, args: string[], cwd: string, options: SkillMineOptions, maxBytes: number): Promise<{ ok: boolean; stdout: string; reason: string }> {
+async function runGit(gitBin: string, args: string[], cwd: string, options: SkillMineOptions, maxBytes: number, timeoutS: number): Promise<{ ok: boolean; stdout: string; reason: string }> {
 	const env: Record<string, string> = {
 		HOME: options.home, PATH: options.pathValue,
 		GIT_OPTIONAL_LOCKS: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0",
@@ -1179,8 +1292,8 @@ async function runGit(gitBin: string, args: string[], cwd: string, options: Skil
 		"-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false", "-c", "core.quotepath=off",
 		...args];
 	try {
-		const result = await run(argv, { cwd, env, deadline_s: SKILL_MINE_GIT_DEADLINE_S, max_output_bytes: maxBytes });
-		if (result.timed_out) return { ok: false, stdout: "", reason: `git ${args[0] ?? ""} timed out after ${SKILL_MINE_GIT_DEADLINE_S} s` };
+		const result = await run(argv, { cwd, env, deadline_s: timeoutS, max_output_bytes: maxBytes });
+		if (result.timed_out) return { ok: false, stdout: "", reason: `git ${args[0] ?? ""} timed out after ${timeoutS} s` };
 		// Truncation first: an over-cap child is SIGKILLed, so its rc is null;
 		// reading the exit code first would misreport the cap as a crash.
 		if (result.total_truncated || result.truncated) return { ok: false, stdout: "", reason: `git ${args[0] ?? ""} output exceeded its cap; narrow --since` };
@@ -1198,13 +1311,15 @@ async function runGit(gitBin: string, args: string[], cwd: string, options: Skil
  * seeds allow upward discovery, matching the kit's project resolution. Either
  * way aliases collapse: the cursor key is the realpath of the git common dir.
  */
-async function canonicalGitRepo(gitBin: string, seed: string, discover: boolean, options: SkillMineOptions): Promise<{ key: string; display: string } | null> {
+async function canonicalGitRepo(gitBin: string, seed: string, discover: boolean, options: SkillMineOptions, deadlineMs: number): Promise<{ key: string; display: string } | null> {
 	let real: string;
 	try {
 		real = realpathSync(resolve(options.cwd, seed));
 	} catch { return null; }
 	if (!discover && !existsSync(join(real, ".git"))) return null;
-	const probed = await runGit(gitBin, ["rev-parse", "--show-toplevel", "--git-common-dir"], real, options, 64 * 1024);
+	const timeoutS = sourceTimeoutS(deadlineMs, SKILL_MINE_GIT_DEADLINE_S);
+	if (timeoutS === null) return null;
+	const probed = await runGit(gitBin, ["rev-parse", "--show-toplevel", "--git-common-dir"], real, options, 64 * 1024, timeoutS);
 	if (!probed.ok) return null;
 	const [top, common] = probed.stdout.split("\n").map(line => line.trim());
 	if (!top) return null;
@@ -1381,11 +1496,13 @@ const SKILL_MINE_GIT_SPLIT_DEPTH = 10;
  * until every piece fits the log byte cap. A piece that still cannot fit is
  * an error and the month is not marked mined.
  */
-async function mineMonthCommits(gitBin: string, display: string, options: SkillMineOptions, sinceISO: string, untilISO: string, month: string, depth: number): Promise<{ commits: GitCommit[] } | { error: string }> {
+async function mineMonthCommits(gitBin: string, display: string, options: SkillMineOptions, sinceISO: string, untilISO: string, month: string, depth: number, deadlineMs: number): Promise<{ commits: GitCommit[] } | { error: string }> {
+	const timeoutS = sourceTimeoutS(deadlineMs, SKILL_MINE_GIT_DEADLINE_S);
+	if (timeoutS === null) return { error: "wall budget reached" };
 	const logged = await runGit(gitBin,
 		["log", "--no-color", "--no-merges", "--reverse", "-z", "--name-only",
 			`--format=%H%x1f%aI%x1f%s%x1f%b%x00`, `--since=${sinceISO}`, `--until=${untilISO}`],
-		display, options, options.gitLogBytesCap ?? SKILL_MINE_GIT_LOG_BYTES_CAP);
+		display, options, options.gitLogBytesCap ?? SKILL_MINE_GIT_LOG_BYTES_CAP, timeoutS);
 	if (!logged.ok) {
 		if (!options.gitNoSplit && logged.reason.includes("exceeded its cap")) {
 			const sinceMs = Date.parse(sinceISO);
@@ -1393,9 +1510,9 @@ async function mineMonthCommits(gitBin: string, display: string, options: SkillM
 			const midMs = Math.floor((sinceMs + untilMs) / 2000) * 1000;
 			if (Number.isFinite(sinceMs) && Number.isFinite(untilMs) && depth < SKILL_MINE_GIT_SPLIT_DEPTH && midMs > sinceMs && midMs < untilMs) {
 				const midISO = new Date(midMs).toISOString();
-				const left = await mineMonthCommits(gitBin, display, options, sinceISO, midISO, month, depth + 1);
+				const left = await mineMonthCommits(gitBin, display, options, sinceISO, midISO, month, depth + 1, deadlineMs);
 				if ("error" in left) return left;
-				const right = await mineMonthCommits(gitBin, display, options, midISO, untilISO, month, depth + 1);
+				const right = await mineMonthCommits(gitBin, display, options, midISO, untilISO, month, depth + 1, deadlineMs);
 				if ("error" in right) return right;
 				const seen = new Set<string>();
 				const commits: GitCommit[] = [];
@@ -1505,10 +1622,10 @@ function clusterGitChains(chains: SkillMineGitChain[], firstSeen: Map<string, st
 }
 /**
  * Git source: for each registered project repository (cass workspaces, or
- * --project when given) mine the next unmined month(s) within the shared wall
- * budget, one repository at a time. Aliases collapse to one canonical
- * repository and are mined once. Admitted chains persist beside the cursor so
- * clusters accumulate across monthly runs without re-mining.
+ * --project when given) mine the next unmined month(s) within its reserved
+ * share of the wall budget, one repository at a time. Aliases collapse to one
+ * canonical repository and are mined once. Admitted chains persist beside the
+ * cursor so clusters accumulate across monthly runs without re-mining.
  */
 async function mineGit(options: SkillMineOptions, sinceMs: number, now: number, cassWorkspaces: string[], deadlineMs: number, firstSeen: Map<string, string>, nowISO: string): Promise<{ status: SkillMineSourceReport; candidates: SkillMineCandidate[]; coverage: SkillMineGitCoverage }> {
 	const coverage = emptySkillMineGitCoverage();
@@ -1521,7 +1638,7 @@ async function mineGit(options: SkillMineOptions, sinceMs: number, now: number, 
 	const repos = new Map<string, { key: string; display: string }>();
 	for (const { seed, discover } of seeds) {
 		if (!seed) { coverage.dropped_not_a_repo++; continue; }
-		const repo = await canonicalGitRepo(gitBin, seed, discover, options);
+		const repo = await canonicalGitRepo(gitBin, seed, discover, options, deadlineMs);
 		if (!repo) { coverage.dropped_not_a_repo++; continue; }
 		if (!repos.has(repo.key)) repos.set(repo.key, repo);
 	}
@@ -1554,10 +1671,18 @@ async function mineGit(options: SkillMineOptions, sinceMs: number, now: number, 
 		const repo = ordered[index]!;
 		const entry = state.repos[repo.key] ?? { display: repo.display, months_mined: [], last_error: null };
 		const unmined = months.filter(month => !entry.months_mined.includes(month));
+		const markStoppedEarly = (visited: number): void => {
+			coverage.not_reached += unmined.length - visited;
+			for (let rest = index + 1; rest < ordered.length; rest++) {
+				const later = state.repos[ordered[rest]!.key] ?? { months_mined: [] as string[], last_error: null };
+				coverage.not_reached += months.filter(m => !later.months_mined.includes(m)).length;
+			}
+			coverage.stopped_early = true;
+		};
 		// A shallow flag alone means nothing: only a boundary that cuts the
 		// window walk is reported, and mining still proceeds read-only.
 		const windowStartMs = months.length > 0 ? Date.parse(`${months[0]}-01T00:00:00Z`) : Number.POSITIVE_INFINITY;
-		const shallowCut = await gitShallowCut(gitBin, repo.display, options, windowStartMs);
+		const shallowCut = await gitShallowCut(gitBin, repo.display, options, windowStartMs, deadlineMs);
 		if (shallowCut) shallowCuts.push(`${repo.display.split("/").slice(-2).join("/")}@${shallowCut.sha.slice(0, 7)}`);
 		let done = 0;
 		const history: GitCommit[] = [];
@@ -1566,19 +1691,18 @@ async function mineGit(options: SkillMineOptions, sinceMs: number, now: number, 
 			// next repository and leave the remainder for a later run.
 			if (done >= monthsPerRun) break;
 			if (Date.now() > deadlineMs) {
-				coverage.not_reached += unmined.length - done;
-				for (let rest = index + 1; rest < ordered.length; rest++) {
-					const later = state.repos[ordered[rest]!.key] ?? { months_mined: [] as string[], last_error: null };
-					coverage.not_reached += months.filter(m => !later.months_mined.includes(m)).length;
-				}
-				coverage.stopped_early = true;
+				markStoppedEarly(done);
 				break;
 			}
 			const year = Number(month.slice(0, 4));
 			const mon = Number(month.slice(5, 7));
 			const mined = await mineMonthCommits(gitBin, repo.display, options,
-				`${month}-01T00:00:00Z`, new Date(Date.UTC(year, mon, 1)).toISOString(), month, 0);
+				`${month}-01T00:00:00Z`, new Date(Date.UTC(year, mon, 1)).toISOString(), month, 0, deadlineMs);
 			if ("error" in mined) {
+				if (mined.error.includes("wall budget reached")) {
+					markStoppedEarly(done);
+					break;
+				}
 				coverage.dropped_errors++;
 				if (entry.last_error !== mined.error) { entry.last_error = mined.error; dirty = true; }
 				continue;
@@ -1911,16 +2035,60 @@ export async function runSkillMine(options: SkillMineOptions): Promise<SkillMine
 	const now = options.now ?? started;
 	const nowISO = new Date(now).toISOString();
 	const sinceMs = parseSinceMs(options.since, now);
-	// One wall budget for the whole mining pass: cass, then Git, stop when it is gone.
+	// Fair shares of one wall budget (SKILLMINEFAIR1): Git keeps a reserved
+	// share so a long cass pass can never starve it. Cumulative deadlines
+	// from the pass start enforce the shares: each source stops at its own
+	// deadline, and time a source does not use flows to the next.
+	const enabled = normalizeSkillMineSources(options.sources);
 	const wallBudgetS = options.wallBudgetS ?? SKILL_MINE_WALL_BUDGET_S;
-	const deadlineMs = Date.now() + Math.max(0, wallBudgetS) * 1000;
-	const cass = await mineCass(options, sinceMs, deadlineMs);
-	const mailArchive = options.mailArchive ?? await liveMailRoot(options) ?? undefined;
-	const mail = mineMail(mailArchive === undefined ? options : { ...options, mailArchive }, sinceMs);
+	const shares = skillMineBudgetShares(enabled, Math.max(0, wallBudgetS) * 1000);
+	let cursor = started;
+	const cassDeadline = cursor + shares.cass; cursor += shares.cass;
+	const mailDeadline = cursor + shares.mail; cursor += shares.mail;
+	const gitDeadline = cursor + shares.git;
+	const skippedCoverage = (): SkillMineCoverage => ({
+		sessions_in_window: 0, sessions_seen: 0, sessions_mined: 0, skipped_oversize: 0,
+		project_filtered: 0, no_path: 0, advisor_sidecar: 0, per_project_cap: 0, session_cap: 0, not_reached: 0,
+		stopped_early: false, list_truncated: false, projects: {}, git: emptySkillMineGitCoverage(),
+		budgets: emptySkillMineBudgets(),
+	});
+	const skipped = (want: SkillMineSourceName): SkillMineSourceReport => ({
+		status: "UNAVAILABLE", reason: `skipped by --source ${enabled.join(",")}; ${want} was not mined`, elapsed_ms: 0, budget_ms: 0,
+	});
+	let cass: { status: SkillMineSourceReport; observations: Observation[]; coverage: SkillMineCoverage; workspaces: string[] };
+	let cassElapsed = 0;
+	if (enabled.includes("cass")) {
+		const sourceStart = Date.now();
+		cass = await mineCass(options, sinceMs, cassDeadline);
+		cassElapsed = Date.now() - sourceStart;
+		cass.status = { ...cass.status, elapsed_ms: cassElapsed, budget_ms: shares.cass };
+	} else {
+		cass = { status: skipped("cass"), observations: [], coverage: skippedCoverage(), workspaces: [] };
+	}
+	let mail: { status: SkillMineSourceReport; observations: Observation[] };
+	let mailElapsed = 0;
+	if (enabled.includes("mail")) {
+		const sourceStart = Date.now();
+		const mailArchive = options.mailArchive ?? await liveMailRoot(options) ?? undefined;
+		mail = mineMail(mailArchive === undefined ? options : { ...options, mailArchive }, sinceMs, mailDeadline);
+		mailElapsed = Date.now() - sourceStart;
+		mail.status = { ...mail.status, elapsed_ms: mailElapsed, budget_ms: shares.mail };
+	} else {
+		mail = { status: skipped("mail"), observations: [] };
+	}
 	const { skills, count: skillCount } = readSkillsIndex(options.skillsDirs ?? defaultSkillsDirs(options.home));
 	const ledger = loadLedger(options.stateDir);
 	const firstSeen = new Map<string, string>(Object.entries(ledger).map(([fp, row]) => [fp, row.first_seen]));
-	const git = await mineGit(options, sinceMs, now, cass.workspaces, deadlineMs, firstSeen, nowISO);
+	let git: { status: SkillMineSourceReport; candidates: SkillMineCandidate[]; coverage: SkillMineGitCoverage };
+	let gitElapsed = 0;
+	if (enabled.includes("git")) {
+		const sourceStart = Date.now();
+		git = await mineGit(options, sinceMs, now, cass.workspaces, gitDeadline, firstSeen, nowISO);
+		gitElapsed = Date.now() - sourceStart;
+		git.status = { ...git.status, elapsed_ms: gitElapsed, budget_ms: shares.git };
+	} else {
+		git = { status: skipped("git"), candidates: [], coverage: emptySkillMineGitCoverage() };
+	}
 	const observations = [...cass.observations, ...mail.observations];
 	const clusters = clusterObservations(observations);
 	const { candidates: ranked } = rankClusters(clusters, firstSeen, nowISO);
@@ -1944,6 +2112,11 @@ export async function runSkillMine(options: SkillMineOptions): Promise<SkillMine
 	// The pack is the judging agent's daily read: it carries the current top clusters (kept, ranked), so a cluster
 	// recurring every day stays visible; the sink and --apply stay limited to never-seen fingerprints.
 	const pack = writeSkillMinePack(options.stateDir, nowISO.slice(0, 10), kept);
+	const budgets: Record<SkillMineSourceName, SkillMineSourceBudget> = {
+		cass: { elapsed_ms: cassElapsed, budget_ms: shares.cass },
+		mail: { elapsed_ms: mailElapsed, budget_ms: shares.mail },
+		git: { elapsed_ms: gitElapsed, budget_ms: shares.git },
+	};
 	const report: SkillMineReport = {
 		overall: cass.status.status === "OK" || mail.status.status === "OK" || git.status.status === "OK" ? "OK" : "UNVERIFIED",
 		sources: {
@@ -1954,10 +2127,11 @@ export async function runSkillMine(options: SkillMineOptions): Promise<SkillMine
 		candidates: fresh, rejects,
 		projects_with_candidates: projects.size,
 		beads_filed: filed, unfiled, sink,
-		coverage: { ...cass.coverage, git: git.coverage },
+		coverage: { ...cass.coverage, git: git.coverage, budgets },
 		pack,
 		elapsed_ms: Date.now() - started,
 	};
+
 	try {
 		mkdirSync(join(options.stateDir, "skill-mine"), { recursive: true, mode: 0o700 });
 		writeFileSync(lastRunPath(options.stateDir), `${JSON.stringify({
@@ -2008,7 +2182,9 @@ export function renderSkillMineText(report: SkillMineReport): string {
 		`mail: ${report.sources.mail.status} (${report.sources.mail.reason})`,
 		`git: ${report.sources.git.status} (${report.sources.git.reason})`,
 		`coverage: ${report.coverage.sessions_mined}/${report.coverage.sessions_in_window} mined, ${report.coverage.skipped_oversize} oversize, stopped_early=${report.coverage.stopped_early}, truncated=${report.coverage.list_truncated}`,
+		`budgets: cass ${report.coverage.budgets.cass.elapsed_ms}/${report.coverage.budgets.cass.budget_ms} ms, mail ${report.coverage.budgets.mail.elapsed_ms}/${report.coverage.budgets.mail.budget_ms} ms, git ${report.coverage.budgets.git.elapsed_ms}/${report.coverage.budgets.git.budget_ms} ms`,
 		`candidates: ${report.candidates.length}; rejects: ${report.rejects.length}; projects: ${report.projects_with_candidates}; beads filed: ${report.beads_filed.length}`,
+
 	];
 	for (const candidate of report.candidates.slice(0, 10)) {
 		lines.push(`- ${candidate.workflow} score=${candidate.score} projects=${candidate.projects.length} occ=${candidate.occurrences} fp=${candidate.fingerprint}`);

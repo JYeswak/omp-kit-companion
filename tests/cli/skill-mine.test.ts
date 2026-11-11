@@ -7,10 +7,11 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, wr
 import { delimiter, join, resolve } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import {
-	clusterObservations, dedupeCandidates, fileBeads, fingerprintOf, isInfra, normalizeSkeleton,
-	parseMailFile, parseSinceMs, rankClusters, readSkillMineStatus, redactedQuote, runSkillMine, skillOverlap,
-	stripInjected, textBlockKey, tokensOf, type SkillMineCandidate, type SkillMineOptions,
+	clusterObservations, dedupeCandidates, fileBeads, fingerprintOf, isInfra, normalizeSkillMineSources, normalizeSkeleton,
+	parseMailFile, parseSinceMs, rankClusters, readSkillMineStatus, redactedQuote, runSkillMine, skillMineBudgetShares,
+	skillOverlap, stripInjected, textBlockKey, tokensOf, SKILL_MINE_GIT_BUDGET_SHARE, type SkillMineCandidate, type SkillMineOptions,
 } from "../../src/skill-mine.ts";
+
 import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 
 afterAll(cleanupAllOwnedTmp);
@@ -856,3 +857,185 @@ test("SKILLMINEGIT1: with splitting disabled an over-cap month errors and the cu
 	expect(report.coverage.git.chains).toBe(0);
 	expect(readSkillMineStatus(f.stateDir).git?.repos_detail[f.gitA]?.months_mined).toEqual(["2026-10"]);
 });
+
+// SKILLMINEFAIR1: one wall budget shared by every source starved Git. On a
+// 365d window a long cass pass consumed the whole budget, so Git mined 0 of
+// 24 months while cass produced candidates. Each enabled source now gets a
+// reserved share of the wall budget (Git keeps at least 40%) enforced by
+// cumulative deadlines, unused time flows forward, and --source limits the
+// pass. Planted negative: the old shared deadline mines 0 Git months here.
+const SLOW_CASS_SH = `#!/bin/sh
+here="$(dirname "$0")"
+if [ "$1" = "sessions" ]; then cat "$here/../cassdata/sessions.json"; exit 0; fi
+if [ "$1" = "export" ]; then sleep 3; cat "$here/../cassdata/exports/$(basename "$2").json"; exit 0; fi
+if [ "$1" = "view" ]; then cat "$here/../cassdata/views/$(basename "$2").json"; exit 0; fi
+echo "unexpected cass argv: $*" >&2; exit 2
+`;
+
+/** Recurrence repos with a cass shim whose exports each burn 3 s of budget. */
+function makeSlowGitFixture(label: string): GitFixture {
+	const f = makeGitFixture(label, "recurrence");
+	put(join(f.bin, "cass"), SLOW_CASS_SH, 0o755);
+	return f;
+}
+
+test("SKILLMINEFAIR1: a slow cass pass cannot starve Git of its reserved share", async () => {
+	const f = makeSlowGitFixture("skill-mine-fair-share");
+	// Two 3 s exports need 6 s; the 5 s budget fits one share but never the
+	// whole pass, so the old shared deadline would leave Git 0 months. With
+	// per-call clamping (Fix A) the first 3 s export is killed at the ~1.5 s
+	// cass share, so nothing is mined and Git still gets its months.
+	const report = await runSkillMine({
+		...f.options, since: "365d", projects: [f.gitA, f.gitB],
+		wallBudgetS: 5, gitMonthsPerRun: 2,
+	});
+	expect(report.overall).toBe("OK");
+	expect(report.sources.cass.status).toBe("OK");
+	// The slow cass pass hit its own share and stopped; it never reached Git.
+	expect(report.coverage.stopped_early).toBe(true);
+	expect(report.coverage.sessions_mined).toBe(0);
+	expect(report.coverage.git.repos).toBe(2);
+	expect(report.coverage.git.months_mined).toEqual(["2025-12", "2026-01"]);
+	expect(report.coverage.git.repos_detail[f.gitA]?.months_mined).toEqual(["2025-12", "2026-01"]);
+	expect(report.coverage.git.repos_detail[f.gitB]?.months_mined).toEqual(["2025-12", "2026-01"]);
+	expect(report.coverage.git.stopped_early).toBe(false);
+	// Per-source elapsed and budget are reported in coverage and on sources.
+	expect(report.coverage.budgets.cass.budget_ms).toBe(1500);
+	expect(report.coverage.budgets.mail.budget_ms).toBe(1500);
+	expect(report.coverage.budgets.git.budget_ms).toBe(2000);
+	expect(report.coverage.budgets.cass.elapsed_ms).toBeGreaterThan(1500);
+	expect(report.coverage.budgets.git.elapsed_ms).toBeGreaterThan(0);
+	expect(report.sources.git.elapsed_ms).toBe(report.coverage.budgets.git.elapsed_ms);
+	expect(report.sources.git.budget_ms).toBe(2000);
+}, fixtureDeadlineS() * 1000);
+
+test("SKILLMINEFAIR1: --source git skips cass and mail entirely", async () => {
+	const f = makeSlowGitFixture("skill-mine-fair-gitonly");
+	const report = await runSkillMine({
+		...f.options, since: "365d", sources: ["git"], projects: [f.gitA, f.gitB],
+		wallBudgetS: 30, gitMonthsPerRun: 1,
+	});
+	expect(report.overall).toBe("OK");
+	expect(report.coverage.sessions_in_window).toBe(0);
+	expect(report.sources.cass.reason).toContain("skipped by --source git");
+	expect(report.sources.mail.reason).toContain("skipped by --source git");
+	expect(report.coverage.git.repos).toBe(2);
+	expect(report.coverage.git.months_mined).toEqual(["2025-12"]);
+	expect(report.coverage.git.repos_detail[f.gitA]?.months_mined).toEqual(["2025-12"]);
+	expect(report.coverage.git.repos_detail[f.gitB]?.months_mined).toEqual(["2025-12"]);
+	// The skipped sources spent nothing and reserved nothing; Git got it all.
+	expect(report.coverage.budgets.cass).toEqual({ elapsed_ms: 0, budget_ms: 0 });
+	expect(report.coverage.budgets.mail).toEqual({ elapsed_ms: 0, budget_ms: 0 });
+	expect(report.coverage.budgets.git.budget_ms).toBe(30_000);
+});
+
+test("SKILLMINEFAIR1: unknown sources are refused with the valid list", async () => {
+	const f = makeFixture("skill-mine-fair-unknown");
+	await expect(runSkillMine({ ...f.options, sources: ["bogus"] })).rejects.toThrow("--source must be one of cass, mail, git");
+	await expect(runSkillMine({ ...f.options, sources: [] })).rejects.toThrow("--source must be one of cass, mail, git");
+	expect(normalizeSkillMineSources(undefined)).toEqual(["cass", "mail", "git"]);
+	expect(normalizeSkillMineSources(["git", "git", "cass"])).toEqual(["cass", "git"]);
+	expect(skillMineBudgetShares(["cass", "mail", "git"], 10_000)).toEqual({ cass: 3000, mail: 3000, git: 4000 });
+	expect(skillMineBudgetShares(["git"], 10_000)).toEqual({ cass: 0, mail: 0, git: 10_000 });
+	expect(SKILL_MINE_GIT_BUDGET_SHARE).toBeGreaterThanOrEqual(0.4);
+});
+
+test("SKILLMINEFAIR1: CLI --source git mines only Git and refuses unknown sources", async () => {
+	const f = makeGitFixture("skill-mine-fair-cli", "recurrence");
+	const tmp = join(f.root, "t");
+	mkdirSync(tmp, { recursive: true });
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) if (typeof value === "string") env[key] = value;
+	Object.assign(env, {
+		HOME: f.home, TMPDIR: tmp, GIT_CEILING_DIRECTORIES: f.root,
+		PATH: [f.bin, ...env.PATH!.split(delimiter)].join(delimiter),
+	});
+	mkdirSync(join(f.root, "empty-mail", "projects"), { recursive: true });
+	const out = runFixture([process.execPath, resolve(repo, "src", "cli.ts"), "skill-mine",
+		"--since", "365d", "--source", "git",
+		"--project", f.gitA, "--project", f.gitB,
+		"--mail-archive", join(f.root, "empty-mail"), "--skills-dir", f.skills, "--sink", f.sink,
+		"--wall-budget-s", "60", "--json"],
+		{ cwd: f.projA, env, floor_s: fixtureDeadlineS() });
+	const envelope = JSON.parse(new TextDecoder().decode(out.stdout));
+	expect(envelope.errors ?? []).toEqual([]);
+	expect(envelope.data.overall).toBe("OK");
+	expect(envelope.data.coverage.sessions_in_window).toBe(0);
+	expect(envelope.data.coverage.git.repos).toBe(2);
+	expect(envelope.data.coverage.git.months_mined.length).toBe(12);
+	// An unknown source is refused with the valid list, and mines nothing.
+	const bad = runFixture([process.execPath, resolve(repo, "src", "cli.ts"), "skill-mine",
+		"--source", "bogus", "--json"],
+		{ cwd: f.projA, env, floor_s: fixtureDeadlineS() });
+	const badEnvelope = JSON.parse(new TextDecoder().decode(bad.stdout));
+	expect((badEnvelope.errors ?? []).length).toBeGreaterThan(0);
+	expect(JSON.stringify(badEnvelope)).toMatch(/cass.*mail.*git/);
+});
+
+// SKILLMINEFAIR1 Fix A: per-call timeouts clamp to the source's remaining
+// share. A cass export that hangs past the whole wall budget is killed at the
+// cass share, the next session never starts, and Git still mines its months.
+// Planted negative: the fixed 30 s timeout lets both 15 s exports finish, so
+// cass eats the whole budget and Git mines 0 months.
+const HANG_CASS_SH = `#!/bin/sh
+here="$(dirname "$0")"
+if [ "$1" = "sessions" ]; then cat "$here/../cassdata/sessions.json"; exit 0; fi
+if [ "$1" = "export" ]; then sleep 15; cat "$here/../cassdata/exports/$(basename "$2").json"; exit 0; fi
+if [ "$1" = "view" ]; then cat "$here/../cassdata/views/$(basename "$2").json"; exit 0; fi
+echo "unexpected cass argv: $*" >&2; exit 2
+`;
+
+test("SKILLMINEFAIR1: a hung cass export cannot consume Git's reserved share", async () => {
+	const f = makeGitFixture("skill-mine-fair-hang", "recurrence");
+	put(join(f.bin, "cass"), HANG_CASS_SH, 0o755);
+	put(join(f.root, "cassdata", "sessions.json"), `${JSON.stringify([
+		{ source_path: "sess-hang-a", workspace: f.gitA },
+		{ source_path: "sess-hang-b", workspace: f.gitB },
+	])}\n`);
+	for (const sess of ["sess-hang-a", "sess-hang-b"]) {
+		put(join(f.root, "cassdata", "exports", `${sess}.json`), `${JSON.stringify([{ role: "user", text: "hello" }])}\n`);
+	}
+	const report = await runSkillMine({
+		...f.options, since: "365d", projects: [f.gitA, f.gitB],
+		wallBudgetS: 6, gitMonthsPerRun: 2,
+	});
+	expect(report.overall).toBe("OK");
+	expect(report.coverage.stopped_early).toBe(true);
+	expect(report.coverage.sessions_mined).toBe(0);
+	expect(report.coverage.git.months_mined.length).toBeGreaterThanOrEqual(1);
+	expect(report.coverage.budgets.git.budget_ms).toBe(2400);
+}, fixtureDeadlineS() * 1000);
+
+test("SKILLMINEFAIR1: CLI --source splits commas, stays case-sensitive, and refuses a bare flag", async () => {
+	const f = makeGitFixture("skill-mine-fair-source", "recurrence");
+	const tmp = join(f.root, "t");
+	mkdirSync(tmp, { recursive: true });
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) if (typeof value === "string") env[key] = value;
+	Object.assign(env, {
+		HOME: f.home, TMPDIR: tmp, GIT_CEILING_DIRECTORIES: f.root,
+		PATH: [f.bin, ...env.PATH!.split(delimiter)].join(delimiter),
+	});
+	mkdirSync(join(f.root, "empty-mail", "projects"), { recursive: true });
+	const argvFor = (extra: string[]): string[] => [process.execPath, resolve(repo, "src", "cli.ts"), "skill-mine", ...extra,
+		"--since", "365d", "--project", f.gitA, "--project", f.gitB,
+		"--mail-archive", join(f.root, "empty-mail"), "--skills-dir", f.skills, "--sink", f.sink,
+		"--wall-budget-s", "60", "--json"];
+	const comma = JSON.parse(new TextDecoder().decode(
+		runFixture(argvFor(["--source", "git,mail"]), { cwd: f.projA, env, floor_s: fixtureDeadlineS() }).stdout));
+	expect(comma.errors ?? []).toEqual([]);
+	expect(comma.data.overall).toBe("OK");
+	expect(comma.data.sources.cass.reason).toContain("skipped by --source");
+	expect(comma.data.sources.cass.reason).toContain("cass was not mined");
+	expect(comma.data.coverage.git.repos).toBe(2);
+	// Values stay case-sensitive: Git is not git.
+	const cased = JSON.parse(new TextDecoder().decode(
+		runFixture(argvFor(["--source", "Git"]), { cwd: f.projA, env, floor_s: fixtureDeadlineS() }).stdout));
+	expect((cased.errors ?? []).length).toBeGreaterThan(0);
+	expect(JSON.stringify(cased)).toMatch(/must be one of cass, mail, git/);
+	// A bare --source is refused and mines nothing.
+	const bare = JSON.parse(new TextDecoder().decode(
+		runFixture(argvFor(["--source"]), { cwd: f.projA, env, floor_s: fixtureDeadlineS() }).stdout));
+	expect((bare.errors ?? []).length).toBeGreaterThan(0);
+	expect(JSON.stringify(bare)).toMatch(/--source needs/);
+}, fixtureDeadlineS() * 1000);

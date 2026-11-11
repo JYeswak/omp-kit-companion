@@ -614,7 +614,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--project", value: "P", description: "Fleet name, repository basename or absolute checkout path (default: current directory)" },
 		{ name: "--all", description: "Every configured and observed project" },
 	], example: "omp-kit mine --since 2026-10-01 --until 2026-11-01 --all --json", runnable: false },
-	{ name: "skill-mine", description: "Mine agent history (cass sessions, the Agent Mail archive, plus Git history month cursors per repository) for recurring procedures worth packaging as skills; read-only unless --apply files SKILLCAND beads", usage: "skill-mine [--since 21d] [--project PATH]... [--skills-dir DIR]... [--mail-archive DIR] [--sink FILE] [--max-new N] [--wall-budget-s S] [--apply] [--json] | skill-mine status [--json]", flags: [
+	{ name: "skill-mine", description: "Mine agent history (cass sessions, the Agent Mail archive, plus Git history month cursors per repository) for recurring procedures worth packaging as skills; read-only unless --apply files SKILLCAND beads", usage: "skill-mine [--since 21d] [--source cass|mail|git]... [--project PATH]... [--skills-dir DIR]... [--mail-archive DIR] [--sink FILE] [--max-new N] [--wall-budget-s S] [--apply] [--json] | skill-mine status [--json]", flags: [
 		{ name: "--since", value: "21d", description: "Lookback window: Nd days or an ISO date (default 21d); Git mines the trailing twelve calendar months overlapping it" },
 		{ name: "--project", value: "PATH", repeatable: true, description: "Restrict mining to these workspaces/project slugs (Git resolves them to repositories); repeat for more" },
 		{ name: "--skills-dir", value: "DIR", repeatable: true, description: "Installed-skills root to dedupe against; repeat for more (default: $OMP_KIT_SKILLS_DIRS, else ~/.agents/skills and ~/.omp/agent/skills)" },
@@ -623,7 +623,8 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--max-new", value: "N", description: "Cap on SKILLCAND beads filed with --apply (default 3, max 1 per project per run)" },
 		{ name: "--apply", description: "File at most --max-new SKILLCAND beads in the owning projects; asks for confirmation first" },
 		{ name: "--yes", description: "Confirm the apply in noninteractive mode; valid only with --apply" },
-		{ name: "--wall-budget-s", value: "S", description: "Wall budget in seconds for the session-mining pass (default 600); stops early with coverage reported" },
+		{ name: "--source", value: "cass|mail|git", repeatable: true, description: "Mine only these sources (default all three); repeat the flag or comma-separate, values are case-sensitive; Git keeps a reserved share of the wall budget" },
+		{ name: "--wall-budget-s", value: "S", description: "Wall budget in seconds for the whole pass (default 600); each enabled source gets a reserved share and Git keeps at least 40%; stops early with coverage reported" },
 	], subcommands: [
 		{ name: "status", description: "Show the last skill-mine run: per-source status, per-repository Git month coverage, candidate totals, beads filed", usage: "skill-mine status [--json]", flags: [], example: "omp-kit skill-mine status --json", runnable: false },
 	], example: "omp-kit skill-mine --since 21d --json", mutation: true, runnable: false, dataSchema: {
