@@ -86,11 +86,41 @@ test("an opted-in repository gets owned scratch and filesystem refusals", async 
 	const owner = readFileSync(join(repoRoot, "var", "agent-tmp", `omp.${pid}`, ".owner"), "utf8");
 	expect(owner).toContain(`pid=${pid}\nlabel=omp\n`);
 	const handler = pi.handlers[0]!;
-	const blocked = await handler({ toolName: "write", input: { path: "/tmp/x" } } as never); // tempsafe: fake tool-input path the guard only judges, never touched on disk
-	expect(blocked?.block).toBe(true);
-	expect(blocked?.reason).toContain("fleet-guard scratch-write");
+	// TMPREWRITE1: a literal simple /tmp file is completed into the session scratch, not refused.
+	const completed = await handler({ toolName: "write", input: { path: "/tmp/x", content: "probe\n" } } as never); // tempsafe: fake tool-input path the guard only judges, never touched on disk
+	expect(completed?.block).not.toBe(true);
+	expect(completed?.input).toMatchObject({ path: join(repoRoot, "var", "agent-tmp", `omp.${pid}`, "x") });
+	expect(completed?.additionalContext).toBe(`AUTO_COMPLETED: /tmp/x -> ${join(repoRoot, "var", "agent-tmp", `omp.${pid}`, "x")}`);
+	// a later read of the same literal reads the same file.
 	const quiet = await handler({ toolName: "read", input: { path: "/tmp/x" } } as never); // tempsafe: fake tool-input path the guard only judges, never touched on disk
-	expect(quiet).toBeUndefined();
+	expect(quiet?.input).toMatchObject({ path: join(repoRoot, "var", "agent-tmp", `omp.${pid}`, "x") });
+});
+
+test("TMPREWRITE1-adopt: an admitted mkdir lets the session adopt the ownerless dir, and session end releases it", async () => {
+	const pi = fakePi();
+	const { cwd, pid } = fixture();
+	const released: string[] = [];
+	const seatEnd: SeatEndDeps = { startOf: () => "Mon Oct  5 13:27:00 2026", release: (dir) => {
+		released.push(dir);
+		return { ok: true, changed: true, dir, reason: "released", ownerPid: pid };
+	} };
+	await fleetGuard(pi, { cwd, pid, env: { AGENT_NAME: "AdoptFlow" }, seatEnd });
+	const handler = pi.handlers[0]!;
+	const ctx = { cwd, sessionManager: { getSessionId: () => SESSION } };
+	// an admitted mkdir records the session-created top.
+	expect(await handler({ toolName: "bash", input: { command: "mkdir -p var/agent-tmp/hand.9" } }, ctx)).toBeUndefined();
+	// the tool creates the dir; the first write then adopts the ownerless dir the session just made.
+	mkdirSync(join(cwd, "var", "agent-tmp", "hand.9"));
+	const completed = await handler({ toolName: "write", input: { path: "var/agent-tmp/hand.9/out.json", content: "flow\n" } }, ctx);
+	expect(completed?.additionalContext).toContain("AUTO_COMPLETED: adopted ownerless scratch dir");
+	const owner = readFileSync(join(cwd, "var", "agent-tmp", "hand.9", ".owner"), "utf8");
+	expect(owner).toContain("agent=AdoptFlow\n");
+	expect(owner).toContain("bin=throwaway\n");
+	expect(parseOwnerFile(owner)).toMatchObject({ agent: "AdoptFlow", session: SESSION });
+	// session end releases the seat dir and the adopted dir with the same mechanism.
+	await pi.shutdowns[0]!({}, { sessionManager: { getSessionId: () => SESSION } });
+	expect(released).toContain(join(cwd, "var", "agent-tmp", `omp.${pid}`));
+	expect(released).toContain(join(cwd, "var", "agent-tmp", "hand.9"));
 });
 
 const SESSION = "01a15012-af9e-7628-bee6-496084668412";
@@ -193,6 +223,21 @@ test("scratch fires before git and reservations in the chain", async () => {
 	const foreign = await handleToolCall(
 		{ toolName: "edit", input: { path: "/tmp/elsewhere.md" } }, { cwd: "/tmp" }); // tempsafe: fake tool-input path the guard only judges, never touched on disk
 	expect(foreign?.reason).toContain("fleet-guard scratch-write");
+});
+
+test("TMPREWRITE1-L1: the session-scratch hint names only the calling repository", async () => {
+	const pi = fakePi();
+	const { cwd, pid } = fixture();
+	const other = fixture(false).cwd;
+	await fleetGuard(pi, { cwd, pid });
+	// same repo, still refused: the hint names the seat dir.
+	const same = await pi.handlers[0]!({ toolName: "write", input: { path: "/tmp/sub/x", content: "probe\n" } }, { cwd }); // tempsafe: fake guard input path, never touched on disk
+	expect(same?.reason).toContain("Session scratch:");
+	expect(same?.reason).toContain(join(cwd, "var", "agent-tmp", `omp.${pid}`));
+	// another repo without opt-in: today's refusal is byte-identical, no cross-repo hint.
+	const foreign = await pi.handlers[0]!({ toolName: "write", input: { path: "/tmp/sub/x", content: "probe\n" } }, { cwd: other }); // tempsafe: fake guard input path, never touched on disk
+	expect(foreign?.reason).not.toContain("Session scratch:");
+	expect(foreign?.reason).toContain("fleet-guard system-temp");
 });
 
 test("logical routes traverse the chain without globally allowing tool calls", async () => {
@@ -338,8 +383,9 @@ test("filesystem refusals survive an unavailable storage-root lookup", async () 
 	const { cwd, pid } = fixture();
 	try {
 		await fleetGuard(pi, { cwd, pid });
-		const refusal = await pi.handlers[0]!({ toolName: "write", input: { path: "/tmp/refused" } }, { cwd }); // tempsafe: fake tool-input path the guard only judges, never touched on disk
-		expect(refusal?.reason).toContain("scratch-write");
+		const completed = await pi.handlers[0]!({ toolName: "write", input: { path: "/tmp/refused", content: "probe\n" } }, { cwd }); // tempsafe: fake tool-input path the guard only judges, never touched on disk
+		// TMPREWRITE1: the literal completes despite the unavailable lookup; the recheck still runs first.
+		expect(completed?.additionalContext).toContain("AUTO_COMPLETED: /tmp/refused -> ");
 	} finally {
 		if (saved.url === undefined) delete process.env.AGENTMAIL_HTTP_URL; else process.env.AGENTMAIL_HTTP_URL = saved.url;
 		if (saved.token === undefined) delete process.env.AGENTMAIL_HTTP_BEARER_TOKEN; else process.env.AGENTMAIL_HTTP_BEARER_TOKEN = saved.token;

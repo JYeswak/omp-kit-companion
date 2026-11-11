@@ -1,10 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ownedTmp, type OwnedTmp } from "../kitlib/tmp.ts";
 import { runFixture } from "../../tests/cli/fixture-process.ts";
 import { fleetPolicyState } from "../../extensions/fleet-policy.ts";
-import { check, checkSystemTemp, gitBlanketArgs, hostAgentName, shellTokens, shellWriteBases, shellWriteTargets, scratchDirFor, writeScratchOwner, applyScratchEnv } from "./scratch.ts";
+import { adoptOwnerlessDir, autoCompletedLine, check, checkSystemTemp, createdScratchTops, gitBlanketArgs, hostAgentName, parseSessionTmpLiteral, rewriteShellCommand, rewriteToolInput, shellTokenSpans, shellTokens, shellWordSpans, shellWriteBases, shellWriteTargets, scratchDirFor, writeScratchOwner, applyScratchEnv } from "./scratch.ts";
 
 const agentTmp = join(import.meta.dir, "../../var/agent-tmp");
 mkdirSync(agentTmp, { recursive: true });
@@ -478,4 +478,366 @@ test("APPLICSCRATCH1-path: a sibling-relative redirect after cd resolves where t
 	expect(nested?.reason).toContain("under $HOME");
 	// an unbalanced `)` never underflows the scope stack.
 	expect(shellWriteBases("echo hi > x)", repo, dir)).toEqual([{ target: "x", base: repo }]);
+});
+
+// TMPREWRITE1 (ompkit-1ra0d.144): a literal simple /tmp file lands in the session scratch.
+function rewriteFixture(label: string): { repo: string; sessionDir: string; aliases: Map<string, string> } {
+	const repo = ownedRoot(`rewrite-${label}`);
+	mkdirSync(join(repo, ".git"), { recursive: true });
+	const sessionDir = ownedRoot(`rewrite-${label}-session`);
+	mkdirSync(sessionDir, { recursive: true });
+	return { repo, sessionDir, aliases: new Map() };
+}
+
+test("TMPREWRITE1: spans mirror shellTokens word boundaries and fail visibly", () => {
+	const corpus = [
+		"echo hi > /tmp/x.json",
+		"cat /tmp/a | tee /tmp/b; echo done > ./out",
+		"echo 'quoted /tmp/no' > /tmp/yes",
+		"FOO=1 env BAR=2 echo hi",
+		"x=$(cat /tmp/r) && echo hi > /tmp/w",
+		"cd sub && echo hi > ../out",
+		"echo hi >| /tmp/nc",
+		"echo hi > $'/tmp/ansi.json'",
+		"tee /tmp/a < /tmp/b",
+	];
+	for (const command of corpus) {
+		const lexed = shellWordSpans(command);
+		expect("error" in lexed).toBe(false);
+		if ("error" in lexed) continue;
+		// spans cover the words; shellTokens additionally yields the operators, which carry no rewrite.
+		const words = shellTokens(command).map((token) => token.text).filter((text) => !/^[;&|()<>-]+$/.test(text));
+		expect(lexed.spans.map((span) => span.text)).toEqual(words);
+		for (const span of lexed.spans) {
+			expect(command.slice(span.start, span.end).includes(span.text)).toBe(true);
+		}
+	}
+	expect(shellWordSpans("echo 'unterminated")).toMatchObject({ error: "unterminated single quote" });
+	expect(shellWordSpans('echo "unterminated')).toMatchObject({ error: "unterminated double quote" });
+});
+
+test("TMPREWRITE1: write-tool and bash redirect land in session scratch; later read follows", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("basic");
+	const context = { cwd: repo };
+	expect(checkSystemTemp({ toolName: "write", input: { path: "/tmp/x.json", content: "{}" } }, ctx(repo))?.block).toBe(true); // tempsafe: fake guard input path, never touched on disk
+	expect(checkSystemTemp({ toolName: "bash", input: { command: "echo hi > /tmp/x.json" } }, ctx(repo))?.block).toBe(true);
+	const write = rewriteToolInput("write", { path: "/tmp/x.json", content: "{}" }, { cwd: repo, context, sessionDir, aliases }); // tempsafe: fake guard input path, never touched on disk
+	expect("input" in (write as object)).toBe(true);
+	if (!("input" in (write as object))) return;
+	expect(write.input.path).toBe(join(sessionDir, "x.json"));
+	expect(write.mapped).toEqual([{ from: "/tmp/x.json", to: join(sessionDir, "x.json") }]); // tempsafe: fake guard input path, never touched on disk
+	expect(autoCompletedLine("/tmp/x.json", join(sessionDir, "x.json"))).toBe(`AUTO_COMPLETED: /tmp/x.json -> ${join(sessionDir, "x.json")}`); // tempsafe: fake guard input path, never touched on disk
+	expect(checkSystemTemp({ toolName: "write", input: write.input }, ctx(repo))).toBeUndefined();
+	const bash = rewriteShellCommand("echo hi > /tmp/x.json", { cwd: repo, home: process.env.HOME ?? "", sessionDir, aliases });
+	expect("command" in (bash as object)).toBe(true);
+	if (!("command" in (bash as object))) return;
+	expect(bash.command).toBe(`echo hi > ${join(sessionDir, "x.json")}`);
+	expect(bash.command.includes("/tmp/")).toBe(false);
+	expect(checkSystemTemp({ toolName: "bash", input: { command: bash.command } }, ctx(repo))).toBeUndefined();
+	const read = rewriteToolInput("read", { path: "/tmp/x.json" }, { cwd: repo, context, sessionDir, aliases }); // tempsafe: fake guard input path, never touched on disk
+	expect("input" in (read as object)).toBe(true);
+	if (!("input" in (read as object))) return;
+	expect(read.input.path).toBe(join(sessionDir, "x.json"));
+	const patch = "*** Begin Patch\n[/tmp/note.json#AB12]\nPUT 1.=1:\n+hi\n*** End Patch\n";
+	const edit = rewriteToolInput("edit", { input: patch }, { cwd: repo, context, sessionDir, aliases });
+	expect("input" in (edit as object)).toBe(true);
+	if (!("input" in (edit as object))) return;
+	expect(edit.input.input).toContain(`[${join(sessionDir, "note.json")}#AB12]`);
+});
+
+test("TMPREWRITE1-kept: non-literal, remote, nested and allocation shapes stay refused", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("kept");
+	const context = { cwd: repo };
+	const home = process.env.HOME ?? "";
+	const stillBlocked = (command: string): void => {
+		const result = rewriteShellCommand(command, { cwd: repo, home, sessionDir, aliases });
+		expect("refuse" in (result as object)).toBe(true);
+		expect(checkSystemTemp({ toolName: "bash", input: { command } }, ctx(repo))?.block).toBe(true);
+	};
+	const stillUntouched = (command: string): void => {
+		const result = rewriteShellCommand(command, { cwd: repo, home, sessionDir, aliases });
+		expect("refuse" in (result as object)).toBe(true);
+		expect(checkSystemTemp({ toolName: "bash", input: { command } }, ctx(repo))).toBeUndefined();
+	};
+	// $TMPDIR is env-dependent (repo-local in the export tree), so the variable-built case names /tmp explicitly.
+	stillBlocked("echo hi > /tmp/$name");
+	stillBlocked("echo hi > /tmp/*.json");
+	stillBlocked("mkdir -p /tmp/x.json");
+	stillBlocked("mktemp /tmp/x.json.XXXXXX");
+	stillBlocked("echo hi > \"/tmp/x.json\"");
+	stillBlocked("echo hi > /tmp/sub/x.json");
+	stillBlocked("echo hi > /tmp/");
+	stillBlocked("echo hi >| /tmp/nc.json");
+	stillBlocked("echo hi > $'/tmp/ansi.json'");
+	stillBlocked("ln -s else /tmp/linked");
+	stillBlocked("install -m 644 a /tmp/b");
+	// file-operation destinations create directories or trees, so the literal never names the opened file.
+	stillBlocked("cp a /tmp/b");
+	stillBlocked("mv a /tmp/b");
+	stillBlocked("git clone https://example.invalid/r.git /tmp/x");
+	stillBlocked("tar -xzf a.tgz -C /tmp/out");
+	// remote or nested execution contexts: nothing local is written, so today allows them;
+	// the rewrite still refuses, so the path is never substituted into another machine or interpreter.
+	stillUntouched("ssh deploy \"echo hi > /tmp/x.json\"");
+	stillUntouched("scp out.json deploy:/tmp/x.json");
+	stillUntouched("rsync -a out.json deploy:/tmp/x.json");
+	stillUntouched("docker exec app sh -c 'echo hi > /tmp/x.json'");
+	stillUntouched("sh -c 'echo hi > /tmp/x.json'");
+	stillUntouched("node -e \"require('fs').writeFileSync('/tmp/x.json','h')\"");
+	const ssh = rewriteShellCommand("ssh deploy \"echo hi > /tmp/x.json\"", { cwd: repo, home, sessionDir, aliases });
+	expect("refuse" in (ssh as object)).toBe(true);
+	expect("refuse" in (rewriteToolInput("write", { path: "/tmp/$name" }, { cwd: repo, context, sessionDir, aliases }) as object)).toBe(true); // tempsafe: fake guard input path, never touched on disk
+	expect("refuse" in (rewriteToolInput("write", { path: "/tmp/sub/x.json" }, { cwd: repo, context, sessionDir, aliases }) as object)).toBe(true); // tempsafe: fake guard input path, never touched on disk
+	expect(rewriteToolInput("read", { path: "/tmp/fresh.json" }, { cwd: repo, context, sessionDir, aliases })).toBeUndefined(); // tempsafe: fake guard input path, never touched on disk
+	expect(checkSystemTemp({ toolName: "read", input: { path: "/tmp/fresh.json" } }, ctx(repo))).toBeUndefined(); // tempsafe: fake guard input path, never touched on disk
+});
+
+test("TMPREWRITE1-kept: here-document and here-string bodies are never rewritten", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("kept-heredoc");
+	const home = process.env.HOME ?? "";
+	const heredoc = ["cat <<EOF", "/tmp/x.json", "EOF"].join("\n"); // tempsafe: parsed command text only, nothing executed
+	const heredocResult = rewriteShellCommand(heredoc, { cwd: repo, home, sessionDir, aliases });
+	expect("refuse" in (heredocResult as object)).toBe(true);
+	const stripped = rewriteShellCommand("cat <<< /tmp/x.json", { cwd: repo, home, sessionDir, aliases });
+	expect("refuse" in (stripped as object)).toBe(true);
+});
+
+test("TMPREWRITE1-adopt: only a session-created ownerless dir is adopted, with an exclusive owner", () => {
+	const repo = ownedRoot("rewrite-adopt");
+	mkdirSync(join(repo, ".git"), { recursive: true });
+	const agent = "AdoptSeat";
+	const session = "01a1502a-5647-76ba-89c5-949087f3e283";
+	const target = join(repo, "var", "agent-tmp", "hand.1", "out.json");
+	// the session made the dir: an admitted mkdir records its top before the tool creates it.
+	expect(createdScratchTops("bash", "mkdir -p var/agent-tmp/hand.1", [], repo)).toEqual([join(repo, "var", "agent-tmp", "hand.1")]);
+	mkdirSync(join(repo, "var", "agent-tmp", "hand.1"), { recursive: true });
+	// planted negative: an ownerless directory this session did not create keeps today's refusal.
+	expect(adoptOwnerlessDir(target, { cwd: repo, agent, session, createdDirs: new Set() })).toMatchObject({ refuse: "scratch directory was not created by this session" });
+	expect(adoptOwnerlessDir(target, { cwd: repo, agent, session })).toMatchObject({ refuse: "scratch directory was not created by this session" });
+	const created = new Set([join(repo, "var", "agent-tmp", "hand.1")]);
+	const adopted = adoptOwnerlessDir(target, { cwd: repo, agent, session, createdDirs: created });
+	expect("dir" in adopted).toBe(true);
+	if (!("dir" in adopted)) return;
+	expect(adopted.dir).toBe(join(repo, "var", "agent-tmp", "hand.1"));
+	const owner = readFileSync(join(adopted.dir, ".owner"), "utf8");
+	expect(owner).toContain(`agent=${agent}\n`);
+	expect(owner).toContain(`session=${session}\n`);
+	expect(owner).toContain("bin=throwaway\n");
+	// exclusive create: a second adopt (or a meanwhile-appeared owner) is not a steal.
+	expect(adoptOwnerlessDir(target, { cwd: repo, agent, session, createdDirs: created })).toMatchObject({ refuse: "scratch directory already has an owner" });
+	mkdirSync(join(repo, "var", "agent-tmp", "theirs.2"), { recursive: true });
+	writeScratchOwner(join(repo, "var", "agent-tmp", "theirs.2"), { pid: process.pid, label: "theirs.2", repo, created: new Date().toISOString(), agent: "OtherSeat", session, bin: "throwaway" });
+	expect(adoptOwnerlessDir(join(repo, "var", "agent-tmp", "theirs.2", "out.json"), { cwd: repo, agent, session, createdDirs: new Set([join(repo, "var", "agent-tmp", "theirs.2")]) })).toMatchObject({ refuse: "scratch directory already has an owner" });
+	expect(adoptOwnerlessDir("/tmp/hand/out.json", { cwd: repo, agent, session, createdDirs: created })).toMatchObject({ refuse: "outside the calling repository scratch root" }); // tempsafe: fake guard input path, never touched on disk
+	expect(adoptOwnerlessDir(join(repo, "var", "agent-tmp"), { cwd: repo, agent, session, createdDirs: created })).toMatchObject({ refuse: "the scratch root itself is not adoptable" });
+	expect(parseSessionTmpLiteral("/tmp/x.json")).toEqual({ root: "/tmp", base: "x.json" }); // tempsafe: fake guard input path, never touched on disk
+	expect(parseSessionTmpLiteral("/tmp/sub/x.json")).toBeUndefined(); // tempsafe: fake guard input path, never touched on disk
+	expect(parseSessionTmpLiteral("/tmp/")).toBeUndefined();
+});
+
+test("TMPREWRITE1-H1: planted links, dirs and hard links at the destination refuse", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("h1");
+	const context = { cwd: repo };
+	const attempt = (path: string): unknown => rewriteToolInput("write", { path, content: "{}" }, { cwd: repo, context, sessionDir, aliases });
+	const refusalOf = (value: unknown): string | undefined => {
+		if (typeof value !== "object" || value === null || !("refuse" in value)) return undefined;
+		return typeof value.refuse === "string" ? value.refuse : undefined;
+	};
+	// planted negative: today's guard still refuses the original literal either way.
+	expect(checkSystemTemp({ toolName: "write", input: { path: "/tmp/link.json", content: "{}" } }, ctx(repo))?.block).toBe(true); // tempsafe: fake guard input path, never touched on disk
+	symlinkSync(join(repo, "elsewhere"), join(sessionDir, "link.json"));
+	expect(refusalOf(attempt("/tmp/link.json"))).toContain("symlink"); // tempsafe: fake guard input path, never touched on disk
+	mkdirSync(join(sessionDir, "dir.json"));
+	expect(refusalOf(attempt("/tmp/dir.json"))).toContain("not a regular file"); // tempsafe: fake guard input path, never touched on disk
+	const hardTarget = join(sessionDir, "hard.json");
+	writeFileSync(hardTarget, "{}\n");
+	linkSync(hardTarget, join(sessionDir, "hard-alias.json"));
+	expect(refusalOf(attempt("/tmp/hard.json"))).toContain("hard link"); // tempsafe: fake guard input path, never touched on disk
+	// an absent destination, or a plain single-link file the session already wrote, admits.
+	expect("input" in (attempt("/tmp/ok.json") as object)).toBe(true); // tempsafe: fake guard input path, never touched on disk
+	writeFileSync(join(sessionDir, "ok.json"), "{}\n");
+	expect("input" in (attempt("/tmp/ok.json") as object)).toBe(true); // tempsafe: fake guard input path, never touched on disk
+	expect(checkSystemTemp({ toolName: "bash", input: { command: "echo hi > /tmp/h1bash.json" } }, ctx(repo))?.block).toBe(true);
+	symlinkSync(join(repo, "elsewhere"), join(sessionDir, "h1bash.json"));
+	expect("refuse" in (rewriteShellCommand("echo hi > /tmp/h1bash.json", { cwd: repo, home: process.env.HOME ?? "", sessionDir, aliases }) as object)).toBe(true);
+});
+
+test("TMPREWRITE1-H2: a noclobber redirect is refused as a system-temp write, never rewritten", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("h2");
+	const home = process.env.HOME ?? "";
+	const command = "echo hi >| /tmp/nc.json";
+	// the tokenizer now sees the combined operator, so the target is judged.
+	expect(shellWriteTargets(command)).toEqual(["/tmp/nc.json"]); // tempsafe: expected value only, nothing created
+	expect("refuse" in (rewriteShellCommand(command, { cwd: repo, home, sessionDir, aliases }) as object)).toBe(true);
+	expect(checkSystemTemp({ toolName: "bash", input: { command } }, ctx(repo))?.block).toBe(true);
+});
+
+test("TMPREWRITE1-H3: ANSI-C quoted temp paths resolve to system temp and refuse", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("h3");
+	const home = process.env.HOME ?? "";
+	const command = "echo hi > $'/tmp/ansi.json'";
+	expect("refuse" in (rewriteShellCommand(command, { cwd: repo, home, sessionDir, aliases }) as object)).toBe(true);
+	expect(checkSystemTemp({ toolName: "bash", input: { command } }, ctx(repo))?.block).toBe(true);
+	expect(checkSystemTemp({ toolName: "bash", input: { command: "echo hi > $'/tmp/ok'extra" } }, ctx(repo))?.block).toBe(true);
+});
+
+test("TMPREWRITE1-M1: a tee input redirect is never a write target", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("m1");
+	const home = process.env.HOME ?? "";
+	expect(shellWriteTargets("tee /tmp/a < /tmp/b")).toEqual(["/tmp/a"]); // tempsafe: expected value only, nothing created
+	const command = "tee /tmp/a < /tmp/b";
+	expect("refuse" in (rewriteShellCommand(command, { cwd: repo, home, sessionDir, aliases }) as object)).toBe(true);
+	expect(checkSystemTemp({ toolName: "bash", input: { command } }, ctx(repo))?.block).toBe(true);
+});
+
+test("TMPREWRITE1-M2: mapped reads note a competing real file at the literal", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("m2");
+	const context = { cwd: repo };
+	const home = process.env.HOME ?? "";
+	const mappedOf = (value: unknown): Array<{ from: unknown; to: unknown; note?: unknown }> | undefined => {
+		if (typeof value !== "object" || value === null || !("mapped" in value)) return undefined;
+		const mapped: unknown = value.mapped;
+		return Array.isArray(mapped) ? mapped : undefined;
+	};
+	const write = rewriteToolInput("write", { path: "/tmp/m2.json", content: "{}" }, { cwd: repo, context, sessionDir, aliases }); // tempsafe: fake guard input path, never touched on disk
+	expect("input" in (write as object)).toBe(true);
+	// no other file at the literal: the notice is plain.
+	const plain = rewriteToolInput("read", { path: "/tmp/m2.json" }, { cwd: repo, context, sessionDir, aliases, originalExists: () => false }); // tempsafe: fake guard input path, never touched on disk
+	expect(mappedOf(plain)).toEqual([{ from: "/tmp/m2.json", to: join(sessionDir, "m2.json") }]); // tempsafe: fake guard input path, never touched on disk
+	// a different real file sits at the original path: the notice says the read serves the session copy.
+	const noted = rewriteToolInput("read", { path: "/tmp/m2.json" }, { cwd: repo, context, sessionDir, aliases, originalExists: () => true }); // tempsafe: fake guard input path, never touched on disk
+	expect(mappedOf(noted)).toEqual([{ from: "/tmp/m2.json", to: join(sessionDir, "m2.json"), note: "a different file exists at /tmp/m2.json; reading the session copy" }]); // tempsafe: fake guard input path, never touched on disk
+	const shell = rewriteShellCommand("cat /tmp/m2.json", { cwd: repo, home, sessionDir, aliases, originalExists: () => true });
+	expect("command" in (shell as object)).toBe(true);
+	expect(mappedOf(shell)?.[0]?.note).toContain("reading the session copy");
+});
+
+test("TMPREWRITE1-M4: comments never contribute rewrite words", () => {
+	const lexed = shellWordSpans("echo hi > /tmp/x # /tmp/y");
+	expect("error" in lexed).toBe(false);
+	if ("error" in lexed) return;
+	expect(lexed.spans.map((span) => span.text)).toEqual(["echo", "hi", "/tmp/x"]); // tempsafe: expected value only, nothing created
+});
+
+test("TMPREWRITE1-track: admitted mkdir and write calls record session-created tops", () => {
+	const repo = ownedRoot("rewrite-track");
+	mkdirSync(join(repo, ".git"), { recursive: true });
+	mkdirSync(join(repo, "var", "agent-tmp", "old.2"), { recursive: true });
+	expect(createdScratchTops("bash", "mkdir -p var/agent-tmp/new.1", [], repo)).toEqual([join(repo, "var", "agent-tmp", "new.1")]);
+	expect(createdScratchTops("bash", "mkdir -p var/agent-tmp/old.2", [], repo)).toEqual([]);
+	expect(createdScratchTops("write", undefined, [join(repo, "var", "agent-tmp", "w.3", "f")], repo)).toEqual([join(repo, "var", "agent-tmp", "w.3")]);
+	expect(createdScratchTops("write", undefined, [join(repo, "notes.md")], repo)).toEqual([]);
+});
+
+test("TMPREWRITE1-L2: remote operands after sudo, xargs and find -exec refuse", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("l2");
+	const home = process.env.HOME ?? "";
+	const refusalOf = (value: unknown): string | undefined => {
+		if (typeof value !== "object" || value === null || !("refuse" in value)) return undefined;
+		return typeof value.refuse === "string" ? value.refuse : undefined;
+	};
+	const sudoRemote = rewriteShellCommand("sudo ssh deploy \"echo hi > /tmp/x.json\"", { cwd: repo, home, sessionDir, aliases });
+	expect("refuse" in (sudoRemote as object)).toBe(true);
+	expect(refusalOf(sudoRemote)).toContain("remote operand after sudo");
+	const findRemote = rewriteShellCommand("find . -exec ssh {} \\;", { cwd: repo, home, sessionDir, aliases });
+	expect("refuse" in (findRemote as object)).toBe(true);
+	// a local redirect under sudo still completes: the redirect belongs to the calling shell.
+	const local = rewriteShellCommand("sudo echo hi > /tmp/local.json", { cwd: repo, home, sessionDir, aliases });
+	expect("command" in (local as object)).toBe(true);
+	if (typeof local !== "object" || local === null || !("command" in local)) return;
+	expect(local.command).toBe(`sudo echo hi > ${join(sessionDir, "local.json")}`);
+});
+
+test("TMPREWRITE1-F1: file operations after wrappers are never spliced", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("f1");
+	const home = process.env.HOME ?? "";
+	const refusalOf = (value: unknown): string | undefined => {
+		if (typeof value !== "object" || value === null || !("refuse" in value)) return undefined;
+		return typeof value.refuse === "string" ? value.refuse : undefined;
+	};
+	// planted negative: the old gate saw no file operation past the wrapper and spoke of
+	// "outside a write" (xargs/find) or missed the destination entirely.
+	for (const command of ["xargs -I{} cp {} /tmp/b", "find . -exec cp {} /tmp/b \\;", "sudo cp a /tmp/b"]) {
+		const rewritten = rewriteShellCommand(command, { cwd: repo, home, sessionDir, aliases });
+		expect("refuse" in (rewritten as object)).toBe(true);
+		expect(refusalOf(rewritten)).toContain("file-operation destination after");
+	}
+});
+
+test("TMPREWRITE1-F2: --target-directory names the destination", () => {
+	expect(shellWriteTargets("cp --target-directory=/tmp a b")).toEqual(["/tmp"]);
+	expect(shellWriteTargets("cp --target-directory /tmp a b")).toEqual(["/tmp"]);
+	const { repo } = rewriteFixture("f2");
+	// planted negative: the old walk read the last operand and missed the real destination.
+	expect(checkSystemTemp({ toolName: "bash", input: { command: "cp --target-directory=/tmp a b" } }, ctx(repo))?.block).toBe(true);
+	expect(checkSystemTemp({ toolName: "bash", input: { command: "cp --target-directory /tmp a b" } }, ctx(repo))?.block).toBe(true);
+});
+
+test("TMPREWRITE1-F3: dd of= is a write target", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("f3");
+	const context = { cwd: repo };
+	const home = process.env.HOME ?? "";
+	expect(shellWriteTargets("dd if=in of=/tmp/a")).toEqual(["/tmp/a"]); // tempsafe: parsed command text only, nothing executed
+	expect(shellWriteTargets("dd if=/tmp/in of=out")).toEqual(["out"]);
+	const rewritten = rewriteShellCommand("dd if=in of=/tmp/a", { cwd: repo, home, sessionDir, aliases });
+	expect("command" in (rewritten as object)).toBe(true);
+	if (typeof rewritten !== "object" || rewritten === null || !("command" in rewritten)) return;
+	expect(rewritten.command).toBe(`dd if=in of=${join(sessionDir, "a")}`);
+	// planted negative: the old guard saw no write at all.
+	expect(checkSystemTemp({ toolName: "bash", input: { command: "dd if=in of=/tmp/a" } }, ctx(repo))?.block).toBe(true);
+	expect(check({ toolName: "bash", input: { command: "dd if=in of=/tmp/a" } }, ctx(repo))?.block).toBe(true);
+	// a non-literal of= stays refused on both paths.
+	expect("refuse" in (rewriteShellCommand("dd of=/tmp/$f", { cwd: repo, home, sessionDir, aliases }) as object)).toBe(true);
+	expect(checkSystemTemp({ toolName: "bash", input: { command: "dd of=/tmp/$f" } }, ctx(repo))?.block).toBe(true);
+
+});
+
+test("TMPREWRITE1-F4: expanded temp names in write position are blocked", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("f4");
+	const home = process.env.HOME ?? "";
+	const command = "echo hi > ${x:-/tmp/a}";
+	// planted negative: the guard used to allow this while only the rewrite refused it.
+	expect("refuse" in (rewriteShellCommand(command, { cwd: repo, home, sessionDir, aliases }) as object)).toBe(true);
+	const blocked = checkSystemTemp({ toolName: "bash", input: { command } }, ctx(repo));
+	expect(blocked?.block).toBe(true);
+	expect(blocked?.reason).toContain("system-temp");
+	expect(check({ toolName: "bash", input: { command } }, ctx(repo))?.reason).toContain("scratch-write");
+	// controls: pure expansions without /tmp stay allowed, and mktemp keeps its own refusal.
+	expect(checkSystemTemp({ toolName: "bash", input: { command: "echo hi > $f" } }, ctx(repo))).toBeUndefined();
+	expect(check({ toolName: "bash", input: { command: "echo ok > \"$(mktemp /tmp/x.XXXXXX)\"" } }, ctx(repo))?.reason).toContain("scratch-alloc");
+});
+
+test("TMPREWRITE1-F5: fd-noclobber operators combine and refuse", () => {
+	const { repo, sessionDir, aliases } = rewriteFixture("f5");
+	const home = process.env.HOME ?? "";
+	expect(shellTokens("echo hi &>>| /tmp/a").map((token) => token.text)).toEqual(["echo", "hi", "&>>|", "/tmp/a"]); // tempsafe: parsed command text only, nothing executed
+	expect(shellWriteTargets("echo hi &>> /tmp/a")).toEqual(["/tmp/a"]); // tempsafe: parsed command text only, nothing executed
+	const command = "echo hi &>>| /tmp/a";
+	expect("refuse" in (rewriteShellCommand(command, { cwd: repo, home, sessionDir, aliases }) as object)).toBe(true);
+	expect(checkSystemTemp({ toolName: "bash", input: { command } }, ctx(repo))?.block).toBe(true);
+});
+
+test("TMPREWRITE1-mirror: shellTokenSpans mirrors shellTokens exactly, including new shapes", () => {
+	const corpus = [
+		"echo hi > /tmp/x.json",
+		"echo hi >| /tmp/nc.json",
+		"echo hi &>>| /tmp/a",
+		"echo hi > $'/tmp/ansi.json'",
+		"tee /tmp/a < /tmp/b",
+		"cat <<EOF\n/tmp/x\nEOF",
+		"sudo ssh deploy \"echo hi > /tmp/x.json\"",
+		"dd if=in of=/tmp/a",
+		"cp --target-directory=/tmp a b",
+		"echo 'a > b'",
+		"echo hi # comment /tmp/c",
+	];
+	for (const command of corpus) {
+		const tokens = shellTokens(command);
+		const spans = shellTokenSpans(command);
+		expect(spans.length, command).toBe(tokens.length);
+		for (const [index, span] of spans.entries()) {
+			expect(span.text, command).toBe(tokens[index]!.text);
+			expect(span.quoted, command).toBe(tokens[index]!.quoted);
+		}
+	}
 });

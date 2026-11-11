@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync, statSync, writeFileSync, type Stats } from "node:fs";
 import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandFromEvent, commandName, executedShellCommands, type ShellWord } from "./git";
@@ -76,14 +76,30 @@ export function hostAgentName(env: Record<string, string | undefined> = process.
 	return [env.AGENT_NAME, env.BR_ACTOR, env.BR_AGENT_NAME].map((value) => value?.trim()).find((value) => value !== undefined && AGENT_NAME.test(value));
 }
 
-export function writeScratchOwner(dir: string, owner: ScratchOwner): void {
-	mkdirSync(dir, { recursive: true, mode: 0o755 });
-	const temp = join(dir, `.owner.${process.pid}.tmp`);
+/** The exact owner-file bytes the kit writes: the one record writer adoption must use, never a hand-built record. */
+export function renderScratchOwner(owner: ScratchOwner): string {
 	const durable = owner.agent !== undefined && owner.session !== undefined && AGENT_NAME.test(owner.agent) && SESSION_ID.test(owner.session)
 		? `agent=${owner.agent}\nsession=${owner.session}\n` : "";
 	const binned = owner.bin === "throwaway" ? "bin=throwaway\n" : "";
-	writeFileSync(temp, `pid=${owner.pid}\nlabel=${owner.label}\nrepo=${owner.repo}\ncreated=${owner.created}\n${durable}${binned}`, { mode: 0o644 });
+	return `pid=${owner.pid}\nlabel=${owner.label}\nrepo=${owner.repo}\ncreated=${owner.created}\n${durable}${binned}`;
+}
+export function writeScratchOwner(dir: string, owner: ScratchOwner): void {
+	mkdirSync(dir, { recursive: true, mode: 0o755 });
+	const temp = join(dir, `.owner.${process.pid}.tmp`);
+	writeFileSync(temp, renderScratchOwner(owner), { mode: 0o644 });
 	renameSync(temp, join(dir, ".owner"));
+}
+/** The nearest directory at or above `start` holding a `.git` entry, or undefined. */
+export function repositoryRootOf(start: string): string | undefined {
+	try {
+		let current = resolve(start);
+		for (;;) {
+			if (existsSync(join(current, ".git"))) return current;
+			const parent = dirname(current);
+			if (parent === current) return undefined;
+			current = parent;
+		}
+	} catch { return undefined; }
 }
 
 /** Point this process (and every child tool) at the session scratch dir. */
@@ -106,9 +122,88 @@ function homeDir(): string {
 // A leading $TMPDIR/$TMP/$TEMP names the process temp dir (the seat scratch when the policy is on, system temp
 // otherwise); an unset variable falls back to /tmp, as mktemp and most tools do.
 const TEMP_VAR = /^\$(?:\{(TMPDIR|TMP|TEMP)\}|(TMPDIR|TMP|TEMP))(?=\/|$)/;
+const ANSI_SINGLE: Record<string, string> = { a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?", " ": " " };
+const ANSI_HEX = /^[0-9A-Fa-f]{2}$/;
+const ANSI_HEX4 = /^[0-9A-Fa-f]{4}$/;
+const ANSI_HEX8 = /^[0-9A-Fa-f]{8}$/;
+/** Decode one `$'...'` ANSI-C quoted span to the bytes the shell passes on, or undefined when malformed. */
+function decodeAnsiSpan(body: string): string | undefined {
+	let out = "";
+	for (let index = 0; index < body.length; index++) {
+		const char = body[index]!;
+		if (char !== "\\") { out += char; continue; }
+		const next = body[++index];
+		if (next === undefined) return undefined;
+		if (next in ANSI_SINGLE) { out += ANSI_SINGLE[next]!; continue; }
+		if (next === "x") {
+			const hex = body.slice(index + 1, index + 3);
+			if (!ANSI_HEX.test(hex)) return undefined;
+			out += String.fromCharCode(parseInt(hex, 16));
+			index += 2;
+			continue;
+		}
+		if (next === "u") {
+			const hex = body.slice(index + 1, index + 5);
+			if (!ANSI_HEX4.test(hex)) return undefined;
+			out += String.fromCharCode(parseInt(hex, 16));
+			index += 4;
+			continue;
+		}
+		if (next === "U") {
+			const hex = body.slice(index + 1, index + 9);
+			if (!ANSI_HEX8.test(hex)) return undefined;
+			out += String.fromCodePoint(parseInt(hex, 16));
+			index += 8;
+			continue;
+		}
+		if (next === "c") {
+			const control = body[++index];
+			if (control === undefined) return undefined;
+			out += String.fromCharCode(control.toUpperCase().charCodeAt(0) & 31);
+			continue;
+		}
+		if (next >= "0" && next <= "7") {
+			let octal = next;
+			while (octal.length < 3 && body[index + 1] !== undefined && body[index + 1]! >= "0" && body[index + 1]! <= "7") octal += body[++index];
+			out += String.fromCharCode(parseInt(octal, 8));
+			continue;
+		}
+		return undefined;
+	}
+	return out;
+}
+/**
+ * Replace every `$'...'` ANSI-C span with its decoded bytes (H3): the shell decodes before it
+ * opens the file, so the guard judges the decoded path. An unterminated span fails closed.
+ */
+function decodeAnsiC(candidate: string): string | undefined {
+	let out = "";
+	let rest = candidate;
+	for (;;) {
+		const open = rest.indexOf("$'");
+		if (open < 0) return out + rest;
+		out += rest.slice(0, open);
+		const body = rest.slice(open + 2);
+		let close = -1;
+		for (let index = 0; index < body.length; index++) {
+			if (body[index] === "\\") { index++; continue; }
+			if (body[index] === "'") { close = index; break; }
+		}
+		if (close < 0) return undefined;
+		const decoded = decodeAnsiSpan(body.slice(0, close));
+		if (decoded === undefined) return undefined;
+		out += decoded;
+		rest = body.slice(close + 1);
+	}
+}
 
 function resolveCandidate(cwd: string, candidate: string): string | null {
 	try {
+		if (candidate.includes("$'")) {
+			const decoded = decodeAnsiC(candidate);
+			if (decoded === undefined) return null;
+			candidate = decoded;
+		}
 		const temp = TEMP_VAR.exec(candidate);
 		if (temp) candidate = (process.env[temp[1] ?? temp[2]!] || "/tmp") + candidate.slice(temp[0].length);
 		const abs = isAbsolute(candidate) ? normalize(candidate) : resolve(cwd, candidate);
@@ -243,6 +338,8 @@ function checkWritePaths(event: FleetGuardEvent, context: FleetGuardContext): Fl
 
 interface ShellToken { text: string; quoted: boolean }
 
+/** Longest-first redirect operators; `&`/`|` alone stay single separators. */
+const COMBINED_REDIRECT = ["<<<", "<<-", "&>>|", "&>|", "&>>", "&>", ">>|", ">|", ">>", ">&", "<<", "<>", "<&", ">", "<"] as const;
 /** Quote-aware split; a token is quoted if any part of it was quoted. */
 export function shellTokens(command: string): ShellToken[] {
 	const tokens: ShellToken[] = [];
@@ -254,8 +351,21 @@ export function shellTokens(command: string): ShellToken[] {
 		quoted = false;
 		partQuoted = false;
 	};
-	for (const char of command) {
+	for (let index = 0; index < command.length; index++) {
+		const char = command[index]!;
 		if (escaped) { text += char; escaped = false; continue; }
+		// ANSI-C quoting (H3): keep the raw `$'...'` spelling in the word so resolution decodes
+		// what the shell actually opens. The word counts as quoted.
+		if (char === "$" && command[index + 1] === "'" && !single && !double) {
+			let close = index + 2;
+			while (close < command.length && command[close] !== "'") close += command[close] === "\\" ? 2 : 1;
+			if (close < command.length) {
+				text += command.slice(index, close + 1);
+				partQuoted = true;
+				index = close;
+				continue;
+			}
+		}
 		if (single) {
 			if (char === "'") single = false;
 			else text += char;
@@ -276,15 +386,19 @@ export function shellTokens(command: string): ShellToken[] {
 			continue;
 		}
 		if (char === ";" || char === "&" || char === "|" || char === "(" || char === ")") {
+			const combined = char === "&" && command[index + 1] === ">" ? COMBINED_REDIRECT.find((op) => command.startsWith(op, index)) : undefined;
 			quoted = quoted || partQuoted;
 			flush();
-			tokens.push({ text: char, quoted: false });
+			if (combined !== undefined) { tokens.push({ text: combined, quoted: false }); index += combined.length - 1; }
+			else tokens.push({ text: char, quoted: false });
 			continue;
 		}
 		if (char === ">" || char === "<") {
+			const combined = COMBINED_REDIRECT.find((op) => command.startsWith(op, index));
 			quoted = quoted || partQuoted;
 			flush();
-			tokens.push({ text: char, quoted: false });
+			tokens.push({ text: combined ?? char, quoted: false });
+			index += (combined ?? char).length - 1;
 			continue;
 		}
 		text += char;
@@ -294,13 +408,19 @@ export function shellTokens(command: string): ShellToken[] {
 	return tokens.filter(token => token.text !== "" || token.quoted);
 }
 
+const REDIRECT = /^(?:\d*)(?:>{1,2}\|?|<>)$/;
+const FD_REDIRECT = /^(?:\d*)&>{1,2}\|?$/;
+/** A token the tokenizer emitted as redirect syntax, never a path operand. */
+function isRedirectToken(token: ShellToken): boolean {
+	return !token.quoted && ((COMBINED_REDIRECT as readonly string[]).includes(token.text) || REDIRECT.test(token.text) || FD_REDIRECT.test(token.text));
+}
 /** A shellTokens token with its byte span, for surgical rewrites that preserve every other byte. */
 export interface ShellTokenSpan { text: string; quoted: boolean; start: number; end: number }
 
 /**
  * shellTokens with byte spans. The split mirrors shellTokens exactly (whitespace separates;
- * `;&|()><` are standalone tokens; quotes and escapes join); callers must verify the returned
- * texts against shellTokens and abort the rewrite on any divergence.
+ * combined redirect operators and `$'...'` spans are single tokens; quotes and escapes join);
+ * callers must verify the returned texts against shellTokens and abort the rewrite on any divergence.
  */
 export function shellTokenSpans(command: string): ShellTokenSpan[] {
 	const spans: ShellTokenSpan[] = [];
@@ -317,6 +437,18 @@ export function shellTokenSpans(command: string): ShellTokenSpan[] {
 	for (let index = 0; index < command.length; index++) {
 		const char = command[index]!;
 		if (escaped) { open(index - 1); text += char; escaped = false; continue; }
+		// ANSI-C quoting: keep the raw `$'...'` spelling like shellTokens does.
+		if (char === "$" && command[index + 1] === "'" && !single && !double) {
+			let close = index + 2;
+			while (close < command.length && command[close] !== "'") close += command[close] === "\\" ? 2 : 1;
+			if (close < command.length) {
+				open(index);
+				text += command.slice(index, close + 1);
+				partQuoted = true;
+				index = close;
+				continue;
+			}
+		}
 		if (single) {
 			if (char === "'") single = false;
 			else text += char;
@@ -337,15 +469,20 @@ export function shellTokenSpans(command: string): ShellTokenSpan[] {
 			continue;
 		}
 		if (char === ";" || char === "&" || char === "|" || char === "(" || char === ")") {
+			const combined = char === "&" && command[index + 1] === ">" ? COMBINED_REDIRECT.find((op) => command.startsWith(op, index)) : undefined;
 			quoted = quoted || partQuoted;
 			flush(index);
-			spans.push({ text: char, quoted: false, start: index, end: index + 1 });
+			const word = combined ?? char;
+			spans.push({ text: word, quoted: false, start: index, end: index + word.length });
+			index += word.length - 1;
 			continue;
 		}
 		if (char === ">" || char === "<") {
+			const combined = COMBINED_REDIRECT.find((op) => command.startsWith(op, index)) ?? char;
 			quoted = quoted || partQuoted;
 			flush(index);
-			spans.push({ text: char, quoted: false, start: index, end: index + 1 });
+			spans.push({ text: combined, quoted: false, start: index, end: index + combined.length });
+			index += combined.length - 1;
 			continue;
 		}
 		open(index);
@@ -355,9 +492,6 @@ export function shellTokenSpans(command: string): ShellTokenSpan[] {
 	flush(command.length);
 	return spans.filter(span => span.text !== "" || span.quoted);
 }
-
-const REDIRECT = /^(?:\d*)>{1,2}\|?$/;
-const FD_REDIRECT = /^(?:\d*)&>{1,2}$/;
 
 /** Write-target operands of one shell command: redirect targets, tee/cp/mv/mkdir destinations. */
 export function shellWriteTargets(command: string): string[] {
@@ -433,6 +567,8 @@ function collectShellWrites(command: string, track: { cwd: string; home: string 
 			i++;
 			while (i < tokens.length && !isSep(tokens[i]!)) {
 				const arg = tokens[i]!;
+				// An input redirect is never a tee write target (M1): `tee /tmp/a < /tmp/b` reads b.
+				if (isRedirectToken(arg)) break;
 				if (arg.text === "-") { i++; continue; }
 				if (!arg.quoted && arg.text.startsWith("-")) { i++; continue; }
 				targets.push({ target: arg.text, base });
@@ -440,16 +576,19 @@ function collectShellWrites(command: string, track: { cwd: string; home: string 
 			}
 			continue;
 		}
-		if (!token.quoted && (token.text === "cp" || token.text === "mv")) {
+		if (!token.quoted && (token.text === "cp" || token.text === "mv" || token.text === "ln" || token.text === "install")) {
 			i++;
 			const operands: string[] = [];
 			let dashT: string | null = null;
 			let skip = false;
 			while (i < tokens.length && !isSep(tokens[i]!)) {
 				const arg = tokens[i]!;
+				if (isRedirectToken(arg)) break;
 				if (skip) { dashT = arg.text; skip = false; i++; continue; }
 				if (!arg.quoted && arg.text.startsWith("-") && arg.text !== "-") {
-					if (arg.text === "-t") skip = true;
+					// F2: `--target-directory DIR` (attached or separate) names the destination like `-t`.
+					if (arg.text === "-t" || arg.text === "--target-directory") skip = true;
+					else if (arg.text.startsWith("--target-directory=")) dashT = arg.text.slice("--target-directory=".length);
 					i++;
 					continue;
 				}
@@ -458,6 +597,17 @@ function collectShellWrites(command: string, track: { cwd: string; home: string 
 			}
 			const dest = dashT ?? operands.at(-1);
 			if (dest !== undefined) targets.push({ target: dest, base });
+			continue;
+		}
+		// F3: `dd of=<path>` writes that file; `if=` is a read and is never a write target.
+		if (!token.quoted && token.text === "dd") {
+			i++;
+			while (i < tokens.length && !isSep(tokens[i]!)) {
+				const arg = tokens[i]!;
+				if (isRedirectToken(arg)) break;
+				if (arg.text.startsWith("of=")) targets.push({ target: arg.text.slice("of=".length), base });
+				i++;
+			}
 			continue;
 		}
 		const atCommand = i === 0 || isSep(tokens[i - 1]!);
@@ -627,7 +777,23 @@ export function gitBlanketArgs(argv: readonly string[]): boolean {
 	}
 	return false;
 }
-
+/**
+ * An expanded word naming a /tmp path in a write position (F4): `${x:-/tmp/a}`, `$f`-style
+ * computed names. Command substitutions (`$(...)`, backquotes) are skipped: their inner commands
+ * are judged on their own (mktemp templates keep their scratch-alloc refusal). Returns the
+ * offending word and the system-temp root it names, or undefined.
+ */
+export function expandedTmpWriteText(command: string, writeTexts: ReadonlySet<string>): { text: string; root: string } | undefined {
+	const inspection = executedShellCommands(command);
+	if ("refusal" in inspection) return undefined;
+	// A dd operand keeps its `of=` prefix in argv while shellWriteBases records the bare path.
+	const candidates = inspection.writes.map(({ target }) => target).concat(
+		inspection.commands.flatMap(({ argv }) => argv.filter((word) => writeTexts.has(word.text) || (word.text.startsWith("of=") && writeTexts.has(word.text.slice("of=".length))))));
+	const hit = candidates.find((word) => word.expanded && !word.text.includes("$(") && !word.text.includes("`") && spanHasTmpText(word.text));
+	if (!hit) return undefined;
+	const root = [...SYSTEM_TEMP_ROOTS].sort((a, b) => b.length - a.length).find((root) => hit.text === root || hit.text.includes(`${root}/`));
+	return root === undefined ? undefined : { text: hit.text, root };
+}
 function checkBashTargets(event: FleetGuardEvent, context: FleetGuardContext): FleetGuardBlock | undefined {
 	const tool = typeof event.toolName === "string" ? event.toolName : "";
 	const command = commandFromEvent(event) ?? (typeof event.input === "string" ? event.input : undefined);
@@ -641,6 +807,10 @@ function checkBashTargets(event: FleetGuardEvent, context: FleetGuardContext): F
 		const root = forbiddenTarget(abs, home, base);
 		if (root !== null) return blockScratch("scratch-write", target, root);
 	}
+	// F4: an expanded word naming a /tmp path in a write position is unresolvable by
+	// construction; block it here, the same rule the rewrite applies before refusing.
+	const expanded = expandedTmpWriteText(command, new Set(writes.map(({ target }) => target)));
+	if (expanded !== undefined) return blockScratch("scratch-write", expanded.text, expanded.root);
 	return undefined;
 }
 
@@ -736,6 +906,472 @@ function checkShellCommands(event: FleetGuardEvent, context: FleetGuardContext):
  * Write/edit paths, shell write operands (redirects, tee/mkdir/cp/mv, git clone/worktree, rsync, tar) and the
  * directories an executed mktemp allocates under. Reads of system temp stay allowed.
  */
+// TMPREWRITE1 (ompkit-1ra0d.144): a literal simple file directly under /tmp, /private/tmp or
+// /var/tmp lands in the seat's session scratch instead of refused. Conservative by construction:
+// every condition below must hold, otherwise the caller keeps today's refusal, never an unguarded
+// write. Tokenizer word spans (not string replace) drive the bash substitution.
+/** System-temp roots whose literal simple children the guard may complete into session scratch. */
+export const REWRITABLE_TMP_ROOTS = ["/tmp", "/private/tmp", "/var/tmp"] as const;
+/** A rewritable basename: no glob, no variable, no directory, at most 64 chars. Exclusive classes. */
+export const REWRITABLE_BASENAME = /^[A-Za-z0-9._-]{1,64}$/;
+/** One AUTO_COMPLETED notice line per completed literal. */
+export function autoCompletedLine(from: string, to: string): string {
+	return `AUTO_COMPLETED: ${from} -> ${to}`;
+}
+/** The literal system-temp file a candidate names, or undefined when it is not a bare `<root>/<base>`. */
+export function parseSessionTmpLiteral(candidate: string): { root: string; base: string } | undefined {
+	for (const root of REWRITABLE_TMP_ROOTS) {
+		if (candidate.length <= root.length + 1 || !candidate.startsWith(`${root}/`)) continue;
+		const base = candidate.slice(root.length + 1);
+		if (REWRITABLE_BASENAME.test(base)) return { root, base };
+		return undefined;
+	}
+	return undefined;
+}
+/** One shell word with its exact byte span in the command, quote and expansion marks. */
+export interface ShellWordSpan { text: string; start: number; end: number; quoted: boolean; expanded: boolean }
+/**
+ * Quote-aware words with exact byte spans. Mirrors shellTokens word boundaries (whitespace and
+ * `;&|()<>"` separators, single/double quotes, backslash escapes) and additionally records where
+ * each word sits, so a substitution can splice whole words only. A span is `expanded` when any part
+ * of it was quoted-incompatible with a literal path: `$`, backtick, brace/bracket/glob characters,
+ * a leading `~`, or an escape; `quoted` when any part was quoted.
+ */
+export type ShellWordSpans = { spans: ShellWordSpan[] } | { error: string };
+export function shellWordSpans(command: string): ShellWordSpans {
+	const spans: ShellWordSpan[] = [];
+	let text = "", start = -1, quoted = false, partQuoted = false, expanded = false;
+	let single = false, double = false, escaped = false;
+	const flush = (end: number): void => {
+		if (start >= 0 && (text !== "" || quoted)) spans.push({ text, start, end, quoted, expanded });
+		text = "";
+		start = -1;
+		quoted = false;
+		partQuoted = false;
+		expanded = false;
+	};
+	const begin = (index: number): void => {
+		if (start < 0) start = index;
+	};
+	for (let index = 0; index < command.length; index++) {
+		const char = command[index]!;
+		if (escaped) { begin(index - 1); text += char; expanded = true; escaped = false; continue; }
+		// ANSI-C quoting (H3): keep the raw `$'...'` spelling like shellTokens does; the `$`
+		// already marks the span expanded, so the rewrite never splices it.
+		if (char === "$" && command[index + 1] === "'" && !single && !double) {
+			let close = index + 2;
+			while (close < command.length && command[close] !== "'") close += command[close] === "\\" ? 2 : 1;
+			if (close < command.length) {
+				begin(index);
+				text += command.slice(index, close + 1);
+				partQuoted = true;
+				expanded = true;
+				index = close;
+				continue;
+			}
+		}
+		if (single) {
+			if (char === "'") single = false;
+			else text += char;
+			continue;
+		}
+		if (double) {
+			if (char === '"') double = false;
+			else if (char === "\\") escaped = true;
+			else if (char === "$" || char === "`") { text += char; expanded = true; }
+			else text += char;
+			continue;
+		}
+		if (char === "\\") { begin(index); escaped = true; continue; }
+		if (char === "'") { begin(index); single = true; partQuoted = true; continue; }
+		if (char === '"') { begin(index); double = true; partQuoted = true; continue; }
+		if (char === " " || char === "\t" || char === "\n" || char === "\r") { quoted = quoted || partQuoted; flush(index); continue; }
+		// A `#` that starts a word is a comment to end of line, exactly as lexShell treats it (M4):
+		// the comment body is inert text, never a whole word to substitute.
+		if (char === "#" && start < 0) {
+			while (index < command.length && command[index] !== "\n") index++;
+			continue;
+		}
+		if (char === ";" || char === "&" || char === "|" || char === "(" || char === ")") {
+			const combined = char === "&" && command[index + 1] === ">" ? COMBINED_REDIRECT.find((op) => command.startsWith(op, index)) : undefined;
+			quoted = quoted || partQuoted; flush(index);
+			index += (combined ?? char).length - 1;
+			continue;
+		}
+		if (char === ">" || char === "<") {
+			const combined = COMBINED_REDIRECT.find((op) => command.startsWith(op, index)) ?? char;
+			quoted = quoted || partQuoted; flush(index);
+			index += combined.length - 1;
+			continue;
+		}
+		begin(index);
+		if (char === "$" || char === "`" || char === "*" || char === "?" || char === "[" || char === "]" || char === "{" || char === "}" || char === "!" || char === "#") expanded = true;
+		if (char === "~" && text === "") expanded = true;
+		text += char;
+	}
+	if (single) return { error: "unterminated single quote" };
+	if (double) return { error: "unterminated double quote" };
+	if (escaped) return { error: "trailing escape" };
+	quoted = quoted || partQuoted;
+	flush(command.length);
+	return { spans };
+}
+/** Commands whose presence anywhere in the call forbids a rewrite (another machine or interpreter). */
+const REWRITE_REMOTE_COMMANDS: Record<string, true> = { ssh: true, scp: true, rsync: true, docker: true, podman: true, kubectl: true, "omp-kit": true, vmpal: true };
+/** Wrappers whose later operands may name a remote program (sudo/ssh) or runner (xargs/find -exec). */
+const REWRITE_WRAPPER_COMMANDS: Record<string, true> = { sudo: true, xargs: true };
+/** Tools that allocate or create directories: a rewrite must never silently redirect them. */
+const REWRITE_ALLOC_COMMANDS: Record<string, true> = { mkdir: true, mktemp: true, gmktemp: true };
+/** File-operation destinations are never spliced: clone/extract/copy targets create directories or trees,
+ * so a literal there does not name the file the tool will open. Redirects and tee stay rewritable. */
+const REWRITE_FILEOP_COMMANDS: Record<string, true> = { cp: true, mv: true, git: true, rsync: true, tar: true, install: true, ln: true, cpio: true, unzip: true };
+function spanHasTmpText(text: string): boolean {
+	return text.includes("/tmp/") || text === "/tmp" || text.includes("/private/tmp/") || text.includes("/var/tmp/");
+}
+export interface RewriteMapping { from: string; to: string; note?: string }
+export type OriginalExists = (literal: string) => boolean;
+/** A rewrite destination the guard can prove safe, or the reason it cannot (H1). */
+export function rewriteDestinationProblem(path: string): string | undefined {
+	let stat;
+	try { stat = lstatSync(path); }
+	catch { return undefined; }
+	if (stat.isSymbolicLink()) return "rewrite destination is a symlink";
+	if (!stat.isFile()) return "rewrite destination is not a regular file";
+	if (stat.nlink !== 1) return "rewrite destination has multiple hard links";
+	return undefined;
+}
+/** A real file at the original literal path, independently of the session copy (M2). */
+export function originalFileExists(literal: string): boolean {
+	try { lstatSync(literal); return true; }
+	catch { return false; }
+}
+export interface ShellRewriteOpts { cwd: string; home: string; sessionDir: string; aliases: Map<string, string>; originalExists?: OriginalExists }
+export type ShellRewrite = { command: string; mapped: Array<RewriteMapping> } | { refuse: string } | undefined;
+/**
+ * Rewrite every whole-word occurrence of a literal simple system-temp file in a bash command to the
+ * session scratch, or refuse (keep today's refusal), or undefined when the command involves no
+ * system-temp path at all. Reads of an already-mapped literal follow the mapping; anything else
+ * (variable-built, glob, quoted, heredoc/herestring body, remote or nested execution context,
+ * allocation tools, a tmp substring that is not a whole word) refuses.
+ */
+export function rewriteShellCommand(command: string, opts: ShellRewriteOpts): ShellRewrite {
+	const lexed = shellWordSpans(command);
+	if ("error" in lexed) return { refuse: `uninspectable shell text (${lexed.error})` };
+	const spans = lexed.spans;
+	const unquoted = command.replace(/"[^"]*"/g, " ").replace(/'[^']*'/g, " ");
+	if (unquoted.includes("<<")) return { refuse: "here-document or here-string body" };
+	// A noclobber-forcing redirect is refused, never rewritten (H2): `>|` opens the real /tmp file.
+	for (const token of shellTokens(command)) {
+		if (!token.quoted && (token.text === ">|" || token.text === ">>|" || token.text === "&>|" || token.text === "&>>|")) return { refuse: "noclobber redirect (>|)" };
+	}
+	const inspection = executedShellCommands(command);
+	if ("refusal" in inspection) return { refuse: inspection.refusal };
+	for (const { argv } of inspection.commands) {
+		const name = commandName(argv[0]?.text ?? "");
+		if (REWRITE_REMOTE_COMMANDS[name] === true) return { refuse: `remote or nested execution context (${name})` };
+		if (REWRITE_ALLOC_COMMANDS[name] === true) return { refuse: `directory or temp allocation (${name})` };
+		if (REWRITE_FILEOP_COMMANDS[name] === true) return { refuse: `file-operation destination (${name})` };
+		// L2: remote operands after sudo/xargs/find -exec are detected explicitly, not via the
+		// quoted-span fallback: a later unquoted remote word means another machine reads the path.
+		const wrapped = REWRITE_WRAPPER_COMMANDS[name] === true ? argv.slice(1)
+			: name === "find" ? argv.slice(argv.findIndex((word) => word.text === "-exec" || word.text === "-execdir") + 1) : [];
+		for (const word of wrapped) {
+			if (word.text === "-exec" || word.text === "-execdir" || word.text === "{}" || word.text === "+" || word.text === ";") continue;
+			if (spans.some((span) => span.text === word.text && !span.quoted && !span.expanded)) {
+				if (REWRITE_REMOTE_COMMANDS[commandName(word.text)] === true) return { refuse: `remote operand after ${name} (${word.text.slice(0, 32)})` };
+				// F1: a file operation after a wrapper (xargs/find/sudo cp, ...) names a
+				// directory or tree at the destination, never a plain file to splice.
+				if (REWRITE_FILEOP_COMMANDS[commandName(word.text)] === true) return { refuse: `file-operation destination after ${name} (${word.text.slice(0, 32)})` };
+			}
+		}
+		for (const word of argv) {
+			if (word.expanded && spanHasTmpText(word.text)) return { refuse: `computed temp path (${word.text.slice(0, 48)})` };
+		}
+	}
+	const writes = shellWriteBases(command, opts.cwd, opts.home);
+	// F3: the bare path of a `dd of=<path>` operand. Only a dd operand's `of=` names a file;
+	// elsewhere `of=` is literal text and keeps today's refusal.
+	const ddOfWords = new Set<string>();
+	for (const { argv } of inspection.commands) {
+		if (commandName(argv[0]?.text ?? "") !== "dd") continue;
+		for (const word of argv) if (word.text.startsWith("of=")) ddOfWords.add(word.text);
+	}
+	const bareOf = (text: string): string | undefined => text.startsWith("of=") && ddOfWords.has(text) ? text.slice("of=".length) : undefined;
+	const literals = new Map<string, string>();
+	const mapped = (literal: string): string => {
+		const known = opts.aliases.get(literal);
+		if (known) return known;
+		const parsed = parseSessionTmpLiteral(literal);
+		const to = join(opts.sessionDir, parsed?.base ?? literal.slice(literal.lastIndexOf("/") + 1));
+		opts.aliases.set(literal, to);
+		return to;
+	};
+	for (const { target, base } of writes) {
+		const abs = resolveCandidate(base, target);
+		if (abs === null) return { refuse: `unresolvable write target (${target.slice(0, 48)})` };
+		if (systemTempRoot(abs, opts.cwd) === undefined) continue;
+		const parsed = !target.startsWith("/") ? undefined : parseSessionTmpLiteral(target);
+		if (!parsed) return { refuse: `non-literal system-temp write target (${target.slice(0, 48)})` };
+		// H1: the session destination must be absent or a plain single-link file; a planted
+		// symlink, directory or hard link keeps today's refusal instead of being followed.
+		const problem = rewriteDestinationProblem(join(opts.sessionDir, parsed.base));
+		if (problem !== undefined) return { refuse: `${problem} (${target.slice(0, 48)})` };
+		literals.set(target, mapped(target));
+	}
+	const reads = new Map<string, string>();
+	const readNotes = new Map<string, string>();
+	const originalExists = opts.originalExists ?? originalFileExists;
+	for (const span of spans) {
+		if (!spanHasTmpText(span.text)) continue;
+		if (span.quoted || span.expanded) return { refuse: `quoted or computed temp path (${span.text.slice(0, 48)})` };
+		// F3: a dd operand splices as `of=<session file>`; the bare path below is what is judged.
+		const bare = bareOf(span.text) ?? span.text;
+		if (literals.has(bare)) continue;
+		const known = opts.aliases.get(bare);
+		if (known !== undefined) {
+			// M2: the session wrote this literal; when a different real file also sits at the
+			// original path, the notice says the read serves the session copy.
+			if (originalExists(bare)) readNotes.set(bare, `a different file exists at ${bare}; reading the session copy`);
+			reads.set(bare, known);
+			continue;
+		}
+		if (parseSessionTmpLiteral(bare) === undefined) return { refuse: `non-literal system-temp path (${span.text.slice(0, 48)})` };
+		const abs = resolveCandidate(opts.cwd, bare);
+		if (abs === null || systemTempRoot(abs, opts.cwd) === undefined) continue;
+		return { refuse: `system-temp path outside a write (${span.text.slice(0, 48)})` };
+	}
+	if (literals.size === 0 && reads.size === 0) return undefined;
+	const all = new Map([...literals, ...reads]);
+	const found: Array<RewriteMapping> = [];
+	let out = command;
+	const keyOf = (text: string): string => bareOf(text) ?? text;
+	const ordered = spans.filter((span) => all.has(keyOf(span.text))).sort((a, b) => b.start - a.start);
+	for (const span of ordered) {
+		const key = keyOf(span.text);
+		const to = all.get(key)!;
+		const replacement = key === span.text ? to : `of=${to}`;
+		out = `${out.slice(0, span.start)}${replacement}${out.slice(span.end)}`;
+		if (!found.some((entry) => entry.from === span.text)) {
+			const note = readNotes.get(key);
+			found.push(note === undefined ? { from: span.text, to: replacement } : { from: span.text, to: replacement, note });
+		}
+	}
+	return { command: out, mapped: found.sort((a, b) => (a.from < b.from ? -1 : 1)) };
+}
+export interface ToolRewriteOpts { cwd: string; context: FleetGuardContext; sessionDir: string; aliases: Map<string, string>; originalExists?: OriginalExists }
+export type ToolRewrite = { input: Record<string, unknown>; mapped: Array<RewriteMapping> } | { refuse: string } | undefined;
+function mapLiteral(literal: string, opts: ToolRewriteOpts): string {
+	const known = opts.aliases.get(literal);
+	if (known) return known;
+	const to = join(opts.sessionDir, parseSessionTmpLiteral(literal)!.base);
+	opts.aliases.set(literal, to);
+	return to;
+}
+const HASHLINE_HEADER = /^\[([^[\]]+)#([0-9A-Fa-f]{4})\]$/;
+function rewriteHashlinePatch(patch: string, opts: ToolRewriteOpts): { patch: string; mapped: Array<{ from: string; to: string }> } | { refuse: string } | undefined {
+	if (!patch.startsWith("*** Begin Patch")) return undefined;
+	const mapped = new Map<string, string>();
+	let touched = false;
+	const lines = patch.split("\n");
+	for (let index = 0; index < lines.length; index++) {
+		const header = HASHLINE_HEADER.exec(lines[index]!);
+		if (!header) continue;
+		const raw = header[1]!;
+		if (mapped.has(raw)) { lines[index] = `[${mapped.get(raw)}#${header[2]}]`; touched = true; continue; }
+		const parsed = parseSessionTmpLiteral(raw);
+		if (parsed !== undefined) {
+			// H1: refuse when the session destination is a planted symlink, directory or hard link.
+			const problem = rewriteDestinationProblem(join(opts.sessionDir, parsed.base));
+			if (problem !== undefined) return { refuse: `${problem} (${raw.slice(0, 48)})` };
+			const to = mapLiteral(raw, opts);
+			mapped.set(raw, to);
+			lines[index] = `[${to}#${header[2]}]`;
+			touched = true;
+			continue;
+		}
+		let abs: string | undefined;
+		try { abs = resolveFilesystemWriteTarget(opts.cwd, raw, opts.context); } catch { abs = null as unknown as undefined; }
+		if (abs !== undefined && systemTempRoot(abs, opts.cwd) !== undefined) return { refuse: `non-literal system-temp edit target (${raw.slice(0, 48)})` };
+	}
+	if (!touched) return undefined;
+	return { patch: lines.join("\n"), mapped: [...mapped].map(([from, to]) => ({ from, to })) };
+}
+/**
+ * Rewrite write/edit/read tool input so literal simple /tmp files land in the session scratch.
+ * Returns undefined when no system-temp path is involved (run as-is); {refuse} keeps today's
+ * refusal. Reads follow an existing mapping only; a first-time read of system temp stays allowed
+ * and unmapped, exactly as today.
+ */
+export function rewriteToolInput(tool: string, input: unknown, opts: ToolRewriteOpts): ToolRewrite {
+	if (!input || typeof input !== "object") return undefined;
+	const record = input as Record<string, unknown>;
+	const mapped = new Map<string, string>();
+	const notes = new Map<string, string>();
+	const originalExists = opts.originalExists ?? originalFileExists;
+	const patchKeys = ["patch", "input", "_input"] as const;
+	const hasPathField = typeof record.path === "string" || typeof record.file === "string" || Array.isArray(record.paths);
+	if (!hasPathField) {
+		for (const key of patchKeys) {
+			const patch = record[key];
+			if (typeof patch !== "string") continue;
+			const rewritten = rewriteHashlinePatch(patch, opts);
+			if (rewritten === undefined) return undefined;
+			if ("refuse" in rewritten) return rewritten;
+			for (const entry of rewritten.mapped) mapped.set(entry.from, entry.to);
+			return { input: { ...record, [key]: rewritten.patch }, mapped: [...mapped].map(([from, to]) => ({ from, to })) };
+		}
+		return undefined;
+	}
+	const rewriteValue = (value: string): string | { refuse: string } => {
+		const known = opts.aliases.get(value);
+		if (known !== undefined) {
+			mapped.set(value, known);
+			// M2: a read that follows the session mapping says so when a different real file
+			// also sits at the original literal path.
+			if (tool === "read" && originalExists(value)) notes.set(value, `a different file exists at ${value}; reading the session copy`);
+			return known;
+		}
+		// Reads follow an existing mapping only; a first-time read of system temp stays allowed
+		// and unmapped, exactly as today.
+		if (tool === "read") return value;
+		const parsed = parseSessionTmpLiteral(value);
+		if (parsed !== undefined) {
+			// H1: refuse when the session destination is a planted symlink, directory or hard link.
+			const problem = rewriteDestinationProblem(join(opts.sessionDir, parsed.base));
+			if (problem !== undefined) return { refuse: `${problem} (${value.slice(0, 48)})` };
+			const to = mapLiteral(value, opts);
+			mapped.set(value, to);
+			return to;
+		}
+		let abs: string | undefined;
+		try { abs = resolveFilesystemWriteTarget(opts.cwd, value, opts.context); } catch { return { refuse: `unresolvable path (${value.slice(0, 48)})` }; }
+		if (abs === undefined || systemTempRoot(abs, opts.cwd) === undefined) return value;
+		return { refuse: `non-literal system-temp path (${value.slice(0, 48)})` };
+	};
+	const withNotes = (): Array<RewriteMapping> => [...mapped].map(([from, to]) => {
+		const note = notes.get(from);
+		return note === undefined ? { from, to } : { from, to, note };
+	});
+	const next: Record<string, unknown> = { ...record };
+	for (const key of ["path", "file"] as const) {
+		const value = record[key];
+		if (typeof value !== "string" || value.trim() === "") continue;
+		const rewritten = rewriteValue(value);
+		if (typeof rewritten !== "string") return rewritten;
+		next[key] = rewritten;
+	}
+	if (Array.isArray(record.paths)) {
+		const paths: unknown[] = [];
+		for (const entry of record.paths) {
+			if (typeof entry !== "string" || entry.trim() === "") { paths.push(entry); continue; }
+			const rewritten = rewriteValue(entry);
+			if (typeof rewritten !== "string") return rewritten;
+			paths.push(rewritten);
+		}
+		next.paths = paths;
+	}
+	if (mapped.size === 0) return undefined;
+	return { input: next, mapped: withNotes() };
+}
+/** A hand-made scratch dir adopted for the calling seat, or a refusal reason keeping today's block. */
+export type AdoptResult = { dir: string; name: string } | { refuse: string };
+export interface AdoptOpts { cwd: string; agent?: string; session?: string; now?: string; createdDirs?: ReadonlySet<string> }
+/**
+ * Adopt a hand-made directory with no `.owner` record under the calling repository's scratch root,
+ * but ONLY when this session itself created it (M3): the caller passes the session guard state's
+ * `createdDirs`, and anything else keeps today's refusal with the remedy text. The owner record is
+ * written with an exclusive create (fail if one appeared meanwhile), through the kit's own owner
+ * writer bytes (never a hand-built record), naming the calling seat with bin throwaway so the dir
+ * is visible to `omp-kit scratch mine` and released at session end like the seat's other dirs.
+ */
+export function adoptOwnerlessDir(target: string, opts: AdoptOpts): AdoptResult {
+	const repo = repositoryRootOf(opts.cwd);
+	if (!repo) return { refuse: "no repository root above the calling directory" };
+	let abs: string;
+	try {
+		abs = isAbsolute(target) ? normalize(target) : resolve(opts.cwd, target);
+		if (abs.includes("\0")) return { refuse: "invalid path" };
+	} catch { return { refuse: "unresolvable path" }; }
+	const root = join(repo, "var", "agent-tmp");
+	if (abs !== root && !abs.startsWith(`${root}/`)) return { refuse: "outside the calling repository scratch root" };
+	if (abs === root) return { refuse: "the scratch root itself is not adoptable" };
+	const name = abs.slice(root.length + 1).split("/")[0]!;
+	const dir = join(root, name);
+	let stat: Stats | undefined;
+	try { stat = statSync(dir); } catch { return { refuse: "scratch directory does not exist" }; }
+	if (!stat.isDirectory()) return { refuse: "scratch name is not a directory" };
+	try {
+		if (lstatSync(dir).isSymbolicLink()) return { refuse: "scratch name is a symlink" };
+	} catch { return { refuse: "scratch directory unavailable" }; }
+	if (opts.createdDirs === undefined || !opts.createdDirs.has(dir)) return { refuse: "scratch directory was not created by this session" };
+	if (!opts.agent || !opts.session) return { refuse: "calling seat identity unavailable" };
+	try {
+		writeFileSync(join(dir, ".owner"), renderScratchOwner({ pid: process.pid, label: name, repo, created: opts.now ?? new Date().toISOString(), agent: opts.agent, session: opts.session, bin: "throwaway" }), { flag: "wx", mode: 0o600 });
+	} catch {
+		return { refuse: "scratch directory already has an owner" };
+	}
+	return { dir, name };
+}
+/** Every path-like target a write/edit tool call names (path/file/paths fields). */
+export function toolTargetPaths(input: unknown): string[] {
+	if (!input || typeof input !== "object") return [];
+	const record = input as Record<string, unknown>;
+	const out: string[] = [];
+	for (const key of ["path", "file"] as const) if (typeof record[key] === "string") out.push(record[key] as string);
+	if (Array.isArray(record.paths)) for (const entry of record.paths) if (typeof entry === "string") out.push(entry);
+	return out;
+}
+/** mkdir options that consume the next word (mode/context); attached `--opt=value` never does. */
+const MKDIR_VALUE_OPTIONS: Record<string, true> = { "-m": true, "--mode": true, "-Z": true, "--context": true };
+/** Literal mkdir destinations of a bash command, through the same executed-command traversal the guards share. */
+export function mkdirScratchDests(command: string): string[] {
+	const inspection = executedShellCommands(command);
+	if ("refusal" in inspection) return [];
+	const out: string[] = [];
+	for (const { argv } of inspection.commands) {
+		// A bare `sudo mkdir ...` runs mkdir; anything fancier (options before mkdir) stays missed, fail closed.
+		const start = commandName(argv[0]?.text ?? "") === "sudo" ? 1 : 0;
+		if (commandName(argv[start]?.text ?? "") !== "mkdir") continue;
+		let options = true;
+		for (let index = start + 1; index < argv.length; index++) {
+			const word = argv[index]!;
+			if (word.expanded) { options = false; continue; }
+			if (options && word.text === "--") { options = false; continue; }
+			if (options && word.text.startsWith("-") && word.text !== "-") {
+				if (!word.text.includes("=") && MKDIR_VALUE_OPTIONS[word.text] === true) index++;
+				continue;
+			}
+			options = false;
+			out.push(word.text);
+		}
+	}
+	return out;
+}
+/**
+ * Scratch-root top dirs an admitted call creates (M3): literal mkdir destinations of an admitted
+ * bash call, and write/edit targets whose top-level dir does not exist yet. The caller records
+ * them only when the verdict admits, so adoption later proves this session made the dir.
+ */
+export function createdScratchTops(tool: string, command: string | undefined, paths: string[], cwd: string): string[] {
+	const repo = repositoryRootOf(cwd);
+	if (!repo) return [];
+	const root = join(repo, "var", "agent-tmp");
+	const tops: string[] = [];
+	const consider = (candidate: string): void => {
+		let abs: string;
+		try { abs = isAbsolute(candidate) ? normalize(candidate) : resolve(cwd, candidate); }
+		catch { return; }
+		if (abs === root || !abs.startsWith(`${root}/`)) return;
+		const top = join(root, abs.slice(root.length + 1).split("/")[0]!);
+		try { if (existsSync(top)) return; }
+		catch { return; }
+		if (!tops.includes(top)) tops.push(top);
+	};
+	if (tool === "bash" && command !== undefined) for (const dest of mkdirScratchDests(command)) consider(dest);
+	if (tool === "write" || tool === "edit") for (const path of paths) consider(path);
+	return tops;
+}
+
 export function checkSystemTemp(event: FleetGuardEvent, context: FleetGuardContext): FleetGuardBlock | undefined {
 	const tool = typeof event.toolName === "string" ? event.toolName : "";
 	const cwd = resolve(eventCwd(event, context));
@@ -770,6 +1406,10 @@ export function checkSystemTemp(event: FleetGuardEvent, context: FleetGuardConte
 		const block = refuse(target, resolveCandidate(base, target));
 		if (block) return block;
 	}
+	// F4: an expanded word naming a /tmp path in a write position is unresolvable by
+	// construction; block it here, the same rule the rewrite applies before refusing.
+	const expanded = expandedTmpWriteText(command, new Set(writes.map(({ target }) => target)));
+	if (expanded !== undefined) return { block: true, reason: `fleet-guard system-temp: writes to ${expanded.text} are blocked (under ${expanded.root}). ${SYSTEM_TEMP_REMEDY}` };
 	for (const target of allocations) {
 		const block = refuse(target, resolveCandidate(cwd, target));
 		if (block) return block;
