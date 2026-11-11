@@ -1430,9 +1430,14 @@ export function checkGoalSend(event: FlywheelToolCallEvent, owner: string | null
 	};
 }
 
-/** Refuse finite Bash work that explicitly disables the OMP deadline. `owner`
-is the server-side session identity; the native tool-call id attributes the
-job. Tool input never supplies either, so a peer cannot spoof ownership. */
+/** DEADLINEAUTO1 (ompkit-1ra0d.177): the kit's chosen policy default a `timeout: 0`
+bash call is patched to. OMP's own default for finite Bash commands is 300 seconds;
+the kit admits the call at 3600 seconds instead of refusing. */
+export const FINITE_JOB_DEFAULT_TIMEOUT_S = 3600;
+
+ /** Refuse finite Bash work that explicitly disables the OMP deadline. `owner`
+ is the server-side session identity; the native tool-call id attributes the
+ job. Tool input never supplies either, so a peer cannot spoof ownership. */
 export function checkBashAdmission(event: FlywheelToolCallEvent, owner: string | null = null): FlywheelToolCallResult | undefined {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
@@ -1473,11 +1478,15 @@ export function checkBashAdmission(event: FlywheelToolCallEvent, owner: string |
 		"pass a positive numeric timeout or omit it to use OMP's bounded default",
 		attribution, "unknown",
 	);
-	if (timeout === 0) return bashAdmissionRefusal(
-		"FINITE_JOB_NO_DEADLINE", command, "timeout zero disables the finite-command deadline, including managed background execution",
-		"pass a positive timeout in seconds or use named service mode with readiness and lifecycle",
-		attribution, 0,
-	);
+	if (timeout === 0) {
+		const raw = event.input;
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return bashAdmissionRefusal(
+			"FINITE_JOB_DEADLINE_UNKNOWN", command, "a timeout-zero call with no patchable input object cannot be bounded",
+			"pass the timeout in a normal tool input object or omit it to use OMP's bounded default",
+			attribution, "unknown",
+		);
+		return { input: { ...(raw as Record<string, unknown>), timeout: FINITE_JOB_DEFAULT_TIMEOUT_S }, additionalContext: `kit-flywheel-guard DEADLINEAUTO1: timeout 0 disables the finite-command deadline, so the input was patched to the kit default of ${FINITE_JOB_DEFAULT_TIMEOUT_S} s and the call was admitted; for a real long-lived job use named service mode (a name with ready.log or a ready.port) instead of timeout 0.` };
+	}
 	return undefined;
 }
 
@@ -2823,8 +2832,14 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		);
 		const goalSend = checkGoalSend(event, admissionOwner(env));
 		if (goalSend !== undefined) return refuseWithNotices(goalSend);
-		const admission = checkBashAdmission(event, admissionOwner(env));
-		if (admission !== undefined) return refuseWithNotices(admission);
+		// DEADLINEAUTO1: a rung-2 admission (a patched input with a note) never ends
+		// evaluation; the note accumulates and later checks still run. A kept refusal
+		// still wins and carries the note.
+		const admission = collect(checkBashAdmission(event, admissionOwner(env)));
+		if (admission?.block === true) return refuseWithNotices(admission);
+		const admittedInput = admission?.input;
+		const withAdmittedInput = (verdict: FlywheelToolCallResult): FlywheelToolCallResult =>
+			verdict.input !== undefined || admittedInput === undefined ? verdict : { ...verdict, input: admittedInput };
 		const clone = collect(checkCloneScratch(event, { env, home, sessionCwd: ctx.cwd }));
 		if (clone?.block === true) return refuseWithNotices(clone);
 		const exportIndex = collect(await checkExportIndex(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd }));
@@ -2855,9 +2870,10 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		}
 		if (result?.block === true) return refuseWithNotices(result);
 		if (result !== undefined) {
-			return notices.length === 0 ? result
-				: { ...result, additionalContext: [...notices, result.additionalContext].filter((part): part is string => typeof part === "string").join(" ") };
+			return notices.length === 0 ? withAdmittedInput(result)
+				: withAdmittedInput({ ...result, additionalContext: [...notices, result.additionalContext].filter((part): part is string => typeof part === "string").join(" ") });
 		}
+		if (admittedInput !== undefined) return { input: admittedInput, additionalContext: notices.join(" ") };
 		return notices.length === 0 ? undefined : { additionalContext: notices.join(" ") };
 		} catch (error) {
 			const warning = `kit-flywheel-guard LOOKUP_REFUSED: lifecycle check failed (${error instanceof Error ? error.message : String(error)}); mutation blocked, nothing was executed.`;

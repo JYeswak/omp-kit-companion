@@ -1,0 +1,1 @@
+- A bash call with `timeout: 0` is no longer refused with `FINITE_JOB_NO_DEADLINE`: the guard patches the input to the kit default of 3600 s and admits the call with a `DEADLINEAUTO1` note naming the patched value and pointing at named service mode for real long-lived jobs. Unparsable timeouts still refuse `FINITE_JOB_DEADLINE_UNKNOWN`.

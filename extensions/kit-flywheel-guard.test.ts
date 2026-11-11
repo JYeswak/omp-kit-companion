@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import kitFlywheelGuard, { FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, normalizeRemoteUrl } from "./kit-flywheel-guard";
+import kitFlywheelGuard, { FINITE_JOB_DEFAULT_TIMEOUT_S, FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, normalizeRemoteUrl } from "./kit-flywheel-guard";
 import type { FlywheelBeforeSubagentSpawnEvent, FlywheelContext, FlywheelExecResult, FlywheelToolCallResult } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput } from "../tests/fleet-guard/kit-flywheel-host";
 import type { FakeHost, Responder } from "../tests/fleet-guard/kit-flywheel-host";
@@ -727,17 +727,28 @@ test("SELF_CLOSE_REFUSED with redirection: assignee match still blocks, lookup u
 });
 
 
-test("BGDEADLINE1: finite async bash jobs reject timeout zero and accept native bounded defaults", async () => {
+test("DEADLINEAUTO1: finite async bash jobs with timeout zero are admitted with the input patched to the default", async () => {
 	const h = await createFlywheelHost(base);
-	const unsafe = await bashInput(h, { command: "bun test", async: true, timeout: 0 });
-	expect(unsafe?.block).toBe(true);
-	expect(unsafe?.reason).toContain("FINITE_JOB_NO_DEADLINE");
-	expect(unsafe?.reason).toContain("positive timeout");
-	expect((await bashInput(h, { command: "cargo test", async: false, timeout: 0 }))?.block).toBe(true);
+	const admitted = await bashInput(h, { command: "bun test", async: true, timeout: 0 });
+	expect(admitted?.block).not.toBe(true);
+	expect(admitted?.input).toMatchObject({ command: "bun test", async: true, timeout: FINITE_JOB_DEFAULT_TIMEOUT_S });
+	expect(admitted?.additionalContext).toContain("DEADLINEAUTO1");
+	expect(admitted?.additionalContext).toContain(`${FINITE_JOB_DEFAULT_TIMEOUT_S} s`);
+	expect(admitted?.additionalContext).toContain("named service mode");
+	expect(await bashInput(h, { command: "cargo test", async: false, timeout: 0 })).toMatchObject({ input: expect.objectContaining({ timeout: FINITE_JOB_DEFAULT_TIMEOUT_S }) });
 	expect((await bashInput(h, { command: "bun test", async: true, timeout: "0" }))?.reason).toContain("FINITE_JOB_DEADLINE_UNKNOWN");
 	expect(await bashInput(h, { command: "bun test", async: true, timeout: 30 })).toBeUndefined();
 	expect(await bashInput(h, { command: "bun test", async: true })).toBeUndefined();
 	expect(h.execs).toHaveLength(0);
+});
+
+test("DEADLINEAUTO1: tool input cannot spoof the refusal owner", async () => {
+	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "TestOwner" } });
+	const spoofed = await bashInput(h, { command: "bun test", async: true, timeout: "0", owner: "Pretender", actor: "Pretender", agent: "Pretender" });
+	expect(JSON.parse(spoofed?.reason ?? "{}").owner).toBe("TestOwner");
+	const anon = await createFlywheelHost(base);
+	const claimed = await bashInput(anon, { command: "bun test", async: true, timeout: "0", owner: "Pretender" });
+	expect(JSON.parse(claimed?.reason ?? "{}").owner).toBeNull();
 });
 
 test("BGDEADLINE1: named services need readiness and cannot disguise a finite suite", async () => {
@@ -749,31 +760,6 @@ test("BGDEADLINE1: named services need readiness and cannot disguise a finite su
 	expect(unready?.block).toBe(true);
 	expect(unready?.reason).toContain("SERVICE_READINESS_REQUIRED");
 	expect(await bashInput(h, { command: "bun run dev", name: "web", ready: { port: 3000 } })).toBeUndefined();
-});
-
-test("BGDEADLINE1: timeout-zero refusal attributes job, owner, command, deadline, and owner-session cancel", async () => {
-	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "TestOwner" } });
-	const unsafe = await bashInput(h, { command: "bun test", async: true, timeout: 0 });
-	expect(unsafe?.block).toBe(true);
-	const reason = JSON.parse(unsafe?.reason ?? "{}");
-	expect(reason.guard).toBe("kit-flywheel-guard");
-	expect(reason.code).toBe("FINITE_JOB_NO_DEADLINE");
-	expect(reason.job).toBe("c1");
-	expect(reason.owner).toBe("TestOwner");
-	expect(reason.command.sha256).toBe(createHash("sha256").update("bun test").digest("hex"));
-	expect(reason.deadline).toBe(0);
-	expect(reason.cancel).toContain("owning OMP session");
-	expect(reason.cancel).not.toContain("kill -9");
-	expect(h.execs).toHaveLength(0);
-});
-
-test("BGDEADLINE1: tool input cannot spoof the refusal owner", async () => {
-	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "TestOwner" } });
-	const spoofed = await bashInput(h, { command: "bun test", async: true, timeout: 0, owner: "Pretender", actor: "Pretender", agent: "Pretender" });
-	expect(JSON.parse(spoofed?.reason ?? "{}").owner).toBe("TestOwner");
-	const anon = await createFlywheelHost(base);
-	const claimed = await bashInput(anon, { command: "bun test", async: true, timeout: 0, owner: "Pretender" });
-	expect(JSON.parse(claimed?.reason ?? "{}").owner).toBeNull();
 });
 
 test("BGDEADLINE1: unknown and service refusals carry job and deadline", async () => {
@@ -1763,7 +1749,7 @@ describe("RETIREGUARD1 legitimate work", () => {
 		expect(await callAs(h, base, "wait-owned", "wait", {})).toEqual([undefined]);
 		expect(await bashInput(h, { command: "python3 scripts/idle_wait.py", timeout: 60 })).toBeUndefined();
 		expect(await bashInput(h, { command: "sleep 30", timeout: 60 })).toBeUndefined();
-		expect((await bashInput(h, { command: "while true; do sleep 1; done", timeout: 0 }))?.reason).toContain("FINITE_JOB_NO_DEADLINE");
+		expect(await bashInput(h, { command: "while true; do sleep 1; done", timeout: 0 })).toMatchObject({ input: expect.objectContaining({ timeout: FINITE_JOB_DEFAULT_TIMEOUT_S }) });
 		const failed = await run([process.execPath, "-e", "process.exit(7)"], { deadline_s: 10, max_output_bytes: 1024 });
 		expect(failed.rc).toBe(7);
 	});

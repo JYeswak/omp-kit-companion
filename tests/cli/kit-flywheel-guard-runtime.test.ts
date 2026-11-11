@@ -77,7 +77,7 @@ test("mock readiness refuses an exited child that never published a port", async
 });
 
 
-test("the linked OMP plugin refuses an async timeout-zero command before it runs", async () => {
+test("the linked OMP plugin admits an async timeout-zero command with the default deadline patched in", async () => {
 	const base = fixtureRoot();
 	const project = join(base, "project");
 	const identity = resolveOmpIdentity(process.env);
@@ -142,13 +142,10 @@ test("the linked OMP plugin refuses an async timeout-zero command before it runs
 			"--approval-mode", "yolo", "go"], project, env, 45_000);
 		const output = `stdout:\n${run.stdout}\nstderr:\n${run.stderr}`;
 		expect(run.exitCode, output).toBe(0);
-		expect(existsSync(join(project, ".ran_bgdeadline")), output).toBe(false);
+		expect(readFileSync(join(project, ".ran_bgdeadline"), "utf8")).toBe("unsafe");
 		expect(readFileSync(join(project, ".ran_bounded"), "utf8")).toBe("bounded");
-		const refusal = toolResults(readFileSync(logPath, "utf8")).find(result => result.includes("FINITE_JOB_NO_DEADLINE"));
-		expect(refusal !== undefined, output).toBe(true);
-		expect(refusal, output).toContain("deadline");
-		expect(refusal, output).toContain("owning OMP session");
-		expect(refusal, output).toContain("job");
+		const retired = toolResults(readFileSync(logPath, "utf8")).find(result => result.includes("FINITE_JOB_NO_DEADLINE"));
+		expect(retired, output).toBe(undefined);
 	} finally {
 		if (mock.exitCode === null) mock.kill("SIGTERM");
 		await mock.exited;
