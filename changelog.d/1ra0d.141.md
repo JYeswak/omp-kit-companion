@@ -1,0 +1,3 @@
+- `omp-kit land` refuses a stale restore before creating any commit, so the refusal leaves no candidate on local main and no intent-to-add entries behind; a deliberate restore lands by declaring the restored commit with a `Revert: <sha>` message line (`Supersedes: <sha>` for a rewrite).
+- `omp-kit land` no longer names unreleased scratch from other checkouts of the same repository in its push notice: only scratch under the landing repo is judged.
+- Direct-commit notes refusals now say that a `[no-changelog]` subject tag is not a waiver on shipped paths: the waiver is an own-line `[no-changelog] <reason>`.

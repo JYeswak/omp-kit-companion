@@ -1,9 +1,11 @@
 // Affected-test source dependencies: src/land.ts
 import { expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 import { EXPECTED_SERVICE, LAND_DEFAULT_TIMEOUT_MS, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, patchHold, registerPushCheck, remoteHead, repoRoot, responseCode, scratch, type HunkSetup } from "./private-index-land.helpers.ts";
+import { disposalGate, type InspectDeps, type LivenessDeps, type OwnedScratchRow, type SeatIdentity } from "../../src/scratch.ts";
+import { scratchOwedUnderRepo } from "../../src/land.ts";
 import { createHash } from "node:crypto";
 
 const LAND_RUN_FLOOR_MS = 60_000;
@@ -742,4 +744,153 @@ test("CHECKOUTRETAIN1 land --patch inside a checkout names it", () => {
 	expect(data.overall).toBe("PUSHED");
 	expect(data.checkoutsRemoved).toEqual(["co-patch"]);
 	expect(rmLogNames(rmLog)).toEqual(["co-patch"]);
+});
+
+// LANDFINDINGS1 (ompkit-1ra0d.141): a stale restore is refused before any
+// commit exists, and a deliberate revert naming the restored commit lands.
+/** Advance owned.txt past the fixture seed, then restore the superseded bytes in the worktree. */
+function staleRestoreSetup(): { work: string; fakeBin: string; seed: string; base: string } {
+	const { work, fakeBin } = fixture();
+	const seed = remoteHead(work);
+	writeFileSync(join(work, "owned.txt"), "newer bytes\n");
+	git(work, ["add", "--", "owned.txt"]);
+	git(work, ["commit", "-m", "newer owned bytes [test]"]);
+	git(work, ["push", "origin", "HEAD:refs/heads/main"]);
+	const base = remoteHead(work);
+	expect(base).not.toBe(seed);
+	writeFileSync(join(work, "owned.txt"), git(work, ["show", `${seed}:owned.txt`]));
+	return { work, fakeBin, seed, base };
+}
+
+const staleRestoreHold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+
+test("LANDFINDINGS1 a stale restore without a Revert trailer is refused with no commit on local main", () => {
+	const { work, fakeBin, base } = staleRestoreSetup();
+	const refsBefore = git(work, ["for-each-ref"]);
+	const statusBefore = git(work, ["status", "--porcelain"]);
+	const run = command(work, ["--paths", "owned.txt", "--message", "feat(land): restore old bytes [test]", "--apply", "--yes"], staleRestoreHold, { amDir: fakeBin });
+	expect(run.status, JSON.stringify(run.body)).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_STALE_RESTORE");
+	const message = (run.body.errors as { message?: string }[])[0]?.message ?? "";
+	expect(message).toContain("no candidate was committed");
+	expectLandSchema(run.body.data);
+	// A refusal before anything was committed carries no commit field at all.
+	expect(run.body.data).toMatchObject({ overall: "REFUSED" });
+	expect("commit" in (run.body.data as Record<string, unknown>)).toBe(false);
+	// No reflog-only candidate: every ref is untouched, the index is
+	// unchanged (no intent-to-add entries), and the worktree keeps the
+	// attempted bytes.
+	expect(git(work, ["for-each-ref"])).toBe(refsBefore);
+	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
+	expect(git(work, ["rev-parse", "refs/heads/main"]).trim()).toBe(base);
+	expect(remoteHead(work)).toBe(base);
+	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("base owned\n");
+});
+
+test("LANDFINDINGS1 a stale restore of an untracked path is refused without touching the index", () => {
+	const { work, fakeBin } = fixture();
+	const seed = remoteHead(work);
+	git(work, ["rm", "--", "owned.txt"]);
+	git(work, ["commit", "-m", "remove owned [test]"]);
+	git(work, ["push", "origin", "HEAD:refs/heads/main"]);
+	const base = remoteHead(work);
+	expect(base).not.toBe(seed);
+	// The removed bytes come back as a purely untracked file.
+	writeFileSync(join(work, "owned.txt"), git(work, ["show", `${seed}:owned.txt`]));
+	expect(git(work, ["status", "--porcelain"])).toBe("?? owned.txt\n");
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, ["--paths", "owned.txt", "--message", "feat(land): restore removed bytes [test]", "--apply", "--yes"], hold, { amDir: fakeBin });
+	expect(run.status, JSON.stringify(run.body)).toBe(1);
+	expect(responseCode(run.body)).toBe("LAND_STALE_RESTORE");
+	expectLandSchema(run.body.data);
+	expect(run.body.data).toMatchObject({ overall: "REFUSED" });
+	expect("commit" in (run.body.data as Record<string, unknown>)).toBe(false);
+	expect(git(work, ["rev-parse", "refs/heads/main"]).trim()).toBe(base);
+	expect(remoteHead(work)).toBe(base);
+	// Still purely untracked: no intent-to-add entry was left behind.
+	const status = git(work, ["status", "--porcelain"]);
+	expect(status).toContain("?? owned.txt");
+	expect(status.split("\n").filter((line) => line.startsWith(" A"))).toEqual([]);
+});
+
+test("LANDFINDINGS1 a deliberate revert with a Revert trailer lands through the verb", () => {
+	const { work, fakeBin, seed } = staleRestoreSetup();
+	const run = command(work, ["--paths", "owned.txt", "--message", `feat(land): revert owned bytes [test]\n\nRevert: ${seed}`, "--apply", "--yes"], staleRestoreHold, {
+		amDir: fakeBin, timeoutMs: LAND_RUN_FLOOR_MS,
+	});
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	const data = run.body.data as { overall: string; commit: string; candidate_sha: string; pushed_sha: string; base: string };
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("PUSHED");
+	expect(typeof data.candidate_sha).toBe("string");
+	expect(data.pushed_sha).toBe(data.candidate_sha);
+	expect(remoteHead(work)).toBe(data.candidate_sha);
+	expect(git(work, ["show", `${data.candidate_sha}:owned.txt`])).toBe("base owned\n");
+	// A subject line that merely mentions reverting is not a trailer: it still refuses without committing.
+	writeFileSync(join(work, "owned.txt"), "newer bytes\n");
+	const refused = command(work, ["--paths", "owned.txt", "--message", `feat(land): revert owned bytes to ${seed} [test]`, "--apply", "--yes"], staleRestoreHold, { amDir: fakeBin });
+	expect(refused.status, JSON.stringify(refused.body)).toBe(1);
+	expect(responseCode(refused.body)).toBe("LAND_STALE_RESTORE");
+	expect(refused.body.data).toMatchObject({ overall: "REFUSED" });
+	expect("commit" in (refused.body.data as Record<string, unknown>)).toBe(false);
+});
+
+test("LANDFINDINGS1 a deliberate rewrite with a Supersedes line lands through the verb", () => {
+	const { work, fakeBin, seed } = staleRestoreSetup();
+	const run = command(work, ["--paths", "owned.txt", "--message", `feat(land): rewrite owned bytes [test]\n\nSupersedes: ${seed}`, "--apply", "--yes"], staleRestoreHold, {
+		amDir: fakeBin, timeoutMs: LAND_RUN_FLOOR_MS,
+	});
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	const data = run.body.data as { overall: string; candidate_sha: string; pushed_sha: string };
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("PUSHED");
+	expect(data.pushed_sha).toBe(data.candidate_sha);
+	expect(remoteHead(work)).toBe(data.candidate_sha);
+	expect(git(work, ["show", `${data.candidate_sha}:owned.txt`])).toBe("base owned\n");
+});
+
+test("LANDFINDINGS1-scratch publication ignores unreleased scratch under another checkout of the same repository", () => {
+	const n = globalThis.fixtureNumber++;
+	const landingRepo = join(scratch, `landf-landing-${n}`);
+	const otherRepo = join(scratch, `landf-other-${n}`);
+	const landingRoot = join(landingRepo, "var", "agent-tmp");
+	const otherRoot = join(otherRepo, "var", "agent-tmp");
+	const landingOwed = join(landingRoot, "work.61001");
+	const otherOwed = join(otherRoot, "work.61002");
+	for (const dir of [landingOwed, otherOwed]) mkdirSync(dir, { recursive: true });
+	const agent = "LandSeat";
+	const session = "01a156d7-e2c8-732e-abf4-e0333e62902b";
+	const ownerText = (pid: number, repo: string) =>
+		`pid=${pid}\nprocess_start=Mon Oct  5 13:27:00 2026\nlabel=work\nrepo=${repo}\ncreated_at=2026-10-20T05:00:00Z\nargv0=test\nagent=${agent}\nsession=${session}\n`;
+	writeFileSync(join(landingOwed, ".owner"), ownerText(61001, landingRepo));
+	writeFileSync(join(otherOwed, ".owner"), ownerText(61002, otherRepo));
+	// No such pid: the probe reports every owner dead.
+	const liveness: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
+		probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
+	const callerSeat = (): SeatIdentity => ({ agent, sessions: [session], main: session });
+	const deps: InspectDeps = { liveness, run: () => ({ code: 1, stdout: "", stderr: "" }), now: Date.parse("2026-11-11T00:00:00Z"), callerSeat };
+	const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
+	const savedState = process.env.XDG_STATE_HOME;
+	const home = join(scratch, `landf-home-${n}`);
+	mkdirSync(join(home, "state"), { recursive: true });
+	process.env.OMP_KIT_SCRATCH_ROOTS = [landingRoot, otherRoot].join(delimiter);
+	process.env.XDG_STATE_HOME = join(home, "state");
+	try {
+		// The raw census charges both checkouts: unscoped, the other checkout's dir would be judged too.
+		const gate = disposalGate(home, "push", deps);
+		expect(gate.unproven).toBe(false);
+		expect(gate.decision).toBe("refuse");
+		expect(gate.owed.map((row) => row.dir).sort()).toEqual([landingOwed, otherOwed].sort());
+		// Publication scopes to the landing repo: the other checkout's dir is never its notice.
+		const scoped = scratchOwedUnderRepo(gate.owed, landingRepo);
+		expect(scoped.map((row) => row.dir)).toEqual([landingOwed]);
+		expect(scratchOwedUnderRepo(gate.owed, otherRepo).map((row) => row.dir)).toEqual([otherOwed]);
+		const rows: OwnedScratchRow[] = gate.owed;
+		expect(scratchOwedUnderRepo(rows, join(scratch, `landf-missing-${n}`))).toEqual([]);
+	} finally {
+		if (savedRoots === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
+		else process.env.OMP_KIT_SCRATCH_ROOTS = savedRoots;
+		if (savedState === undefined) delete process.env.XDG_STATE_HOME;
+		else process.env.XDG_STATE_HOME = savedState;
+	}
 });

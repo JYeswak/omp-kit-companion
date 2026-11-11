@@ -12,6 +12,7 @@ import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep 
 import { convergeRepository } from "./converge.ts";
 import type { ConvergeResult } from "./converge.ts";
 import { defaultLiveness, defaultRunner, disposalGate } from "./scratch.ts";
+import type { OwnedScratchRow } from "./scratch.ts";
 import { parseReservationRead } from "./fleet-guard/git.ts";
 import type { AttestedReservation } from "./fleet-guard/git.ts";
 import { reapLandedCheckouts } from "./ovnfs-checkouts.ts";
@@ -558,6 +559,65 @@ function supersededBlob(repo: string, base: string, path: string, candidateOid: 
 	}
 	return false;
 }
+// LANDFINDINGS1 (ompkit-1ra0d.141): a deliberate restore declares the
+// restored commit with a `Revert: <sha>` line, or `Supersedes: <sha>` for a
+// rewrite. Scope mirrors the stale-worktree hook exactly (its line-start
+// grep, not the interpret-trailers block): either token opens a line,
+// anywhere in the message, followed by 7-64 hex chars. Resolution and the
+// per-path byte check below stay fail-closed.
+const DECLARED_RESTORE_PATTERNS = [
+	/^[ \t]*[Rr]evert:[ \t]*([0-9a-fA-F]{7,64})/,
+	/^[ \t]*[Ss]upersedes:[ \t]*([0-9a-fA-F]{7,64})/,
+];
+
+/** Commits declared by `Revert:`/`Supersedes:` message lines, resolved to full SHAs. */
+function revertTrailerCommits(repo: string, message: string): string[] {
+	const out: string[] = [];
+	for (const line of message.split("\n")) {
+		for (const pattern of DECLARED_RESTORE_PATTERNS) {
+			const match = pattern.exec(line);
+			if (!match) continue;
+			const resolved = git(repo, ["rev-parse", "--verify", `${match[1]}^{commit}`]);
+			if (resolved.code !== 0 || resolved.interrupted || resolved.out.trim().length === 0) continue;
+			out.push(resolved.out.trim());
+		}
+	}
+	return out;
+}
+
+/** True when every stale path's candidate bytes come from a commit the message's `Revert:`/`Supersedes:` lines declare. Unresolvable lines never admit. */
+function revertAdmitsStalePaths(repo: string, message: string, stale: { path: string; oid: string }[]): boolean {
+	if (stale.length === 0) return true;
+	const named = revertTrailerCommits(repo, message);
+	if (named.length === 0) return false;
+	return stale.every(({ path, oid }) => named.some((commit) => {
+		const entry = treeBlob(repo, commit, path);
+		return entry !== null && entry.present && entry.oid === oid;
+	}));
+}
+
+// LANDFINDINGS1 (ompkit-1ra0d.141): the push-time census sees every scratch
+// root, including other checkouts of the same repository. Publication judges
+// only scratch that lives under the landing repo; another checkout's
+// unreleased dirs are that checkout's business, never this push's notice.
+// Unresolvable dirs are dropped: what cannot be placed is never judged.
+export function scratchOwedUnderRepo(rows: OwnedScratchRow[], repo: string): OwnedScratchRow[] {
+	let root: string;
+	try {
+		root = realpathSync(join(resolve(repo), "var", "agent-tmp"));
+	} catch {
+		return [];
+	}
+	return rows.filter((row) => {
+		let dir: string;
+		try {
+			dir = realpathSync(row.dir);
+		} catch {
+			return false;
+		}
+		return dir === root || dir.startsWith(root + sep);
+	});
+}
 
 export type LandPublicationQualification = {
 	guard: string;
@@ -581,6 +641,8 @@ export function qualifyPublicationCandidate(repo: string, input: {
 	owner: string;
 	publicationRef: string;
 	qualifiedBlobs: Record<string, WorktreeBlob>;
+	/** The candidate message. A deliberate restore declaring every restored commit with a `Revert:`/`Supersedes:` line is admitted. */
+	message?: string;
 }): { qualification: LandPublicationQualification } | LandGuardRefusal {
 	const guardCheck = pushCheckResult("UNRUN", "guard_refused");
 	const guardRefusal = (code: string, message: string, remediation: string): LandGuardRefusal => ({
@@ -616,8 +678,12 @@ export function qualifyPublicationCandidate(repo: string, input: {
 			const restored = supersededBlob(repo, input.base, path, candidateEntry.oid);
 			if (restored === null)
 				return guardRefusal("LAND_STALE_HISTORY_UNREADABLE", `The actual-parent history for ${path} could not be read; no candidate was qualified`, "Repair the repository history and retry; nothing was published.");
-			if (restored)
-				return guardRefusal("LAND_STALE_RESTORE", `Owned path ${path} restores bytes the actual parent ${input.base} superseded; no candidate was qualified`, "Rebase the owned change onto the actual parent content instead of restoring obsolete bytes; nothing was published.");
+			if (restored) {
+				const oid = candidateEntry.oid;
+				const admitted = typeof input.message === "string" && revertAdmitsStalePaths(repo, input.message, [{ path, oid }]);
+				if (!admitted)
+					return guardRefusal("LAND_STALE_RESTORE", `Owned path ${path} restores bytes the actual parent ${input.base} superseded; the candidate ${input.candidate} is saved on local main and was not published`, `Remove it from local main with git reset --keep ${input.base}, or re-land the same bytes declaring the restored commit with a \`Revert: <sha>\` line (\`Supersedes: <sha>\` for a rewrite); nothing was published.`);
+			}
 		}
 	}
 	const touched = candidateTouchedPaths(repo, input.candidate);
@@ -1328,6 +1394,29 @@ function landedBaseTimeMs(repo: string, base: string): number | null {
 			verification: "UNVERIFIED",
 		};
 	}
+	// Snapshot the exact qualified worktree bytes before construction. The
+	// actual-parent guard compares the built candidate against this snapshot
+	// and the qualified base, never against a dispatch seed or shared HEAD.
+	const qualifiedBlobs: Record<string, WorktreeBlob> = {};
+	for (const path of paths) qualifiedBlobs[path] = hashWorktreeBlob(repo, path);
+	// LANDFINDINGS1: refuse a stale restore before the index or any commit is
+	// touched, so the refusal leaves no reflog-only candidate on local main
+	// and no intent-to-add entries behind. A deliberate restore declares every
+	// restored commit with a `Revert: <sha>` line, or `Supersedes: <sha>` for
+	// a rewrite, and is admitted.
+	const stalePaths: { path: string; oid: string }[] = [];
+	for (const path of paths) {
+		const blob = qualifiedBlobs[path];
+		if (!blob?.present || !blob.oid) continue;
+		const restored = supersededBlob(repo, base, path, blob.oid);
+		if (restored === null)
+			return refused("LAND_STALE_HISTORY_UNREADABLE", `The actual-parent history for ${path} could not be read; no candidate was committed`, "Repair the repository history and retry; nothing was committed.");
+		if (restored) stalePaths.push({ path, oid: blob.oid });
+	}
+	if (stalePaths.length > 0 && !revertAdmitsStalePaths(repo, message, stalePaths)) {
+		const named = stalePaths.map(({ path }) => path).join(", ");
+		return refused("LAND_STALE_RESTORE", `Owned path ${named} restores bytes the actual parent ${base} superseded; no candidate was committed`, "Rebase the owned change onto the actual parent content instead of restoring obsolete bytes, or declare the restored commit with a `Revert: <sha>` line (`Supersedes: <sha>` for a rewrite) for a deliberate restore; nothing was committed and the index is unchanged.");
+	}
 	// Git's native --only transaction leaves every unrelated staged entry intact.
 	// New paths must first be known to the index; only explicitly owned paths enter it.
 	for (const path of paths) {
@@ -1338,11 +1427,6 @@ function landedBaseTimeMs(repo: string, base: string): number | null {
 			if (add.code !== 0) return refused("LAND_PATH_UNAVAILABLE", `Could not prepare owned path ${path}`, "Repair the file or index; no commit was created.");
 		}
 	}
-	// Snapshot the exact qualified worktree bytes before construction. The
-	// actual-parent guard compares the built candidate against this snapshot
-	// and the qualified base, never against a dispatch seed or shared HEAD.
-	const qualifiedBlobs: Record<string, WorktreeBlob> = {};
-	for (const path of paths) qualifiedBlobs[path] = hashWorktreeBlob(repo, path);
 	// GATELOCK1: the installed member judges HEAD plus these exact owned
 	// worktree paths before git commit takes index.lock. The commit hook
 	// admits only the same tree, parent, message, remote base and gate.
@@ -1411,7 +1495,7 @@ function landedBaseTimeMs(repo: string, base: string): number | null {
 	// owned paths, and hold current custody. Anything else publishes nothing.
 	const qualified = qualifyPublicationCandidate(repo, {
 		candidate: sha, base, paths, owner,
-		publicationRef: LAND_PUBLICATION_REF, qualifiedBlobs,
+		publicationRef: LAND_PUBLICATION_REF, qualifiedBlobs, message,
 	});
 	if ("refusal" in qualified) {
 		const phases = landPhaseEvidence(repo, sha, false);
@@ -1449,9 +1533,12 @@ function landedBaseTimeMs(repo: string, base: string): number | null {
 				// block, so a broken measuring tool cannot strand a landing.
 				try {
 					const gate = disposalGate(homedir(), "push", { liveness: defaultLiveness(), run: defaultRunner });
-					if (!gate.unproven && gate.decision === "refuse") {
-						const first = gate.owed.slice(0, 3).map(row => `${row.dir} (${row.state}, bin ${row.bin})`).join("; ");
-						scratchNotice = `SCRATCH_DISPOSAL_NOTICE: ${gate.owed.length} undisposed scratch dir(s): ${first}${gate.owed.length > 3 ? "…" : ""}. The push proceeded; release each with omp-kit scratch release DIR --bin throwaway|evidence|promote.`;
+					// LANDFINDINGS1: publication judges only scratch under the landing repo. Unreleased dirs
+					// inside other checkouts of the same repository are that checkout's business, never this push's.
+					const owed = gate.unproven ? [] : scratchOwedUnderRepo(gate.owed, repo);
+					if (owed.length > 0) {
+						const first = owed.slice(0, 3).map(row => `${row.dir} (${row.state}, bin ${row.bin})`).join("; ");
+						scratchNotice = `SCRATCH_DISPOSAL_NOTICE: ${owed.length} undisposed scratch dir(s) under the landing repo: ${first}${owed.length > 3 ? "…" : ""}. The push proceeded; release each with omp-kit scratch release DIR --bin throwaway|evidence|promote.`;
 					}
 				} catch { /* fail-open: the push check already passed */ }
 				return admission;

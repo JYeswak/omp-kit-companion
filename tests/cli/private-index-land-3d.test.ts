@@ -82,7 +82,7 @@ test("refuses a caller patch restoring bytes the actual parent superseded", () =
 	const { work, fakeBin, seed, parent } = actualParentSetup();
 	const origin = git(work, ["remote", "get-url", "origin"]).trim();
 	const caller = join(scratch, `stale-caller-${fixtureNumber++}`);
-	git(scratch, ["clone", "--branch", "main", origin, caller]);
+	git(scratch, ["clone", "--no-hardlinks", "--branch", "main", origin, caller]);
 	git(caller, ["config", "user.name", "stale caller"]);
 	git(caller, ["config", "user.email", "stale-caller@example.invalid"]);
 	// The caller selection restores the seed bytes onto the actual parent.
@@ -97,23 +97,17 @@ test("refuses a caller patch restoring bytes the actual parent superseded", () =
 	expect(run.status).toBe(1);
 	expect(responseCode(run.body)).toBe("LAND_STALE_RESTORE");
 	expectLandSchema(run.body.data);
-	const data = run.body.data as {
-		overall: string; commit: string; candidate_sha: string; pushed_sha: null;
-		phases: { candidate_sha: string; actual_parents: string[]; publication_ref: string };
-	};
+	const data = run.body.data as { overall: string };
 	expect(data.overall).toBe("REFUSED");
-	expect(data.pushed_sha).toBeNull();
-	expect(data.commit).toBe(data.candidate_sha);
-	// The refused candidate really was parented on the actual parent with stale bytes.
-	expect(git(work, ["show", "-s", "--format=%P", data.candidate_sha]).trim()).toBe(parent);
-	expect(git(work, ["show", `${data.candidate_sha}:owned.txt`])).toBe("base owned\n");
-	expect(data.phases.actual_parents).toEqual([parent]);
-	expect(data.phases.publication_ref).toBe("refs/heads/main");
-	// Zero publication: the seed bytes never reach origin. Like a refused
-	// path-mode save, the candidate stays on local main for inspection.
+	// LANDFINDINGS1 (ompkit-1ra0d.141) preferred shape: refused before any
+	// commit exists, so no reflog-only candidate stays on local main. The
+	// reconstruction never strands in the caller worktree either.
+	expect("commit" in (run.body.data as Record<string, unknown>)).toBe(false);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(parent);
+	expect(git(work, ["rev-parse", "refs/heads/main"]).trim()).toBe(localBefore);
 	expect(remoteHead(work)).toBe(parent);
 	expect(git(work, ["show", `${parent}:owned.txt`])).toBe("actual parent bytes\n");
-	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(data.candidate_sha);
+	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("actual parent bytes\n");
 	expect(seed).not.toBe(parent);
 });
 
@@ -121,7 +115,7 @@ test("refuses when the publication parent advances before publication", () => {
 	const { work, fakeBin, parent } = actualParentSetup();
 	const origin = git(work, ["remote", "get-url", "origin"]).trim();
 	const peerDir = join(scratch, `race-peer-${fixtureNumber++}`);
-	git(scratch, ["clone", "--branch", "main", origin, peerDir]);
+	git(scratch, ["clone", "--no-hardlinks", "--branch", "main", origin, peerDir]);
 	git(peerDir, ["config", "user.name", "race peer"]);
 	git(peerDir, ["config", "user.email", "race-peer@example.invalid"]);
 	// B3 advances the same owned path, so no silent merge can absorb it.

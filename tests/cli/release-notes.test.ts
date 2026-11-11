@@ -652,6 +652,10 @@ test("fragment-for --message judges the staged commit with the release trailer a
 	const shipped = judge("fix a [test]\n\nBead: ompkit-x2\n# Please enter the commit message\n");
 	expect(shipped.exitCode).toBe(4);
 	expect(shipped.stderr).toContain("this commit (Bead: ompkit-x2) has no changelog fragment: changelog.d/x2.md");
+	const subjectTag = judge("fix a [test] [no-changelog]\n\nBead: ompkit-x2\n");
+	expect(subjectTag.exitCode).toBe(4);
+	expect(subjectTag.stderr).toContain("this commit (Bead: ompkit-x2) has no changelog fragment: changelog.d/x2.md");
+	expect(subjectTag.stderr).toContain("subject tag is not a waiver");
 	const twoBeads = judge("fix a [test]\n\nBead: ompkit-x2\nBead: ompkit-x3\n");
 	expect(twoBeads.exitCode).toBe(4);
 	expect(twoBeads.stderr).toContain("this commit touches shipped paths but must have one Bead: trailer");

@@ -430,7 +430,14 @@ function judgeDirectCommit(label: string, shortHash: string | undefined, body: s
 	const bead = beads[0]!;
 	const resolved = resolveBeadFragment(bead, fragments);
 	if (!resolved) return { verdict: "refused", reason: `${label} has an invalid Bead: trailer: ${bead}` };
-	if (!resolved.fragment) return { verdict: "refused", reason: `${label} (Bead: ${bead}) has no changelog fragment: ${resolved.expected[0]}` };
+	// LANDFINDINGS1 (ompkit-1ra0d.141): a [no-changelog] subject tag looks like
+	// the waiver but is not one: the waiver is an own-line `[no-changelog]
+	// <reason>`. Name the honored form so the next commit is not a retry.
+	if (!resolved.fragment) {
+		const hint = /\[no-changelog\]/.test(body)
+			? "; a [no-changelog] subject tag is not a waiver on shipped paths: put `[no-changelog] <reason>` on its own message line" : "";
+		return { verdict: "refused", reason: `${label} (Bead: ${bead}) has no changelog fragment: ${resolved.expected[0]}${hint}` };
+	}
 	return { verdict: "covered", bead, fragment: resolved.fragment };
 }
 
