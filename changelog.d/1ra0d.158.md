@@ -1,1 +1,0 @@
-- `omp-kit preflight claim` by the bead's current assignee no longer refuses `ASSIGNED`: claiming a bead already assigned to you is admitted as the activating no-op it is. A claim by anyone else is still refused `ASSIGNED`.
