@@ -123,6 +123,7 @@ import { retainFleetCaches } from "./cache-retain.ts";
 import { beadsMigrateCommand } from "./beads-migrate.ts";
 import { briefContract, briefCandidates, renderBrief } from "./brief.ts";
 import { toolsVerifyCommand } from "./tools-manifest.ts";
+import { TOOL_UPDATE_LOOKUP_CODE, runToolUpdate, toolsUpdateCommand } from "./tool-update.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -133,6 +134,7 @@ export type ParsedCommand = { command: Command; parent?: Command; flags: Readonl
 export type CommandHandler = (request: ParsedCommand) => CliResult | Promise<CliResult>;
 const handlers = new Map<string, CommandHandler>();
 registerCommandHandler("tools verify", toolsVerifyCommand);
+registerCommandHandler("tools update", toolsUpdateCommand);
 
 /** Register a real handler by grammar path (e.g. "apply rules"); absent handlers remain unavailable. */
 export function registerCommandHandler(path: string, handler: CommandHandler): void {
@@ -2877,6 +2879,54 @@ async function runLockedConfiguredJob(home: string, jobsDir: string, job: Servic
 	}
 }
 
+/** OVNFSTRACK1: one tool-update tick. Holds the run lock, never the global load gate: high load defers only the daemon swap (binary + skill still land). */
+async function runToolUpdateService(home: string, jobsDir: string, job: ServiceJobDef): Promise<CliResult> {
+	const off = readJobOff(join(home, ".local", "state", "omp-kit", `${job.name}.off`));
+	if (off.disabled) return { code: 0, data: { overall: "OK", job: job.name, status: "OFF", ...(off.reason ? { reason: off.reason } : {}) }, verification: "UNVERIFIED" };
+	try {
+		mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
+	} catch { /* acquireRunLock reports unusable directories */ }
+	const unavailable: CliResult = { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+		errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+			remediation: "Repair the state root; the job receipt is missing." }], verification: "UNVERIFIED" };
+	const claimed = acquireRunLock(jobsDir, job.name);
+	if (claimed.status !== "ACQUIRED") {
+		const receipt = { started_at: new Date().toISOString(), finished_at: new Date().toISOString(), exit: OVERLAP_EXIT, omp_version: null, status: "SKIPPED-OVERLAP", holder_pid: claimed.holderPid ?? null, holder_age_ms: claimed.holderAgeMs ?? null };
+		if (!recordJobReceipt(home, job.name, receipt)) return unavailable;
+		return { code: OVERLAP_EXIT, data: { overall: "OK", job: job.name, status: "SKIPPED-OVERLAP", receipt }, verification: "UNVERIFIED" };
+	}
+	try {
+		const override = process.env.OMP_KIT_LOAD_OVERRIDE;
+		let load1: number, ncpu: number;
+		if (override !== undefined) {
+			const parts = override.split("/");
+			load1 = Number(parts[0]);
+			ncpu = Number(parts[1] ?? "");
+		} else {
+			load1 = loadavg()[0] ?? 0;
+			ncpu = cpus().length;
+		}
+		const started = new Date().toISOString();
+		const result = await runToolUpdate({ home, mode: "apply", deferSwapOnHighLoad: true, load1, ncpu });
+		const installedVersion = result.status === "UPDATED" || result.status === "DEFERRED_LOAD" ? result.latest : (result.status === "CURRENT" ? result.installed : null);
+		const lookupUnavailable = result.status === "REFUSED" && result.code === TOOL_UPDATE_LOOKUP_CODE;
+		const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: lookupUnavailable ? 0 : result.exitCode, omp_version: null, status: lookupUnavailable ? "LOOKUP_UNAVAILABLE" : result.status, installed_ovnfs_version: installedVersion, result };
+		if (!recordJobReceipt(home, job.name, receipt)) return unavailable;
+		if (lookupUnavailable) {
+			return { code: 0, data: { overall: "OK", job: job.name, ...result, status: "LOOKUP_UNAVAILABLE", receipt }, verification: "UNVERIFIED" };
+		}
+		if (result.status === "REFUSED") {
+			return { code: 1, data: { overall: "FINDINGS", job: job.name, ...result, receipt }, errors: [{ code: result.code, message: result.reason, remediation: "Read the refusal reason; no file was replaced." }], verification: "UNVERIFIED" };
+		}
+		if (result.status === "FAILED") {
+			return { code: 1, data: { overall: "FINDINGS", job: job.name, ...result, receipt }, errors: [{ code: result.code, message: result.reason, remediation: "The previous binary was restored; inspect serve.log uppers and remove the orphan upper after deciding." }], verification: "UNVERIFIED" };
+		}
+		return { code: 0, data: { overall: "OK", job: job.name, ...result, receipt }, verification: "UNVERIFIED" };
+	} finally {
+		claimed.lock.release();
+	}
+}
+
 async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	const sub = request.command.name;
 	const platform = process.platform;
@@ -3132,6 +3182,11 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		const job = scoped[name!]!;
 		const root = receiptStateRoot();
 		const jobsDir = root ? join(root, "jobs") : join(home, ".local", "state", "omp-kit", "jobs");
+		// OVNFSTRACK1: native tool-update body. It holds the run lock itself and does its own
+		// high-load swap deferral (binary + skill even when loaded, swap deferred), so it bypasses
+		// the global load gate that would SKIPPED-LOAD the whole tick. lockedRun stays true so the
+		// supervisor path remains `service run tool-update`.
+		if (job.name === "tool-update") return await runToolUpdateService(home, jobsDir, job);
 		// SENTINELLIVE1: a configured-command job is executed by launchd/systemd directly from its
 		// rendered argv. A hand `service run` would start a second, unsupervised copy (the failure
 		// this job exists to end), so it is refused; the supervisor is the only runner.

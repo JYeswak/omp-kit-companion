@@ -63,7 +63,7 @@ Fleet guards, services and the update channel are opt-in.
 | Reverse a change | `omp-kit undo RUN_ID --yes` restores one receipt and refuses if a file changed since |
 | See what is broken | `omp-kit doctor --scope NAME` covers installed components and measured push latency |
 | Keep agents in bounds | `fleet-guard`, `kit-save-guard`, `kit-flywheel-guard`, `kit-agent-mail-guard`, `kit-guard-optin`, `kit-callback` extensions |
-| Stay current | The `kit-update` service installs each published release and relinks the plugin |
+| Stay current | `kit-update` and `tool-update` track published releases |
 | Script it | Every command takes `--json` and returns one envelope; `omp-kit schema --json` describes it |
 
 ## Features
@@ -241,11 +241,11 @@ mapping fields, activation commands and read-only verification.
 
 ### Service jobs and kit updates
 
-18 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
+19 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
 `load-watch`, `ci-poller`, `fleet-flush`; 300 s:
 `kit-update`, `close-pass`; hourly: `claude-save`, [`am-retain`](docs/service-contract.md#agent-mail-retention),
 `session-retain`, `cache-retain`, `autocut`; 6 h: `scratch-reaper`,
-`fleet-lessons`; daily: `cc-compress`, `skill-mine`; weekly: `gate-rationalize`; daemon: `cc`.
+`fleet-lessons`, `tool-update`; daily: `cc-compress`, `skill-mine`; weekly: `gate-rationalize`; daemon: `cc`.
 Install previews a diff first, keeps a backup, and retires installed lifecycle definitions.
 
 ```sh
@@ -454,7 +454,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit fleet-lessons` | `fleet-lessons [--project PATH]... [--json]` | Read current lesson advice, preserved history and unresolved references without intake or service effects | `omp-kit fleet-lessons --project . --json` |
 | `omp-kit mine` | `mine --since DATE --until DATE [--project P\|--all] [--json]` | Read-only UTC-window mining of transcripts, tracker, git, hooks and command-center; ranked cited candidates; unbound events quarantined; unmeasured minutes null | `omp-kit mine --since 2026-10-01 --until 2026-11-01 --all --json` |
 | `omp-kit milestone` | `milestone pin\|unpin SESSION BEAD... --reason TEXT [--by NAME] [--first]`; `milestone date SESSION DATE --reason TEXT`; `milestone show SESSION` | Validated atomic logged edits; `show`: epic, due, pins | `omp-kit milestone show cfsios --json` |
-| `omp-kit tools verify` | `verify NAME [--artifact PATH] [--platform OS_ARCH]` | Pinned archive/binary hashes; no install or execution | `omp-kit tools verify ovnfs --platform darwin_arm64` |
+| `omp-kit tools` | `verify NAME ...`; `update ovnfs [--plan\|--apply]` | Pinned hashes; update verifies and swaps with rollback | `omp-kit tools update ovnfs --apply --json` |
 | `omp-kit checkin` | `checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]` | Record verified own activity or explicit items; refuses unavailable coverage | `omp-kit checkin --done br-123 --next 'Verify the consumer' --bead br-123 --commit --json` |
 | `omp-kit project` | `project add REPO --session NAME [--workers N] [--profile P] [--plan\|--apply] [--undo RECEIPT]`; `project status SESSION [--json]`; `project goal SESSION --set TEXT\|--from-file FILE [--apply]` | Register seats with undo; `goal` replaces the director goal | `omp-kit project status skillgrowth --json` |
 | `omp-kit test` | `test [--full] [--record] [--rules DIR --cases FILE] [--integrations] [--mcp] [--metamorphic] [--mutants] [--repeat N]` | Matcher conformance, external packs, live fixtures, per-profile integration and MCP proofs, mutation and flake checks | `omp-kit test --json` |

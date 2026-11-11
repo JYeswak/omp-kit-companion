@@ -14,20 +14,23 @@ export type ToolArtifact = {
 };
 
 // Maintainer-approved pins, not live release metadata or installation authority.
+// OVNFSTRACK1: the pin tracks the installed ovnfs release (0.4.0); `tools update`
+// resolves newer releases at run time and verifies them against the publisher
+// checksums, so this file no longer claims 0.1.1.
 export const TOOL_MANIFEST = {
 	ovnfs: {
-		name: "ovnfs", version: "0.1.1",
-		release_url: "https://github.com/stencil-hq/ovnfs/releases/tag/v0.1.1",
-		publisher_checksums_url: "https://github.com/stencil-hq/ovnfs/releases/download/v0.1.1/ovnfs_0.1.1_checksums.txt",
-		publisher_checksums_sha256: "25ddb6248218230b861251fce2e018260cd263f7717ad7f0960cecb90d0c3136",
+		name: "ovnfs", version: "0.4.0",
+		release_url: "https://github.com/stencil-hq/ovnfs/releases/tag/v0.4.0",
+		publisher_checksums_url: "https://github.com/stencil-hq/ovnfs/releases/download/v0.4.0/ovnfs_0.4.0_checksums.txt",
+		publisher_checksums_sha256: "810a43a5bb42e78b79f532eae8d55e602320955d83cc53176e46091bcea0e468",
 		canary_command: ["ovnfs", "--version"], // Recorded only; never executed by verify.
 		platforms: {
 			darwin_arm64: {
-				name: "ovnfs_0.1.1_darwin_arm64.tar.gz",
-				url: "https://github.com/stencil-hq/ovnfs/releases/download/v0.1.1/ovnfs_0.1.1_darwin_arm64.tar.gz",
-				publisher_sha256: "314a09c3b002c83f2b950f53b7f72061f90cbb2a6c1383dd05a0218a92723873",
+				name: "ovnfs_0.4.0_darwin_arm64.tar.gz",
+				url: "https://github.com/stencil-hq/ovnfs/releases/download/v0.4.0/ovnfs_0.4.0_darwin_arm64.tar.gz",
+				publisher_sha256: "d0019aadb6842643401ab869e5f18f5237bbd15799bcedd35257055203833b0e",
 				binary_path: "ovnfs",
-				binary_sha256: "78d5a8290b293c8a80ac85d754096a1464682f6a1a2239efb1c051ced08340b9",
+				binary_sha256: "3922ffba5881e1808123bc9a217154bcb6b6795a549745f4e958137d8879b9e5",
 				signature: null,
 			} satisfies ToolArtifact,
 		},
@@ -88,9 +91,9 @@ export async function toolsVerifyCommand(request: ParsedCommand): Promise<CliRes
 }
 
 export const TOOLS_COMMAND: Command = {
-	name: "tools", description: "Read-only pinned external-tool provenance; no install or execution authority",
-	usage: "tools verify NAME [--artifact PATH] [--platform OS_ARCH]", flags: [],
-	example: "omp-kit tools verify ovnfs --platform darwin_arm64 --json", runnable: false,
+	name: "tools", description: "Pinned external-tool provenance and ovnfs update with proven swap",
+	usage: "tools verify NAME [--artifact PATH] [--platform OS_ARCH] | tools update ovnfs [--plan | --apply]", flags: [],
+	example: "omp-kit tools update ovnfs --apply --json", runnable: false,
 	subcommands: [{ name: "verify", description: "Verify downloaded or local archive and binary hashes against kit-owned pins; never executes the canary",
 		usage: "tools verify NAME [--artifact PATH] [--platform OS_ARCH]", argument: "NAME", flags: [
 			{ name: "--artifact", value: "PATH", description: "Read this local artifact instead of downloading the pinned release" },
@@ -99,6 +102,15 @@ export const TOOLS_COMMAND: Command = {
 		dataSchema: { type: "object", required: ["overall", "field", "expected", "actual", "text"], properties: {
 			overall: { enum: ["VERIFIED", "REFUSED"] }, field: { type: ["string", "null"] },
 			expected: { type: ["string", "null"] }, actual: { type: ["string", "null"] }, text: { type: "string" },
+		} },
+	},
+	{ name: "update", description: "Update ovnfs from its release with checksum verification, release-tagged skill refresh and a proven daemon swap with rollback; never changes file modes under the daemon state",
+		usage: "tools update ovnfs [--plan | --apply]", argument: "NAME", flags: [
+			{ name: "--plan", description: "Preview the available update without changing files" },
+			{ name: "--apply", description: "Download, verify, atomically install, refresh the skill and swap the daemon with rollback" },
+		], example: "omp-kit tools update ovnfs --apply --json", runnable: false,
+		dataSchema: { type: "object", required: ["overall", "tool"], properties: {
+			overall: { enum: ["CURRENT", "UPDATE_AVAILABLE", "UPDATED", "DEFERRED_LOAD", "REFUSED", "FAILED"] }, tool: { type: "string" }, text: { type: "string" },
 		} },
 	}],
 };

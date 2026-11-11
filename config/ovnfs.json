@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "skill_store_subpath": ".claude/skills",
+  "skill_name": "ovnfs"
+}

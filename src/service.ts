@@ -149,6 +149,10 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	// commit is installed and loaded. Its command is operator data (fleet-watch.json `closePass`: the grade_wave.py
 	// close pass), never a kit path; UNCONFIGURED until set. lockedRun: a tick never starts a second pass while one runs.
 	"close-pass": { name: "close-pass", label: "com.omp-kit.close-pass", kind: "interval", intervalSeconds: 300, runAtLoad: false, commandConfigKey: "closePass", lockedRun: true },
+	// OVNFSTRACK1 (ompkit-1ra0d.155): every 6 h, keep ovnfs current the way kit-update keeps the kit current.
+	// Native body in `service run tool-update` (tools update --apply with high-load swap deferral), not operator
+	// data: the supervisor path is `service run tool-update` and the service-run single-flight lock serializes ticks.
+	"tool-update": { name: "tool-update", label: "com.omp-kit.tool-update", kind: "interval", intervalSeconds: 21600, runAtLoad: false, lockedRun: true },
 };
 
 /** A claude-save run receipt, `claude-save-<runId>.json`, directly in the kit state root. */
