@@ -24,6 +24,10 @@ import { nativeReservationIdentity } from "./native-identity.ts";
  * arguments. This guard reads that call before it runs and refuses:
  *   AM_IDENTITY_MISMATCH / AM_IDENTITY_UNKNOWN: send_message or reply_message whose sender_name is not the
  *     seat's own name (AGENT_NAME; with none, the Agent Mail pane identity of $TMUX_PANE).
+ *     The reservation tools (file_reservation_paths, renew_file_reservations,
+ *     release_file_reservations) and the reservation macro (macro_file_reservation_cycle) carry
+ *     the caller as agent_name and have no sender_name; another seat's name there is refused,
+ *     and a missing agent_name is refused naming agent_name (AMRENEW1).
  *   AM_SUBJECT_VOCAB: a send_message subject that does not start with the protocol vocabulary.
  *   AM_ACK_SUBJECT / AM_ACK_NO_BEAD / AM_ACK_BEAD_UNRESOLVED / AM_ACK_REPLY: ack_required true without a
  *     QUESTION, BLOCKED, APPROVAL, DECISION or HANDOFF subject that names a bead id `br show` resolves.
@@ -727,7 +731,9 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		const bulk = BULK_READ_TOOLS[call.tool] === true || BULK_READ_PATTERN.test(call.tool);
 		const registration = Object.prototype.hasOwnProperty.call(REGISTRATION_KEYS, call.tool);
 		const reservation = call.tool === "file_reservation_paths" || call.tool === "release_file_reservations" || call.tool === "renew_file_reservations";
-		const guarded = reservation || bulk || registration || call.tool === "send_message" || call.tool === "reply_message" || call.tool === "fetch_inbox";
+		/** AMRENEW1: the reservation macro reserves like the direct tools; its schema names the caller agent_name. */
+		const reservationMacro = call.tool === "macro_file_reservation_cycle";
+		const guarded = reservation || reservationMacro || bulk || registration || call.tool === "send_message" || call.tool === "reply_message" || call.tool === "fetch_inbox";
 		if (!guarded) return undefined;
 		try {
 			// NATIVEPREGRADE1: a child's inherited AGENT_NAME never owns reservations.
@@ -757,6 +763,31 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			}
 			if (policy.kind === "off") return undefined;
 			if (policy.kind === "unavailable") return refuse("AM_FLEET_POLICY", `the repo's fleet opt-in is unreadable (${policy.reason}).`);
+			// AMRENEW1 (ompkit-jyxx5): the reservation tools and the reservation macro carry the
+			// caller as agent_name; their schemas have no sender_name. Judge each call by the
+			// identity field its own schema really has: the seat's own name passes, another
+			// seat's name is refused, and a missing agent_name is refused naming agent_name
+			// (never as impersonation). Native children keep what the guard does for them
+			// today: the three direct tools take the IDENTITY_UNBOUND path above, and a child
+			// calling the reservation macro passes through unjudged here.
+			if (reservation || reservationMacro) {
+				if (ctx.agent?.kind === "sub") return undefined;
+				if (!call.args.ok) return refuse("AM_ARGS_UNREADABLE", `${call.tool}: ${call.args.why}.`);
+				const { names: reservationNames, project: reservationProject, unbound: reservationUnbound } = await seatNames(ctx, prop(call.args.value, "project_key"));
+				if (reservationNames.length === 0) {
+					return refuse("IDENTITY_UNBOUND", reservationUnbound?.paneName
+						? `No identity file binds this seat's actual pane under ${reservationProject}: its pane identity names ${reservationUnbound.paneName}, who is not registered there. Run register_agent or macro_start_session for that project before reserving.`
+						: "No identity file binds this seat's actual pane. Run register_agent or macro_start_session for this pane before reserving.");
+				}
+				const claimed = prop(call.args.value, "agent_name");
+				if (typeof claimed !== "string" || claimed.trim() === "") {
+					return refuse("AM_IDENTITY_MISMATCH", `${call.tool}: agent_name is missing (this seat is ${reservationNames.join(", ")}). Pass your own seat name in agent_name.`);
+				}
+				if (!reservationNames.some(name => name.toLowerCase() === claimed.trim().toLowerCase())) {
+					return refuse("AM_IDENTITY_MISMATCH", `${call.tool}: agent_name "${claimed}" is not this seat (${reservationNames.join(", ")}). Reserve, renew and release as yourself; never as another agent.`);
+				}
+				return undefined;
+			}
 			if (registration) {
 				if (!call.args.ok || typeof call.args.value !== "object" || call.args.value === null || Array.isArray(call.args.value)) {
 					return refuse("AM_REGISTRATION_SCHEMA", `${call.tool}: schema requires an object with project, program and model strings.`);

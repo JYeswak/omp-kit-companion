@@ -320,6 +320,84 @@ test("identity: with no AGENT_NAME the Agent Mail pane identity names the seat; 
 	expect(code(await anonymous.mail(cwd, "send_message", send({ sender_name: "RedCat" })))).toBe("IDENTITY_UNBOUND");
 });
 
+// --- AMRENEW1 (ompkit-jyxx5) --------------------------------------------------------------------------
+// The reservation tools and the reservation macro carry the caller as agent_name; their schemas have
+// no sender_name, so judging them by sender_name refused a seat's own renew/reserve/release.
+
+const reserveArgs = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+	project_key: "/abs/path/backend", agent_name: "PlumRaven", paths: [".beads/issues.jsonl"], exclusive: true, ttl_seconds: 1800, ...over,
+});
+
+const renewArgs = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+	project_key: "/abs/path/backend", agent_name: "PlumRaven", extend_seconds: 3600, file_reservation_ids: [171565], ...over,
+});
+
+const releaseArgs = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+	project_key: "/abs/path/backend", agent_name: "PlumRaven", file_reservation_ids: [171565], ...over,
+});
+
+const reservationCycleArgs = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+	project_key: "/abs/path/backend", agent_name: "PlumRaven", paths: [".beads/issues.jsonl"], exclusive: true, ttl_seconds: 1800, ...over,
+});
+
+test("AMRENEW1: a seat's own reserve, renew, release and reservation cycle pass", async () => {
+	const h = await createHost();
+	const cwd = fleetRepo();
+	expect(await h.mail(cwd, "file_reservation_paths", reserveArgs())).toBeUndefined();
+	expect(await h.mail(cwd, "renew_file_reservations", renewArgs())).toBeUndefined();
+	expect(await h.mail(cwd, "release_file_reservations", releaseArgs())).toBeUndefined();
+	expect(await h.mail(cwd, "macro_file_reservation_cycle", reservationCycleArgs())).toBeUndefined();
+	// The direct mounted-tool form carries the same identity field.
+	expect(await h.call({ toolName: "mcp__mcp_agent_mail_renew_file_reservations", input: renewArgs() }, cwd)).toBeUndefined();
+	// Planted negative: the same calls under another seat's name are refused, so a mutant that
+	// always passes cannot survive this file.
+	expect(code(await h.mail(cwd, "file_reservation_paths", reserveArgs({ agent_name: "BlueLake" })))).toBe("AM_IDENTITY_MISMATCH");
+	expect(code(await h.mail(cwd, "renew_file_reservations", renewArgs({ agent_name: "BlueLake" })))).toBe("AM_IDENTITY_MISMATCH");
+	expect(code(await h.mail(cwd, "release_file_reservations", releaseArgs({ agent_name: "BlueLake" })))).toBe("AM_IDENTITY_MISMATCH");
+	expect(code(await h.mail(cwd, "macro_file_reservation_cycle", reservationCycleArgs({ agent_name: "BlueLake" })))).toBe("AM_IDENTITY_MISMATCH");
+});
+
+test("AMRENEW1: another seat's name in agent_name is refused AM_IDENTITY_MISMATCH", async () => {
+	const h = await createHost();
+	const cwd = fleetRepo();
+	const calls: Array<[string, Record<string, unknown>]> = [
+		["file_reservation_paths", reserveArgs()],
+		["renew_file_reservations", renewArgs()],
+		["release_file_reservations", releaseArgs()],
+		["macro_file_reservation_cycle", reservationCycleArgs()],
+	];
+	for (const [tool, args] of calls) {
+		const refused = await h.mail(cwd, tool, { ...args, agent_name: "BlueLake" });
+		expect(code(refused)).toBe("AM_IDENTITY_MISMATCH");
+		expect(refused?.reason).toContain("agent_name");
+		// Planted negative: the seat's own name passes, so a mutant that always refuses dies here.
+		expect(await h.mail(cwd, tool, args)).toBeUndefined();
+	}
+});
+
+test("AMRENEW1: a missing agent_name is refused naming agent_name, never as impersonation", async () => {
+	const h = await createHost();
+	const cwd = fleetRepo();
+	const calls: Array<[string, Record<string, unknown>]> = [
+		["file_reservation_paths", reserveArgs()],
+		["renew_file_reservations", renewArgs()],
+		["release_file_reservations", releaseArgs()],
+		["macro_file_reservation_cycle", reservationCycleArgs()],
+	];
+	for (const [tool, args] of calls) {
+		const bare: Record<string, unknown> = { ...args };
+		delete bare.agent_name;
+		const refused = await h.mail(cwd, tool, bare);
+		expect(refused?.block).toBe(true);
+		const reason = refused?.reason ?? "";
+		expect(reason).toContain("agent_name");
+		// Planted negatives: the refusal names the field this tool really has (agent_name, which
+		// the call omits too) and never reads as the impersonation charge the bug produced.
+		expect(reason).not.toContain("sender_name");
+		expect(reason).not.toMatch(/another agent|impersonat/i);
+	}
+});
+
 // --- subject vocabulary ------------------------------------------------------------------------
 
 test("subject: every vocabulary word passes, free text and near misses are refused", async () => {

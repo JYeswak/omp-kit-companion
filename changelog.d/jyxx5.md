@@ -1,0 +1,1 @@
+- Renewing, reserving, or releasing your own file reservation no longer refuses with `AM_IDENTITY_MISMATCH`: the reservation tools and the reservation macro are now judged by the `agent_name` field their schemas actually carry (they have no `sender_name`). Acting under another seat's name is still refused, and a call with no `agent_name` is refused naming `agent_name`.
