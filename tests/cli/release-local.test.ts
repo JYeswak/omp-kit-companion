@@ -1626,3 +1626,70 @@ echo VERIFIED_ALL
 	}, fixtureDeadlineS(60) * 1_000);
 }
 }
+// RELSCRIPTCOPY1 (ompkit-1ra0d.187): a landing that rewrites scripts/release-local.sh while a release
+// runs must not change the running release. At startup the script copies itself into its owned scratch
+// and re-execs the copy exactly once (marker), preserving argv and exit status, so the running release
+// never reads the checkout's file again.
+const RELCOPY_PAD_LINES = 2048;
+function relcopyFixture(withCopy: boolean): string {
+	const copy = withCopy ? [
+		'if [ -z "${OMP_KIT_RELEASE_LOCAL_COPIED:-}" ]; then',
+		'\tif [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR:-}" ]; then',
+		'\t\t_rlc_dir="$TMPDIR/release-local-copy"',
+		'\t\t/bin/mkdir -p "$_rlc_dir"',
+		'\t\t_rlc_copy="$_rlc_dir/release-local.sh"',
+		'\t\t/bin/cp -p "${BASH_SOURCE[0]}" "$_rlc_copy"',
+		'\t\tOMP_KIT_RELEASE_LOCAL_COPIED=1 exec /bin/bash "$_rlc_copy" ${1+"$@"}',
+		'\tfi',
+		'fi',
+		'unset _rlc_dir _rlc_copy || true',
+	].join("\n") + "\n" : "";
+	// The padding after the sleep keeps the tail unread while the fixture waits at its marked point:
+	// bash only pulls more of the file when the parser needs the next command.
+	let script = `#!/usr/bin/env bash\nset -euo pipefail\n${copy}touch "$1"\nsleep 5\n`;
+	for (let i = 0; i < RELCOPY_PAD_LINES; i++) script += `# pad ${i} ` + "x".repeat(100) + "\n";
+	script += 'echo "behavior: original"\necho "self: ${BASH_SOURCE[0]}"\n';
+	return script;
+}
+async function relcopyRun(withCopy: boolean): Promise<{ rc: number; stdout: string }> {
+	const work = realpathSync(ownedTmp(withCopy ? "release-copy" : "release-nocopy", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+	try {
+		const fixture = join(work, "release-local.sh");
+		writeFileSync(fixture, relcopyFixture(withCopy));
+		chmodSync(fixture, 0o755);
+		const ready = join(work, "ready");
+		const started = runFixtureAsync(["bash", fixture, ready], { cwd: ROOT, env: { ...process.env, TMPDIR: work }, floor_s: 30 });
+		// Polling a real subprocess's ready file: fake timers cannot advance the fixture, and there is
+		// no awaitable signal for file creation, so poll on a short interval under a fixtureDeadlineS bound.
+		const limit = Date.now() + fixtureDeadlineS(30) * 1_000;
+		while (!existsSync(ready)) {
+			if (Date.now() > limit) throw new Error("RELSCRIPTCOPY1 fixture never reached its marked point");
+			await Bun.sleep(50);
+		}
+		// A concurrent landing rewrites the checkout file mid-run: mutated body plus a syntax error.
+		writeFileSync(fixture, '#!/usr/bin/env bash\necho "behavior: MUTATED"\nif (\n');
+		const result = await started;
+		return { rc: result.rc, stdout: new TextDecoder().decode(result.stdout) };
+	} finally {
+		rmSync(work, { recursive: true, force: true });
+	}
+}
+test("RELSCRIPTCOPY1 release-local.sh re-execs an owned scratch copy at startup", () => {
+	const script = readFileSync(join(ROOT, "scripts/release-local.sh"), "utf8");
+	for (const line of ["OMP_KIT_RELEASE_LOCAL_COPIED", "release-local-copy", 'exec /bin/bash "$_rlc_copy"',
+		'"${BASH_SOURCE[0]}"', "OMP_KIT_RELEASE_LOCAL_ROOT"]) expect(script).toContain(line);
+	expect(script.indexOf("OMP_KIT_RELEASE_LOCAL_COPIED")).toBeLessThan(script.indexOf("REPO="));
+	expect(runFixture(["bash", "-n", join(ROOT, "scripts/release-local.sh")], { cwd: ROOT, floor_s: 30 }).rc).toBe(0);
+});
+test("RELSCRIPTCOPY1 a mid-run checkout rewrite keeps the running copy on its original behavior", async () => {
+	const { rc, stdout } = await relcopyRun(true);
+	expect(rc).toBe(0);
+	expect(stdout).toContain("behavior: original");
+	expect(stdout).not.toContain("behavior: MUTATED");
+	const self = stdout.split("\n").find(line => line.startsWith("self: ")) ?? "";
+	expect(self).toContain("release-local-copy");
+}, fixtureDeadlineS(30) * 1_000);
+test("RELSCRIPTCOPY1 planted negative: without the re-exec the mid-run rewrite breaks the run", async () => {
+	const { stdout } = await relcopyRun(false);
+	expect(stdout).not.toContain("behavior: original");
+}, fixtureDeadlineS(30) * 1_000);

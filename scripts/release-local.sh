@@ -52,6 +52,23 @@ if [ -z "${BASH_VERSION:-}" ] || (set -o | grep -q '^posix[[:space:]]*on'); then
 fi
 set -euo pipefail
 
+# RELSCRIPTCOPY1 (ompkit-1ra0d.187): a landing that edits this file while a release runs used to kill
+# the running release with a bash syntax error, because bash reads this file incrementally. Copy this
+# file into the caller's owned scratch and re-exec the copy exactly once (marker), preserving argv and
+# exit status, so the running release never reads the checkout's file again.
+if [ -z "${OMP_KIT_RELEASE_LOCAL_COPIED:-}" ]; then
+	if [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR:-}" ]; then # tempsafe: reads only the caller's owned scratch path; the copy below creates no new temp root
+		_rlc_dir="$TMPDIR/release-local-copy" # tempsafe: subdir of the caller's owned scratch, released with it
+		/bin/mkdir -p "$_rlc_dir"
+		_rlc_copy="$_rlc_dir/release-local.sh"
+		/bin/cp -p "${BASH_SOURCE[0]}" "$_rlc_copy"
+		OMP_KIT_RELEASE_LOCAL_COPIED=1 OMP_KIT_RELEASE_LOCAL_ROOT="$ROOT" exec /bin/bash "$_rlc_copy" ${1+"$@"}
+	fi
+elif [ -n "${OMP_KIT_RELEASE_LOCAL_ROOT:-}" ]; then
+	ROOT="$OMP_KIT_RELEASE_LOCAL_ROOT"
+fi
+unset _rlc_dir _rlc_copy || true
+
 REPO="${OMP_KIT_REPO:-JYeswak/omp-kit-companion}"
 # Read-only probe exercises the same bootstrap as an actual cut, before any mutation.
 if [ "${1:-}" = --check-env ]; then
