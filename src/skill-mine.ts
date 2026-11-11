@@ -1,6 +1,6 @@
 import { accessSync, appendFileSync, constants, createReadStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { run } from "./kitlib/run.ts";
 import { captureMineReplay } from "./mine-replay.ts";
@@ -1113,7 +1113,7 @@ function saveGitState(stateDir: string, state: SkillMineGitState): void {
 	const dir = join(stateDir, "skill-mine");
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	const final = join(dir, "git-cursors.json");
-	const temp = join(dir, `git-cursors.json.${process.pid}.tmp`);
+	const temp = join(dir, `git-cursors.json.${randomBytes(6).toString("hex")}.tmp`);
 	writeFileSync(temp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 	renameSync(temp, final);
 }
