@@ -66,6 +66,15 @@ LOCAL_REQUIRED = (
     # Linux defect stays visible there until LOCKLINUX1 names the holder.
     "tests/cli/kitlib-lock.test.ts",
     "tests/scripts/kitlib_lock_test.py",
+    # RELFLAKE1 (ompkit-1ra0d.109): verdict ed4dde1d named these on one loaded 4-core shard; each
+    # passes alone on this host (scratch-orphan-reap-signals 1/1, br-create-guard-lockfd 3/3).
+    # scratch-orphan-reap-signals refused process-file-linkage-unproven: the 3 s per-pid lsof proof
+    # deadline lost to shard load. br-create-guard-lockfd's race half lost to the GROUPREAP1
+    # parent-death reaper, which swept the SIGKILLED guard's orphaned native create (holding the
+    # lock by design) before the second-admission probe ran; KL02-vs-GROUPREAP1 contract follow-up
+    # stays with the owning beads. The release judges both files here until the flake source is named.
+    "tests/cli/scratch-orphan-reap-signals.test.ts",
+    "tests/cli/br-create-guard-lockfd.test.sh",
 )
 
 

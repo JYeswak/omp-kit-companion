@@ -1,0 +1,1 @@
+- The release full-suite verdict judges two load-sensitive files (`scratch-orphan-reap-signals.test.ts`, `br-create-guard-lockfd.test.sh`) on the host instead of the shared 4-core workers, where their 3 s proofs lost to shard load and failed releases of unchanged trees.
