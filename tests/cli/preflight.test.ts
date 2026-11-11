@@ -158,6 +158,24 @@ test("PRIORART blocks queued fix transitions without a valid code-cited comment"
 	}
 });
 
+test("CLAIMSELF1: claim by the current assignee is admitted; claim by another actor is refused ASSIGNED", async () => {
+	const bead = {
+		id: "kit-self", status: "open", assignee: "FoggyValley", updated_at: "2026-11-11T00:00:00Z", labels: [],
+		acceptance_criteria: "- [x] [a] [build] done\n",
+	};
+	const read = async (args: string[]): Promise<unknown> => {
+		if (args[0] === "show") return [bead];
+		if (args[0] === "list") return [];
+		throw new Error(`unexpected tracker read: ${args.join(" ")}`);
+	};
+	const self = await preflightBead("claim", base, bead.id, { actor: "FoggyValley", env: {}, read });
+	expect(self.findings.filter(finding => finding.blocking).map(finding => finding.code)).toEqual([]);
+	expect(self.ok, renderEnvelope(self)).toBe(true);
+	const other = await preflightBead("claim", base, bead.id, { actor: "Peer", env: {}, read });
+	expect(other.findings.filter(finding => finding.blocking).map(finding => finding.code)).toContain("ASSIGNED");
+	expect(other.ok).toBe(false);
+});
+
 test("non-claim preflight honors the PATH tracker even when BR_REAL names a different tracker", async () => {
 	const dir = join(base, "non-claim-namespace");
 	const bin = join(dir, "bin");

@@ -203,7 +203,10 @@ export async function preflightBead(act: Exclude<PreflightAct, "commit" | "publi
 	const gated = bead.labels.filter(l => ["human-gate", "owner-decision", "kind:process"].includes(l));
 	if (act === "claim") {
 		if (bead.status !== "open") push("NOT_OPEN", `${id} is ${bead.status}`, "claim only an open bead");
-		if (bead.assignee) push("ASSIGNED", `${id} is assigned to ${bead.assignee}`, "pick another bead or ask the holder");
+		// CLAIMSELF1 (ompkit-1ra0d.158): a claim by the current assignee is a
+		// reversible no-op that activates the bead, not a conflict. Only a
+		// different holder (or an unknown actor) is refused ASSIGNED.
+		if (bead.assignee && bead.assignee !== actor) push("ASSIGNED", `${id} is assigned to ${bead.assignee}`, "pick another bead or ask the holder");
 		if (bead.labels.includes("needs-director")) push("NEEDS_DIRECTOR", `${id} carries an unresolved director disposition (needs-director)`, "route it to the director; claim only after the label is resolved with a recorded disposition");
 		if (gated.length) push("GATED_LABEL", `${id} carries ${gated.join(", ")}`, "route it; never claim a human-gate, owner-decision or kind:process bead");
 		if (actor) {
