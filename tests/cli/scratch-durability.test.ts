@@ -364,3 +364,47 @@ test("EDITPAYLOAD1: a moved-from scratch file is judged on its added lines", asy
 	await f.index("src/canonical.ts", "disposable line\n");
 	expect((await durabilityCheck(move, context))?.reason).toContain("tracked-source-copy content");
 }, fixtureDeadlineS() * 1000);
+
+test("SCRATCHVARIANT1: a codex write variant carrying an edit-shaped patch is judged on its bytes", async () => {
+	const f = await editPayloadFixture("durability-scratchvariant");
+	const abs = join(f.scratch, "driver.mjs");
+	writeFileSync(abs, "hello\n");
+	// Runtime-selected like the guard itself: the owning OMP installation provides this module, so no static import can name it.
+	const native = await import(pathToFileURL(join(resolveOmpIdentity().nativeRoot!, "native", "index.js")).href);
+	const currentTag = new native.EditStore().recordSnapshotFile(abs);
+	const notices: string[] = [];
+	const context = { ...f.context, warn: (message: string) => { notices.push(message); } };
+	// Recorded codex shape: a write event whose written bytes live under `input` as a
+	// hashline patch (plus the seat's `i` intent field), not under `content`. The
+	// added line is indented: the edit engine rejects an unindented body on a
+	// single-line JS file as an ambiguous boundary, exactly like a live seat retry.
+	const disposable = `*** Begin Patch\n[${abs}#${currentTag}]\nPUT 1.=1:\n+  disposable specimen\n*** End Patch`;
+	const variant = { toolName: "write", input: { i: "Fixing typos", input: disposable } };
+	expect(await durabilityCheck(variant, context)).toBeUndefined();
+	expect(notices).toHaveLength(0);
+	// PUT-then-MV: the simulator yields nothing for the moved-from source while its
+	// section still names the added lines, so the judgments below run on
+	// deterministic bytes whatever the engine's replace semantics are.
+	const moved = `*** Begin Patch\n[${abs}#${currentTag}]\nPUT 1.=1:\n+  disposable specimen\nMV renamed-outside.txt\n*** End Patch`;
+	const movedVariant = { toolName: "write", input: { i: "Fixing typos", input: moved } };
+	expect(await durabilityCheck(movedVariant, context)).toBeUndefined();
+	// The same variant writing a canonical tracked-source copy is still refused.
+	await f.index("src/canonical.ts", "  disposable specimen\n");
+	expect((await durabilityCheck(movedVariant, context))?.reason).toContain("tracked-source-copy content");
+	// The judgment reads real bytes: script content through the variant is refused.
+	// A plain-text scratch file takes an unindented body without tripping the
+	// engine's ambiguous-boundary rejection, so the script bytes are judged.
+	const scriptAbs = join(f.scratch, "run.txt");
+	writeFileSync(scriptAbs, "placeholder\n");
+	const scriptTag = new native.EditStore().recordSnapshotFile(scriptAbs);
+	const script = `*** Begin Patch\n[${scriptAbs}#${scriptTag}]\nPUT 1.=1:\n+#!/bin/sh\necho hi\n*** End Patch`;
+	// A write naming no payload variant at all stays fail-closed.
+	expect((await durabilityCheck({ toolName: "write", input: { path: join(f.scratch, "empty.txt") } }, context))?.reason)
+		.toContain("cannot be established from this payload variant");
+	// A patch-carrying write whose bytes truly cannot be read is admitted with the
+	// same one-line notice as an edit.
+	const removal = `*** Begin Patch\n[${abs}#${currentTag}]\nREM\n*** End Patch`;
+	expect(await durabilityCheck({ toolName: "write", input: { i: "Fixing typos", input: removal } }, context)).toBeUndefined();
+	expect(notices).toHaveLength(1);
+	expect(notices[0]).not.toContain("\n");
+}, fixtureDeadlineS() * 1000);

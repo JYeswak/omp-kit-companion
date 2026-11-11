@@ -318,7 +318,11 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 	try {
 		const entries = await targets(event);
 		if (entries.length === 0) return refuse("filesystem targets cannot be established from this payload variant");
-		const patch = event.toolName === "edit" ? patchText(event) : undefined;
+		// SCRATCHVARIANT1: codex seats deliver an edit-shaped patch as a write event
+		// (`input` hashline string, no `path`/`content` fields). patchText already
+		// returns undefined for path-carrying inputs, so reading it for every tool
+		// only opens the patch-carrying variant; ordinary writes are untouched.
+		const patch = patchText(event);
 		let simulated: { contents: Map<string, string>; rejected: boolean } | undefined;
 		let referenceRepo: string | undefined;
 		for (const entry of entries) {
@@ -406,7 +410,10 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 				// nothing durable to that path; scratch is disposable, so an edit is admitted with a one-line
 				// notice while content the guard can read is still judged below. A content-less write stays
 				// refused (DONEGUARD1 pins the fail-closed write): it names no edit payload variant.
-				const added = entry.added ?? (event.toolName === "edit" && patch !== undefined ? addedFromHashline(patch, cwd, [path, physical]) : undefined);
+				// SCRATCHVARIANT1: the added-lines fallback runs for every patch-carrying
+				// event (patch is undefined for ordinary writes), so a codex write
+				// variant is judged on the bytes its patch adds, exactly like an edit.
+				const added = entry.added ?? (patch !== undefined ? addedFromHashline(patch, cwd, [path, physical]) : undefined);
 				if (added !== undefined) {
 					content = added;
 				} else if (entry.movedFrom !== undefined) {
@@ -421,7 +428,11 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 					}
 				}
 				if (content === undefined) {
-					if (event.toolName !== "edit") return refuse("scratch edit/write content cannot be established from this payload variant");
+					// SCRATCHVARIANT1: a patch-carrying write whose bytes truly cannot be
+					// read (delete, move source, non-hashline patch) is admitted with the
+					// same one-line notice as an edit. A write naming no payload variant
+					// at all (no content, no patch) stays refused above.
+					if (event.toolName !== "edit" && patch === undefined) return refuse("scratch edit/write content cannot be established from this payload variant");
 					context.warn?.(unreadableScratchNotice(scratch, physical));
 					continue;
 				}
