@@ -79,6 +79,7 @@ import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaul
 import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, jobCodePrefix, launchdLoaded, resolveOperatorCommand, type OperatorCommand, type ServiceProgram } from "./service.ts";
 import { ccStateDir } from "./service.ts";
 import { retainOmpSessions } from "./session-retain.ts";
+import { retainStateLedgers, type LedgerRetentionReport } from "./ledger-retain.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { defaultBudgetLedgerPath, releaseBudgetEntry, SCRATCH_EXPORT_DIRECTORY, updateScratchUsers } from "./scratch.ts";
 import type { ScratchReleaseOptions } from "./scratch.ts";
@@ -2693,8 +2694,8 @@ export function firstFailure(result: Pick<ScratchApplyResult, "applied" | "kille
 	return "";
 }
 
-/** Only the current service keeper may enter this synchronous body in its owned child. */
-function runScratchReaperBody(home: string): CliResult {
+/** Only the current service keeper may enter this body in its owned child. */
+async function runScratchReaperBody(home: string): Promise<CliResult> {
 	const result = applyScratch(home, {
 		liveness: defaultLiveness(), run: scratchRunner, home, runtimeRepo: kitIdentity().release.root,
 		onInspect: path => { process.send?.({ action: "INSPECT", path }); },
@@ -2709,6 +2710,17 @@ function runScratchReaperBody(home: string): CliResult {
 	const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length
 		+ result.expired.filter(isApplyFailure).length;
 	const refused = result.receipt.refused_count;
+	// STATERETAIN1 (ompkit-1ra0d.62): ledger rotation rides the reaper verb, never its own service.
+	const ledgerRoot = receiptStateRoot() ?? (isAbsolute(home) ? join(home, ".local", "state", "omp-kit") : null);
+	let ledgerRetention: LedgerRetentionReport | null = null;
+	if (ledgerRoot !== null) {
+		try {
+			ledgerRetention = await retainStateLedgers(ledgerRoot);
+		} catch (error) {
+			ledgerRetention = { stateRoot: ledgerRoot, rotated: [], receiptsArchived: [], skipped: [],
+				errors: [`ledger-retention: ${error instanceof Error ? error.message : String(error)}`] };
+		}
+	}
 	return { code: failed > 0 ? 1 : 0, data: { overall: failed > 0 ? "FINDINGS" : "OK", job: "scratch-reaper",
 		stats: { roots: result.roots.length, sessions: result.applied.length, browser_orphans: browserResult.killed.length, browser_clones: browserResult.quarantined.length, orphans: result.orphans.length,
 			reaped: result.applied.filter(v => v.action === "REAP").length,
@@ -2716,7 +2728,7 @@ function runScratchReaperBody(home: string): CliResult {
 			applied: result.applied.length, refused,
 			deleted: result.expired.length, failures: failed,
 			reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
-		sessions: result.applied, orphans: result.orphans, killed: result.killed, expired: result.expired },
+		sessions: result.applied, orphans: result.orphans, killed: result.killed, expired: result.expired, ledgerRetention },
 		errors: failed > 0 ? [{ code: "SCRATCH_APPLY_FAILED", message: `scratch-reaper had ${failed} failed action(s)${firstFailure(result)}`,
 			remediation: "Inspect the applied verdicts and scratch reap JSONL receipt; refused paths were left in place." }] : [],
 		verification: "UNVERIFIED" };
@@ -4396,6 +4408,16 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		const failed = result.applied.filter(isApplyFailure).length + result.killed.filter(kill => !kill.ok).length
 			+ result.expired.filter(isApplyFailure).length;
+		// STATERETAIN1 (ompkit-1ra0d.62): ledger rotation rides the reaper verb, never its own service.
+		let applyLedgerRetention: LedgerRetentionReport | null = null;
+		if (root !== null) {
+			try {
+				applyLedgerRetention = await retainStateLedgers(root);
+			} catch (error) {
+				applyLedgerRetention = { stateRoot: root, rotated: [], receiptsArchived: [], skipped: [],
+					errors: [`ledger-retention: ${error instanceof Error ? error.message : String(error)}`] };
+			}
+		}
 		const dbFlag = request.flags.get("--db");
 		const db = typeof dbFlag === "string" && dbFlag !== "" ? dbFlag : undefined;
 		const actor = process.env.AGENT_NAME ?? "omp-kit-scratch";
@@ -4412,7 +4434,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 				orphans: result.orphans, killed: result.killed, expired: result.expired, receipt: result.receipt,
 				reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes, totals: result.totals,
 				rootMetrics: result.rootMetrics, pressure: result.pressure, quarantineBuckets: result.quarantineBuckets,
-				unownedActiveRule: result.unownedActiveRule, gapReport: result.gapReport,
+				unownedActiveRule: result.unownedActiveRule, gapReport: result.gapReport, ledgerRetention: applyLedgerRetention,
 				...(gapFiled === null ? { gapFileCommands } : { gapFiled }) },
 			verification: "UNVERIFIED" };
 	}

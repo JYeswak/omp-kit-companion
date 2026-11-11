@@ -1,8 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { retainReleases, runKitUpdateJob, type KitUpdateJobConfig } from "../../src/kit-update-job.ts";
 import { retainFleetCaches } from "../../src/cache-retain.ts";
+import { retainStateLedgers } from "../../src/ledger-retain.ts";
+import { appendJsonl, readJsonl } from "../../src/kitlib/jsonl.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 const roots: string[] = [];
 afterEach(() => {
@@ -196,4 +200,178 @@ test("STATERETAIN1: cache-retain expires old upgrade-notice and git-lock-rate fi
 	expect(existsSync(join(kit, "upgrade-notice-fedcba9876543210.json"))).toBe(true);
 	expect(existsSync(join(kit, "git-lock-rate.ledger"))).toBe(false);
 	expect(existsSync(join(kit, "plugin-keepme.json"))).toBe(true);
+});
+
+function makeLedgerRoot(): string {
+	const root = realpathSync(ownedTmp("stateretain-ledger", { root: join(import.meta.dir, "../../var/agent-tmp") }).path);
+	roots.push(root);
+	mkdirSync(root, { recursive: true, mode: 0o700 });
+	return root;
+}
+/** Narrow one fixture row to its numeric `n`; the unchecked cast would trust the JSON shape blind. */
+function rowNumber(row: unknown): number {
+	if (row !== null && typeof row === "object" && "n" in row && typeof row.n === "number") return row.n;
+	throw new Error(`expected a fixture row with numeric n, got ${JSON.stringify(row)?.slice(0, 80)}`);
+}
+
+test("STATERETAIN1: a ledger past the size threshold is archived; its newest window stays readable by the real reader", async () => {
+	const root = makeLedgerRoot();
+	const now = Date.now();
+	const rows = Array.from({ length: 30 }, (_, index) => JSON.stringify({ n: index, pad: "x".repeat(40) }));
+	writeFileSync(join(root, "gate-events.jsonl"), `${rows.join("\n")}\n`);
+	const report = await retainStateLedgers(root, { maxBytes: 500, keepRows: 10, timestamp: "20261111T101800Z", nowMs: now });
+	expect(report.errors).toEqual([]);
+	expect(report.rotated).toHaveLength(1);
+	const rotation = report.rotated[0]!;
+	expect(rotation.ledger).toBe("gate-events.jsonl");
+	expect(rotation.archive).toBe("gate-events.jsonl.20261111T101800Z.gz");
+	expect(rotation.archivedRows).toBe(20);
+	expect(rotation.keptRows).toBe(10);
+	// The real reader (kitlib readJsonl, the same reader push-latency and project wakes use) sees the newest window.
+	const read = readJsonl(join(root, "gate-events.jsonl"));
+	expect(read.errors).toEqual([]);
+	expect(read.rows.map(rowNumber)).toEqual([20, 21, 22, 23, 24, 25, 26, 27, 28, 29]);
+	// The archive holds exactly the oldest rows, compressed.
+	const archived = gunzipSync(readFileSync(join(root, rotation.archive))).toString("utf8").trim().split("\n")
+		.map(line => rowNumber(JSON.parse(line) as unknown));
+	expect(archived).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+	// Planted negative: the oldest row is gone from the live ledger.
+	expect(readFileSync(join(root, "gate-events.jsonl"), "utf8")).not.toContain('"n":0,');
+	expect(readFileSync(join(root, "gate-events.jsonl"), "utf8")).toContain('"n":29,');
+});
+
+test("STATERETAIN1: a small stale ledger rotates by age; a fresh one and mail-wake are byte-identical", async () => {
+	const root = makeLedgerRoot();
+	const now = Date.now();
+	const stale = Array.from({ length: 5 }, (_, index) => JSON.stringify({ n: index }));
+	writeFileSync(join(root, "bash-corpus.jsonl"), `${stale.join("\n")}\n`);
+	const agedAt = new Date(now - 40 * 86_400_000);
+	utimesSync(join(root, "bash-corpus.jsonl"), agedAt, agedAt);
+	// mail-wake.jsonl is excluded from rotation (bare appendFileSync writers the
+	// lock cannot serialize); even stale it stays untouched.
+	const wake = Array.from({ length: 5 }, (_, index) => JSON.stringify({ n: index }));
+	writeFileSync(join(root, "mail-wake.jsonl"), `${wake.join("\n")}\n`);
+	utimesSync(join(root, "mail-wake.jsonl"), agedAt, agedAt);
+	const wakeBefore = readFileSync(join(root, "mail-wake.jsonl"));
+	const fresh = Array.from({ length: 5 }, (_, index) => JSON.stringify({ m: index }));
+	writeFileSync(join(root, "gate-events.jsonl"), `${fresh.join("\n")}\n`);
+	const before = readFileSync(join(root, "gate-events.jsonl"), "utf8");
+	const report = await retainStateLedgers(root, { maxBytes: 100 * 1024 * 1024, keepRows: 20_000, timestamp: "20261111T101800Z", nowMs: now });
+	expect(report.errors).toEqual([]);
+	expect(report.rotated.map(entry => entry.ledger)).toEqual(["bash-corpus.jsonl"]);
+	const archived = gunzipSync(readFileSync(join(root, "bash-corpus.jsonl.20261111T101800Z.gz"))).toString("utf8").trim().split("\n")
+		.map(line => rowNumber(JSON.parse(line) as unknown));
+	expect(archived).toEqual([0]);
+	const kept = readJsonl(join(root, "bash-corpus.jsonl"));
+	expect(kept.errors).toEqual([]);
+	expect(kept.rows.map(rowNumber)).toEqual([1, 2, 3, 4]);
+	// Planted negative: the fresh ledger under both thresholds is untouched.
+	expect(report.skipped).toContain("gate-events.jsonl: under both thresholds");
+	expect(readFileSync(join(root, "gate-events.jsonl"), "utf8")).toBe(before);
+	expect(readdirSync(root).filter(name => name.startsWith("gate-events.jsonl."))).toEqual([]);
+	// Planted negative: mail-wake.jsonl is never rotated, however stale.
+	expect(readFileSync(join(root, "mail-wake.jsonl")).equals(wakeBefore)).toBe(true);
+	expect(readdirSync(root).filter(name => name.startsWith("mail-wake.jsonl."))).toEqual([]);
+});
+
+test("STATERETAIN1: planted — appends racing the rotation keep every row", async () => {
+	// Without the writer lock the rename can land between a racing append's
+	// open and write, stranding the row in the unlinked inode. The lock makes the
+	// union exact in either order.
+	const root = makeLedgerRoot();
+	const now = Date.now();
+	const ledger = join(root, "gate-events.jsonl");
+	const rows = Array.from({ length: 500 }, (_, index) => JSON.stringify({ n: index, pad: "x".repeat(40) }));
+	writeFileSync(ledger, `${rows.join("\n")}\n`);
+	const rotation = retainStateLedgers(root, { maxBytes: 500, keepRows: 10, timestamp: "20261111T101800Z", nowMs: now });
+	const racing = (async (): Promise<void> => {
+		for (let index = 500; index < 520; index++) {
+			await appendJsonl(ledger, () => ({ n: index }), { deadline_s: fixtureDeadlineS(), state_dir: root });
+		}
+	})();
+	const [report] = await Promise.all([rotation, racing]);
+	expect(report.errors).toEqual([]);
+	expect(report.rotated).toHaveLength(1);
+	const live = readJsonl(ledger);
+	expect(live.errors).toEqual([]);
+	const archived = gunzipSync(readFileSync(join(root, report.rotated[0]!.archive))).toString("utf8").trim().split("\n")
+		.map(line => rowNumber(JSON.parse(line) as unknown));
+	const all = [...archived, ...live.rows.map(rowNumber)].sort((a, b) => a - b);
+	expect(all).toEqual(Array.from({ length: 520 }, (_, index) => index));
+});
+
+test("STATERETAIN1: a crash orphan archive with identical rows is reused, never duplicated", async () => {
+	const root = makeLedgerRoot();
+	const now = Date.now();
+	const rows = Array.from({ length: 30 }, (_, index) => JSON.stringify({ n: index, pad: "x".repeat(40) }));
+	writeFileSync(join(root, "gate-events.jsonl"), `${rows.join("\n")}\n`);
+	const orphanText = `${rows.slice(0, 20).join("\n")}\n`;
+	writeFileSync(join(root, "gate-events.jsonl.20261111T101800Z.gz"), gzipSync(Buffer.from(orphanText, "utf8")));
+	const report = await retainStateLedgers(root, { maxBytes: 500, keepRows: 10, timestamp: "20261111T101800Z", nowMs: now });
+	expect(report.errors).toEqual([]);
+	expect(report.rotated).toHaveLength(1);
+	expect(report.rotated[0]!.archive).toBe("gate-events.jsonl.20261111T101800Z.gz");
+	// Planted negative: every row exists exactly once across the live ledger and the reused archive.
+	const live = readJsonl(join(root, "gate-events.jsonl"));
+	expect(live.errors).toEqual([]);
+	const archived = gunzipSync(readFileSync(join(root, "gate-events.jsonl.20261111T101800Z.gz"))).toString("utf8").trim().split("\n")
+		.map(line => rowNumber(JSON.parse(line) as unknown));
+	const all = [...archived, ...live.rows.map(rowNumber)].sort((a, b) => a - b);
+	expect(all).toEqual(Array.from({ length: 30 }, (_, index) => index));
+});
+
+test("STATERETAIN1: a foreign archive under the canonical name gets a fresh -N name; the orphan is untouched", async () => {
+	const root = makeLedgerRoot();
+	const now = Date.now();
+	const rows = Array.from({ length: 30 }, (_, index) => JSON.stringify({ n: index, pad: "x".repeat(40) }));
+	writeFileSync(join(root, "gate-events.jsonl"), `${rows.join("\n")}\n`);
+	const orphan = gzipSync(Buffer.from("unrelated\n", "utf8"));
+	writeFileSync(join(root, "gate-events.jsonl.20261111T101800Z.gz"), orphan);
+	const report = await retainStateLedgers(root, { maxBytes: 500, keepRows: 10, timestamp: "20261111T101800Z", nowMs: now });
+	expect(report.errors).toEqual([]);
+	expect(report.rotated).toHaveLength(1);
+	expect(report.rotated[0]!.archive).toBe("gate-events.jsonl.20261111T101800Z-2.gz");
+	// Planted negative: the foreign orphan is byte-identical and the fresh archive holds the oldest rows.
+	expect(readFileSync(join(root, "gate-events.jsonl.20261111T101800Z.gz")).equals(orphan)).toBe(true);
+	const archived = gunzipSync(readFileSync(join(root, "gate-events.jsonl.20261111T101800Z-2.gz"))).toString("utf8").trim().split("\n")
+		.map(line => rowNumber(JSON.parse(line) as unknown));
+	expect(archived).toEqual(Array.from({ length: 20 }, (_, index) => index));
+});
+
+test("STATERETAIN1: claude-save receipts older than 30 days are archived; young ones and non-receipts stay", async () => {
+	const root = makeLedgerRoot();
+	const now = Date.now();
+	const DAY = 86_400_000;
+	const aged = (name: string, ageDays: number): void => {
+		writeFileSync(join(root, name), JSON.stringify({ receipt: name }));
+		const at = new Date(now - ageDays * DAY);
+		utimesSync(join(root, name), at, at);
+	};
+	aged("claude-save-abc123.json", 40);
+	aged("claude-save-young.json", 1);
+	aged("unrelated.json", 40);
+	const original = readFileSync(join(root, "claude-save-abc123.json"));
+	const report = await retainStateLedgers(root, { nowMs: now, timestamp: "20261111T101800Z" });
+	expect(report.errors).toEqual([]);
+	expect(report.receiptsArchived.map(entry => entry.receipt)).toEqual(["claude-save-abc123.json"]);
+	expect(existsSync(join(root, "claude-save-abc123.json"))).toBe(false);
+	expect(existsSync(join(root, "claude-save-abc123.json.gz"))).toBe(true);
+	expect(gunzipSync(readFileSync(join(root, "claude-save-abc123.json.gz"))).equals(original)).toBe(true);
+	// Planted negatives: the young receipt and the non-receipt are untouched.
+	expect(existsSync(join(root, "claude-save-young.json"))).toBe(true);
+	expect(existsSync(join(root, "claude-save-young.json.gz"))).toBe(false);
+	expect(existsSync(join(root, "unrelated.json"))).toBe(true);
+	expect(existsSync(join(root, "unrelated.json.gz"))).toBe(false);
+});
+
+test("STATERETAIN1: planted negatives — bad arguments throw and a missing ledger is skipped, never created", async () => {
+	const root = makeLedgerRoot();
+	await expect(retainStateLedgers(join(root, "missing"))).rejects.toThrow("LEDGER_RETENTION_ARGUMENT_INVALID");
+	expect(() => retainStateLedgers(root, { timestamp: "yesterday" })).toThrow("LEDGER_RETENTION_ARGUMENT_INVALID");
+	expect(() => retainStateLedgers(root, { maxBytes: 0 })).toThrow("LEDGER_RETENTION_ARGUMENT_INVALID");
+	const report = await retainStateLedgers(root, { nowMs: Date.now(), timestamp: "20261111T101800Z" });
+	expect(report.errors).toEqual([]);
+	expect(report.rotated).toEqual([]);
+	expect(report.receiptsArchived).toEqual([]);
+	expect(existsSync(join(root, "gate-events.jsonl"))).toBe(false);
 });
