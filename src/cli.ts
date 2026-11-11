@@ -14,6 +14,7 @@ import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand,
 import { RELEASE_DATA } from "./release-assets.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { run as runBounded, runSync as runBoundedSync } from "./kitlib/run.ts";
+import { runtimeTempRoot } from "./runtime.ts";
 import { listRepoCheckouts } from "./ovnfs-checkouts.ts";
 import { audit, undo, why } from "./audit.ts";
 import { LAND_GUARD_PUBLIC_IDENTITY, inspectLandGuard, landCommand } from "./land.ts";
