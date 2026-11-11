@@ -16,6 +16,7 @@ import type { OwnedScratchRow } from "./scratch.ts";
 import { parseReservationRead } from "./fleet-guard/git.ts";
 import type { AttestedReservation } from "./fleet-guard/git.ts";
 import { reapLandedCheckouts } from "./ovnfs-checkouts.ts";
+import { scrubText } from "../extensions/secret-output-guard.ts";
 
 
 type GitResult = { code: number; out: string; err: string; interrupted: boolean; timedOut: boolean };
@@ -169,6 +170,16 @@ export type PushCheckResult = {
 	checked_sha: string | null;
 	pushed_sha: string | null;
 	exit_code: number | null;
+	/** Bounded redacted stdout tail; present only when the check ran and failed. */
+	stdout_tail?: string | null;
+	/** Bounded redacted stderr tail; present only when the check ran and failed. */
+	stderr_tail?: string | null;
+	/** True when the stdout tail was cut to the bound (the tail names it too). */
+	stdout_truncated?: boolean;
+	/** True when the stderr tail was cut to the bound (the tail names it too). */
+	stderr_truncated?: boolean;
+	/** Durable owned diagnostic file naming the failed candidate; null when unwritable. */
+	diagnostic_path?: string | null;
 };
 type TreeBlob =
 	| { kind: "blob"; mode: string; oid: string }
@@ -187,6 +198,38 @@ export function pushCheckDeadlineSeconds(): number {
 	const raw = process.env[PUSH_CHECK_DEADLINE_ENV];
 	const value = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
 	return Number.isSafeInteger(value) ? Math.min(3600, Math.max(1, value)) : 600;
+}
+
+// LANDDIAG1 (ompkit-1ra0d.165): a failing push-check keeps bounded redacted
+// diagnostics. The owned run root is cleaned when the check ends, so the
+// durable diagnostic lives under the git dir's omp-kit/push-check-diagnostics
+// (the same durable home as the land-push hook logs), and the refusal names it.
+const PUSH_CHECK_DIAG_CHARS = 4 * 1024;
+const PUSH_CHECK_DIAG_DIR = "push-check-diagnostics";
+
+/** Redact first (so no credential shape survives the bound), then keep the last 4 KiB with an explicit marker. Byte slicing only; no patterns. */
+function boundedPushCheckTail(raw: Uint8Array): { tail: string; truncated: boolean } {
+	const redacted = scrubText(new TextDecoder().decode(raw));
+	if (redacted.length <= PUSH_CHECK_DIAG_CHARS) return { tail: redacted, truncated: false };
+	return {
+		tail: `${redacted.slice(redacted.length - PUSH_CHECK_DIAG_CHARS)}\n[truncated: showing last ${PUSH_CHECK_DIAG_CHARS} of ${redacted.length} characters]`,
+		truncated: true,
+	};
+}
+
+/** Persist the redacted bounded failure record outside the cleaned run root; null when the git dir is unreadable or unwritable (best-effort, never throws). */
+function persistPushCheckDiagnostic(repo: string, candidateSha: string, exitCode: number | null, stdout: { tail: string; truncated: boolean }, stderr: { tail: string; truncated: boolean }): string | null {
+	const gitDir = git(repo, ["rev-parse", "--absolute-git-dir"]);
+	if (gitDir.code !== 0 || gitDir.interrupted) return null;
+	const dir = join(gitDir.out.trim(), "omp-kit", PUSH_CHECK_DIAG_DIR);
+	const path = join(dir, `${candidateSha}.${Date.now()}.log`);
+	try {
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(path, `# push-check failed for candidate ${candidateSha}; exit ${exitCode === null ? "unknown" : exitCode}\n# stdout${stdout.truncated ? " (truncated)" : ""}\n${stdout.tail}\n# stderr${stderr.truncated ? " (truncated)" : ""}\n${stderr.tail}\n`);
+		return path;
+	} catch {
+		return null;
+	}
 }
 
 /** Shared push-check execution (HANDOFFPUSHCHECK1): one runner for land and the push-check verb, bounded by kitlib run(). */
@@ -223,7 +266,10 @@ export async function executePushCheckScript(repo: string, script: Buffer, execu
 		if (run.timed_out || exitCode === null) return { ...common, exit_code: exitCode, status: "UNRUN", reason: "check_execution_unavailable" };
 		if (exitCode === 0) return { ...common, exit_code: exitCode, status: "PASS", reason: undefined };
 		if (exitCode === 77) return { ...common, exit_code: exitCode, status: "SKIP", reason: "check_not_applicable" };
-		return { ...common, exit_code: exitCode, status: "FAIL", reason: "check_failed" };
+		const stdout = boundedPushCheckTail(run.stdout);
+		const stderr = boundedPushCheckTail(run.stderr);
+		const diagnostic_path = persistPushCheckDiagnostic(repo, candidateSha, exitCode, stdout, stderr);
+		return { ...common, exit_code: exitCode, status: "FAIL", reason: "check_failed", stdout_tail: stdout.tail, stderr_tail: stderr.tail, stdout_truncated: stdout.truncated, stderr_truncated: stderr.truncated, diagnostic_path };
 	} finally {
 		try { scratch.cleanup(); } catch { /* the owned-temp exit hook retries */ }
 	}
@@ -1562,7 +1608,7 @@ function landedBaseTimeMs(repo: string, base: string): number | null {
 		const convergenceData: ConvergeResult = { ...convergence };
 		delete convergenceData.push_output;
 		const failure = published ? undefined : suiteFailure ?? (checkResult.status === "FAIL"
-			? { code: "LAND_CHECK_FAILED", message: "The registered repo check failed for the exact publication candidate", remediation: "Repair the check or candidate; it was not published." }
+			? { code: "LAND_CHECK_FAILED", message: `The registered repo check failed for the exact publication candidate${checkResult.diagnostic_path ? `; diagnostics: ${checkResult.diagnostic_path}` : ""}`, remediation: checkResult.diagnostic_path ? `Inspect diagnostics at ${checkResult.diagnostic_path}, then repair the check or candidate; it was not published.` : "Repair the check or candidate; it was not published." }
 			: checkUnavailable
 				? { code: "LAND_CHECK_UNRUN", message: `The registered repo check did not complete: ${checkResult.reason ?? "unknown"}`, remediation: "Restore the registered check tooling and retry; no publication was authorized." }
 				: convergence.reason === "PUSH_REJECTED"

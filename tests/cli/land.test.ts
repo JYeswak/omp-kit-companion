@@ -286,7 +286,7 @@ test.concurrent(`LANDPANETIMEOUT1 mutant: a fixed ${OLD_FIXED_RESOLVE_TIMEOUT_S}
 	expect(source).toContain(distinct);
 	// The pre-fix behaviour: a fixed bound whose timeout falls through to the rc check (OWNER_UNKNOWN).
 	const mutant = source.replace(bound, `const deadlineS = ${OLD_FIXED_RESOLVE_TIMEOUT_S};`).replace(distinct, "if (false)\n")
-		.replaceAll('from "./', `from "${join(repoRoot, "src")}/`);
+		.replaceAll('from "./', `from "${join(repoRoot, "src")}/`).replaceAll('from "../', `from "${repoRoot}/`);
 	const mutantPath = join(scratch, `land-resolve-mutant-${globalThis.fixtureNumber++}.ts`);
 	writeFileSync(mutantPath, mutant);
 	const { work } = fixture();
