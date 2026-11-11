@@ -196,6 +196,16 @@ export function planRules(input: RuleInput): RulePlan {
 	}
 }
 
+/** Names the files blocking a rule plan so the refusal can point at them; no fs access. */
+export function collisionRefusal(entries: readonly { name: string; action: RuleAction }[]): { message: string; remediation: string } {
+	const collisions = entries.filter(entry => entry.action === "collision").map(entry => entry.name).sort();
+	const named = collisions.length > 0 ? `: ${collisions.join(", ")}` : "";
+	return {
+		message: `An unowned or edited managed rule name blocks changes${named}`,
+		remediation: "Move each edited copy to its .omp/agent/rules overlay or remove it, or run migrate --plan; identical unowned files remain unowned.",
+	};
+}
+
 /** Caller must obtain explicit CLI confirmation; no-op never takes a lock or alters state. */
 export function applyRulePlan(plan: RulePlan, options: { confirmed: true }): RuleReceipt {
 	if (options?.confirmed !== true) fail("INVALID_PLAN");

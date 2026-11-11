@@ -25,7 +25,7 @@ import { convergeCommand } from "./converge.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
 import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, readPluginReceipt, undoPlugin, type PluginProfile, type PluginRunner, type PluginSnapshot, type RegexBudgetSelection } from "./apply-plugin.ts";
 import { applyPolicyPlan, inspectPolicySettings, planPolicy, undoPolicyReceipt } from "./apply-policy.ts";
-import { applyRulePlan, planRules } from "./apply-rules.ts";
+import { applyRulePlan, collisionRefusal, planRules } from "./apply-rules.ts";
 import { applyMigration, planMigration, planMigrationMutation } from "./migrate.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair, type RepairDecision } from "./repair.ts";
 import { ContextInputError, contextFinding, runCapabilitiesCheck, runContextInventory, validateProfileName } from "./context.ts";
@@ -1354,10 +1354,13 @@ function rulesCommand(request: ParsedCommand): CliResult {
 		const data = { overall: plan.blocked ? "FAIL" : "UNVERIFIED", action: "PLAN",
 			fleet, entries, changes: plan.changes, unknown_markdown: plan.unknownMarkdown,
 			receipt_id: null as string | null };
-		if (plan.blocked) return { code: 2, data, errors: [{
-			code: "RULE_COLLISION", message: "An unowned or edited managed rule name blocks changes",
-			remediation: "Inspect the named conflict and replan; identical unowned files remain unowned.",
-		}], verification: "UNVERIFIED" };
+		if (plan.blocked) {
+			const refusal = collisionRefusal(plan.entries);
+			return { code: 2, data, errors: [{
+				code: "RULE_COLLISION", message: refusal.message,
+				remediation: refusal.remediation,
+			}], verification: "UNVERIFIED" };
+		}
 		if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
 		const result = applyRulePlan(plan, { confirmed: true });
 		return { code: 0, data: { ...data, action: result.status, receipt_id: result.id }, verification: "UNVERIFIED" };

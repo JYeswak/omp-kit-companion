@@ -4,7 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { join, resolve } from "node:path";
 import { diagnose } from "../../src/diagnostics.ts";
-import { applyRulePlan, planRules } from "../../src/apply-rules.ts";
+import { applyRulePlan, collisionRefusal, planRules } from "../../src/apply-rules.ts";
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
@@ -264,7 +264,23 @@ test("compiled rules plan and consented apply establish verifiable ownership wit
 	const collision = run(["apply", "rules", "--apply", "--yes"]);
 	expect(collision.code).toBe(2);
 	expect(collision.envelope.errors[0].code).toBe("RULE_COLLISION");
+	expect(collision.envelope.errors[0].message).toMatch(/beta/);
+	expect(collision.envelope.errors[0].remediation).toMatch(/migrate/);
+
 	expect(readFileSync(join(f.installed, "beta.md"), "utf8")).toBe("operator edit\n");
+}));
+
+test("RULE_COLLISION refusal names the blocking files and points at migrate", () => fixture(f => {
+	mkdirSync(f.installed, { recursive: true });
+	writeFileSync(join(f.installed, "alpha.md"), "operator edit\n");
+	const plan = planRules({ root: f.root, home: f.home });
+	expect(plan.blocked).toBe(true);
+	expect(plan.entries.map(e => [e.name, e.action])).toEqual([["alpha", "collision"]]);
+	const refusal = collisionRefusal(plan.entries);
+	expect(refusal.message).toMatch(/alpha/);
+	expect(refusal.remediation).toMatch(/migrate --plan/);
+	expect(refusal.remediation).toMatch(/overlay/);
+	expect(() => applyRulePlan(plan, { confirmed: true })).toThrow(/RULE_COLLISION/);
 }));
 
 test("doctor distinguishes kit-owned postimage from identical unowned bytes and drift", async () => {

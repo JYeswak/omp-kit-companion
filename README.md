@@ -431,8 +431,9 @@ KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
 "$KIT" audit --json
 ```
 
-`apply rules` writes into `~/.agents/rules/` (never `~/.omp`); `audit` lists each
-file. `overall` may stay `UNVERIFIED`: disk cannot prove OMP's effective profile.
+`apply rules` writes only `~/.agents/rules/`; `audit` lists each file; `overall`
+may stay `UNVERIFIED`. On `RULE_COLLISION` nothing changed: run
+`"$KIT" migrate --plan`, move edited copies to the overlay, replan.
 
 ## Command reference
 
@@ -722,7 +723,7 @@ Moved to [docs/faq.md](docs/faq.md).
 
 ## About Contributions
 
-Bug reports and focused proposals are welcome through GitHub issues. A pull request is a proposal, not an automatic merge commitment; the maintainer may independently implement a change after review. Do not post session logs, local absolute paths, credentials, or private model transcripts. Use `CONTRIBUTING.md` for the workflow and `SECURITY.md` for sensitive reports.
+Bug reports and focused proposals go through GitHub issues. A pull request is a proposal, not a merge commitment; the maintainer may independently implement a change after review. Never post session logs, local paths, credentials, or private transcripts. Workflow: `CONTRIBUTING.md`; sensitive reports: `SECURITY.md`.
 
 Maintained by [JYeswak](https://github.com/JYeswak).
 
