@@ -1,2 +1,0 @@
-- iMessage bridge self-chat mode: when this Mac is signed into Joshua's own Apple ID, texts typed in the note-to-self chat are delivered to the lead seat, and the bridge's own replies (marked with a reply prefix, with guids recorded before the next poll) never loop back as prompts. Limit: in self-chat mode Apple does not push-notify replies to the phone. (ompkit-1ra0d.171)
-- In self-chat mode a message you type that starts with `[chief] ` is treated as the chief's own reply and skipped (logged as `LOOP_GUARD`), so start your own messages with anything else.

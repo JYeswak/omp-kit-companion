@@ -4,6 +4,14 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.120] - 2026-11-11
+
+### Changed
+
+- The pinned shellcheck gate no longer bind-mounts host directories into the engine container: `commit-preflight.py` and `fresh-gate.sh` bake the judge arguments at `docker create` time, copy the staged tree in with `docker cp`, run it attached with `docker start -a`, and remove the container by id, with every docker call still under its bound. Push-gate shell checks keep judging in seconds from network-filesystem checkouts where a guest bind mount hung and left the files UNJUDGED. (ompkit-1ra0d.169)
+- iMessage bridge self-chat mode: when this Mac is signed into Joshua's own Apple ID, texts typed in the note-to-self chat are delivered to the lead seat, and the bridge's own replies (marked with a reply prefix, with guids recorded before the next poll) never loop back as prompts. Limit: in self-chat mode Apple does not push-notify replies to the phone. (ompkit-1ra0d.171)
+- In self-chat mode a message you type that starts with `[chief] ` is treated as the chief's own reply and skipped (logged as `LOOP_GUARD`), so start your own messages with anything else.
+
 ## [0.2.119] - 2026-11-11
 
 ### Changed
