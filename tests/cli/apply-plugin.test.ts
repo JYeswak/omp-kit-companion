@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { expect, test } from "bun:test";
-import { mkdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, pluginReceiptPaths, pluginRowErrors, undoPlugin, type PluginReceipt, type PluginRunner, type PluginSnapshot } from "../../src/apply-plugin.ts";
+import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
+import { nativeTestEnv } from "./apply-policy.helpers.ts";
+import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, pluginReceiptPaths, pluginRowErrors, readPluginReceipt, undoPlugin, type PluginProfile, type PluginRunner, type PluginSnapshot } from "../../src/apply-plugin.ts";
 
 const store = "/fixture/releases/0.2.5";
 const scratchRoot = join(process.cwd(), "var", "agent-tmp");
@@ -667,3 +668,63 @@ test("ompkit-fp72.29: failed rows project to CLI errors entries naming profile a
 	expect(errors[0]?.code).toContain("PLUGIN_SNAPSHOT_INCOMPLETE");
 	expect(errors[0]?.message).toContain("default");
 });
+
+test("OUTSIDERDOCS2: a bare plugin plan on a HOME with no named profiles selects the default profile", () => {
+	const owned = ownedTmp("prof1-bare-plan", { root: scratchRoot });
+	try {
+		const home = join(owned.path, "home"), project = join(owned.path, "project");
+		mkdirSync(project, { recursive: true });
+		const cli = join(import.meta.dir, "../../src/cli.ts");
+		const result = runFixture([process.execPath, cli, "apply", "plugin", "--plan", "--json"],
+			{ cwd: project, env: nativeTestEnv(home), floor_s: 30 });
+		const envelope = JSON.parse(Buffer.from(result.stdout).toString()) as {
+			errors?: { code: string }[]; data?: { steps?: { profile: string }[]; skipped?: { profile: string }[] };
+		};
+		// Planted negative: the unfixed command refuses the README's own bare form with INVALID_PROFILES.
+		expect((envelope.errors ?? []).map(error => error.code)).not.toContain("INVALID_PROFILES");
+		const mentioned = [...(envelope.data?.steps ?? []), ...(envelope.data?.skipped ?? [])].map(step => step.profile);
+		expect(mentioned).toEqual(["default"]);
+	} finally {
+		rmSync(owned.path, { recursive: true, force: true });
+	}
+}, fixtureDeadlineS() * 1000);
+
+test("OUTSIDERDOCS2: a bare plugin plan with named profiles refuses instead of planning them all", () => {
+	const owned = ownedTmp("prof1-bare-named", { root: scratchRoot });
+	try {
+		const home = join(owned.path, "home"), project = join(owned.path, "project");
+		mkdirSync(join(home, ".omp", "profiles", "work", "agent"), { recursive: true });
+		mkdirSync(project, { recursive: true });
+		const cli = join(import.meta.dir, "../../src/cli.ts");
+		const result = runFixture([process.execPath, cli, "apply", "plugin", "--plan", "--json"],
+			{ cwd: project, env: nativeTestEnv(home), floor_s: 30 });
+		const envelope = JSON.parse(Buffer.from(result.stdout).toString()) as {
+			errors?: { code: string; message: string; remediation: string }[];
+		};
+		expect(result.rc).toBe(2);
+		expect(envelope.errors?.[0]).toMatchObject({ code: "INVALID_PROFILES" });
+		expect(envelope.errors?.[0]?.remediation).toContain("--profiles all");
+	} finally {
+		rmSync(owned.path, { recursive: true, force: true });
+	}
+}, fixtureDeadlineS() * 1000);
+
+test("OUTSIDERDOCS2: a bare plugin plan with an unreadable profile listing refuses", () => {
+	const owned = ownedTmp("prof1-bare-broken", { root: scratchRoot });
+	try {
+		const home = join(owned.path, "home"), project = join(owned.path, "project");
+		mkdirSync(join(home, ".omp"), { recursive: true });
+		writeFileSync(join(home, ".omp", "profiles"), "not a directory");
+		mkdirSync(project, { recursive: true });
+		const cli = join(import.meta.dir, "../../src/cli.ts");
+		const result = runFixture([process.execPath, cli, "apply", "plugin", "--plan", "--json"],
+			{ cwd: project, env: nativeTestEnv(home), floor_s: 30 });
+		const envelope = JSON.parse(Buffer.from(result.stdout).toString()) as {
+			errors?: { code: string; message: string }[];
+		};
+		expect(result.rc).toBe(2);
+		expect(envelope.errors?.[0]).toMatchObject({ code: "INVALID_PROFILES", message: "Named OMP profile listing failed" });
+	} finally {
+		rmSync(owned.path, { recursive: true, force: true });
+	}
+}, fixtureDeadlineS() * 1000);

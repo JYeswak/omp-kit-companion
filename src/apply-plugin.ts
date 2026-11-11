@@ -732,6 +732,15 @@ export function undoPlugin(
 	return rows;
 }
 
-export function readPluginReceipt(path: string): PluginReceipt {
-	return JSON.parse(readFileSync(path, "utf8")) as PluginReceipt;
+export function readPluginReceipt(path: string, id?: string): PluginReceipt {
+	let stat;
+	try { stat = lstatSync(path); } catch { throw new Error("SIDECAR_CORRUPT"); }
+	if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()) throw new Error("SIDECAR_PERMISSIONS");
+	if (stat.size > 65536) throw new Error("SIDECAR_OVERSIZED");
+	let value: unknown;
+	try { value = JSON.parse(readFileSync(path, "utf8")); } catch { throw new Error("SIDECAR_CORRUPT"); }
+	if (!value || typeof value !== "object" || !("schema_version" in value) || value.schema_version !== 1 ||
+		!("id" in value) || typeof value.id !== "string" || (id !== undefined && value.id !== id) ||
+		!("rows" in value) || !Array.isArray(value.rows)) throw new Error("SIDECAR_CORRUPT");
+	return value as PluginReceipt;
 }

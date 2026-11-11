@@ -342,11 +342,11 @@ The online installer downloads only the archive for your platform and its bundle
 from GitHub's attestation store. It checks archive SHA-256, manifest SHA-256,
 every file hash, USTAR safety and provenance before writing
 `PREFIX/releases/<version>/` and pointing `PREFIX/bin/omp-kit` at it. Offline
-archives require an adjacent `<archive>.sigstore.json`; source-tag authority still
-requires network access. The updater uses this same verifier before extraction.
-It never installs OMP, Bun, models, profiles, or shell startup edits, and it refuses
-plain HTTP indexes, relative prefixes, and an existing release directory whose
-bytes differ. Upgrading by hand is the same commands with the new version.
+archives require an adjacent `<archive>.sigstore.json`; source-tag authority
+still requires network access. The updater uses this same verifier before
+extraction. It never installs OMP, Bun, models, profiles,
+or shell startup edits, and it refuses plain HTTP indexes, relative prefixes,
+and an existing release directory whose bytes differ.
 
 ### 2. Rules and extensions as an OMP plugin
 
@@ -355,10 +355,9 @@ omp plugin install "github:JYeswak/omp-kit-companion#v$KIT_VERSION"
 omp plugin list
 ```
 
-Fleet tool/save guards require the nearest repo's `.omp/fleet.json` with `{"enabled":true}`; stock repos stay unchanged. See
-[docs/usage.md](docs/usage.md) for how plugin rules rank against native rules
-and `~/.agents/rules` copies, and `omp-kit migrate --plan` to move legacy
-copies onto plugin layering.
+Fleet tool/save guards need the nearest repo's `.omp/fleet.json` with `{"enabled":true}`. See
+[docs/usage.md](docs/usage.md) for rule ranking, and `omp-kit migrate --plan`
+to move legacy copies onto plugin layering.
 
 ### 3. From source
 
@@ -379,25 +378,18 @@ verified release (see [Limitations](#limitations)). Contributor checks are in
 ### Release and update flow
 
 Every green commit on `main` that carries release notes becomes the next patch
-release:
-
-1. Each change adds a fragment under `changelog.d/` (or a `[no-changelog]`
-   reason in the commit message). The pre-push gate and the release workflow
-   both enforce it.
-2. When CI passes on `main`, the release train folds the `changelog.d/`
-   fragments into `CHANGELOG.md` under `## [Unreleased]`, promotes that heading
-   to `## [X.Y.Z] - DATE`, sets the `package.json` version, commits
-   `chore: bump version to X.Y.Z`, and tags `vX.Y.Z`.
-3. `release.yml` builds and certifies the ship set (`darwin-arm64-none`,
-   `linux-arm64-gnu`, `linux-x64-gnu`) and publishes a GitHub release whose
-   body is that CHANGELOG section.
-4. A green commit with no notes is not released. Red CI is never tagged, one
-   train runs at a time, and the newest green commit wins.
-5. On machines running the `kit-update` service with
-   `OMP_KIT_UPDATE_POLL=github`, each 300-second tick asks GitHub (through
-   `gh`) for the newest release, downloads it only when it is newer than the
-   live install, applies it under an update receipt, and relinks the plugin
-   (`apply plugin --apply`). A failed postcheck keeps the prior version.
+release: each change adds a fragment under `changelog.d/` (or a `[no-changelog]`
+reason), enforced by the pre-push gate and the release workflow. When CI passes,
+the train folds the fragments into `CHANGELOG.md`, sets the `package.json`
+version and the README release line on `main`, and tags that green commit
+`vX.Y.Z` (no separate bump commit). `release.yml` then builds and certifies the
+ship set (`darwin-arm64-none`, `linux-arm64-gnu`, `linux-x64-gnu`) and publishes
+a GitHub release whose body is that CHANGELOG section. A green commit with no
+notes is not released; red CI is never tagged. On machines running the
+`kit-update` service with `OMP_KIT_UPDATE_POLL=github`, each 300-second tick
+asks GitHub (through `gh`) for the newest release, downloads it only when
+newer, applies it under an update receipt, and relinks the plugin
+(`apply plugin --apply`). A failed postcheck keeps the prior version.
 
 The manual cut and rehearsal are documented in
 [docs/release-procedure.md](docs/release-procedure.md).
@@ -439,10 +431,8 @@ KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
 "$KIT" audit --json
 ```
 
-`apply rules` writes the pack into `~/.agents/rules/` and never touches
-`~/.omp`; `audit` lists each file. Only `--apply` with confirmation changes
-anything. `overall` may stay `UNVERIFIED` (disk cannot prove OMP's effective
-profile); the pack verdict is `data.test.status`.
+`apply rules` writes into `~/.agents/rules/` (never `~/.omp`); `audit` lists each
+file. `overall` may stay `UNVERIFIED`: disk cannot prove OMP's effective profile.
 
 ## Command reference
 
@@ -492,7 +482,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit heavy` | `heavy [--label LABEL] [--lane NAME] [--no-wait] [--max-runtime S] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 deferred, 124 over budget, 69 observer-unavailable | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
 | `omp-kit next` | `next --role worker\|director [--repo PATH] [--agent NAME]` | Read-only next action and applicable skills | `omp-kit next --role worker --json` |
 | `omp-kit grader next` | `grader next [--repo PATH] [--agent NAME]` | Select one prioritized grader action (`OMP_KIT_GRADE_WAVE` = `grade_wave.py` path); unavailable sources read UNKNOWN, never empty | `OMP_KIT_GRADE_WAVE=/path/to/grade_wave.py omp-kit grader next --repo . --json` |
-| `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan; needs native `rch` on PATH (else `RCH_UNAVAILABLE`) | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
+| `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan; needs native `rch` on PATH with a parseable `status --json` (else `rch_status_unavailable`; no binary at all is `RCH_UNAVAILABLE`) | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
 | `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or resolve shared-main convergence; keeps peer state, refuses owner conflicts, never force-pushes | `omp-kit converge --repo . --json` |
 | `omp-kit land` | `land --paths PATH... --message MSG --apply --yes\|land --patch FILE [--base SHA] --message MSG --apply --yes` | Commit reserved paths, pass `commit-msg` and [push check](docs/land.md), publish without force: `PUSHED`/`REFUSED`/`UNRUN` | `omp-kit help land` |
 | `omp-kit push-check` | `push-check --commit SHA [--repo PATH]` | Record a commit's `.omp/push-check` verdict | `omp-kit help push-check` |
@@ -526,14 +516,14 @@ Use repeatable `--done` for explicit reports.
 
 | Subcommand | What it does | Example |
 |---|---|---|
-| `apply rules` | Install or update kit-owned rules | `omp-kit apply rules --apply --yes` |
-| `apply policy` | Per-profile TTSR keys via native `omp config set`, with profile backup and read-back; `--profiles NAMES\|all`, `--include-default` | `omp-kit apply policy --plan --json` |
+| `apply policy` | Per-profile TTSR keys via native `omp config set`, with profile backup and read-back; `--profiles NAMES\|all`, `--include-default`. The apply writes a reversal receipt; `undo` restores the values | `omp-kit apply policy --plan --json` |
 | `apply extensions` | Install portable defaults into selected profiles; `--fleet` selects the external-tool fleet integrations instead | `omp-kit apply extensions --plan --profiles all --json` |
-| `apply mcp` | Import MCP servers from claude, cursor, codex, project or a file into profiles' `mcp.json`, or edit servers already there (`--env-command`, `--enable`); needs an existing source (see `doctor --scope mcp --sources`), else `SOURCE_UNAVAILABLE` | `omp-kit apply mcp --from claude --servers z3-prover --profiles all --plan --json` |
+| `apply plugin` | Link the kit plugin package into profiles (`--store` is the kit root holding `package.json`, `rules/`, `extensions/`); bare form plans the default profile, else `--profiles all --include-default` | `omp-kit apply plugin --plan --profiles all --include-default --json` |
+| `apply mcp` | Import MCP servers from claude, cursor, codex, project, or a JSON `mcpServers` file into profiles' `mcp.json`. A fresh HOME has no source (`SOURCE_UNAVAILABLE`): seed the file in the example, then `--from` it | `echo '{"mcpServers":{"x":{"command":"true"}}}' > "$HOME/.cache/mcp.json" && omp-kit apply mcp --from "$HOME/.cache/mcp.json" --servers all --profiles all --plan --json` |
 | `activation opt-out` | Record an opt-out with a reason; empty reasons are refused and nothing is written | `omp-kit activation opt-out --item service:kit-update --reason 'no launchd' --json` |
 | `repair --scope rules` / `policy` / `extensions` | Reversible repair (`github` unsupported: `UNSUPPORTED_REPAIR_SCOPE`) | `omp-kit repair --scope policy --plan --json` |
 | `repair --scope state` | Restore the private state root to mode 0700, nothing else | `omp-kit repair --scope state --plan --json` |
-| `service list` / `status [JOB\|--all]` | Known jobs with installed and loaded state | `omp-kit service status --all --json` |
+| `service list` / `status [JOB\|--all]` | Known jobs with installed and loaded state. `loaded` true with `installed` false means the label runs from another install | `omp-kit service status --all --json` |
 | `service install JOB` | Render, diff, back up, bootstrap, verify; `--replace` takes over a label loaded from another plist; needs `$HOME/.local/bin/omp-kit` first (copied from the installed kit as above), else `LAUNCHER_UNAVAILABLE` | `omp-kit service install omp-watch --dry-run --json` |
 | `service uninstall JOB` | Bootout and move the plist to backup; `--purge-logs` deletes logs | `omp-kit service uninstall omp-watch --apply --yes --json` |
 | `service doctor [JOB\|--all]` | Read-only checks; `--fix --apply --yes` reinstalls drifted jobs and rotates logs | `omp-kit service doctor --all --json` |
@@ -566,7 +556,7 @@ Use repeatable `--done` for explicit reports.
 | `--scope sessions` | Running OMP sessions: `CURRENT`, `STALE`, or `UNVERIFIED` against the install | `omp-kit doctor --scope sessions` |
 | `--scope load` | Load average and memory pressure: `OK` or `CONTENDED` | `omp-kit doctor --scope load` |
 | `--scope memory` | Memory configuration readiness for a profile | `omp-kit doctor --scope memory --profile NAME` |
-| `--scope mcp` | MCP readiness for a profile; `--sources` lists servers in other harness configs | `omp-kit doctor --scope mcp --profile NAME` |
+| `--scope mcp` | MCP readiness for a named profile or `--profile default`; `--sources` lists servers in other harness configs | `omp-kit doctor --scope mcp --profile NAME` |
 | `--scope context` | Context inventory for a profile and project | `omp-kit doctor --scope context --profile NAME` |
 | `--scope browsers` | Browser processes and leftover automation clones | `omp-kit doctor --scope browsers` |
 | `--scope services` | launchd jobs: running, idle, failing, path mismatch; `--services FILE` checks a required-jobs list | `omp-kit doctor --scope services` |
@@ -631,7 +621,7 @@ report without writing.
 | `~/.config/omp-kit/fleet-watch.json`, `OMP_KIT_FLEET_WATCH_CONFIG` | Coordinator/admission routes and job settings | none |
 | `$XDG_CONFIG_HOME/omp-kit/load.json` | `heavy` slots, maximum wait, disk observer (`sbh` strict, `statfs` OS-only, `auto` default) and optional floor percent | 2 slots, auto observer, bytes-need only |
 | `config/planning-score.toml`, `<repo>/.omp/planning-score.toml` | Planning score tuning and fleet list | kit defaults |
-| `<repo>/.omp/plan.toml`, `OMP_KIT_PLAN_CONFIG` | The repo's comprehensive plan: path, review dir (rounds counted from review files) | none: missions from `plan(<m>):` commits only |
+| `<repo>/.omp/plan.toml`, `OMP_KIT_PLAN_CONFIG` | Repo plan: path, review dir | none: missions from `plan(<m>):` commits only |
 | `config/lessons.toml` | fleet-lessons job | kit defaults |
 | `config/beads-policy.template.yaml` | Strict `.beads/policy.yaml` template, copied by hand | n/a |
 | `.omp/infra-pins.toml` | Toolchain pins for `infra` | kit copy, `--file` overrides |
@@ -658,8 +648,7 @@ report without writing.
 Example files:
 
 ```jsonc
-// ttsr-profiles.json: unique profile names; "default" allowed.
-// Empty/invalid/duplicate lists fail closed: PROFILE_LIST_UNVERIFIED.
+// ttsr-profiles.json: unique names; bad lists fail closed: PROFILE_LIST_UNVERIFIED.
 ["default", "work"]
 ```
 
@@ -686,8 +675,9 @@ whatever `HOME` is; never use a scratch `HOME`.
 
 Undo in reverse: `omp-kit undo RUN_ID --yes`, then
 `omp-kit service uninstall JOB --apply --yes` bootouts each job and moves its
-plist to backup (`--purge-logs` deletes logs). Remove the plugin (step 2):
-`omp plugin uninstall omp-kit-companion`. Then `rm -rf
+plist to backup (`--purge-logs` deletes logs). A policy apply id is also its
+`receipt_id`; undo restores the TTSR values. Remove the
+plugin (step 2): `omp plugin uninstall omp-kit-companion`. Then `rm -rf
 "$HOME/.local/opt/omp-kit"` and the `$HOME/.local/bin/omp-kit` copy if
 present. Receipts stay under the state root (`$XDG_STATE_HOME/omp-kit`, else
 `~/.local/state/omp-kit`) unless removed too. `~/.cache/gh/.sigstore` is gh's.

@@ -10,7 +10,9 @@ import { runtimeTempRoot } from "./runtime.ts";
 export type PolicyInput = Readonly<{ root: string; home: string; ompPath?: string; stateRoot?: string; project?: string; profiles?: "all" | readonly string[]; includeDefault?: boolean; profileConfigHome?: string }>;
 export type PolicyStep = Readonly<{ profile: string; path: string; key: PolicyKey; command: string; beforeSha256: string | null; beforeMode: number | null; beforeValue: PolicyValue; value: PolicyValue }>;
 export type PolicyPlan = Readonly<{ scope: "policy"; profiles: readonly string[]; steps: readonly PolicyStep[]; blockedProfiles: readonly Readonly<{ profile: string; names: readonly string[] }>[] }>;
-export type PolicyReceipt = Readonly<{ status: "APPLIED" | "UNCHANGED"; backupId: string | null; files: number; keys: number }>;
+export type PolicyUndoStep = Readonly<{ profile: string; key: PolicyKey; beforeValue: PolicyValue; value: PolicyValue }>;
+export type PolicyUndoReceipt = Readonly<{ schema_version: 1; id: string; scope: "ttsr-policy"; created_at: string; steps: readonly PolicyUndoStep[] }>;
+export type PolicyUndoRow = Readonly<{ profile: string; key: PolicyKey; status: "RESTORED" | "UNCHANGED" | "REFUSED"; reason?: string }>;
 
 type FileImage = { bytes: Buffer; image: Image };
 type PolicyConfig = { name: string; directory: string; path: string; file: FileImage | null; issue?: string };
@@ -393,16 +395,59 @@ function applyNativePolicySteps(plan: PolicyPlan, context: NativePolicyApplyCont
 	return written.size;
 }
 
+export function policyReceiptPath(stateRoot: string, id: string): string {
+	if (!isAbsolute(stateRoot) || resolve(stateRoot) !== stateRoot) fail("STATE_UNSAFE");
+	if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) fail("STATE_UNSAFE");
+	return join(stateRoot, `policy-${id}.json`);
+}
+
+export function readPolicyReceipt(path: string): PolicyUndoReceipt {
+	let stat;
+	try { stat = lstatSync(path); } catch { throw new Error("SIDECAR_CORRUPT"); }
+	if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()) throw new Error("SIDECAR_PERMISSIONS");
+	if (stat.size > 65536) throw new Error("SIDECAR_OVERSIZED");
+	let value: unknown;
+	try { value = JSON.parse(readFileSync(path, "utf8")); } catch { throw new Error("SIDECAR_CORRUPT"); }
+	if (!record(value) || value.schema_version !== 1 || typeof value.id !== "string" || value.scope !== "ttsr-policy" ||
+		typeof value.created_at !== "string" || !Array.isArray(value.steps) || value.steps.length === 0) throw new Error("SIDECAR_CORRUPT");
+	for (const step of value.steps) {
+		if (!record(step) || typeof step.profile !== "string" || !profileName.test(step.profile) ||
+			typeof step.key !== "string" || !(policyKeys as readonly string[]).includes(step.key) ||
+			!validPolicyValue(step.key as PolicyKey, step.beforeValue) || !validPolicyValue(step.key as PolicyKey, step.value))
+			throw new Error("SIDECAR_CORRUPT");
+	}
+	return value as PolicyUndoReceipt;
+}
+
+/** Reverse every applied TTSR key to its pre-apply value; each key reports its own outcome. */
+export function undoPolicyReceipt(stateRoot: string, id: string, input: { home: string; ompPath: string }): readonly PolicyUndoRow[] {
+	const absoluteState = absolute(stateRoot), home = absolute(input.home);
+	if (!isAbsolute(input.ompPath)) fail("STATE_UNSAFE");
+	const receipt = readPolicyReceipt(policyReceiptPath(absoluteState, id));
+	if (receipt.id !== id) fail("SIDECAR_CORRUPT");
+	// Last-applied key first, so a partial reversal still leaves the earliest keys for a retry.
+	return [...receipt.steps].reverse().map(step => {
+		const current = readNativeValue(runNativeConfig(input.ompPath, home, step.profile, "get", step.key), step.key);
+		if (current.issue) return { profile: step.profile, key: step.key, status: "REFUSED", reason: current.issue };
+		if (JSON.stringify(current.value) === JSON.stringify(step.beforeValue)) return { profile: step.profile, key: step.key, status: "UNCHANGED" };
+		if (JSON.stringify(current.value) !== JSON.stringify(step.value)) return { profile: step.profile, key: step.key, status: "REFUSED", reason: "FRESH_PLAN" };
+		const setResult = readNativeValue(runNativeConfig(input.ompPath, home, step.profile, "set", step.key, encodePolicyValue(step.beforeValue)), step.key);
+		if (setResult.issue || JSON.stringify(setResult.value) !== JSON.stringify(step.beforeValue))
+			return { profile: step.profile, key: step.key, status: "REFUSED", reason: setResult.issue ?? "POLICY_UNDO_READBACK_FAILED" };
+		return { profile: step.profile, key: step.key, status: "RESTORED" };
+	});
+}
+
 /** Applies only a freshly replanned TTSR policy; the full profile config is backed up before native config writes. */
 export function applyPolicyPlan(plan: PolicyPlan, options: { confirmed: true }): PolicyReceipt {
-	if (options?.confirmed !== true) fail("INVALID_PLAN");
-	const prepared = privatePlans.get(plan);
-	if (!prepared) fail("INVALID_PLAN");
-	if (plan.blockedProfiles.length) fail("DISABLED_RULE_REFUSED");
-	revalidatePolicyPlan(plan, prepared);
-	const stateRoot = prepared.input.stateRoot!, home = prepared.input.home;
-	if (inspectPendingMutations(stateRoot).length) fail("PENDING_RECOVERY");
-	if (!plan.steps.length) return { status: "UNCHANGED", backupId: null, files: 0, keys: 0 };
+ 	if (options?.confirmed !== true) fail("INVALID_PLAN");
+ 	const prepared = privatePlans.get(plan);
+ 	if (!prepared) fail("INVALID_PLAN");
+ 	if (plan.blockedProfiles.length) fail("DISABLED_RULE_REFUSED");
+ 	revalidatePolicyPlan(plan, prepared);
+ 	const stateRoot = prepared.input.stateRoot!, home = prepared.input.home;
+ 	if (inspectPendingMutations(stateRoot).length) fail("PENDING_RECOVERY");
+ 	if (!plan.steps.length) return { status: "UNCHANGED", backupId: null, files: 0, keys: 0 };
 	const originals = changedPolicyProfiles(plan, prepared.profiles);
 	const ompPath = policyOmpPath(prepared.input.ompPath);
 	const backupId = persistPolicyBackup(stateRoot, home, originals);
@@ -413,5 +458,8 @@ export function applyPolicyPlan(plan: PolicyPlan, options: { confirmed: true }):
 		profiles: new Map(prepared.profiles.map(profile => [profile.name, profile])),
 		currentImages: new Map(originals.map(profile => [profile.name, profile.file])), writeStarted: false }
 	const files = applyNativePolicySteps(plan, context);
+	const receipt: PolicyUndoReceipt = { schema_version: 1, id: backupId, scope: "ttsr-policy", created_at: new Date().toISOString(),
+		steps: plan.steps.map(step => ({ profile: step.profile, key: step.key, beforeValue: step.beforeValue, value: step.value })) };
+	writePrivate(policyReceiptPath(stateRoot, backupId), Buffer.from(JSON.stringify(receipt) + "\n"));
 	return { status: "APPLIED", backupId, files, keys: plan.steps.length };
 }

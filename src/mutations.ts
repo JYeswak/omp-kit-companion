@@ -500,11 +500,11 @@ export function inspectPendingMutations(stateRoot: string): PendingInspection[] 
 /** Create and validate the private root before a durable feature backup is written. */
 export function ensureMutationStateRoot(stateRoot: string): void { guarded(() => safeState(stateRoot, true)); }
 export type AuditStatus = "APPLIED" | "RESTORED" | "UNDO_PARTIAL" | "BEFORE" | "AFTER" |
-	"PARTIAL" | "DRIFT" | "ABORTED_BEFORE" | "ABORTED_AFTER_COMPENSATION" | "COMPLETED_AFTER" | "PENDING" | "RECONCILED";
+	"PARTIAL" | "DRIFT" | "ABORTED_BEFORE" | "COMPLETED_AFTER" | "PENDING" | "RECONCILED" | "UNREADABLE";
 export type AuditReport = {
 	id: string; kind: "mutation" | "update"; status: AuditStatus; recordedAt: string;
 	files: AuditFile[]; undoOf?: string; undoneBy?: string; scope?: "kit" | "omp" | "all"; rescanRequired?: true;
-	current?: PendingInspection["state"];
+	current?: PendingInspection["state"]; reason?: string;
 };
 function backupState(file: ReceiptFile): AuditFile["backup"] {
 	if (!file.before || !file.backup) return "NONE";
@@ -556,6 +556,52 @@ function readUpdateReport(path: string): AuditReport {
 	return { id: value.id, kind: "update", status: value.state,
 		recordedAt: lstatSync(path).mtime.toISOString(), files: [], scope: value.scope };
 }
+/** Sidecar receipts (plugin-*, policy-*) are bounded and owner-only like every other receipt read. */
+function readSidecarJson(path: string): Record<string, unknown> {
+	let file: { bytes: Buffer; image: Image } | null = null;
+	try { file = openFile(path); } catch { fail("SIDECAR_CORRUPT"); }
+	if (!file || file.image.mode & 0o077 || file.image.uid !== process.getuid?.()) fail("SIDECAR_PERMISSIONS");
+	if (file.bytes.length > 65536) fail("SIDECAR_OVERSIZED");
+	try {
+		const value: unknown = JSON.parse(file.bytes.toString("utf8"));
+		if (!value || typeof value !== "object") fail("SIDECAR_CORRUPT");
+		return value as Record<string, unknown>;
+	} catch (error) { if (error instanceof Error && error.message.startsWith("SIDECAR_")) throw error; fail("SIDECAR_CORRUPT"); }
+}
+
+/** A plugin link receipt (plugin-<id>.json) as a public audit row; undo restores the recorded links. */
+function pluginReceiptReport(path: string, id: string): AuditReport {
+	const value = readSidecarJson(path);
+	if (value.schema_version !== 1 || value.id !== id || typeof value.created_at !== "string" || !Array.isArray(value.rows)) fail("SIDECAR_CORRUPT");
+	const files: AuditFile[] = [];
+	for (const row of value.rows) {
+		if (!row || typeof row !== "object" || !("profile" in row) || typeof row.profile !== "string" ||
+			!("status" in row) || typeof row.status !== "string") fail("SIDECAR_CORRUPT");
+		const before = "before" in row && row.before !== null && typeof row.before === "object" && "installed" in row.before ? row.before.installed : null;
+		const after = "after" in row && row.after !== null && typeof row.after === "object" && "installed" in row.after ? row.after.installed : null;
+		files.push({ root: "omp", name: row.profile, action: before === true ? (after === true ? "REPLACED" : "DELETED") : "CREATED",
+			backup: "backup" in row && row.backup ? "READY" : "NONE" });
+	}
+	const partial = value.rows.some(row => !!row && typeof row === "object" && "status" in row && (row.status === "PARTIAL" || row.status === "REFUSED"));
+	return { id, kind: "mutation", status: partial ? "PARTIAL" : "APPLIED", recordedAt: value.created_at, files };
+}
+
+/** A TTSR policy reversal receipt (policy-<id>.json) as a public audit row; undo restores the recorded values. */
+function policyReceiptReport(stateRoot: string, path: string, id: string): AuditReport {
+	const value = readSidecarJson(path);
+	if (value.schema_version !== 1 || value.id !== id || value.scope !== "ttsr-policy" || typeof value.created_at !== "string" || !Array.isArray(value.steps) || value.steps.length === 0) fail("SIDECAR_CORRUPT");
+	const profiles: string[] = [];
+	for (const step of value.steps) {
+		if (!step || typeof step !== "object" || !("profile" in step) || typeof step.profile !== "string") fail("SIDECAR_CORRUPT");
+		if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(step.profile)) fail("SIDECAR_CORRUPT");
+		if (!profiles.includes(step.profile)) profiles.push(step.profile);
+	}
+	let backup: AuditFile["backup"] = "READY";
+	try { backup = openFile(join(stateRoot, "policy-backups", id, "manifest.json")) ? "READY" : "MISSING"; }
+	catch { backup = "MISSING"; }
+	return { id, kind: "mutation", status: "APPLIED", recordedAt: value.created_at,
+		files: profiles.map(profile => ({ root: "home", name: profile === "default" ? ".omp/agent/config.yml" : `.omp/profiles/${profile}/agent/config.yml`, action: "REPLACED", backup })) };
+}
 /** No private paths, hashes, receipt internals, or backup contents cross this boundary. */
 export function auditMutations(stateRoot: string): AuditReport[] {
 	return guarded(() => {
@@ -572,6 +618,23 @@ export function auditMutations(stateRoot: string): AuditReport[] {
 					const status = match[2] === "ABORTED_BEFORE" ? "ABORTED_BEFORE" : match[2] === "COMPLETED_AFTER" ? "COMPLETED_AFTER" : "APPLIED";
 					rows.push(receiptReport(path, status));
 				}
+			}
+		}
+		// Sidecar undoable receipts live beside receipts/: plugin links and TTSR policy
+		// reversals. The three commands agree on one receipt: audit lists it, why
+		// explains it, and undo restores it.
+		if (optionalInfo(stateRoot)) for (const name of readdirSync(stateRoot).sort()) {
+			const match = /^(plugin|policy)-([a-f0-9-]+)\.json$/.exec(name);
+			if (!match) continue;
+			const sidecarKind = match[1]!, sidecarId = match[2]!, sidecarPath = join(stateRoot, name);
+			try {
+				receiptId(sidecarId);
+				rows.push(sidecarKind === "plugin" ? pluginReceiptReport(sidecarPath, sidecarId) : policyReceiptReport(stateRoot, sidecarPath, sidecarId));
+			} catch (error) {
+				const reason = error instanceof Error && /^(SIDECAR_CORRUPT|SIDECAR_OVERSIZED|SIDECAR_PERMISSIONS|STATE_UNSAFE)$/.test(error.message) ? error.message : "STATE_UNSAFE";
+				let recordedAt = "";
+				try { recordedAt = lstatSync(sidecarPath).mtime.toISOString(); } catch { continue; }
+				rows.push({ id: sidecarId, kind: "mutation", status: "UNREADABLE", recordedAt, files: [], reason });
 			}
 		}
 		if (optionalInfo(pendingDir(stateRoot))) {

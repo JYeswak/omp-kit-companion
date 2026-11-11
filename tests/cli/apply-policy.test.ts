@@ -2,8 +2,9 @@ import { afterAll, afterEach, expect, test } from "bun:test";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { YAML } from "bun";
-import { applyPolicyPlan, planPolicy } from "../../src/apply-policy.ts";
-import { cleanupCompiledFixture, cleanupPolicyFixtures, compiledFixture, fixture, nativeOmp, nativeTest, nativeTestEnv, nativeConfigValue, policyValues, seedProfile } from "./apply-policy.helpers.ts";
+import { applyPolicyPlan, planPolicy, undoPolicyReceipt } from "../../src/apply-policy.ts";
+import { audit, why } from "../../src/audit.ts";
+import { cleanupCompiledFixture, cleanupPolicyFixtures, compiledFixture, fixture, nativeOmp, nativeTest, nativeTestEnv, nativeConfigValue, policyValues, seedProfile, setNativeValue } from "./apply-policy.helpers.ts";
 afterEach(cleanupPolicyFixtures);
 afterAll(cleanupCompiledFixture);
 
@@ -167,4 +168,31 @@ nativeTest("post-write native policy drift remains partial and retains the backu
 	expect(driftInjected).toBe(true);
 	expect(failure).toMatch(/^POLICY_APPLY_PARTIAL:[0-9a-f-]+:work:enabled$/);
 	expect(nativeConfigValue(f.home, f.project, "work", "ttsr.enabled")).toBe(false);
+});
+
+nativeTest("OUTSIDERDOCS2: a policy apply writes a receipt that undo restores to the prior values", () => {
+	const f = fixture();
+	seedProfile(f.home, "work", { ...policyValues, enabled: false, repeatMode: "once", repeatGap: 8 });
+	const plan = planPolicy({ ...f.input, profiles: ["work"] });
+	expect(plan.steps.map(step => step.key)).toEqual(["enabled", "repeatMode", "repeatGap"]);
+	const applied = applyPolicyPlan(plan, { confirmed: true });
+	expect(applied.status).toBe("APPLIED");
+	const receiptId = applied.backupId!;
+	expect(existsSync(join(f.input.stateRoot, `policy-${receiptId}.json`))).toBe(true);
+	expect(audit(f.input.stateRoot).find(row => row.id === receiptId)?.status).toBe("APPLIED");
+	expect(why(f.input.stateRoot, receiptId).id).toBe(receiptId);
+	expect(undoPolicyReceipt(f.input.stateRoot, receiptId, { home: f.home, ompPath: nativeOmp }))
+		.toEqual(["repeatGap", "repeatMode", "enabled"].map(key => ({ profile: "work", key, status: "RESTORED" })));
+	expect(nativeConfigValue(f.home, f.project, "work", "ttsr.enabled")).toBe(false);
+	expect(nativeConfigValue(f.home, f.project, "work", "ttsr.repeatMode")).toBe("once");
+	expect(nativeConfigValue(f.home, f.project, "work", "ttsr.repeatGap")).toBe(8);
+	expect(undoPolicyReceipt(f.input.stateRoot, receiptId, { home: f.home, ompPath: nativeOmp }))
+		.toEqual(["repeatGap", "repeatMode", "enabled"].map(key => ({ profile: "work", key, status: "UNCHANGED" })));
+	setNativeValue(f.home, f.project, "work", "ttsr.repeatGap", 99);
+	expect(undoPolicyReceipt(f.input.stateRoot, receiptId, { home: f.home, ompPath: nativeOmp }))
+		.toEqual([
+			{ profile: "work", key: "repeatGap", status: "REFUSED", reason: "FRESH_PLAN" },
+			{ profile: "work", key: "repeatMode", status: "UNCHANGED" },
+			{ profile: "work", key: "enabled", status: "UNCHANGED" },
+		]);
 });

@@ -4,8 +4,25 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { join, resolve } from "node:path";
 import { applyRulePlan, planRules } from "../../src/apply-rules.ts";
+import { applyPlugin, planPlugin, type PluginSnapshot } from "../../src/apply-plugin.ts";
 import { audit, undo, why } from "../../src/audit.ts";
 import { applyMutation, planMutation, recoverMutation } from "../../src/mutations.ts";
+
+function pluginRunner() {
+	const state = new Map<string, PluginSnapshot>();
+	const initial = (profile: string): PluginSnapshot => ({ installed: false, target: null,
+		link_path: `/fixture/user-home/${profile}/plugins/node_modules/omp-kit-companion`,
+		plugins_dir_hash: "before-tree", lock_hash: "before-lock", disabled_rules: [], link_kind: "ABSENT" });
+	return { state, initial, runner: {
+		snapshot: (profile: string) => state.get(profile) ?? initial(profile),
+		invoke: (profile: string, args: readonly string[]) => {
+			const before = state.get(profile) ?? initial(profile);
+			state.set(profile, { ...before, installed: true, target: args[2] ?? null, link_kind: "SYMLINK",
+				plugins_dir_hash: "after-tree", lock_hash: "after-lock" });
+			return { code: 0, stdout: "", stderr: "" };
+		},
+	} };
+}
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 function fixture(run: (f: { home: string; source: string; state: string; rules: string; directory: string }) => void): void {
@@ -290,4 +307,42 @@ test("compiled apply to audit and why to byte-verified undo never exposes HOME o
 	const repeated = run(["undo", id, "--yes"]);
 	expect(repeated.code).toBe(2);
 	expect(repeated.envelope.errors[0].code).toBe("ALREADY_UNDONE");
+}));
+
+test("OUTSIDERDOCS2: a plugin receipt appears in audit and is explained by why", () => fixture(f => {
+	const fake = pluginRunner();
+	const receipt = applyPlugin(planPlugin("/fixture/releases/0.2.5",
+		[{ name: "default", configFiles: ["config.yml"] }]), fake.runner, f.state);
+	expect(receipt.rows[0]).toMatchObject({ profile: "default", status: "APPLIED" });
+	// Planted negative: the unfixed audit lists only mutation receipts, so the plugin id is absent.
+	const rows = audit(f.state);
+	expect(rows.map(row => [row.id, row.status])).toContainEqual([receipt.id, "APPLIED"]);
+	const explanation = why(f.state, receipt.id);
+	expect(explanation.id).toBe(receipt.id);
+	expect(explanation.files).toEqual([expect.objectContaining({ root: "omp", name: "default", action: "CREATED" })]);
+	// Control: the public row carries no store path, tree hash, or directory.
+	const publicData = JSON.stringify({ rows, explanation });
+	expect(publicData).not.toContain("/fixture/");
+	expect(publicData).not.toContain("before-tree");
+	expect(publicData).not.toContain(f.directory);
+}));
+
+test("OUTSIDERDOCS2: one unreadable sidecar degrades to its own row and the rest still list", () => fixture(f => {
+	const fake = pluginRunner();
+	const good = applyPlugin(planPlugin("/fixture/releases/0.2.5",
+		[{ name: "default", configFiles: ["config.yml"] }]), fake.runner, f.state);
+	const malformed = "aaaaaaaa-1111-1111-1111-111111111111";
+	const oversized = "bbbbbbbb-2222-2222-2222-222222222222";
+	const exposed = "cccccccc-3333-3333-3333-333333333333";
+	writeFileSync(join(f.state, `policy-${malformed}.json`), "{ malformed", { mode: 0o600 });
+	writeFileSync(join(f.state, `policy-${oversized}.json`), "x".repeat(70000), { mode: 0o600 });
+	writeFileSync(join(f.state, `plugin-${exposed}.json`), JSON.stringify({ schema_version: 1, id: exposed, rows: [] }), { mode: 0o644 });
+	const rows = audit(f.state);
+	expect(rows.map(row => [row.id, row.status])).toContainEqual([good.id, "APPLIED"]);
+	const byId = new Map(rows.map(row => [row.id, row]));
+	expect(byId.get(malformed)).toMatchObject({ status: "UNREADABLE", reason: "SIDECAR_CORRUPT" });
+	expect(byId.get(oversized)).toMatchObject({ status: "UNREADABLE", reason: "SIDECAR_OVERSIZED" });
+	expect(byId.get(exposed)).toMatchObject({ status: "UNREADABLE", reason: "SIDECAR_PERMISSIONS" });
+	expect(why(f.state, good.id).id).toBe(good.id);
+	expect(why(f.state, malformed)).toMatchObject({ status: "UNREADABLE", reason: "SIDECAR_CORRUPT" });
 }));

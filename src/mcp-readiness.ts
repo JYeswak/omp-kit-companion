@@ -118,11 +118,11 @@ function projectShadow(project: string | undefined, name: string): "none" | "sha
 /** No OMP invocation, migration, user writes, subprocesses, server startup, or env-value exposure. */
 export function inspectMcpReadiness(input: McpReadinessInput): McpReadinessReport {
  const name = input.profile;
- if (!PROFILE_NAME.test(name) || name === "default" || name === "." || name === ".." || name.endsWith(".")) return report(name, "DEGRADED", "A named existing profile is required", "Select a named OMP profile; the default profile is not inspected by this optional command.");
- const home = resolve(input.home);
- const segments = [".omp", "profiles", name, "agent"];
- if (!safeDirectory(home, segments)) return report(name, "DEGRADED", "Named profile removed, absent, or unsafe", "Select an existing named profile; inspection never creates one.");
- const agent = join(home, ...segments);
+	if (!PROFILE_NAME.test(name) || name === "." || name === ".." || name.endsWith(".")) return report(name, "DEGRADED", "A valid profile name is required", "Select an existing OMP profile name.");
+	const home = resolve(input.home);
+	const segments = name === "default" ? [".omp", "agent"] : [".omp", "profiles", name, "agent"];
+	const agent = join(home, ...segments);
+	if (!safeDirectory(home, segments)) return report(name, "DEGRADED", "Profile removed, absent, or unsafe", "Select an existing OMP profile; inspection never creates one.");
  const filenames = ["mcp.json", ".mcp.json"];
  const files = filenames.filter(file => state(join(agent, file)) !== "missing");
  if (!files.length) return report(name, "DEGRADED", "No native MCP config in selected profile", `List importable servers with omp-kit doctor --scope mcp --sources, then omp-kit apply mcp --from SOURCE --servers NAMES --profiles ${name} --plan.`);

@@ -23,7 +23,7 @@ import { saveCommand } from "./save.ts";
 import { convergeCommand } from "./converge.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
 import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, readPluginReceipt, undoPlugin, type PluginProfile, type PluginRunner, type PluginSnapshot, type RegexBudgetSelection } from "./apply-plugin.ts";
-import { applyPolicyPlan, inspectPolicySettings, planPolicy } from "./apply-policy.ts";
+import { applyPolicyPlan, inspectPolicySettings, planPolicy, undoPolicyReceipt } from "./apply-policy.ts";
 import { applyRulePlan, planRules } from "./apply-rules.ts";
 import { applyMigration, planMigration, planMigrationMutation } from "./migrate.ts";
 import { applyRepairPlan, planDeepDoctor, planRepair, type RepairDecision } from "./repair.ts";
@@ -947,8 +947,8 @@ async function memoryInventory(request: ParsedCommand): Promise<CliResult> {
 
 function mcpInventory(request: ParsedCommand): CliResult {
 	const selected = request.flags.get("--profile");
-	if (typeof selected !== "string" || selected === "default" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(selected) || selected.endsWith(".")) {
-		return refusal("PROFILE_REQUIRED", "MCP inventory requires an explicitly selected existing named profile", "Use omp-kit doctor --scope mcp --profile NAME, never the default profile.");
+	if (typeof selected !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(selected) || selected.endsWith(".")) {
+		return refusal("PROFILE_REQUIRED", "MCP inventory requires an explicitly selected profile", "Use omp-kit doctor --scope mcp --profile NAME, or --profile default for the default profile.");
 	}
 	const kit = kitIdentity();
 	const home = process.env.HOME;
@@ -966,9 +966,10 @@ function mcpInventory(request: ParsedCommand): CliResult {
 		}], verification: "UNVERIFIED" };
 	}
 	try {
-		if (!statSync(join(home, ".omp", "profiles", selected, "agent")).isDirectory()) throw new Error("not a directory");
+		const agentDir = selected === "default" ? join(home, ".omp", "agent") : join(home, ".omp", "profiles", selected, "agent");
+		if (!statSync(agentDir).isDirectory()) throw new Error("not a directory");
 	} catch {
-		return refusal("PROFILE_UNAVAILABLE", "Selected named MCP profile does not exist as a directory", "Select an existing named OMP profile; this command never creates one.");
+		return refusal("PROFILE_UNAVAILABLE", "Selected MCP profile does not exist as a directory", "Select an existing OMP profile; this command never creates one.");
 	}
 	const report = inspectMcpReadiness({ home, profile: selected, project: process.cwd(), ompPath: omp.location,
 		...(process.env.PATH ? { pathEnv: process.env.PATH } : {}), ...(receiptStateRoot() ? { stateRoot: receiptStateRoot()! } : {}),
@@ -1197,18 +1198,32 @@ function receiptCommand(request: ParsedCommand): CliResult {
 		if (request.command.name === "why")
 			return { code: 0, data: { overall: "UNVERIFIED", receipt: why(stateRoot, request.argument) }, verification: "UNVERIFIED" };
 		if (request.command.name === "undo") {
-			const pluginPath = join(stateRoot, `plugin-${request.argument}.json`);
-			if (existsSync(pluginPath)) {
-				const omp = resolveOmpIdentity(process.env).launcher;
-				const home = process.env.HOME;
-				if (!home || !isAbsolute(home) || resolve(home) !== home || !isAbsolute(omp))
-					return refusal("OMP_UNAVAILABLE", "A canonical HOME and OMP launcher are required for plugin undo", "Restore the original profile paths and retry the recorded plugin undo.");
-				const receipt = readPluginReceipt(pluginPath);
-				const storeHash = receipt.rows.find(row => row.after?.package_hash)?.after?.package_hash ??
-					receipt.rows.find(row => row.before?.package_hash)?.before?.package_hash ?? "";
-				const runner = createPluginRunner(omp, home, pluginProfiles(home), receipt.store, storeHash);
-				const rows = undoPlugin(receipt, runner, stateRoot);
-				return { code: rows.some(row => row.status === "REFUSED") ? 1 : 0, data: { overall: "UNVERIFIED", status: rows.some(row => row.status === "REFUSED") ? "PARTIAL" : "RESTORED", receipt_id: request.argument, rows }, verification: "UNVERIFIED" };
+			// Sidecar ids are UUIDs; anything else skips these branches untouched for why() to judge.
+			if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(request.argument)) {
+				const pluginPath = join(stateRoot, `plugin-${request.argument}.json`);
+				if (existsSync(pluginPath)) {
+					const omp = resolveOmpIdentity(process.env).launcher;
+					const home = process.env.HOME;
+					if (!home || !isAbsolute(home) || resolve(home) !== home || !isAbsolute(omp))
+						return refusal("OMP_UNAVAILABLE", "A canonical HOME and OMP launcher are required for plugin undo", "Restore the original profile paths and retry the recorded plugin undo.");
+					const receipt = readPluginReceipt(pluginPath, request.argument);
+					const storeHash = receipt.rows.find(row => row.after?.package_hash)?.after?.package_hash ??
+						receipt.rows.find(row => row.before?.package_hash)?.before?.package_hash ?? "";
+					const runner = createPluginRunner(omp, home, pluginProfiles(home), receipt.store, storeHash);
+					const rows = undoPlugin(receipt, runner, stateRoot);
+					return { code: rows.some(row => row.status === "REFUSED") ? 1 : 0, data: { overall: "UNVERIFIED", status: rows.some(row => row.status === "REFUSED") ? "PARTIAL" : "RESTORED", receipt_id: request.argument, rows }, verification: "UNVERIFIED" };
+				}
+				const policyPath = join(stateRoot, `policy-${request.argument}.json`);
+				if (existsSync(policyPath)) {
+					const omp = resolveOmpIdentity(process.env).launcher;
+					const home = process.env.HOME;
+					if (!home || !isAbsolute(home) || resolve(home) !== home || !isAbsolute(omp))
+						return refusal("OMP_UNAVAILABLE", "A canonical HOME and OMP launcher are required for policy undo", "Restore the recorded TTSR values and retry the recorded policy undo.");
+					const rows = undoPolicyReceipt(stateRoot, request.argument, { home, ompPath: omp });
+					const refused = rows.some(row => row.status === "REFUSED");
+					const restored = rows.some(row => row.status === "RESTORED");
+					return { code: refused ? 1 : 0, data: { overall: "UNVERIFIED", status: refused ? "PARTIAL" : restored ? "RESTORED" : "UNCHANGED", receipt_id: request.argument, rows }, verification: "UNVERIFIED" };
+				}
 			}
 		}
 		const recorded = why(stateRoot, request.argument);
@@ -1240,7 +1255,8 @@ function receiptCommand(request: ParsedCommand): CliResult {
 				remediation: "Inspect audit and current postimages; no automatic rollback or receipt deletion occurred.",
 			}], verification: "UNVERIFIED" };
 		const safe = ["BACKUP_CORRUPT", "FRESH_PLAN", "ALREADY_UNDONE", "STATE_UNSAFE", "UNSAFE_PATH",
-			"LOCK_BUSY", "INVALID_PLAN", "KIT_RECEIPT_INVALID", "POSTIMAGE_CHANGED", "PRIOR_RELEASE_CHANGED"];
+			"LOCK_BUSY", "INVALID_PLAN", "KIT_RECEIPT_INVALID", "POSTIMAGE_CHANGED", "PRIOR_RELEASE_CHANGED",
+			"SIDECAR_CORRUPT", "SIDECAR_OVERSIZED", "SIDECAR_PERMISSIONS"];
 		return refusal(safe.includes(code) ? code : "RECEIPT_UNAVAILABLE",
 			"Receipt cannot be verified or undone without changing unverified state",
 			"Inspect the private receipt and current postimages; do not force replacement.");
@@ -1525,6 +1541,18 @@ function pluginCommand(request: ParsedCommand): CliResult {
 	if (!isAbsolute(store) || resolve(store) !== store) return refusal("INVALID_STORE", "Plugin store must be an absolute canonical package root", "Pass --store ABSOLUTE_DIR containing package.json, rules/, and extensions/.");
 	const allProfiles = pluginProfiles(home), namedProfiles = allProfiles.filter(profile => profile.name !== "default");
 	const selected = request.flags.get("--profiles");
+	// The bare form plans the default profile only when the listing succeeded and
+	// names no profiles; it never silently plans every named profile. A failed
+	// listing and a non-empty one both refuse with the exact selecting flags.
+	if (selected === undefined && !request.flags.has("--include-default")) {
+		let namedListed = true;
+		try { readdirSync(join(home, ".omp", "profiles")); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") namedListed = false; }
+		if (!namedListed)
+			return refusal("INVALID_PROFILES", "Named OMP profile listing failed", "Use --profiles all or --profiles NAME[,NAME], or pass --include-default for the default profile.");
+		if (namedProfiles.length)
+			return refusal("INVALID_PROFILES", "No OMP profiles were selected", "Use --profiles all or --profiles NAME[,NAME], or pass --include-default for the default profile.");
+	}
 	let selectedNames = namedProfiles.map(profile => profile.name);
 	if (selected !== undefined) {
 		if (typeof selected !== "string") return refusal("INVALID_PROFILES", "Profile selection must be a name list or all", "Use --profiles all or --profiles NAME[,NAME].");
@@ -1535,10 +1563,10 @@ function pluginCommand(request: ParsedCommand): CliResult {
 		return refusal("INVALID_PROFILES", "Profile selection must name distinct existing named profiles", "Use --profiles all, --profiles NAME[,NAME], or --include-default for the default profile.");
 	const existingNames = new Set(namedProfiles.map(profile => profile.name));
 	if (selectedNames.some(name => !existingNames.has(name))) return refusal("INVALID_PROFILES", "A selected named profile does not exist", "Select existing OMP profiles with --profiles all or --profiles NAME[,NAME].");
-	const includeDefault = request.flags.has("--include-default");
+	const includeDefault = request.flags.has("--include-default") || (selected === undefined && namedProfiles.length === 0);
 	const selectedSet = new Set(selectedNames);
 	const profiles = allProfiles.filter(profile => profile.name === "default" ? includeDefault : selectedSet.has(profile.name));
-	if (!profiles.length) return refusal("INVALID_PROFILES", "No OMP profiles were selected", "Select named profiles or pass --include-default.");
+	if (!profiles.length) return refusal("INVALID_PROFILES", "No OMP profiles were selected", "Select named profiles with --profiles all or --profiles NAME[,NAME], or pass --include-default for the default profile.");
 	const omp = resolveOmpIdentity(process.env).launcher;
 	if (!omp || !isAbsolute(omp)) return refusal("OMP_UNAVAILABLE", "The OMP launcher is unavailable", "Install OMP or provide the canonical launcher; no profile was changed.");
 	try {
@@ -2012,14 +2040,14 @@ function policyCommand(request: ParsedCommand): CliResult {
 		const plan = planPolicy({ root, home, stateRoot, project: process.cwd(), profileConfigHome: process.env.XDG_CONFIG_HOME, ...(profiles === undefined ? {} : { profiles }), includeDefault: request.flags.has("--include-default") });
 		const data = { overall: plan.blockedProfiles.length ? "FAIL" : "UNVERIFIED", action: "PLAN", profiles: plan.profiles,
 			steps: plan.steps.map(step => ({ profile: step.profile, path: step.path, key: "ttsr." + step.key, command: step.command })),
-			blocked_profiles: plan.blockedProfiles, backup_id: null as string | null };
+			blocked_profiles: plan.blockedProfiles, backup_id: null as string | null, receipt_id: null as string | null };
 		if (plan.blockedProfiles.length) return { code: 2, data, errors: [{
 			code: "DISABLED_RULE_REFUSED", message: "Selected profiles contain disabled names that policy would re-enable",
 			remediation: "Keep disabled names unchanged; generic --yes cannot authorize a re-enable.",
 		}], verification: "UNVERIFIED" };
 		if (!request.flags.has("--apply")) return { code: 0, data, verification: "UNVERIFIED" };
 		const result = applyPolicyPlan(plan, { confirmed: true });
-		return { code: 0, data: { ...data, action: result.status, backup_id: result.backupId },
+		return { code: 0, data: { ...data, action: result.status, backup_id: result.backupId, receipt_id: result.backupId },
 			verification: "UNVERIFIED" };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "";
@@ -2873,7 +2901,8 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			const state = linux ? systemctlState(job, defaultRunner) : null;
 			const loaded = print !== null ? launchdLoaded(print) : (state !== null && (state.enabled || state.active));
 			return { name, label: job.label, kind: job.kind, launcher, installed: installed !== null, loaded,
-				lastExit: print?.lastExit ?? null, runs: print?.runs ?? null, last_run_at: readJobFinishedAt(home, name) };
+				lastExit: print?.lastExit ?? null, runs: print?.runs ?? null, last_run_at: readJobFinishedAt(home, name),
+				note: loaded && installed === null ? "Loaded in the live domain but not installed by this kit; list inspects without changing it." : null };
 		}) }, verification: "UNVERIFIED" };
 	}
 	if (sub === "install") {

@@ -244,3 +244,12 @@ test("doctor reports START_FAILED for a server failing at session start, OK for 
 });
 
 afterAll(() => cleanupAllOwnedTmp());
+
+test("OUTSIDERDOCS2: the default profile reads its own agent directory", () => {
+ const f = fixture(); const dir = join(f.home, ".omp", "agent"); mkdirSync(dir, { recursive: true }); const exe = f.binary(); f.config(dir, exe);
+ const report = inspectMcpReadiness({ home: f.home, profile: "default", project: f.project, pathEnv: f.bin });
+ expect(report.status).toBe("UNVERIFIED");
+ expect(report.servers).toEqual([expect.objectContaining({ name: "fixture", configured: true, startup_ready: "NOT_PROBED", actually_callable: "NOT_PROBED" })]);
+ expect(JSON.stringify(report)).not.toContain("sensitive-config-value");
+ expect(JSON.stringify(report)).not.toContain(exe);
+});
