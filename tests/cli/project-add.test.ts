@@ -188,6 +188,50 @@ if (args[0] === "send") {
 	if (args[2] === "keys") { process.exit(0); }
 	process.exit(1);
 }
+if (args[0] === "ctl") {
+	// Native-agent-API dispatch used by deliverToTernSeat: the last
+	// string.char(...) group carries the payload as UTF-8 bytes, the first
+	// the block id. An idle live seat adopts a goal synchronously.
+	const lua = args.slice(3).join(" ");
+	const parts = lua.split("string.char(");
+	if (parts.length < 3) process.exit(1);
+	const first = parts[1].slice(0, parts[1].indexOf(")"));
+	const last = parts[parts.length - 1].slice(0, parts[parts.length - 1].indexOf(")"));
+	const block = Buffer.from(first.split(",").map((s) => Number(s.trim()))).toString("utf8");
+	const payload = Buffer.from(last.split(",").map((s) => Number(s.trim()))).toString("utf8");
+	const file = dir + "/session-" + block + ".jsonl";
+	let parent = "m1";
+	let prev = null;
+	try {
+		const lines = fs.readFileSync(file, "utf8").split("\\n").filter((line) => line.trim() !== "");
+		const tip = JSON.parse(lines[lines.length - 1]);
+		if (tip !== null && typeof tip === "object" && typeof tip.id === "string" && tip.id !== "") parent = tip.id;
+		const n = lines.length;
+		for (let i = lines.length - 1; i >= 0; i--) {
+			const record = JSON.parse(lines[i]);
+			const goal = record !== null && typeof record === "object" && record.type === "mode_change" && record.mode === "goal"
+				? (record.data !== null && typeof record.data === "object" ? record.data.goal : null) : null;
+			if (goal !== null && typeof goal === "object" && typeof goal.id === "string" && typeof goal.objective === "string") {
+				prev = { id: goal.id, objective: goal.objective, n };
+				break;
+			}
+		}
+	} catch { /* virgin journal: the assistant root stays the parent */ }
+	const stamp = "g" + String(fs.readFileSync(file, "utf8").split("\\n").filter((line) => line.trim() !== "").length + 1);
+	if (payload === "/goal drop") {
+		const entry = { type: "mode_change", id: stamp, parentId: parent, mode: "goal",
+		data: { goal: { id: prev === null ? "goal-none" : prev.id, objective: prev === null ? "" : prev.objective, status: "dropped" } } };
+		fs.appendFileSync(file, JSON.stringify(entry) + "\\n");
+		process.exit(0);
+	}
+	if (process.env.PROJECTGOAL_NO_SET === "1" && payload.startsWith("/goal set ")) process.exit(0);
+	const objective = payload.startsWith("/goal set ") ? payload.slice("/goal set ".length).trim() : null;
+	const entry = objective === null
+		? { type: "message", id: stamp, parentId: parent, message: { role: "user", content: [{ type: "text", text: payload }] } }
+		: { type: "mode_change", id: stamp, parentId: parent, mode: "goal", data: { goal: { id: "goal-" + stamp, objective, status: "active" } } };
+	fs.appendFileSync(file, JSON.stringify(entry) + "\\n");
+	process.exit(0);
+}
 if (args[0] === "close") {
 	fs.appendFileSync(dir + "/closed.jsonl", args.slice(1).join(" ") + "\\n");
 	process.exit(0);
@@ -214,7 +258,8 @@ if (args[0] === "agents" && args[1] === "resolve-pane") {
 	const id = pane.startsWith("tern:") ? pane.slice(5) : pane;
 	const name = id === process.env.DIR_BLOCK ? "TurquoisePuma" : id === process.env.WORKER_BLOCK ? "FoggyValley" : null;
 	if (name === null) { console.error("unknown pane " + pane); process.exit(1); }
-	console.log(JSON.stringify({ agent_name: name, pane_id: pane }));
+	const project = String(args[args.indexOf("--project") + 1] ?? "");
+	console.log(JSON.stringify({ agent_name: name, pane_id: pane, project_key: project, binding: "legacy-unverified" }));
 	process.exit(0);
 }
 process.exit(1);
@@ -560,3 +605,146 @@ test("PROJECTSTATUS108 odd id beyond 2^53 resolves and reads alive", async () =>
 		h.cleanup();
 	}
 }, fixtureDeadlineS(60) * 1000);
+
+async function goalFixture(): Promise<Fixture> {
+	const f = await fixture();
+	writeFileSync(f.rosterPath, `{\n  "chiefs": { "lead": "PeachLeopard" },\n  "sessions": {\n    "other": { "director": "D", "workers": [] }\n  }\n}\n`);
+	writeFileSync(f.fleetWatchPath, JSON.stringify({ enabled: true, intervalSeconds: 120, noDecisionChecks: 5,
+		sessions: [{ session: "other", coordinatorPane: "tern:9", coordinatorSession: "other", repo: "/other", workerPanes: [] }] }, null, 2) + "\n");
+	const applied = await cli(f, ["project", "add", f.repo, "--session", "skillgrowth", "--workers", "1", "--profile", "codex", "--mission", "skillgrowth:104", "--goal", "Grow the skill library", "--orientation", "Take goals from the director", "--apply", "--yes", "--json"]);
+	expect(applied.code, applied.out + applied.err).toBe(0);
+	return f;
+}
+
+test("PROJECTGOAL1 replace: drop proven, set proven, previous text reported, status shows the new goal", async () => {
+	const f = await goalFixture();
+	try {
+		const journalBefore = readFileSync(f.sessionFile(f.directorBlock), "utf8");
+		// Plan is the default and changes nothing.
+		const planned = await cli(f, ["project", "goal", "skillgrowth", "--set", "Own skillgrowth: land the queue", "--plan", "--json"]);
+		expect(planned.code, planned.out + planned.err).toBe(0);
+		const plan = JSON.parse(planned.out).data;
+		expect(plan.action).toBe("PLAN");
+		expect(plan.seat).toBe(`tern:${f.directorBlock}`);
+		expect(plan.current_goal).toBe("Grow the skill library");
+		expect(plan.new_goal).toBe("Own skillgrowth: land the queue");
+		expect(plan.deliveries).toEqual([{ seat: `tern:${f.directorBlock}`, kind: "goal-drop" }, { seat: `tern:${f.directorBlock}`, kind: "goal-set" }]);
+		expect(readFileSync(f.sessionFile(f.directorBlock), "utf8")).toBe(journalBefore);
+		// Apply drops the old goal, then sets the new one, each proven from the journal.
+		const changed = await cli(f, ["project", "goal", "skillgrowth", "--set", "Own skillgrowth: land the queue", "--apply", "--yes", "--json"]);
+		expect(changed.code, changed.out + changed.err).toBe(0);
+		const done = JSON.parse(changed.out).data;
+		expect(done.action).toBe("APPLIED");
+		expect(done.seat).toBe(`tern:${f.directorBlock}`);
+		expect(done.previous_goal).toBe("Grow the skill library");
+		expect(typeof done.goal_id).toBe("string");
+		expect(done.dropped).toBe(true);
+		const journal = readFileSync(f.sessionFile(f.directorBlock), "utf8");
+		expect(journal).toContain('"status":"dropped"');
+		expect(journal).toContain('"objective":"Own skillgrowth: land the queue"');
+		// Status reads the new active goal from the journal.
+		const status = await cli(f, ["project", "status", "skillgrowth", "--json"]);
+		expect(status.code, status.out + status.err).toBe(0);
+		expect(JSON.parse(status.out).data.seats[0].activeGoal).toBe("Own skillgrowth: land the queue");
+	} finally {
+		f.killDecoys();
+		f.mail.server.stop(true);
+	}
+}, fixtureDeadlineS(300) * 1000);
+
+test("PROJECTGOAL1 set on a goal-less seat sends no drop", async () => {
+	const f = await goalFixture();
+	try {
+		// A restarted seat whose journal carries no active goal.
+		const lines = readFileSync(f.sessionFile(f.directorBlock), "utf8").split("\n");
+		writeFileSync(f.sessionFile(f.directorBlock), lines.slice(0, 2).join("\n") + "\n");
+		const planned = await cli(f, ["project", "goal", "skillgrowth", "--set", "Own skillgrowth: land the queue", "--plan", "--json"]);
+		expect(planned.code, planned.out + planned.err).toBe(0);
+		expect(JSON.parse(planned.out).data.current_goal).toBe(null);
+		expect(JSON.parse(planned.out).data.deliveries).toEqual([{ seat: `tern:${f.directorBlock}`, kind: "goal-set" }]);
+		const changed = await cli(f, ["project", "goal", "skillgrowth", "--set", "Own skillgrowth: land the queue", "--apply", "--yes", "--json"]);
+		expect(changed.code, changed.out + changed.err).toBe(0);
+		const done = JSON.parse(changed.out).data;
+		expect(done.action).toBe("APPLIED");
+		expect(done.previous_goal).toBe(null);
+		expect(done.dropped).toBe(false);
+		expect(typeof done.goal_id).toBe("string");
+		expect(readFileSync(f.sessionFile(f.directorBlock), "utf8")).not.toContain('"status":"dropped"');
+	} finally {
+		f.killDecoys();
+		f.mail.server.stop(true);
+	}
+}, fixtureDeadlineS(300) * 1000);
+
+test("PROJECTGOAL1 a paused seat is refused with zero sends", async () => {
+	const f = await goalFixture();
+	try {
+		const path = f.sessionFile(f.directorBlock);
+		const before = readFileSync(path, "utf8");
+		const tip = JSON.parse(before.split("\n").filter((line) => line.trim() !== "").pop()!);
+		writeFileSync(path, before + JSON.stringify({ type: "mode_change", id: "gp1", parentId: tip.id, mode: "goal_paused" }) + "\n");
+		const changed = await cli(f, ["project", "goal", "skillgrowth", "--set", "Own skillgrowth: land the queue", "--apply", "--yes", "--json"]);
+		expect(changed.code).toBe(2);
+		expect(JSON.parse(changed.out).errors[0].code).toBe("GATE_PAUSED");
+		expect(readFileSync(path, "utf8").split("\n").filter((line) => line.trim() !== "").length)
+			.toBe(before.split("\n").filter((line) => line.trim() !== "").length + 1);
+	} finally {
+		f.killDecoys();
+		f.mail.server.stop(true);
+	}
+}, fixtureDeadlineS(300) * 1000);
+
+test("PROJECTGOAL1 goal text refusals: empty, over cap, and a line starting with /", async () => {
+	const f = await goalFixture();
+	try {
+		const before = readFileSync(f.sessionFile(f.directorBlock), "utf8");
+		const empty = await cli(f, ["project", "goal", "skillgrowth", "--set", "   ", "--apply", "--yes", "--json"]);
+		expect(empty.code).toBe(2);
+		expect(JSON.parse(empty.out).errors[0].code).toBe("PROJECT_GOAL_INVALID");
+		const slashed = await cli(f, ["project", "goal", "skillgrowth", "--set", "Legit line\n/goal drop", "--apply", "--yes", "--json"]);
+		expect(slashed.code).toBe(2);
+		expect(JSON.parse(slashed.out).errors[0].code).toBe("PROJECT_GOAL_INVALID");
+		const crSlashed = await cli(f, ["project", "goal", "skillgrowth", "--set", "Legit line\r/goal drop", "--apply", "--yes", "--json"]);
+		expect(crSlashed.code).toBe(2);
+		expect(JSON.parse(crSlashed.out).errors[0].code).toBe("PROJECT_GOAL_INVALID");
+		const indented = await cli(f, ["project", "goal", "skillgrowth", "--set", "Legit line\n   /goal drop", "--apply", "--yes", "--json"]);
+		expect(indented.code).toBe(2);
+		expect(JSON.parse(indented.out).errors[0].code).toBe("PROJECT_GOAL_INVALID");
+		const nul = join(f.dir, "nul-goal.txt");
+		writeFileSync(nul, "Own skillgrowth: " + String.fromCharCode(0) + "land the queue");
+		const nulled = await cli(f, ["project", "goal", "skillgrowth", "--from-file", nul, "--apply", "--yes", "--json"]);
+		expect(nulled.code).toBe(2);
+		expect(JSON.parse(nulled.out).errors[0].code).toBe("PROJECT_GOAL_INVALID");
+		const big = join(f.dir, "big-goal.txt");
+		writeFileSync(big, "x".repeat(16 * 1024 + 1));
+		const capped = await cli(f, ["project", "goal", "skillgrowth", "--from-file", big, "--apply", "--yes", "--json"]);
+		expect(capped.code).toBe(2);
+		expect(JSON.parse(capped.out).errors[0].code).toBe("PROJECT_GOAL_INVALID");
+		const missing = await cli(f, ["project", "goal", "nosuch", "--set", "Something", "--apply", "--yes", "--json"]);
+		expect(missing.code).toBe(2);
+		expect(JSON.parse(missing.out).errors[0].code).toBe("PROJECT_SESSION_UNKNOWN");
+		expect(readFileSync(f.sessionFile(f.directorBlock), "utf8")).toBe(before);
+	} finally {
+		f.killDecoys();
+		f.mail.server.stop(true);
+	}
+}, fixtureDeadlineS(300) * 1000);
+
+test("PROJECTGOAL1 set unproven after a proven drop reports the partial state", async () => {
+	const f = await goalFixture();
+	try {
+		f.env.PROJECTGOAL_NO_SET = "1";
+		const changed = await cli(f, ["project", "goal", "skillgrowth", "--set", "Own skillgrowth: land the queue", "--apply", "--yes", "--json"]);
+		expect(changed.code).toBe(1);
+		const errors = JSON.parse(changed.out).errors;
+		expect(errors[0].code).toBe("PROJECT_GOAL_UNPROVEN");
+		expect(errors[0].message).toContain("drop proven but set unproven");
+		expect(errors[0].message).toContain("goal-less");
+		const journal = readFileSync(f.sessionFile(f.directorBlock), "utf8");
+		expect(journal).toContain('"status":"dropped"');
+		expect(journal).not.toContain('"objective":"Own skillgrowth: land the queue"');
+	} finally {
+		f.killDecoys();
+		f.mail.server.stop(true);
+	}
+}, fixtureDeadlineS(300) * 1000);

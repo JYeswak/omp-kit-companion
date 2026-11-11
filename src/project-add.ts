@@ -5,9 +5,9 @@
 import { closeSync, existsSync, fdatasyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { deliverFirstSeatGoal } from "./send.ts";
+import { buildNativeSendTurn, deliverFirstSeatGoal, deliverToTernSeat, ternCtlBin, type TernSendGate } from "./send.ts";
 import type { TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
-import { observeTernSeat } from "./plane-tern.ts";
+import { defaultTernIo, identifyTernSeat, observeTernSeat, parseSessionView, readSessionView, ternPaneId } from "./plane-tern.ts";
 import { callAgentMail } from "./fleet-guard/reservations.ts";
 import { fleetWatchConfigPath } from "./service.ts";
 import { loadFleetWatchConfig, type FleetWatchSession } from "./fleet-watch.ts";
@@ -674,6 +674,439 @@ export async function undoProjectAdd(input: { receiptId: string; env: NodeJS.Pro
 	}
 	return { ok: true, undone: { session: receipt.session, files: receipt.files.map((file) => file.path), panes: closed, agents: receipt.agents } };
 }
+
+
+/** PROJECTGOAL1: replace the director seat's goal in place. No registry field, no receipt, no new state. */
+export const PROJECT_GOAL_MAX_BYTES = 16 * 1024;
+
+export interface ProjectGoalInput {
+	session: string;
+	set?: string;
+	fromFile?: string;
+	env: NodeJS.ProcessEnv;
+	deps?: ProjectAddDeps;
+	pollMs?: number;
+	deadlineMs?: number;
+}
+
+export interface ProjectGoalPlan {
+	session: string;
+	seat: string;
+	currentGoal: string | null;
+	newGoal: string;
+	deliveries: { seat: string; kind: "goal-drop" | "goal-set" }[];
+	gate: { paused: boolean; pullEnabled: boolean | null };
+}
+
+export interface ProjectGoalApplied {
+	status: "APPLIED";
+	session: string;
+	seat: string;
+	previousGoal: string | null;
+	goalId: string;
+	dropped: boolean;
+}
+
+function failGoal(code: string, detail: string, remediation: string): { ok: false; code: string; detail: string; remediation: string } {
+	return { ok: false, code, detail, remediation };
+}
+
+function readGoalFileCapped(path: string): { ok: true; text: string } | { ok: false; code: string; detail: string; remediation: string } {
+	let size: number;
+	try {
+		size = statSync(path).size;
+	} catch {
+		return { ok: false, code: "PROJECT_GOAL_INVALID", detail: `goal file ${path} is unreadable`, remediation: "Pass a readable file via --from-file FILE." };
+	}
+	if (!Number.isFinite(size) || size > PROJECT_GOAL_MAX_BYTES) {
+		return { ok: false, code: "PROJECT_GOAL_INVALID", detail: `goal file ${path} is over the 16 KiB cap`, remediation: "Pass a goal text of at most 16 KiB." };
+	}
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch {
+		return { ok: false, code: "PROJECT_GOAL_INVALID", detail: `goal file ${path} is unreadable`, remediation: "Pass a readable file via --from-file FILE." };
+	}
+	if (Buffer.byteLength(text, "utf8") > PROJECT_GOAL_MAX_BYTES) {
+		return { ok: false, code: "PROJECT_GOAL_INVALID", detail: `goal file ${path} is over the 16 KiB cap`, remediation: "Pass a goal text of at most 16 KiB." };
+	}
+	return { ok: true, text };
+}
+
+/** Goal text from exactly one source, capped, with no second slash command. */
+export function resolveGoalText(input: { set?: string; fromFile?: string }): { ok: true; text: string } | { ok: false; code: string; detail: string; remediation: string } {
+	if ((input.set === undefined && input.fromFile === undefined) || (input.set !== undefined && input.fromFile !== undefined)) {
+		return failGoal("PROJECT_GOAL_INVALID", "goal needs exactly one source", "Pass the new goal via --set TEXT or --from-file FILE.");
+	}
+	let raw: string;
+	if (typeof input.set === "string") {
+		raw = input.set;
+	} else if (typeof input.fromFile === "string" && input.fromFile.trim() !== "") {
+		const read = readGoalFileCapped(input.fromFile);
+		if (!read.ok) return read;
+		raw = read.text;
+	} else {
+		return failGoal("PROJECT_GOAL_INVALID", "goal must not be blank", "Pass the new goal via --set TEXT or --from-file FILE.");
+	}
+	const text = raw.trim();
+	if (text === "") return failGoal("PROJECT_GOAL_INVALID", "goal must not be blank", "Pass the new goal via --set TEXT or --from-file FILE.");
+	if (text.includes(String.fromCharCode(0))) return failGoal("PROJECT_GOAL_INVALID", "goal must not contain a NUL byte", "Pass plain text with no NUL bytes.");
+	if (Buffer.byteLength(text, "utf8") > PROJECT_GOAL_MAX_BYTES) {
+		return failGoal("PROJECT_GOAL_INVALID", "goal is over the 16 KiB cap", "Pass a goal text of at most 16 KiB.");
+	}
+	// CR-only Mac-classic breaks count as line breaks, like LF and CRLF.
+	for (const paragraph of text.split("\n")) {
+		for (const line of paragraph.split("\r")) {
+			if (line.trimStart().startsWith("/")) {
+				return failGoal("PROJECT_GOAL_INVALID", "goal text carries a second slash command", "Pass a single goal objective with no line starting with /.");
+			}
+		}
+	}
+	return { ok: true, text };
+}
+
+function locateGoalDirector(input: ProjectGoalInput, home: string): { ok: true; entry: FleetWatchSession; paths: ProjectAddPaths } | { ok: false; code: string; detail: string; remediation: string } {
+	if (!SESSION_NAME.test(input.session)) {
+		return failGoal("PROJECT_SESSION_INVALID", `session ${JSON.stringify(input.session)} must match [a-z0-9][a-z0-9-]*`, "Pick the lowercase session name the project was added with.");
+	}
+	const paths = resolveProjectAddPaths(input.env, home);
+	let config: { sessions: FleetWatchSession[] };
+	try {
+		config = loadFleetWatchConfig(paths.fleetWatchPath);
+	} catch (error) {
+		return failGoal("PROJECT_FLEET_WATCH_INVALID", `fleet-watch config ${paths.fleetWatchPath} is invalid: ${error instanceof Error ? error.message : String(error)}`, "Repair the file; the goal was not changed.");
+	}
+	const entry = config.sessions.find((row) => row.session === input.session) ?? null;
+	if (entry === null) return failGoal("PROJECT_SESSION_UNKNOWN", `session ${input.session} is not a managed project`, "Add it first with project add.");
+	const bare = (pane: string): string | null => {
+		const text = pane.startsWith("tern:") ? pane.slice("tern:".length) : pane;
+		return /^[0-9]+$/.test(text) ? text : null;
+	};
+	if (bare(entry.coordinatorPane) === null || entry.workerPanes.some((pane) => bare(pane) === null)) {
+		return failGoal("PROJECT_PANES_UNRECORDED", `session ${input.session} has no recorded panes yet`, "Wait for project add to finish recording them.");
+	}
+	return { ok: true, entry, paths };
+}
+
+interface DirectorGoalState {
+	sessionFile: string;
+	activeGoal: { id: string; objective: string } | null;
+	paused: boolean;
+}
+
+function goalRecordOf(value: unknown): { mode: unknown; goal: { id?: unknown; objective?: unknown; status?: unknown } | null } | null {
+	if (typeof value !== "object" || value === null) return null;
+	const record = value as Record<string, unknown>;
+	if (record.type !== "mode_change" || typeof record.mode !== "string") return null;
+	const data = (typeof record.data === "object" && record.data !== null ? record.data : null) as Record<string, unknown> | null;
+	const goal = (data !== null && typeof data.goal === "object" && data.goal !== null ? data.goal : null) as Record<string, unknown> | null;
+	return { mode: record.mode, goal: goal === null ? null : { id: goal.id, objective: goal.objective, status: goal.status } };
+}
+
+/** Latest goal-mode record wins: an active goal, or a paused marker. */
+function scanGoalState(text: string): { activeGoal: { id: string; objective: string } | null; paused: boolean } {
+	let last: { mode: string; id: string; objective: string; status: string } | null = null;
+	for (const line of text.split("\n")) {
+		if (line.trim() === "") continue;
+		let value: unknown;
+		try {
+			value = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		const record = goalRecordOf(value);
+		if (record === null || (record.mode !== "goal" && record.mode !== "goal_paused")) continue;
+		if (typeof value !== "object" || value === null) continue;
+		const id = (value as Record<string, unknown>).id;
+		if (typeof id !== "string" || id === "") continue;
+		if (record.mode === "goal_paused") {
+			last = { mode: "goal_paused", id, objective: "", status: "paused" };
+			continue;
+		}
+		const goal = record.goal;
+		if (goal === null || typeof goal.id !== "string" || goal.id === "" || typeof goal.objective !== "string" || typeof goal.status !== "string") continue;
+		last = { mode: "goal", id: goal.id, objective: goal.objective, status: goal.status };
+	}
+	if (last === null) return { activeGoal: null, paused: false };
+	if (last.mode === "goal_paused") return { activeGoal: null, paused: true };
+	return last.status === "active" ? { activeGoal: { id: last.id, objective: last.objective }, paused: false } : { activeGoal: null, paused: false };
+}
+
+async function readDirectorGoalState(input: { session: string; pane: string; repo: string; env: NodeJS.ProcessEnv; io: TernObserverIo }): Promise<{ ok: true; state: DirectorGoalState } | { ok: false; code: string; detail: string; remediation: string }> {
+	const seat: TernSeatBinding = { session: input.session, pane: input.pane, windowKey: "", cwd: input.repo, identityProject: input.repo };
+	let observation;
+	try {
+		observation = await observeTernSeat(seat, input.io, {});
+	} catch (error) {
+		return failGoal("OBSERVATION_UNKNOWN", `seat observation failed: ${error instanceof Error ? error.message : String(error)}`, "Inspect the seat host; the goal was not changed.");
+	}
+	if (observation.state === "DEAD") return failGoal("SEAT_DEAD", "seat pane is dead; zero sends", "Restart the seat, then set the goal again.");
+	const sessionFile = observation.sessionFile;
+	if (sessionFile === null) return failGoal("OBSERVATION_UNKNOWN", "seat has no readable session file; zero sends", "Inspect the seat host; the goal was not changed.");
+	let text: string | null;
+	try {
+		text = input.io.readSessionFile(sessionFile);
+	} catch {
+		text = null;
+	}
+	if (text === null) return failGoal("OBSERVATION_UNKNOWN", "seat session file is unreadable; zero sends", "Inspect the seat host; the goal was not changed.");
+	const scanned = scanGoalState(text);
+	return { ok: true, state: { sessionFile, activeGoal: scanned.activeGoal, paused: scanned.paused } };
+}
+
+function goalGateOf(entry: FleetWatchSession, paused: boolean): TernSendGate {
+	return { ...(paused ? { paused: true as const } : {}), ...(entry.pullEnabled === false ? { pullEnabled: false as const } : {}) };
+}
+export async function planProjectGoal(input: ProjectGoalInput): Promise<{ ok: true; plan: ProjectGoalPlan } | { ok: false; code: string; detail: string; remediation: string }> {
+	const home = input.env.HOME ?? "";
+	if (!home || !isAbsolute(home) || resolve(home) !== home) {
+		return failGoal("PROJECT_HOME_UNAVAILABLE", "a canonical absolute HOME is required", "Set HOME to an absolute path with no symlinks.");
+	}
+	const text = resolveGoalText(input);
+	if (!text.ok) return text;
+	const located = locateGoalDirector(input, home);
+	if (!located.ok) return located;
+	const pane = located.entry.coordinatorPane;
+	const io = input.deps?.io ?? defaultTernIo();
+	const read = await readDirectorGoalState({ session: input.session, pane, repo: located.entry.repo, env: input.env, io });
+	if (!read.ok) return read;
+	return {
+		ok: true,
+		plan: {
+			session: input.session, seat: pane,
+			currentGoal: read.state.activeGoal === null ? null : read.state.activeGoal.objective,
+			newGoal: text.text,
+			deliveries: read.state.activeGoal === null
+				? [{ seat: pane, kind: "goal-set" as const }]
+				: [{ seat: pane, kind: "goal-drop" as const }, { seat: pane, kind: "goal-set" as const }],
+			gate: { paused: read.state.paused, pullEnabled: located.entry.pullEnabled ?? null },
+		},
+	};
+}
+
+interface GoalDropProof {
+	sessionFile: string;
+	offset: number;
+	entryId: string;
+}
+
+function recordIdsOf(text: string): Set<string> {
+	const ids = new Set<string>();
+	for (const line of text.split("\n")) {
+		if (line.trim() === "") continue;
+		try {
+			const value = JSON.parse(line) as { id?: unknown };
+			if (typeof value === "object" && value !== null && typeof value.id === "string" && value.id !== "") ids.add(value.id);
+		} catch {
+			/* Unparseable tail lines never prove. */
+		}
+	}
+	return ids;
+}
+
+/** A post-cursor mode_change is goal-less when it leaves goal mode or retires the goal. */
+function isGoallessModeChange(value: unknown): boolean {
+	const record = goalRecordOf(value);
+	if (record === null) return false;
+	if (record.mode !== "goal") return true;
+	return record.goal !== null && typeof record.goal.status === "string" && record.goal.status !== "active";
+}
+
+/**
+ * PROJECTGOAL1 drop leg: send `/goal drop` through the native turn and prove
+ * the goal-less mode_change from the bound journal. Gate first (zero sends on
+ * refuse), then the same observe/identify/binding checks the proven send path
+ * performs, then a cursor-pinned poll for a goal-less entry descending from
+ * the pre-send journal.
+ */
+export async function deliverGoalDrop(input: {
+	seat: TernSeatBinding;
+	io: TernObserverIo;
+	gate?: TernSendGate;
+	env?: NodeJS.ProcessEnv;
+	pollMs?: number;
+	deadlineMs?: number;
+	wait?: (ms: number) => Promise<void>;
+}): Promise<{ ok: true; proof: GoalDropProof } | { ok: false; code: string; detail: string; remediation: string }> {
+	const failed = (code: string, detail: string, remediation: string) => ({ ok: false as const, code, detail, remediation });
+	const gate = input.gate ?? {};
+	if (gate.paused === true) return failed("GATE_PAUSED", "seat is paused; zero sends", "Unpause the seat, then set the goal again.");
+	if (gate.pullEnabled === false) return failed("GATE_PULL_DISABLED", "pullEnabled is false; zero sends", "Re-enable pulls for the project, then set the goal again.");
+	const io = input.io;
+	const pollMs = input.pollMs ?? 50;
+	const deadlineMs = input.deadlineMs ?? 20_000;
+	const wait = input.wait ?? (async (ms: number) => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); });
+	const paneId = ternPaneId(input.seat.pane);
+	if (typeof input.seat.session !== "string" || !input.seat.session.trim() || paneId === null) {
+		return failed("PLANE_SEAT_UNBOUND", "seat needs a configured session and exact pane id; zero sends", "Repair the project registration; the goal was not changed.");
+	}
+	let observation;
+	try {
+		observation = await observeTernSeat(input.seat, io, {});
+	} catch (error) {
+		return failed("OBSERVATION_UNKNOWN", `seat observation failed: ${error instanceof Error ? error.message : String(error)}`, "Inspect the seat host; the goal was not changed.");
+	}
+	if (observation.state === "DEAD") return failed("SEAT_DEAD", "seat pane is dead; zero sends", "Restart the seat, then set the goal again.");
+	if (observation.state !== "IDLE" || observation.runtimeBinding === null) {
+		return failed("OBSERVATION_UNKNOWN", `seat not provably idle (${observation.reason ?? "unknown"}); zero sends`, "Wait for the seat to settle, then set the goal again.");
+	}
+	if (typeof input.seat.identityProject !== "string") {
+		return failed("PLANE_SEAT_UNBOUND", "caller Agent Mail project is unavailable; zero sends", "Repair the project registration; the goal was not changed.");
+	}
+	const identity = await identifyTernSeat({ ...input.seat, identityProject: input.seat.identityProject }, io, {});
+	if (identity.status !== "IDENTIFIED" || identity.runtimeBinding === null) {
+		return failed(identity.status === "REFUSED" ? identity.code : "IDENTITY_UNKNOWN", `seat identity not bound (${identity.reason}); zero sends`, "Inspect the seat and Agent Mail; the goal was not changed.");
+	}
+	const ob = observation.runtimeBinding;
+	const ib = identity.runtimeBinding;
+	if (ob.sessionFile !== ib.sessionFile || ob.sessionUuid !== ib.sessionUuid
+		|| ob.paneId !== ib.paneId || ob.sessionId !== ib.sessionId
+		|| ob.foregroundPid !== ib.foregroundPid || ob.foregroundStarted !== ib.foregroundStarted) {
+		return failed("SEAT_REBOUND", "observe/identify runtime bindings differ; seat moved, zero sends", "Wait for the seat to settle, then set the goal again.");
+	}
+	const sessionFile = ob.sessionFile;
+	const journalView = readSessionView(io, sessionFile);
+	if (journalView === null) return failed("ELIGIBILITY_UNKNOWN", "session file unreadable; zero sends", "Inspect the seat host; the goal was not changed.");
+	const journal = parseSessionView(journalView);
+	if (journal.status !== "KNOWN") return failed("ELIGIBILITY_UNSETTLED", "turn not settled; zero sends", "Wait for the seat to settle, then set the goal again.");
+	const cursorBytes = journalView.fileSize;
+	const knownIds = recordIdsOf(journalView.tail.toString("utf8"));
+	const lua = buildNativeSendTurn(paneId, "/goal drop");
+	if (lua === null) return failed("BLOCK_UNWIREABLE", "block not a bare decimal pane id; zero sends", "Repair the project registration; the goal was not changed.");
+	let dispatched = false;
+	try {
+		dispatched = io.run([ternCtlBin(), "ctl", "carly", "lua", lua]).code === 0;
+	} catch {
+		dispatched = false;
+	}
+	if (!dispatched) return failed("SEND_AMBIGUOUS", "drop dispatch failed, effect unknown; proof never attempted", "Inspect the seat; the goal was not changed.");
+	const polls = Math.max(1, Math.ceil(deadlineMs / pollMs));
+	for (let poll = 0; poll < polls; poll++) {
+		if (poll > 0) await wait(pollMs);
+		let size: number | null = null;
+		try {
+			size = statSync(sessionFile).size;
+		} catch {
+			size = null;
+		}
+		if (size === null || size < cursorBytes) {
+			return failed("PROJECT_GOAL_UNPROVEN", "journal shrank during drop proof; the drop is unproven", "Inspect the seat journal; the goal was not changed.");
+		}
+		if (size === cursorBytes) continue;
+		const current = readSessionView(io, sessionFile);
+		if (current === null) continue;
+		const bytes = current.tail;
+		const base = current.tailStart;
+		const parents = new Map<string, string | null>();
+		const start = Math.max(0, cursorBytes - base);
+		let position = start;
+		while (position < bytes.length) {
+			const newline = bytes.indexOf(0x0a, position);
+			if (newline < 0) break;
+			if (newline > position) {
+				try {
+					const record = JSON.parse(bytes.subarray(position, newline).toString("utf8")) as { id?: unknown; parentId?: unknown };
+					if (typeof record === "object" && record !== null && typeof record.id === "string" && record.id !== "") {
+						parents.set(record.id, typeof record.parentId === "string" ? record.parentId : null);
+						if (isGoallessModeChange(record)) {
+							let ancestor: string | null = typeof record.parentId === "string" ? record.parentId : null;
+							for (let hops = 0; hops <= parents.size; hops++) {
+								if (ancestor === null) break;
+								if (knownIds.has(ancestor)) {
+									return { ok: true, proof: { sessionFile, offset: base + position, entryId: record.id } };
+								}
+								if (!parents.has(ancestor)) break;
+								ancestor = parents.get(ancestor) ?? null;
+							}
+						}
+					}
+				} catch {
+					/* Unparseable tail lines never prove. */
+				}
+			}
+			position = newline + 1;
+		}
+	}
+	return failed("PROJECT_GOAL_UNPROVEN", "drop unproven: no goal-less mode_change after the drop send", "Inspect the seat journal; the goal was not changed.");
+}
+
+function readGoalIdAt(input: { io: TernObserverIo; sessionFile: string; offset: number }): string | null {
+	let text: string | null;
+	try {
+		text = input.io.readSessionFile(input.sessionFile);
+	} catch {
+		return null;
+	}
+	if (text === null) return null;
+	let position = 0;
+	for (const line of text.split("\n")) {
+		if (line === "") {
+			position += 1;
+			continue;
+		}
+		if (position === input.offset) {
+			try {
+				const record = JSON.parse(line) as { data?: { goal?: { id?: unknown } } };
+				const id = record?.data?.goal?.id;
+				return typeof id === "string" && id !== "" ? id : null;
+			} catch {
+				return null;
+			}
+		}
+		position += Buffer.byteLength(line, "utf8") + 1;
+	}
+	return null;
+}
+
+export async function applyProjectGoal(input: ProjectGoalInput): Promise<{ ok: true; result: ProjectGoalApplied } | { ok: false; code: string; detail: string; remediation: string; partial?: boolean }> {
+	const home = input.env.HOME ?? "";
+	if (!home || !isAbsolute(home) || resolve(home) !== home) {
+		return failGoal("PROJECT_HOME_UNAVAILABLE", "a canonical absolute HOME is required", "Set HOME to an absolute path with no symlinks.");
+	}
+	const text = resolveGoalText(input);
+	if (!text.ok) return text;
+	const located = locateGoalDirector(input, home);
+	if (!located.ok) return located;
+	const pane = located.entry.coordinatorPane;
+	const io = input.deps?.io ?? defaultTernIo();
+	const wait = input.deps?.wait;
+	const pollMs = input.pollMs ?? 50;
+	const deadlineMs = input.deadlineMs ?? 20_000;
+	const read = await readDirectorGoalState({ session: input.session, pane, repo: located.entry.repo, env: input.env, io });
+	if (!read.ok) return read;
+	const gate = goalGateOf(located.entry, read.state.paused);
+	if (gate.paused === true) return failGoal("GATE_PAUSED", "seat is paused; zero sends", "Unpause the seat, then set the goal again.");
+	if (gate.pullEnabled === false) return failGoal("GATE_PULL_DISABLED", "pullEnabled is false; zero sends", "Re-enable pulls for the project, then set the goal again.");
+	const previousGoal = read.state.activeGoal === null ? null : read.state.activeGoal.objective;
+	let dropped = false;
+	if (read.state.activeGoal !== null) {
+		const drop = await deliverGoalDrop({
+			seat: { session: input.session, pane, windowKey: "", cwd: located.entry.repo, identityProject: located.entry.repo },
+			io, gate, env: input.env, pollMs, deadlineMs, ...(wait === undefined ? {} : { wait }),
+		});
+		if (!drop.ok) return drop;
+		dropped = true;
+	}
+	const goalText = `/goal set ${text.text}`;
+	const sent = await deliverToTernSeat({
+		seat: { session: input.session, pane, windowKey: "", cwd: located.entry.repo, identityProject: located.entry.repo }, text: goalText,
+		dropDir: located.paths.stateRoot, io, env: input.env,
+		pollMs, deadlineMs, untilDeliveredMs: deadlineMs, gate, ...(wait === undefined ? {} : { wait }),
+	});
+	if (sent.status !== "OK" || sent.sessionFile === null) {
+		const reread = await readDirectorGoalState({ session: input.session, pane, repo: located.entry.repo, env: input.env, io });
+		const state = reread.ok
+			? (reread.state.activeGoal === null ? "the seat is now goal-less" : `the seat still carries goal ${JSON.stringify(reread.state.activeGoal.objective)}`)
+			: "the seat state could not be re-read";
+		return { ...failGoal("PROJECT_GOAL_UNPROVEN", `drop proven but set unproven: ${sent.detail}; ${state}`, "Inspect the seat journal, then set the goal again with project goal."), partial: true };
+	}
+	const goalId = readGoalIdAt({ io, sessionFile: sent.sessionFile, offset: sent.offset ?? -1 });
+	if (goalId === null) {
+		return { ...failGoal("PROJECT_GOAL_UNPROVEN", `set proven at offset ${sent.offset ?? 0} but the new goal id could not be read back`, "Inspect the seat journal, then set the goal again with project goal."), partial: true };
+	}
+	return { ok: true, result: { status: "APPLIED", session: input.session, seat: pane, previousGoal, goalId, dropped } };
+}
+
 
 export interface ProjectSeatStatus {
 	role: "director" | "worker";

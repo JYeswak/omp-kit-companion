@@ -57,7 +57,7 @@ import { claudeSaveServiceConfig, claudeSaveUserConfigPath, runClaudeSaveJob, ru
 import { ensureMutationStateRoot, writePrivate, type PendingInspection } from "./mutations.ts";
 import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
 import { inspectProjectTrust } from "./project-trust.ts";
-import { applyProjectAdd, planProjectAdd, projectStatus, undoProjectAdd } from "./project-add.ts";
+import { applyProjectAdd, applyProjectGoal, planProjectAdd, planProjectGoal, projectStatus, undoProjectAdd } from "./project-add.ts";
 import { PROFILE_RECIPE_KINDS, renderRecipe } from "./profile-recipes.ts";
 import { confirmMutation, renderOutput, type PresentationResult } from "./output.ts";
 import { redactFullTestCause, runFullTest, type FullTestCause, type FullTestReport } from "./full-test-runner.ts";
@@ -1738,8 +1738,39 @@ async function projectStatusCommand(request: ParsedCommand): Promise<CliResult> 
 	}
 }
 
+async function projectGoalCommand(request: ParsedCommand): Promise<CliResult> {
+	const home = process.env.HOME;
+	if (!home || !isAbsolute(home) || resolve(home) !== home) {
+		return refusal("PROJECT_HOME_UNAVAILABLE", "A canonical absolute HOME is required", "Set HOME to an absolute path with no symlinks.");
+	}
+	try {
+		const session = request.argument;
+		if (!session) return refusal("PROJECT_SESSION_MISSING", "A session name is required", "Pass project goal SESSION --set TEXT.");
+		const set = request.flags.get("--set");
+		const fromFile = request.flags.get("--from-file");
+		const goal = { session: session.trim(), set: typeof set === "string" ? set : undefined, fromFile: typeof fromFile === "string" ? fromFile : undefined, env: process.env };
+		if (!request.flags.has("--apply")) {
+			const planned = await planProjectGoal(goal);
+			if (!planned.ok) {
+				return { code: 2, data: { overall: "FAIL", scope: "project", action: "PLAN" }, errors: [{ code: planned.code, message: planned.detail, remediation: planned.remediation }], verification: "UNVERIFIED" };
+			}
+			return { code: 0, data: { overall: "UNVERIFIED", scope: "project", action: "PLAN", session: planned.plan.session, seat: planned.plan.seat, current_goal: planned.plan.currentGoal, new_goal: planned.plan.newGoal, deliveries: planned.plan.deliveries, gate: planned.plan.gate }, verification: "UNVERIFIED" };
+		}
+		const applied = await applyProjectGoal(goal);
+		if (!applied.ok) {
+			return { code: applied.partial === true ? 1 : 2, data: { overall: "FAIL", scope: "project", action: "APPLY" }, errors: [{ code: applied.code, message: applied.detail, remediation: applied.remediation }], verification: "UNVERIFIED" };
+		}
+		return { code: 0, data: { overall: "OK", scope: "project", action: "APPLIED", session: applied.result.session, seat: applied.result.seat, previous_goal: applied.result.previousGoal, goal_id: applied.result.goalId, dropped: applied.result.dropped }, verification: "UNVERIFIED" };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		const code = /^[A-Z][A-Z_0-9]+$/.test(message) ? message : "PROJECT_FAILED";
+		return refusal(code, `project goal failed: ${message.slice(0, 300)}`, "Inspect the fleet-watch config and seat host; the goal was not changed.");
+	}
+}
+
 registerCommandHandler("project add", projectAddCommand);
 registerCommandHandler("project status", projectStatusCommand);
+registerCommandHandler("project goal", projectGoalCommand);
 
 function extensionCommand(request: ParsedCommand): CliResult {
 	const root = kitIdentity().release.root, home = process.env.HOME;

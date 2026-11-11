@@ -654,7 +654,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--project", value: "PATH", repeatable: true, description: "Project root to check; repeat for a fleet; defaults to the current directory" },
 		], example: "omp-kit mission anchor --project ~/Developer/omp-kit --json", runnable: false, dataSchema: missionData },
 	], example: "omp-kit mission validate --json", runnable: false },
-	{ name: "project", description: "Register an omp-kit project, start named seats and report their wake health, with receipt and undo", usage: "project add REPO --session NAME [--workers N] [--profile P] [--model M] [--mission S:N] [--goal TEXT] [--orientation TEXT] [--plan|--apply] [--undo RECEIPT] [--yes] | project status SESSION [--json]", flags: [], subcommands: [
+	{ name: "project", description: "Register an omp-kit project, start named seats (receipted, undoable) and report their wake health, replace the director goal", usage: "project add REPO --session NAME [--workers N] [--profile P] [--model M] [--mission S:N] [--goal TEXT] [--orientation TEXT] [--plan|--apply] [--undo RECEIPT] [--yes] | project status SESSION [--json] | project goal SESSION --set TEXT|--from-file FILE [--plan|--apply] [--json]", flags: [], subcommands: [
 		{ name: "add", description: "Mint seats, write the repo opt-in, roster and admission routes, start seats, deliver the first goal with proof", usage: "project add REPO --session NAME [--workers N] [--profile P] [--model M] [--mission S:N] [--goal TEXT] [--orientation TEXT] [--plan|--apply] [--undo RECEIPT] [--yes]", argument: "REPO", flags: [...planApply,
 			{ name: "--session", value: "NAME", description: "Fleet session name for the project (lowercase, digits and dashes)" },
 			{ name: "--workers", value: "N", description: "Worker seats beside the director (0-16, default 1)" },
@@ -666,6 +666,10 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--undo", value: "RECEIPT", description: "Restore every store byte-identically and close the created seats" },
 		], example: "omp-kit project add ~/Developer/skill-library-growth --session skillgrowth --workers 1 --profile codex --apply --json", runnable: false, mutation: true },
 		{ name: "status", description: "Report per-seat identity, aliveness, goal and latest mail wake outcome/timestamp, plus bead counts and last commit", usage: "project status SESSION [--json]", argument: "SESSION", flags: [], example: "omp-kit project status skillgrowth --json", runnable: false },
+		{ name: "goal", description: "Replace the director seat's goal through the gated send path, proving drop then set from the journal", usage: "project goal SESSION --set TEXT|--from-file FILE [--plan|--apply]", argument: "SESSION", flags: [...planApply,
+			{ name: "--set", value: "TEXT", description: "Replacement goal objective, at most 16 KiB, no line starting with /" },
+			{ name: "--from-file", value: "FILE", description: "Read the replacement goal from FILE (at most 16 KiB)" },
+		], example: "omp-kit project goal skillgrowth --set 'Own skillgrowth: land the queue' --apply --json", runnable: false, mutation: true },
 	], example: "omp-kit project status skillgrowth --json", runnable: false },
 	{ name: "drain", description: "List landed-but-open beads and stale in-progress claims from a tracker", usage: "drain close-queue|stale-claims --db PATH [--repo DIR] [--json]", flags: [], subcommands: [
 		{ name: "close-queue", description: "Open beads named by a landing commit with no grader verdict since", usage: "drain close-queue --db PATH --repo DIR [--json]", flags: [
