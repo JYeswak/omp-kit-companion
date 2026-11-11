@@ -29,7 +29,7 @@
  * This grammar is defined only here: scripts/box-lint.ts runs parseBoxes and unreplayableReason
  * for bead_lint's create and update admission (REPLAYABLE1 ompkit-fp72.135.3.71).
  */
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { run, type RunResult } from "./kitlib/run.ts";
@@ -117,19 +117,31 @@ function isGateNotRequiredFailure(argv: string[], stderr: string): boolean {
  * so a natively-resolved br is known by construction. An unavailable `am`, or a refusal that is not
  * an unknown agent (a path that is no mail project at all), is inconclusive: the acts keep their own
  * errors. Only a positive AGENT_NOT_FOUND refuses up front, before any replay, with the remedy.
+ * VERIFYMAILPROBE1 (ompkit-1ra0d.174): one probe per repo and actor per process, bounded at 10 s. A
+ * timeout is already inconclusive (known), so waiting 60 s per verify only multiplied an exhausted
+ * Agent Mail pool's latency across concurrent verifies (bead-replayable parity hung 120 s, 2026-11-11).
  */
+const MAIL_PROBE_DEADLINE_S = 10;
+const mailProbeCache = new Map<string, Promise<{ known: boolean; detail: string }>>();
 async function verifierKnownToTargetMail(repo: string, actor: string, env: Record<string, string>): Promise<{ known: boolean; detail: string }> {
 	if (resolveRealBr(env.PATH ?? process.env.PATH ?? "").skipped.length === 0) return { known: true, detail: "native br: no tracker guard" };
-	let result: RunResult;
-	try {
-		result = await run(["am", "agents", "show", "--project", repo, "--json", actor], { cwd: repo, deadline_s: 60, env });
-	} catch {
-		return { known: true, detail: "Agent Mail unreadable: the acts report their own errors" };
-	}
-	const err = text(result.stderr).slice(0, 200);
-	if (result.rc === 0) return { known: true, detail: "verifier is registered" };
-	if (err.includes("AGENT_NOT_FOUND")) return { known: false, detail: err };
-	return { known: true, detail: "no mail project or agent verdict: the acts report their own errors" };
+	const key = `${repo}\u0000${actor}`;
+	const cached = mailProbeCache.get(key);
+	if (cached !== undefined) return cached;
+	const probe = (async () => {
+		let result: RunResult;
+		try {
+			result = await run(["am", "agents", "show", "--project", repo, "--json", actor], { cwd: repo, deadline_s: MAIL_PROBE_DEADLINE_S, env });
+		} catch {
+			return { known: true, detail: "Agent Mail unreadable: the acts report their own errors" };
+		}
+		const err = text(result.stderr).slice(0, 200);
+		if (result.rc === 0) return { known: true, detail: "verifier is registered" };
+		if (err.includes("AGENT_NOT_FOUND")) return { known: false, detail: err };
+		return { known: true, detail: "no mail project or agent verdict: the acts report their own errors" };
+	})();
+	mailProbeCache.set(key, probe);
+	return probe;
 }
 
 /**
@@ -463,6 +475,24 @@ function prependProvisionedBin(lockDir: string, env: Record<string, string>, log
 	log.push(`deps prepended ${bin} to the replay PATH`);
 }
 /**
+ * VERIFYNODEPS1 (ompkit-1ra0d.172): only a package.json that declares dependencies needs a lockfile.
+ * A manifest with no dependency map (the kit's own repo) has nothing to resolve, so its boxes run as before.
+ * An unreadable or unparsable manifest counts as declaring them: it cannot be proven dependency-free.
+ */
+export function declaresDependencies(path: string): boolean {
+	if (!existsSync(path)) return false;
+	try {
+		const manifest = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+		return ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].some((key) => {
+			const map = manifest[key];
+			return map !== null && typeof map === "object" && Object.keys(map).length > 0;
+		});
+	} catch {
+		return true;
+	}
+}
+
+/**
  * Ensure one box command's JS dependencies are provisioned. Null: no JS runtime involved, so
  * nothing to do. Otherwise the box cwd's nearest lockfile dir up to the export root, installed
  * once per directory (cache). A package.json with no covering lockfile is the named refusal,
@@ -478,7 +508,7 @@ async function ensureBoxDeps(command: string, exportDir: string, env: Record<str
 	let hasPackageJson = false;
 	let hasDenoConfig = false;
 	for (;;) {
-		if (existsSync(join(dir, "package.json"))) hasPackageJson = true;
+		if (declaresDependencies(join(dir, "package.json"))) hasPackageJson = true;
 		if (existsSync(join(dir, "deno.json")) || existsSync(join(dir, "deno.jsonc"))) hasDenoConfig = true;
 		const lock = lockKind(dir);
 		if (lock !== null) {
