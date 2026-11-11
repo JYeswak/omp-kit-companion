@@ -1,0 +1,1 @@
+- Kit update now refreshes the installed pre-push fresh gate from the released copy, so a released push-gate fix is live after install without reinstalling it by hand.

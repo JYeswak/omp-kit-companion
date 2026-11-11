@@ -13,6 +13,7 @@ import {
 	inspectHooks,
 	installedHookRepos,
 	liveHookFreshnessIo,
+	liveHookRefreshIo,
 	parseCheckMembers,
 	refreshFleetHooks,
 } from "../../src/hook-refresh.ts";
@@ -475,5 +476,67 @@ test("hooks doctor runs both installer checks: fresh, stale, missing and restore
 		expect((await inspect()).filter(row => row.evidence?.installer).map(row => row.status)).toEqual(["OK", "OK"]);
 	} finally {
 		rmSync(repo, { recursive: true, force: true });
+	}
+}, fixtureDeadlineS(120) * 1000);
+
+test("PUSHGATEREFRESH1: a stale installed pre-push gate is rewritten by the same refresh pass; a current one is left byte-identical", async () => {
+	const root = resolve(import.meta.dir, "../..");
+	const scratch = ownedTmp("hookrefresh-pushgate", { bead: "ompkit-1ra0d.120" });
+	try {
+		const gated = join(scratch.path, "gated");
+		const ungated = join(scratch.path, "ungated");
+		const env = gitEnv(scratch.path);
+		for (const repo of [gated, ungated]) {
+			expect(runFixture(["git", "init", "-q", repo], { cwd: scratch.path, env }).rc).toBe(0);
+			const installed = await run(["sh", join(root, "scripts/install-commit-msg-bead.sh"), repo], { deadline_s: fixtureDeadlineS(120) });
+			expect(installed.rc).toBe(0);
+		}
+		const hooksOf = (repo: string): string => {
+			const rev = runFixture(["git", "-C", repo, "rev-parse", "--git-path", "hooks"], { cwd: scratch.path, env });
+			expect(rev.rc).toBe(0);
+			return resolve(repo, Buffer.from(rev.stdout).toString("utf8").trim());
+		};
+		const src = join(root, "scripts/pre-push-gate.sh");
+		const gateDest = join(hooksOf(gated), "hooks.d/pre-push/40-omp-kit-fresh-gate");
+		mkdirSync(join(gateDest, ".."), { recursive: true });
+		writeFileSync(gateDest, "# stale installed gate\n");
+		expect((await run(["sh", join(root, "scripts/install-pre-push-gate.sh"), "--check", gated], { deadline_s: fixtureDeadlineS() })).rc).toBe(3);
+		// Planted negative: the old refresh (bead installer only) leaves the stale gate in place.
+		const oldRefresh = await run(["sh", join(root, "scripts/install-commit-msg-bead.sh"), gated], { deadline_s: fixtureDeadlineS(120) });
+		expect(oldRefresh.rc).toBe(0);
+		expect(readFileSync(gateDest, "utf8")).toBe("# stale installed gate\n");
+		const live = liveHookRefreshIo(scratch.path, root);
+		const both = [{ repo: gated, source: "t:pushgate" }, { repo: ungated, source: "t:pushgate" }];
+		const io: HookRefreshIo = { ...live, repos: () => both, pullRepos: () => both };
+		const gatedRel = "hooks.d/pre-push/40-omp-kit-fresh-gate";
+		const rows = await censusHookFreshness(io);
+		const gatedRow = rows.find((row) => row.repo === resolve(gated))!;
+		expect(gatedRow.state).toBe("STALE");
+		expect(gatedRow.stale).toContain(gatedRel);
+		const ungatedRow = rows.find((row) => row.repo === resolve(ungated))!;
+		expect(ungatedRow.state).toBe("FRESH");
+		expect(ungatedRow.stale).toEqual([]);
+		const report = await refreshFleetHooks(io);
+		expect(report.failed).toBe(0);
+		expect(report.refreshed).toBe(1);
+		expect(report.fresh).toBe(1);
+		const result = report.results.find((row) => row.repo === resolve(gated))!;
+		expect(result.status).toBe("REFRESHED");
+		const member = result.members.find((row) => row.member === gatedRel)!;
+		expect(member.before_sha256).toBe(sha("# stale installed gate\n"));
+		expect(member.after_sha256).toBe(sha(readFileSync(src)));
+		expect(member.refreshed).toBe(true);
+		expect(readFileSync(gateDest)).toEqual(readFileSync(src));
+		expect(existsSync(join(hooksOf(ungated), "hooks.d/pre-push/40-omp-kit-fresh-gate"))).toBe(false);
+		// A current gate is left byte-identical: the next pass is FRESH and changes nothing.
+		const before = sha(readFileSync(gateDest));
+		const gatedOnly: HookRefreshIo = { ...io, pullRepos: () => [{ repo: gated, source: "t:pushgate" }] };
+		const again = await refreshFleetHooks(gatedOnly);
+		expect(again.failed).toBe(0);
+		expect(again.refreshed).toBe(0);
+		expect(again.fresh).toBe(1);
+		expect(sha(readFileSync(gateDest))).toBe(before);
+	} finally {
+		scratch.cleanup();
 	}
 }, fixtureDeadlineS(120) * 1000);

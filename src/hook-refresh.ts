@@ -22,49 +22,70 @@
 //   active release's scripts/install-commit-msg-bead.sh --check names as
 //   MISSING or STALE. The installer is the one member list; nothing here
 //   mirrors it by hand.
+// - PUSHGATEREFRESH1 (ompkit-1ra0d.120): the same pass also covers the
+//   pre-push fresh gate install-pre-push-gate.sh installs. Both installers'
+//   --check outputs merge into the one member list; a stale installed gate is
+//   rewritten from the release copy, while a repo that never had the gate
+//   installed is never planted one (its MISSING lines are not drift).
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { lstatSync, readFileSync, realpathSync, readdirSync, statSync } from "node:fs";
+import { copyFileSync, lstatSync, readFileSync, realpathSync, readdirSync, statSync } from "node:fs";
+import { run, runSync } from "./kitlib/run.ts";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { Finding } from "./diagnostics.ts";
 import { fleetWatchRepos } from "./scratch.ts";
-import { run } from "./kitlib/run.ts";
 
 /**
- * One member the installer's --check names. The installer is the one member
- * list (HOOKREFRESHALL1): the census and the refresh parse its
+ * One member an installer's --check names. The installers are the member
+ * lists (HOOKREFRESHALL1): the census and the refresh parse their
  * `MISSING installed member: <dest>` and
- * `STALE installed member: <dest> differs from <src>` lines, so a member the
- * installer gains (e.g. KITGATE1's 42-omp-kit-affected-gate) is seen with no
- * change here. Parsed with prefix/suffix string ops, not patterns.
+ * `STALE installed member: <dest> differs from <src>` lines, so a member an
+ * installer gains is seen with no change here. Parsed with prefix/suffix
+ * string ops, not patterns. Both the commit-msg bead installer and the
+ * pre-push gate installer name their members this way (PUSHGATEREFRESH1).
  */
 export interface CheckMember { dest: string; src: string | null; kind: "MISSING" | "STALE"; }
-const MISSING_PREFIX = "install-commit-msg-bead: MISSING installed member: ";
-const STALE_PREFIX = "install-commit-msg-bead: STALE installed member: ";
+const PRE_PUSH_MISSING_PREFIX = "install-pre-push-gate: MISSING installed member: ";
+const MISSING_PREFIXES = [
+	"install-commit-msg-bead: MISSING installed member: ",
+	PRE_PUSH_MISSING_PREFIX,
+];
+const STALE_PREFIXES = [
+	"install-commit-msg-bead: STALE installed member: ",
+	"install-pre-push-gate: STALE installed member: ",
+];
 const STALE_MID = " differs from ";
 const RERUN_SUFFIX = "; rerun ";
+function matchPrefix(line: string, prefixes: string[]): string | null {
+	for (const prefix of prefixes) {
+		if (line.startsWith(prefix)) return line.slice(prefix.length);
+	}
+	return null;
+}
 export function parseCheckMembers(output: string): CheckMember[] {
 	const found: CheckMember[] = [];
 	const seen = new Set<string>();
 	for (const line of output.split("\n")) {
-		if (line.startsWith(MISSING_PREFIX)) {
-			const dest = line.slice(MISSING_PREFIX.length).trim();
+		const missing = matchPrefix(line, MISSING_PREFIXES);
+		if (missing !== null) {
+			const dest = missing.trim();
 			if (dest.length === 0 || seen.has(`M:${dest}`)) continue;
 			seen.add(`M:${dest}`);
 			found.push({ dest, src: null, kind: "MISSING" });
-		} else if (line.startsWith(STALE_PREFIX)) {
-			const rest = line.slice(STALE_PREFIX.length);
-			const rerunAt = rest.lastIndexOf(RERUN_SUFFIX);
-			const core = rerunAt >= 0 ? rest.slice(0, rerunAt) : rest;
-			const midAt = core.indexOf(STALE_MID);
-			if (midAt < 0) continue;
-			const dest = core.slice(0, midAt).trim();
-			const src = core.slice(midAt + STALE_MID.length).trim();
-			if (dest.length === 0 || src.length === 0 || seen.has(`S:${dest}`)) continue;
-			seen.add(`S:${dest}`);
-			found.push({ dest, src, kind: "STALE" });
+			continue;
 		}
+		const staleRest = matchPrefix(line, STALE_PREFIXES);
+		if (staleRest === null) continue;
+		const rerunAt = staleRest.lastIndexOf(RERUN_SUFFIX);
+		const core = rerunAt >= 0 ? staleRest.slice(0, rerunAt) : staleRest;
+		const midAt = core.indexOf(STALE_MID);
+		if (midAt < 0) continue;
+		const dest = core.slice(0, midAt).trim();
+		const src = core.slice(midAt + STALE_MID.length).trim();
+		if (dest.length === 0 || src.length === 0 || seen.has(`S:${dest}`)) continue;
+		seen.add(`S:${dest}`);
+		found.push({ dest, src, kind: "STALE" });
 	}
 	return found;
 }
@@ -99,7 +120,7 @@ export interface HookFreshnessIo {
 	kitRoot(): string;
 	digest(path: string): string | null;
 	hooksDir(repo: string): { dir: string | null; config: string | null; tracked: boolean };
-	/** Active release's install-commit-msg-bead.sh --check <repo> (bounded). */
+	/** Active release's installers --check <repo>, bead plus pre-push gate (bounded). */
 	check(repo: string): Promise<HookCheckResult>;
 	/** True when the hooks dir holds at least one installed kit member. */
 	hasKitMembers(dir: string): boolean;
@@ -338,17 +359,34 @@ function gitOut(repo: string, args: string[]): string | null {
 }
 
 /**
- * Check one repo with the active release's installer through the bounded
- * run() primitive (never spawnSync: the installer forks).
+ * Check one repo with the active release's installers through the bounded
+ * run() primitive (never spawnSync: the installers fork). The pre-push gate
+ * installer names its member the same way the bead installer names its
+ * own (PUSHGATEREFRESH1), so both outputs merge into one member list.
+ * A pre-push MISSING line is not drift: the gate is managed where installed,
+ * never planted by the refresh into a repo that never had it. Only its STALE
+ * lines join the merged output.
  */
-async function liveCheck(kitRoot: string, repo: string): Promise<HookCheckResult> {
+function dropNeverInstalledGateLines(output: string): string {
+	return output.split("\n").filter((line) => !line.startsWith(PRE_PUSH_MISSING_PREFIX)).join("\n");
+}
+async function checkOne(script: string, repo: string): Promise<HookCheckResult> {
 	try {
-		const result = await run(["sh", join(kitRoot, "scripts/install-commit-msg-bead.sh"), "--check", repo], { deadline_s: 30, max_output_bytes: 64 * 1024 });
+		const result = await run(["sh", script, "--check", repo], { deadline_s: 30, max_output_bytes: 64 * 1024 });
 		const output = `${Buffer.from(result.stdout).toString("utf8")}\n${Buffer.from(result.stderr).toString("utf8")}`;
 		return { rc: result.rc, output };
 	} catch {
 		return { rc: null, output: "" };
 	}
+}
+async function liveCheck(kitRoot: string, repo: string): Promise<HookCheckResult> {
+	const bead = await checkOne(join(kitRoot, "scripts/install-commit-msg-bead.sh"), repo);
+	const gate = await checkOne(join(kitRoot, "scripts/install-pre-push-gate.sh"), repo);
+	if (!checkUsable(bead) || !checkUsable(gate)) {
+		return { rc: null, output: `${bead.output}\n${gate.output}` };
+	}
+	const rc = bead.rc === 3 || gate.rc === 3 ? 3 : 0;
+	return { rc, output: `${bead.output}\n${dropNeverInstalledGateLines(gate.output)}` };
 }
 function liveFreshnessExtras(kitRoot: string): Pick<HookFreshnessIo, "check" | "hasKitMembers"> {
 	return {
@@ -517,6 +555,58 @@ export async function refreshFleetHooks(io: HookRefreshIo): Promise<HookRefreshR
 	return report;
 }
 
+/**
+ * Rewrite a stale installed pre-push gate from the active release's copy
+ * (PUSHGATEREFRESH1). Detection reuses the pre-push installer's own --check,
+ * the same member list the merged live check reads; only STALE members named
+ * there are ever written, each a byte copy of the release source. A repo that
+ * never had the gate installed is untouched (its MISSING lines never reach
+ * the refresh; see liveCheck). Fail closed: an unreadable source, or one
+ * outside the release, refuses the whole installer run, and the refresh
+ * after-check verifies the rewrite.
+ */
+function syncPrePushGate(kitRoot: string, repo: string): { ok: boolean; detail: string; synced: number } {
+	let output: string;
+	try {
+		// --check performs no forks (file tests and cmp only), so the
+		// synchronous bounded primitive is sound here; the forking bead
+		// installer keeps using async run() (see liveCheck).
+		const check = runSync(["sh", join(kitRoot, "scripts/install-pre-push-gate.sh"), "--check", repo], {
+			deadline_s: 30, max_output_bytes: 4 * 1024 * 1024,
+		});
+		output = `${Buffer.from(check.stdout).toString("utf8")}${Buffer.from(check.stderr).toString("utf8")}`;
+	} catch (error) {
+		return { ok: false, detail: `pre-push gate --check failed: ${error instanceof Error ? error.message : String(error)}`, synced: 0 };
+	}
+	const stale = parseCheckMembers(output).filter((problem) => problem.kind === "STALE");
+	if (stale.length === 0) return { ok: true, detail: "pre-push gate fresh", synced: 0 };
+	let root: string;
+	try {
+		root = realpathSync(kitRoot);
+	} catch {
+		root = resolve(kitRoot);
+	}
+	for (const problem of stale) {
+		if (problem.src === null) return { ok: false, detail: `pre-push gate source missing for ${problem.dest}`, synced: 0 };
+		let realSrc: string;
+		try {
+			realSrc = realpathSync(problem.src);
+		} catch {
+			return { ok: false, detail: `pre-push gate source unreadable: ${problem.src}`, synced: 0 };
+		}
+		const rel = relative(root, realSrc);
+		if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+			return { ok: false, detail: `refusing to copy a gate source outside the release: ${problem.src}`, synced: 0 };
+		}
+		try {
+			copyFileSync(realSrc, problem.dest);
+		} catch (error) {
+			return { ok: false, detail: `pre-push gate copy failed: ${error instanceof Error ? error.message : String(error)}`, synced: 0 };
+		}
+	}
+	return { ok: true, detail: `synced ${stale.length} pre-push gate member(s)`, synced: stale.length };
+}
+
 export function liveHookRefreshIo(home: string, kitRoot: string): HookRefreshIo {
 	const fresh = liveHookFreshnessIo(home, kitRoot);
 	const base = home || process.env.HOME || homedir();
@@ -530,15 +620,19 @@ export function liveHookRefreshIo(home: string, kitRoot: string): HookRefreshIo 
 			}
 		}),
 		runInstaller: (repo) => {
+			let bead: { status: number | null; out: string };
 			try {
 				const run = spawnSync("sh", [join(kitRoot, "scripts/install-commit-msg-bead.sh"), repo], {
 					encoding: "utf8", timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
 				});
-				const out = ((run.stdout ?? "") + (run.stderr ?? "")).trim().slice(-500);
-				return run.status === 0 ? { ok: true, detail: out || "verified active" } : { ok: false, detail: `exit ${run.status ?? "?"}: ${out}` };
+				bead = { status: run.status, out: ((run.stdout ?? "") + (run.stderr ?? "")).trim().slice(-500) };
 			} catch (error) {
 				return { ok: false, detail: error instanceof Error ? error.message : String(error) };
 			}
+			if (bead.status !== 0) return { ok: false, detail: `exit ${bead.status ?? "?"}: ${bead.out}` };
+			const gate = syncPrePushGate(kitRoot, repo);
+			if (!gate.ok) return gate;
+			return { ok: true, detail: gate.synced > 0 ? `${bead.out || "verified active"}; ${gate.detail}` : (bead.out || "verified active") };
 		},
 	};
 }
