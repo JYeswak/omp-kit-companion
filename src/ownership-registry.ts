@@ -42,7 +42,7 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 	{
 		id: "scratch-seat-dir", title: "Seat and agent scratch dirs var/agent-tmp/<label>.<pid>/.owner",
 		rows: [1, 2, 3], class: "REHOME", ownerKey: "agent+session", scope: "seat", survivesRespawn: true,
-		writers: ["src/fleet-guard/scratch.ts", "extensions/fleet-guard.ts", "src/scratch.ts"],
+		writers: ["src/fleet-guard/scratch.ts", "extensions/fleet-guard.ts", "src/fleet-guard/seat-end.ts", "src/scratch.ts"],
 		cancel: "omp-kit scratch release DIR by the same agent holding the owner's omp session (any pid)",
 		crash: "reaper: dead pid, no live seat for the named session and no open file descriptors is REAP; an unprovable seat is never reaped",
 		respawn: "the successor holds the same session lease, so the dir stays LIVE and releasable; legacy pid-only records are handed over by respawn_seat.py until their seats restart on the guard that writes agent+session",

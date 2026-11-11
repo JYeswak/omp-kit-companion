@@ -34,6 +34,23 @@ afterEach(() => {
 	}
 });
 
+/**
+ * TMPREDIRECT1 (ompkit-1ra0d.178): load the guard with the fixture recognized as a scratch root
+ * and a fixture-local budget ledger, so the seat dir comes from the ownership API without touching
+ * live roots or the live ledger. The roots override lives only for the synchronous creation.
+ */
+async function seated(pi: FakePi, deps: GuardDeps): Promise<void> {
+	const cwd = deps.cwd ?? "";
+	const previous = process.env.OMP_KIT_SCRATCH_ROOTS;
+	process.env.OMP_KIT_SCRATCH_ROOTS = join(cwd, "var", "agent-tmp");
+	try {
+		await fleetGuard(pi, { seatScratch: { ledgerPath: join(cwd, "budgets.json") }, ...deps });
+	} finally {
+		if (previous === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
+		else process.env.OMP_KIT_SCRATCH_ROOTS = previous;
+	}
+}
+
 type ToolCallHandler = (event: FleetGuardEvent, context?: { cwd: string; localProtocolOptions?: { getArtifactsDir?: () => string | null }; sessionManager?: { getSessionId?: () => string | undefined } }) => Promise<FleetGuardBlock | undefined>;
 type ShutdownHandler = (event: unknown, context?: { sessionManager?: { getSessionId?: () => string | undefined } }) => Promise<void>;
 
@@ -80,11 +97,16 @@ test("an opted-in repository gets owned scratch and filesystem refusals", async 
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
 	const deps: GuardDeps = { cwd, pid };
-	await fleetGuard(pi, deps);
+	await seated(pi, deps);
 	const repoRoot = cwd;
 	expect(process.env.TMPDIR).toBe(join(repoRoot, "var", "agent-tmp", `omp.${pid}`));
 	const owner = readFileSync(join(repoRoot, "var", "agent-tmp", `omp.${pid}`, ".owner"), "utf8");
-	expect(owner).toContain(`pid=${pid}\nlabel=omp\n`);
+	// TMPREDIRECT1: the seat dir carries the ownership API's record (capability, bin, process identity).
+	expect(owner).toContain(`pid=${pid}\n`);
+	expect(owner).toContain("label=omp\n");
+	expect(owner).toContain("bin=throwaway\n");
+	expect(parseOwnerFile(owner)).toMatchObject({ pid, label: "omp", bin: "throwaway", agent: null, session: null });
+	expect(owner).toMatch(/capability_sha256=[0-9a-f]{64}\n/);
 	const handler = pi.handlers[0]!;
 	// TMPREWRITE1: a literal simple /tmp file is completed into the session scratch, not refused.
 	const completed = await handler({ toolName: "write", input: { path: "/tmp/x", content: "probe\n" } } as never); // tempsafe: fake tool-input path the guard only judges, never touched on disk
@@ -104,7 +126,7 @@ test("TMPREWRITE1-adopt: an admitted mkdir lets the session adopt the ownerless 
 		released.push(dir);
 		return { ok: true, changed: true, dir, reason: "released", ownerPid: pid };
 	} };
-	await fleetGuard(pi, { cwd, pid, env: { AGENT_NAME: "AdoptFlow" }, seatEnd });
+	await seated(pi, { cwd, pid, env: { AGENT_NAME: "AdoptFlow" }, seatEnd });
 	const handler = pi.handlers[0]!;
 	const ctx = { cwd, sessionManager: { getSessionId: () => SESSION } };
 	// an admitted mkdir records the session-created top.
@@ -129,13 +151,14 @@ const ownerOf = (cwd: string, pid: number): string => readFileSync(join(cwd, "va
 test("OWNERKEY1: the first tool call records the agent and its omp session in the seat owner, once", async () => {
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
-	await fleetGuard(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" } });
+	await seated(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" } });
 	// Before any call the session is unknown: the owner is the pid-only record it always was.
 	expect(ownerOf(cwd, pid)).not.toContain("session=");
 	const handler = pi.handlers[0]!;
 	await handler({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => SESSION } });
 	const first = ownerOf(cwd, pid);
-	expect(first).toContain(`pid=${pid}\nlabel=omp\n`);
+	expect(first).toContain(`pid=${pid}\n`);
+	expect(first).toContain("label=omp\n");
 	expect(first).toContain(`agent=TurquoiseSummit\nsession=${SESSION}\n`);
 	// A later call from a subagent session must not replace the main session.
 	await handler({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => "01a1502a-5647-76ba-89c5-949087f3e283" } });
@@ -146,20 +169,21 @@ test("OWNERKEY1: without a host agent name, or without a session id, the seat ow
 	for (const [env, session] of [[{}, SESSION], [{ AGENT_NAME: "TurquoiseSummit" }, undefined], [{ AGENT_NAME: "../evil" }, SESSION]] as const) {
 		const pi = fakePi();
 		const { cwd, pid } = fixture();
-		await fleetGuard(pi, { cwd, pid, env });
+		await seated(pi, { cwd, pid, env });
 		await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => session } });
-		expect(ownerOf(cwd, pid).trim().split("\n").map((line) => line.split("=")[0])).toEqual(["pid", "label", "repo", "created", "bin"]);
+		expect(ownerOf(cwd, pid).trim().split("\n").map((line) => line.split("=")[0])).toEqual(["pid", "process_start", "label", "repo", "created_at", "argv0", "bin", "capability_sha256"]);
 	}
 });
 
 test("SCRATCHBIN1: a session's own dir names its bin at creation and keeps it when the session is recorded", async () => {
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
-	await fleetGuard(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" } });
+	await seated(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" } });
 	expect(ownerOf(cwd, pid)).toContain("bin=throwaway\n");
 	await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => SESSION } });
 	const recorded = ownerOf(cwd, pid);
-	expect(recorded).toContain(`agent=TurquoiseSummit\nsession=${SESSION}\nbin=throwaway\n`);
+	expect(recorded).toContain(`agent=TurquoiseSummit\nsession=${SESSION}\n`);
+	expect(recorded).toContain("bin=throwaway\n");
 	expect(parseOwnerFile(recorded)).toMatchObject({ agent: "TurquoiseSummit", session: SESSION, bin: "throwaway" });
 });
 
@@ -171,7 +195,7 @@ test("SCRATCHBIN1: the session that recorded the seat releases its dir when it e
 	const released: string[] = [];
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
-	await fleetGuard(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" }, seatEnd: seatEndDeps(released) });
+	await seated(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" }, seatEnd: seatEndDeps(released) });
 	expect(pi.shutdowns).toHaveLength(1);
 	await pi.shutdowns[0]!({}, { sessionManager: { getSessionId: () => SESSION } });
 	expect(released).toEqual([]);
@@ -188,7 +212,7 @@ test("SCRATCHBIN1 planted negative: a respawn's session end leaves the dir for t
 	const released: string[] = [];
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
-	await fleetGuard(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" }, seatEnd: seatEndDeps(released, { XDG_STATE_HOME: state }) });
+	await seated(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" }, seatEnd: seatEndDeps(released, { XDG_STATE_HOME: state }) });
 	await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => SESSION } });
 	mkdirSync(join(state, "omp-kit-orchestration"));
 	writeFileSync(join(state, "omp-kit-orchestration", `respawn-intent.${pid}.json`),
@@ -207,7 +231,7 @@ test("SCRATCHBIN1: with the real release, the ended session's dir carries the th
 	Bun.spawnSync(["git", "-C", project, "init", "--quiet"], { stdout: "pipe", stderr: "pipe" });
 	const pi = fakePi();
 	const pid = process.pid;
-	await fleetGuard(pi, { cwd: project, pid, env: { AGENT_NAME: "TurquoiseSummit" }, seatEnd: liveSeatEndDeps(home) });
+	await seated(pi, { cwd: project, pid, env: { AGENT_NAME: "TurquoiseSummit" }, seatEnd: liveSeatEndDeps(home) });
 	await pi.handlers[0]!({ toolName: "read", input: { path: join(project, "x") } } as never, { cwd: project, sessionManager: { getSessionId: () => SESSION } });
 	const dir = join(project, "var", "agent-tmp", `omp.${pid}`);
 	const owner = ownerOf(project, pid);
@@ -229,7 +253,7 @@ test("TMPREWRITE1-L1: the session-scratch hint names only the calling repository
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
 	const other = fixture(false).cwd;
-	await fleetGuard(pi, { cwd, pid });
+	await seated(pi, { cwd, pid });
 	// same repo, still refused: the hint names the seat dir.
 	const same = await pi.handlers[0]!({ toolName: "write", input: { path: "/tmp/sub/x", content: "probe\n" } }, { cwd }); // tempsafe: fake guard input path, never touched on disk
 	expect(same?.reason).toContain("Session scratch:");
@@ -258,7 +282,7 @@ test("registered handler uses the actual calling context's local mapping", async
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
 	const { cwd: callingCwd } = fixture(false);
-	await fleetGuard(pi, { cwd, pid });
+	await seated(pi, { cwd, pid });
 	const handler = pi.handlers[0]!;
 	const event = { toolName: "write", input: { path: "local://notes/out" } };
 	expect(await handler(event, { cwd: callingCwd, localProtocolOptions: { getArtifactsDir: () => join(cwd, "artifacts") } })).toBeUndefined();
@@ -382,7 +406,7 @@ test("filesystem refusals survive an unavailable storage-root lookup", async () 
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
 	try {
-		await fleetGuard(pi, { cwd, pid });
+		await seated(pi, { cwd, pid });
 		const completed = await pi.handlers[0]!({ toolName: "write", input: { path: "/tmp/refused", content: "probe\n" } }, { cwd }); // tempsafe: fake tool-input path the guard only judges, never touched on disk
 		// TMPREWRITE1: the literal completes despite the unavailable lookup; the recheck still runs first.
 		expect(completed?.additionalContext).toContain("AUTO_COMPLETED: /tmp/refused -> ");
@@ -397,7 +421,7 @@ test("stock plugin loading neither creates fleet scratch nor changes caller temp
 	const { cwd } = fixture(false);
 	const pi = fakePi();
 	const previousTmp = process.env.TMPDIR;
-	await fleetGuard(pi, { cwd, pid: process.pid });
+	await seated(pi, { cwd, pid: process.pid });
 	expect(existsSync(join(cwd, "var", "agent-tmp"))).toBe(false);
 	expect(process.env.TMPDIR).toBe(previousTmp);
 });
@@ -406,7 +430,7 @@ test.each(["directory-missing", "marker-missing"])("stock marker absence (%s) pe
 	const { cwd } = fixture(false);
 	if (missing === "marker-missing") mkdirSync(join(cwd, ".omp"));
 	const pi = fakePi();
-	await fleetGuard(pi, { cwd, pid: process.pid });
+	await seated(pi, { cwd, pid: process.pid });
 	const admit = async (event: Parameters<ToolCallHandler>[0]): Promise<void> => {
 		for (const handler of pi.handlers) {
 			const result = await handler(event, { cwd });
@@ -442,7 +466,7 @@ test.each(["directory-missing", "marker-missing"])("stock marker absence (%s) pe
 test.each([["stock repository", (): string => fixture(false).cwd], ["opted-in repository", (): string => fixture().cwd]] as const)("TMPWRITE1: %s sessions refuse system-temp writes and admit owned scratch", async (_label, make) => {
 	const cwd = make();
 	const pi = fakePi();
-	await fleetGuard(pi, { cwd, pid: process.pid });
+	await seated(pi, { cwd, pid: process.pid });
 	const judge = async (command: string, callingCwd = cwd): Promise<string | undefined> => {
 		for (const handler of pi.handlers) {
 			const result = await handler({ toolName: "bash", input: { command } }, { cwd: callingCwd });

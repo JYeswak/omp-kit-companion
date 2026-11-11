@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import { check as checkGit } from "../src/fleet-guard/git.ts";
 import { commandFromEvent } from "../src/fleet-guard/git.ts";
 import { check as checkReservations, exportAgentMailStorageRoot } from "../src/fleet-guard/reservations.ts";
-import { adoptOwnerlessDir, applyScratchEnv, autoCompletedLine, check as checkScratch, checkSystemTemp, createdScratchTops, hostAgentName, rewriteShellCommand, rewriteToolInput, scratchDirFor, toolTargetPaths, writeScratchOwner, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent, type RewriteMapping } from "../src/fleet-guard/scratch.ts";
-import { endSeat, liveSeatEndDeps, type SeatEndDeps } from "../src/fleet-guard/seat-end.ts";
+import { adoptOwnerlessDir, applyScratchEnv, autoCompletedLine, check as checkScratch, checkSystemTemp, createdScratchTops, hostAgentName, rewriteShellCommand, rewriteToolInput, toolTargetPaths, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent, type RewriteMapping } from "../src/fleet-guard/scratch.ts";
+import { createSeatScratch, endSeat, liveSeatEndDeps, recordSeatOwner, type SeatEndDeps, type SeatScratchOpts } from "../src/fleet-guard/seat-end.ts";
 import { check as checkDurability } from "../src/fleet-guard/durability.ts";
 import { check as checkWriteOwnership } from "../src/fleet-guard/write-own.ts";
 import { checkPlutilInPlace } from "../src/fleet-guard/plutil.ts";
@@ -49,6 +49,8 @@ export interface GuardDeps {
 	env?: Record<string, string | undefined>;
 	/** Test seam for the session-end disposal; defaults to ps and the kit's own release. */
 	seatEnd?: SeatEndDeps;
+	/** Test seam for the seat-dir creation; defaults to the live budget ledger and clock. */
+	seatScratch?: SeatScratchOpts;
 }
 
 /**
@@ -177,14 +179,17 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 	}
 	// The seat dir is owned by the agent and its omp session, never by a bare pid. The session id is only known
 	// once the session manager is in a tool-call context, so the first call records it (once: later calls may
-	// belong to a subagent session).
-	let seat: { dir: string; repo: string; created: string; recorded: boolean; agent?: string; session?: string } | null = null;
+	// belong to a subagent session). TMPREDIRECT1 (ompkit-1ra0d.178): the dir comes from the kit's scratch
+	// ownership API (createScratch, the same one `omp-kit scratch new` uses), never an invented raw directory.
+	let seat: { dir: string; repo: string; recorded: boolean; agent?: string; session?: string } | null = null;
 	if (initial.kind === "on") {
-		const dir = scratchDirFor(initial.root, pid);
-		const created = new Date().toISOString();
-		writeScratchOwner(dir, { pid, label: "omp", repo: initial.root, created, bin: "throwaway" });
-		seat = { dir, repo: initial.root, created, recorded: false };
-		applyScratchEnv(dir);
+		const created = createSeatScratch(initial.root, deps?.seatScratch ?? {});
+		if ("refuse" in created) {
+			console.warn(`fleet-guard: seat scratch unavailable (${created.refuse}); session completions disabled, refusals unchanged`);
+		} else {
+			seat = { dir: created.dir, repo: initial.root, recorded: false };
+			applyScratchEnv(created.dir);
+		}
 		try { await exportAgentMailStorageRoot(); }
 		catch {
 			console.warn("fleet-guard: Agent Mail storage-root discovery unavailable; reservation admission reports storage failures separately");
@@ -199,8 +204,7 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 			seat.recorded = true;
 			seat.agent = agent;
 			seat.session = session;
-			try { writeScratchOwner(seat.dir, { pid, label: "omp", repo: seat.repo, created: seat.created, agent, session, bin: "throwaway" }); }
-			catch { /* the pid-only owner stays valid */ }
+			recordSeatOwner(seat.dir, agent, session);
 		}
 		if (seat !== null) state.dir = seat.dir;
 		const contention = checkContention(event);

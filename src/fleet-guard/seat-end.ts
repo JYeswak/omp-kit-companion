@@ -1,7 +1,7 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { defaultLiveness, defaultRunner, releaseScratch, type ScratchReleaseResult } from "../scratch.ts";
+import { join, resolve } from "node:path";
+import { createScratch, defaultBudgetLedgerPath, defaultLiveness, defaultRunner, parseOwnerFile, releaseScratch, type InspectDeps, type ScratchReleaseResult } from "../scratch.ts";
 
 /**
  * The end of a session's own scratch dir (ompkit-774u.15). A seat dir is `bin=throwaway`, and its owner disposes
@@ -77,4 +77,67 @@ export function liveSeatEndDeps(home: string = homedir()): SeatEndDeps {
 			callerSeat: () => ({ agent, sessions: [session], main: session }) }, { bin: "throwaway" }),
 		home,
 	};
+}
+
+/** The seat dir label: `<repo>/var/agent-tmp/omp.<pid>`, the same spelling the guard always used. */
+export const SEAT_SCRATCH_LABEL = "omp";
+
+/** Test seam for the seat-dir creation; everything live unless a test plants a ledger or clock. */
+export interface SeatScratchOpts { ledgerPath?: string; now?: number }
+
+/** Either the owned seat dir, or the refusal reason that keeps today's blocks byte-identical. */
+export type SeatScratchResult = { dir: string } | { refuse: string };
+
+/**
++ * TMPREDIRECT1 (ompkit-1ra0d.178): the seat's session scratch comes from the kit's scratch
++ * ownership API (the same `createScratch` `omp-kit scratch new` uses), never an invented raw
++ * directory, so the reaper, the budget ledger and root registration all know about it. The owner
++ * starts pid-only (no seat identity until the first tool call names the agent and its omp session),
++ * exactly the lifecycle the hand-rolled writer had. A refusal fails closed: the caller keeps
++ * today's refusals with no session hint and no rewrite.
++ */
+export function createSeatScratch(repo: string, opts: SeatScratchOpts = {}): SeatScratchResult {
+	const liveness = defaultLiveness();
+	const deps: InspectDeps = { liveness, run: defaultRunner,
+		callerSeat: () => ({ agent: null, sessions: [], main: null }),
+		...(opts.now !== undefined ? { now: opts.now } : {}) };
+	const created = createScratch(SEAT_SCRATCH_LABEL, repo, deps, { bin: "throwaway" }, false,
+		opts.ledgerPath ?? defaultBudgetLedgerPath());
+	if (created.ok) return { dir: created.dir };
+	if (created.reason !== "directory-create-failed") return { refuse: created.reason };
+	// Same-process re-init: the dir is already ours when its owner names this incarnation.
+	const dir = join(resolve(repo), "var", "agent-tmp", `${SEAT_SCRATCH_LABEL}.${process.pid}`);
+	let text: string;
+	try { text = readFileSync(join(dir, ".owner"), "utf8"); }
+	catch { return { refuse: created.reason }; }
+	const owner = parseOwnerFile(text);
+	const start = liveness.processStart(process.pid);
+	if (owner === null || owner.pid !== process.pid || owner.processStart === null || start === null || owner.processStart !== start)
+		return { refuse: created.reason };
+	return { dir };
+}
+
+/**
++ * Record the seat on its own dir at the first tool call (agent and omp session together, once):
++ * appends to the creation-time owner, preserving its capability, budget and process identity, and
++ * refuses (leaving the pid-only owner valid) when the seat is already recorded or the pair is not
++ * a well-formed owner. Never replaces a recorded seat: a later subagent session keeps the first.
++ */
+export function recordSeatOwner(dir: string, agent: string, session: string): boolean {
+	let text: string;
+	try { text = readFileSync(join(dir, ".owner"), "utf8"); }
+	catch { return false; }
+	const owner = parseOwnerFile(text);
+	if (owner === null || owner.agent !== null || owner.session !== null) return false;
+	const next = `${text.endsWith("\n") ? text : `${text}\n`}agent=${agent}\nsession=${session}\n`;
+	if (parseOwnerFile(next) === null) return false;
+	const tmp = join(dir, `.owner.${process.pid}.tmp`);
+	try {
+		writeFileSync(tmp, next, { mode: 0o600 });
+		renameSync(tmp, join(dir, ".owner"));
+	} catch {
+		try { rmSync(tmp, { force: true }); } catch { /* the pid-only owner stays valid */ }
+		return false;
+	}
+	return true;
 }
