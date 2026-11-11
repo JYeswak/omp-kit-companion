@@ -55,6 +55,82 @@ const CHILD = "{child}";
 const tag = (b: { letter: string | null; index: number }) => `[${b.letter ?? b.index}]`;
 /** Phases the verifier understands. Anything else in a tag is unsupported, not a box to skip. */
 export const KNOWN_PHASES: Record<string, true> = { build: true, landed: true, live: true, after: true };
+/** VERIFYGATE1 (ompkit-1ra0d.137): the reviewer gate verify reports before closing. */
+const MIN_REVIEWERS_GATE = "min_reviewers";
+/**
+ * The exact validation text br prints when the tracker's workflow requires no such gate for the
+ * transition. Only this text is ever treated as "gate not required", never any other error.
+ */
+const GATE_NOT_REQUIRED = `workflow does not require gate '${MIN_REVIEWERS_GATE}' for transition`;
+
+/**
+ * Whether the target tracker's workflow requires the min_reviewers gate for closing `bead` from
+ * `from`: true when `br gate list` names it on the `from -> closed` edge, false when the list parses
+ * and names no such gate, null when the tracker cannot say (an older br, an unreadable answer).
+ * A null answer keeps the gate-report act: the exact validation error below still lands the close.
+ */
+async function minReviewersRequired(repo: string, bead: string, from: string, env: Record<string, string>): Promise<boolean | null> {
+	let out: string;
+	try {
+		const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];
+		const listed = await run(["br", "gate", "list", bead, "--json", ...db], { cwd: repo, deadline_s: 60, env });
+		if (listed.rc !== 0) return null;
+		out = text(listed.stdout);
+	} catch {
+		return null;
+	}
+	try {
+		const doc: unknown = JSON.parse(out);
+		const transitions = doc !== null && typeof doc === "object" && "gated_transitions" in doc ? doc.gated_transitions : undefined;
+		if (!Array.isArray(transitions)) return null;
+		for (const edge of transitions) {
+			if (edge === null || typeof edge !== "object" || !("from" in edge) || !("to" in edge) || !("gates" in edge)) continue;
+			if (edge.from !== from || edge.to !== "closed" || !Array.isArray(edge.gates)) continue;
+			if (edge.gates.some(gate => gate !== null && typeof gate === "object" && "gate" in gate && gate.gate === MIN_REVIEWERS_GATE)) return true;
+		}
+		return false;
+	} catch {
+		return null;
+	}
+}
+
+/** The transition a gate-not-required validation names, or null when the text names none. */
+function notRequiredTransition(stderr: string): string | null {
+	const marker = `${GATE_NOT_REQUIRED} '`;
+	const start = stderr.indexOf(marker);
+	if (start < 0) return null;
+	const end = stderr.indexOf("'", start + marker.length);
+	if (end < 0) return null;
+	return stderr.slice(start + marker.length, end);
+}
+
+/** Whether this act failure is exactly the gate-not-required validation, never any other error. */
+function isGateNotRequiredFailure(argv: string[], stderr: string): boolean {
+	const gate = argv.indexOf("--gate");
+	return argv.length > 4 && argv[0] === "br" && argv[1] === "gate" && argv[2] === "report"
+		&& gate >= 0 && argv[gate + 1] === MIN_REVIEWERS_GATE && stderr.includes(GATE_NOT_REQUIRED);
+}
+
+/**
+ * VERIFYGATE1-identity (ompkit-1ra0d.137 [b]): whether the acting verifier is known to the target
+ * project's Agent Mail. Only a shim-mediated br enforces the tracker guard (a native br has none),
+ * so a natively-resolved br is known by construction. An unavailable `am`, or a refusal that is not
+ * an unknown agent (a path that is no mail project at all), is inconclusive: the acts keep their own
+ * errors. Only a positive AGENT_NOT_FOUND refuses up front, before any replay, with the remedy.
+ */
+async function verifierKnownToTargetMail(repo: string, actor: string, env: Record<string, string>): Promise<{ known: boolean; detail: string }> {
+	if (resolveRealBr(env.PATH ?? process.env.PATH ?? "").skipped.length === 0) return { known: true, detail: "native br: no tracker guard" };
+	let result: RunResult;
+	try {
+		result = await run(["am", "agents", "show", "--project", repo, "--json", actor], { cwd: repo, deadline_s: 60, env });
+	} catch {
+		return { known: true, detail: "Agent Mail unreadable: the acts report their own errors" };
+	}
+	const err = text(result.stderr).slice(0, 200);
+	if (result.rc === 0) return { known: true, detail: "verifier is registered" };
+	if (err.includes("AGENT_NOT_FOUND")) return { known: false, detail: err };
+	return { known: true, detail: "no mail project or agent verdict: the acts report their own errors" };
+}
 
 /**
  * One acceptance box; `line` is the trimmed source line, so a lint can name it and tell a new box from an unchanged one.
@@ -316,6 +392,10 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	if (row === null) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("UNJUDGED: bead became unreadable").join("\n"), acts };
 	const lesson = await closeLesson(input.lesson, row, input.repo, env);
 	if (lesson === null) return { ok: false, code: "LESSON_MISSING", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment; no replay or tracker act ran").join("\n"), acts };
+	// VERIFYGATE1-identity: the tracker guard refuses a verifier the target project's Agent Mail does not
+	// know at the first act, after a full replay. Prove the verifier up front, before replaying anything.
+	const identity = await verifierKnownToTargetMail(input.repo, input.actor, env);
+	if (!identity.known) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`UNJUDGED: Agent Mail cannot verify ${input.actor} in ${input.repo} (${identity.detail}); register the verifier in the target project (am agents create --project ${input.repo} --program <program> --model <model>) then retry; no replay or tracker act ran`).join("\n"), acts };
 	// The owned replay fixture uses an explicit database path under its per-run
 	// scratch; deleting BEADS_DB alone would still discover an ancestor tracker.
 	// VERIFYTMP1 (ompkit-1ra0d.73): the export has no .git, so a box that reads git discovers whatever
@@ -515,13 +595,19 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		acts.push(["br", "update", input.bead, "--description", `${description}\n\n## Original acceptance (before omp-kit verify moved ${deferredTags} to ${childRef})\n${acceptance}`, "--acceptance-criteria", remaining, ...(shrinks ? ["--force"] : []), "--actor", input.actor]);
 	}
 	acts.push(["br", "update", input.bead, "--check-acceptance", ticks.join(","), "--actor", input.actor]);
-	acts.push(["br", "gate", "report", input.bead, "--gate", "min_reviewers", "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
+	// VERIFYGATE1: when the target workflow requires no min_reviewers gate for this closing transition,
+	// the report is refused rc 4 after the ticks are written. Ask first and skip the report, saying so;
+	// an unreadable answer keeps the act and the fallback below still lands the close.
+	const gateRequired = await minReviewersRequired(input.repo, input.bead, row.status, env);
+	if (gateRequired === false) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${row.status} -> closed'; skipping gate report`);
+	else acts.push(["br", "gate", "report", input.bead, "--gate", MIN_REVIEWERS_GATE, "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
 	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${input.actor} (family: ${family})\n${lesson}\n${log.join("\n")}`, "--actor", input.actor]);
 	if (homeNote) log.push(`LIVEREADBACK child placed under ${homeNote}`);
 	const child = deferred.length > 0 ? childRef : undefined;
 	if (input.dryRun) return { ok: true, code: "DRY_RUN", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts, child };
 	const done = await executeActs(acts, input.repo, env, { bead: row, actor: input.actor });
 	if (done.failure !== null) return { ok: false, code: "ACT_FAILED", bead: input.bead, export: input.exportSha, replays, log: log.concat(done.failure).join("\n"), acts: done.acts, child: done.child ?? reuse, rollback: done.rollback };
+	if (done.skippedGate !== null) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${done.skippedGate}'; skipping gate report`);
 	return { ok: true, code: "CLOSED", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: done.acts, child: done.child ?? reuse };
 }
 
@@ -565,8 +651,9 @@ async function restoreAcceptance(checkpoint: ActCheckpoint, expected: string, cw
 		: { status: "STATE_UNPROVEN", detail: "acceptance restore readback did not verify original state" };
 }
 
-async function executeActs(acts: string[][], cwd: string, env: Record<string, string>, checkpoint?: ActCheckpoint): Promise<{ acts: string[][]; child?: string; failure: string | null; rollback?: AcceptanceRollback }> {
+async function executeActs(acts: string[][], cwd: string, env: Record<string, string>, checkpoint?: ActCheckpoint): Promise<{ acts: string[][]; child?: string; failure: string | null; skippedGate: string | null; rollback?: AcceptanceRollback }> {
 	let child: string | undefined;
+	let skippedGate: string | null = null;
 	let expectedAcceptance = checkpoint?.bead.acceptance ?? "";
 	let failure: string | null = null;
 	const ranActs: string[][] = [];
@@ -579,6 +666,13 @@ async function executeActs(acts: string[][], cwd: string, env: Record<string, st
 			expectedAcceptance = acceptanceAfterAct(expectedAcceptance, argv);
 		const r = await run(argv, { cwd, deadline_s: 60, env });
 		if (r.rc !== 0) {
+			// VERIFYGATE1 fallback: the pre-act gate query could not say whether the workflow requires
+			// this gate (an older br, an unreadable answer). Skip exactly this validation and run on to
+			// the close, never any other error.
+			if (isGateNotRequiredFailure(argv, text(r.stderr))) {
+				skippedGate = notRequiredTransition(text(r.stderr)) ?? "unknown transition";
+				continue;
+			}
 			failure = `act failed rc ${r.rc}: ${argv.slice(0, 4).join(" ")}: ${text(r.stderr)}`;
 			break;
 		}
@@ -593,11 +687,11 @@ async function executeActs(acts: string[][], cwd: string, env: Record<string, st
 			child = id;
 		}
 	}
-	if (failure === null) return { acts: ranActs, child, failure: null };
+	if (failure === null) return { acts: ranActs, child, failure: null, skippedGate };
 	const rollback = checkpoint === undefined
 		? { status: "NOT_NEEDED" as const, detail: "no acceptance checkpoint was changed" }
 		: await restoreAcceptance(checkpoint, expectedAcceptance, cwd, env, ranActs);
-	return { acts: ranActs, child, rollback, failure: `${failure}\nrollback: ${rollback.status}` };
+	return { acts: ranActs, child, rollback, skippedGate, failure: `${failure}\nrollback: ${rollback.status}` };
 }
 
 /** The fields verify reads from one `br show --json` row, or null when br names no such bead. `related` lists the ids its `related` dependencies point at; `readbacks` lists open or in-progress live-readback beads related back to it. */
@@ -648,13 +742,20 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 	// ALLLIVE1: a bead whose every open box is [live]/[after] has nothing an export can replay, so verify can never
 	// close it (PENDING) and it never gets a child. It is read back directly, as its own readback child would be.
 	const direct = !child.labels.includes(LIVE_READBACK_LABEL) && toRun.length > 0 && toRun.every(b => b.phase === "live" || b.phase === "after");
-	if (child.status !== "open" || !(direct || child.labels.includes(LIVE_READBACK_LABEL))) return refuse("NOT_LIVE_READBACK", `${input.bead} is ${child.status || "unknown"} with labels [${child.labels.join(", ")}]; only an open ${LIVE_READBACK_LABEL} child, or an open bead whose every open box is [live]/[after], is read back`);
+	// VERIFYGATE1-readback: after a DONE handoff the bead is in_review, and the live boxes are still open
+	// work. Accept an in_review bead whose every remaining box is [live], as well as the open cases.
+	const inReviewLive = child.status === "in_review" && toRun.length > 0 && toRun.every(b => b.phase === "live");
+	if (child.status === "open" ? !(direct || child.labels.includes(LIVE_READBACK_LABEL)) : !inReviewLive) return refuse("NOT_LIVE_READBACK", `${input.bead} is ${child.status || "unknown"} with labels [${child.labels.join(", ")}]; only an open ${LIVE_READBACK_LABEL} child, an open bead whose every open box is [live]/[after], or an in_review bead whose every remaining box is [live], is read back`);
 	// The verified bead is the child's one `related` link (its parent-child edge points at the active home bead).
 	const parent = direct ? child : child.related.length === 1 ? await showBead(child.related[0]!, input.repo, env) : null;
 	if (parent === null) return refuse("NOT_LIVE_READBACK", `${input.bead} needs exactly one readable related link to the bead it reads back; it has [${child.related.join(", ")}]`);
 	if (input.actor === parent.assignee || input.actor === child.assignee) return refuse("NON_AUTHOR_REQUIRED", `refused: ${input.actor} is the assignee of ${input.actor === parent.assignee ? parent.id : child.id}`);
 	const bad = toRun.filter(b => unreplayableReason(b) !== null);
 	if (bad.length > 0) return refuse("ACCEPTANCE_NOT_REPLAYABLE", `not replayable: ${bad.map(b => `${tag(b)} ${unreplayableReason(b)}`).join("; ")}`);
+	// An unchecked [v][build] judgement is required evidence, never replayable debt: refuse PENDING
+	// exactly as the export path does, before anything is replayed or ticked.
+	const buildJudgements = boxes.filter(b => !b.checked && b.letter === "v" && b.phase === "build");
+	if (buildJudgements.length > 0) return refuse("PENDING", `pending: ${buildJudgements.map(tag).join(" ")} build judgement remains on the bead; it cannot be replayed or deferred as rollout debt`);
 	const lesson = await closeLesson(input.lesson, child, input.repo, env);
 	if (lesson === null) return refuse("LESSON_MISSING", "LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment; no replay or tracker act ran");
 	const harnessRoot = process.env.GRADE_WAVE_SCRATCH || undefined;
@@ -681,15 +782,20 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 			? ["br", "comments", "add", parent.id, `REWORK ${parent.id}: live readback failed ${failed.map(f => `${tag(f)} ${f.detail}`).join("; ")}\n${log.join("\n")}`, "--actor", input.actor]
 			: ["br", "reopen", parent.id, "--reason", `REWORK ${parent.id}: live readback ${child.id} failed ${failed.map(f => `${tag(f)} ${f.detail}`).join("; ")}\n${log.join("\n")}`, "--actor", input.actor]);
 	} else {
-		const ticks = boxes.filter(b => !b.checked).map(b => b.item);
+		const ticks = toRun.map(b => b.item);
 		if (ticks.length > 0) acts.push(["br", "update", child.id, "--check-acceptance", ticks.join(","), "--actor", input.actor]);
-		acts.push(["br", "gate", "report", child.id, "--gate", "min_reviewers", "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
+		// VERIFYGATE1-readback: same skip as the export path; the open -> closed edge of a gateless
+		// workflow refuses the report the same way. An unreadable answer keeps the act.
+		const gateRequired = await minReviewersRequired(input.repo, child.id, child.status, env);
+		if (gateRequired === false) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${child.status} -> closed'; skipping gate report`);
+		else acts.push(["br", "gate", "report", child.id, "--gate", MIN_REVIEWERS_GATE, "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
 		acts.push(["br", "close", child.id, "--reason", `live readback of ${parent.id} by ${input.actor} (family: ${family}) on the installed kit: ${replays.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}`, "--transition-comment", `CLOSED ${child.id} by ${input.actor} (family: ${family})\n${lesson}\n${log.join("\n")}`, "--actor", input.actor]);
 	}
 	const code: VerifyResult["code"] = input.dryRun ? "DRY_RUN" : failed.length > 0 ? "REWORK" : "CLOSED";
 	if (input.dryRun) return { ok: failed.length === 0, code, bead: input.bead, export: "installed", replays, log: log.join("\n"), acts };
 	const done = await executeActs(acts, input.repo, env, failed.length > 0 ? undefined : { bead: child, actor: input.actor });
 	if (done.failure !== null) return { ok: false, code: "ACT_FAILED", bead: input.bead, export: "installed", replays, log: log.concat(done.failure).join("\n"), acts: done.acts, rollback: done.rollback };
+	if (done.skippedGate !== null) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${done.skippedGate}'; skipping gate report`);
 	return { ok: failed.length === 0, code, bead: input.bead, export: "installed", replays, log: log.join("\n"), acts: done.acts };
 }
 

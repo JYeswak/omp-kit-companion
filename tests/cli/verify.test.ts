@@ -140,7 +140,7 @@ type FixtureComment = { id: number; author: string; text: string; created_at: st
 
 /** A stateful toy tracker in its own directory; close-policy assertions use the real guard below. */
 let fakeBrCount = 0;
-function fakeBr(bead: Record<string, unknown>, opts?: { failOn?: string | string[]; failMessage?: string; commitBeforeRefusal?: boolean; refusalAcceptance?: string; comments?: FixtureComment[]; extraBeads?: Record<string, unknown>[] }): { env: Record<string, string>; acts: () => string[]; state: (id?: string) => Record<string, unknown> } {
+function fakeBr(bead: Record<string, unknown>, opts?: { failOn?: string | string[]; failMessage?: string; commitBeforeRefusal?: boolean; refusalAcceptance?: string; comments?: FixtureComment[]; extraBeads?: Record<string, unknown>[]; gateList?: unknown }): { env: Record<string, string>; acts: () => string[]; state: (id?: string) => Record<string, unknown> } {
 	const home = join(base, `fake-br-${++fakeBrCount}`);
 	const bin = join(home, "bin");
 	mkdirSync(bin, { recursive: true });
@@ -155,6 +155,11 @@ function fakeBr(bead: Record<string, unknown>, opts?: { failOn?: string | string
 	// views the writer refreshes on every save, byte-identical to the writer's own read output.
 	for (const [id, row] of Object.entries(initial.beads)) writeFileSync(join(views, `show-${id}.json`), JSON.stringify([row]));
 	writeFileSync(join(views, "comments.json"), JSON.stringify(comments));
+	// VERIFYGATE1: the gate-list read is a tracker read like show, served unlogged from views. The default
+	// fixture workflow requires min_reviewers on both closing edges, so the gate-report act stays; a test
+	// with a gateless workflow passes gateList with no gated transitions instead.
+	const gateList = opts?.gateList ?? { issue_id: String(bead.id), current_status: "in_review", history: [], legacy_results: [], gated_transitions: [{ from: "in_review", to: "closed", gates: [{ gate: "min_reviewers", satisfied: false }], satisfied: false }, { from: "open", to: "closed", gates: [{ gate: "min_reviewers", satisfied: false }], satisfied: false }] };
+	writeFileSync(join(views, "gate-list.json"), JSON.stringify(gateList));
 	const writer = join(home, "br.js");
 	const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 	writeFileSync(join(bin, "br"), [
@@ -163,6 +168,7 @@ function fakeBr(bead: Record<string, unknown>, opts?: { failOn?: string | string
 		"\"show \"*/*|\"show \") ;;",
 		`"show "*) f=${quote(views)}/show-"$2".json; [ -f "$f" ] || exit 3; exec cat "$f" ;;`,
 		`"comments list") exec cat ${quote(join(views, "comments.json"))} ;;`,
+		`"gate list"*) f=${quote(join(views, "gate-list.json"))}; [ -f "$f" ] || exit 3; exec cat "$f" ;;`,
 		"esac",
 		`exec bun ${quote(writer)} "$@"`,
 		"",
@@ -799,6 +805,122 @@ test("planted: a failing reviewer-gate report fails the close as ACT_FAILED nami
 	expect(res.code).toBe("ACT_FAILED");
 	expect(res.log).toContain("act failed");
 	expect(res.log).toContain("gate report");
+});
+
+/* VERIFYGATE1 (ompkit-1ra0d.137): verify against a tracker whose workflow requires no reviewer gate,
+   a verifier the target project's Agent Mail does not know, and the live-readback halves (gateless
+   open -> closed; in_review with remaining [live] boxes). */
+
+/** Strict workflow with no gates section: no transition requires min_reviewers. */
+const VERIFYGATE1_NO_GATES_POLICY = `workflow:
+  strict: true
+  statuses: [open, in_progress, in_review, rework, closed]
+  transitions:
+    initial: [open]
+    open: [in_progress, closed]
+    in_progress: [in_review, open]
+    in_review: [closed, rework]
+    rework: [in_progress, open]
+    closed: [open]
+  required_fields:
+    "open -> in_progress": [acceptance_criteria_present]
+    in_review: [acceptance_criteria_present, transition_comment]
+    closed: [acceptance_criteria, transition_comment]
+`;
+
+test("VERIFYGATE1 [a]: in a fixture tracker whose workflow has no min_reviewers gate, verify ticks, skips the gate report and closes", async () => {
+	const { dir: cdir, sha } = await repo("verifygate-nogate");
+	const t = await tracker("verifygate-t");
+	writeFileSync(join(t.dir, ".beads", "policy.yaml"), VERIFYGATE1_NO_GATES_POLICY);
+	const envT = trackerEnv(t);
+	const ac = "- [ ] [a] [build] probe passes; planted negative: bad input is refused. `sh scripts/t.sh` -> 16 pass 0 fail";
+	const desc = "WHAT: verifygate1 no-gate close fixture.\n\nWHY: proves verify closes where the workflow requires no reviewer gate.\n\n## Pitfalls\n- the fixture tracker stays under owned scratch and never touches shipped state";
+	const id = await createBead(t, "verifygate no-gate close", ["--description", desc, "--acceptance-criteria", ac, "--labels", "kind:fix", "--assignee", "Author"]);
+	for (const m of [["update", id, "--status", "in_progress", "--transition-comment", "fixture start"], ["update", id, "--check-acceptance", "1"], ["update", id, "--status", "in_review", "--transition-comment", "fixture ready", "--actor", "tester"]]) {
+		const r = await brun(m, t.dir, envT);
+		if (r.rc !== 0) throw new Error(`${m.slice(0, 3).join(" ")} -> ${r.rc}: ${r.out.slice(0, 300)}`);
+	}
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, family: "same (bun)", lesson: "verifygate1 no-gate fixture" });
+	expect(res.code).toBe("CLOSED");
+	expect(res.acts.map(a => a.slice(0, 3).join(" "))).not.toContain("br gate report");
+	expect(res.log).toContain("skipping gate report");
+	expect(res.log).toContain("not required");
+	expect((await row(t, id)).status).toBe("closed");
+}, fixtureDeadlineS(60) * 1_000);
+
+/** A fixture `am` whose agents-show answers from a fixed script: `{}` for a known verifier, or an
+ * AGENT_NOT_FOUND refusal for a stranger. `am` is resolved from PATH, so prepending the bin
+ * shadows the real one exactly where verify resolves it. */
+function verifygateAgentMailBin(label: string, known: boolean): string {
+	const dir = join(base, label);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "am"), known
+		? "#!/bin/sh\nif [ \"$1\" = \"agents\" ] && [ \"$2\" = \"show\" ]; then\nprintf '%s' '{}'\nexit 0\nfi\nexit 1\n"
+		: "#!/bin/sh\nif [ \"$1\" = \"agents\" ] && [ \"$2\" = \"show\" ]; then\nprintf '%s' '{\"error\":{\"type\":\"AGENT_NOT_FOUND\",\"message\":\"Agent not found in project\"}}' >&2\nexit 1\nfi\nexit 1\n");
+	chmodSync(join(dir, "am"), 0o755);
+	return dir;
+}
+
+test("VERIFYGATE1-identity [b]: a verifier unknown to the target project's Agent Mail is refused before any replay", async () => {
+	const marker = join(base, "verifygate-identity-replay");
+	const { dir, sha } = await repo("verifygate-identity", { "entered.sh": "#!/bin/sh\nprintf entered > \"$VERIFYGATE_REPLAY_MARKER\"\nprintf '0 fail\\n'\n" });
+	const acceptance = "- [ ] [a] [build] `sh scripts/entered.sh` -> 0 fail";
+	const br = fakeBr(inReview(acceptance));
+	const refused = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Stranger", env: { ...br.env, PATH: `${verifygateAgentMailBin("verifygate-unknown-am", false)}${delimiter}${br.env.PATH ?? ""}`, VERIFYGATE_REPLAY_MARKER: marker } });
+	expect(refused.code).toBe("NOT_IN_REVIEW");
+	expect(refused.log).toContain("UNJUDGED: Agent Mail cannot verify Stranger");
+	expect(refused.log).toContain("am agents create");
+	expect(refused.replays).toEqual([]);
+	expect(refused.acts).toEqual([]);
+	expect(br.acts()).toEqual([]);
+	expect(existsSync(marker)).toBe(false);
+	// A verifier the target mail knows proceeds through replay, ticks, gate report and close.
+	const knownMarker = join(base, "verifygate-identity-known-replay");
+	const known = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Known", env: { ...br.env, PATH: `${verifygateAgentMailBin("verifygate-known-am", true)}${delimiter}${br.env.PATH ?? ""}`, VERIFYGATE_REPLAY_MARKER: knownMarker } });
+	expect(known.code).toBe("CLOSED");
+	expect(known.acts.map(a => a.slice(0, 3).join(" "))).toContain("br gate report");
+	expect(existsSync(knownMarker)).toBe(true);
+});
+
+test("VERIFYGATE1-readback gate: live-readback on an open bead skips the unrequired gate report (open -> closed) and closes", async () => {
+	const { dir, sha } = await repo("verifygate-readback-gate");
+	const noGate = `Error: Validation failed: to: workflow does not require gate 'min_reviewers' for transition 'open -> closed'`;
+	const parent = { id: "kit-parent", status: "open", assignee: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [], acceptance_criteria: "" };
+	const br = fakeBr({ id: "kit-live", status: "open", assignee: null, created_by: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [LIVE_READBACK_LABEL], acceptance_criteria: "- [ ] [c] [live] `sh scripts/t.sh` -> 16 pass", dependencies: [{ dependency_type: "related", id: "kit-parent" }] }, { failOn: ["gate list", "gate report"], failMessage: noGate, extraBeads: [parent] });
+	const res = await liveReadback({ bead: "kit-live", repo: dir, actor: "Peer", env: br.env, family: "same (bun)", lesson: "verifygate1 readback gate fixture" });
+	expect(res.code).toBe("CLOSED");
+	expect(res.log).toContain("skipping gate report");
+	expect(res.log).toContain("open -> closed");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["c", true]]);
+	expect(br.state("kit-live").status).toBe("closed");
+	expect(br.state("kit-live").acceptance_criteria).toBe("- [x] [c] [live] `sh scripts/t.sh` -> 16 pass");
+});
+
+test("VERIFYGATE1-readback in-review: live-readback accepts an in_review bead whose remaining boxes are [live]", async () => {
+	const { dir } = await repo("verifygate-readback-inreview");
+	const parent = { id: "kit-parent", status: "open", assignee: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [], acceptance_criteria: "" };
+	const br = fakeBr({ id: "kit-live", status: "in_review", assignee: null, created_by: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [LIVE_READBACK_LABEL], acceptance_criteria: "- [ ] [c] [live] `sh scripts/t.sh` -> 16 pass", dependencies: [{ dependency_type: "related", id: "kit-parent" }] }, { extraBeads: [parent] });
+	const res = await liveReadback({ bead: "kit-live", repo: dir, actor: "Peer", env: br.env, family: "same (bun)", lesson: "verifygate1 in-review readback fixture" });
+	expect(res.code).toBe("CLOSED");
+	expect(res.acts.map(a => a.slice(0, 3).join(" "))).toContain("br gate report");
+	expect(res.log).not.toContain("skipping gate report");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["c", true]]);
+	expect(br.state("kit-live").status).toBe("closed");
+});
+
+test("VERIFYGATE1-readback in-review judgement: an unchecked [v][build] box refuses PENDING and ticks nothing", async () => {
+	const { dir } = await repo("verifygate-readback-judgement");
+	const parent = { id: "kit-parent", status: "open", assignee: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [], acceptance_criteria: "" };
+	const acceptance = "- [ ] [v] [build] reviewer judgement; planted negative: a rubber stamp is refused. `echo judgement` -> judgement\n- [ ] [c] [live] `sh scripts/t.sh` -> 16 pass";
+	const br = fakeBr({ id: "kit-live", status: "in_review", assignee: null, created_by: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [LIVE_READBACK_LABEL], acceptance_criteria: acceptance, dependencies: [{ dependency_type: "related", id: "kit-parent" }] }, { extraBeads: [parent] });
+	const res = await liveReadback({ bead: "kit-live", repo: dir, actor: "Peer", env: br.env, family: "same (bun)", lesson: "verifygate1 judgement fixture" });
+	expect(res.code).toBe("PENDING");
+	expect(res.log).toContain("build judgement remains");
+	expect(res.replays).toEqual([]);
+	expect(res.acts).toEqual([]);
+	expect(br.acts()).toEqual([]);
+	expect(br.state("kit-live").status).toBe("in_review");
+	expect(br.state("kit-live").acceptance_criteria).toBe(acceptance);
 });
 
 

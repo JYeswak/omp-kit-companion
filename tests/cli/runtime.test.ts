@@ -1285,7 +1285,8 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		expect(res.code, res.log).toBe("DRY_RUN");
 		expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true]]);
 		expect(res.log).toContain("owned fixture");
-		expect(res.acts[2]?.join(" ") ?? "").toContain(fam);
+		// VERIFYGATE1 (ompkit-1ra0d.137): the fixture tracker requires no min_reviewers gate, so the report act is absent; the close act carries the family.
+		expect(res.acts.find(a => a[1] === "close")?.join(" ") ?? "").toContain(fam);
 		expect(readFileSync(join(tdir, ".beads", "issues.jsonl"), "utf8")).toBe(before);
 		// Official candidate smoke through the existing verify consumer (dry-run: no mutation, no live claim).
 		const official = await run([ompBin, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", "official-binary", "--lesson", "native replay-barrier fixture", "--dry-run", "--json"], { cwd: root, deadline_s: fixtureDeadlineS(600), env: verifyEnv });
