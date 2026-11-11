@@ -7,6 +7,7 @@ import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { runSync } from "../../src/kitlib/run.ts";
 import { releaseProcess } from "./release-process.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 
@@ -87,11 +88,11 @@ beforeAll(async () => {
 	sourceGit(objectStore, ["archive", "--format=tar", `--output=${sourceArchive}`, sourceRevision]);
 	const archived = join(output, "archived-source");
 	mkdirSync(archived);
-	const extracted = await releaseProcess(["tar", "-xf", sourceArchive, "-C", archived], { stdout: "pipe", stderr: "pipe", deadline_s: 120 });
+	const extracted = await releaseProcess(["tar", "-xf", sourceArchive, "-C", archived], { stdout: "pipe", stderr: "pipe", deadline_s: fixtureDeadlineS(120) });
 	expect(extracted.exitCode, extracted.stderr.toString()).toBe(0);
 	expect(existsSync(join(archived, "MANIFEST.tsv"))).toBe(false);
 	const sourceBefore = sourceTree(archived, "freeze");
-	const built = await releaseProcess(["sh", join(archived, "scripts", "package-release.sh"), "--version", "1.2.3", "--platform", key, "--out", output], { cwd: output, env: { ...process.env, OMP_KIT_TEST_WORK_ROOT: output, TMPDIR: output }, stdout: "pipe", stderr: "pipe", deadline_s: 120 });
+	const built = await releaseProcess(["sh", join(archived, "scripts", "package-release.sh"), "--version", "1.2.3", "--platform", key, "--out", output], { cwd: output, env: { ...process.env, OMP_KIT_TEST_WORK_ROOT: output, TMPDIR: output }, stdout: "pipe", stderr: "pipe", deadline_s: fixtureDeadlineS(120) });
 	expect(built.exitCode, built.stdout.toString() + built.stderr.toString()).toBe(0);
 	expect(readdirSync(output).filter(name => name.startsWith("omp-kit-work."))).toEqual([]);
 	expect(sourceTree(archived, "digest")).toBe(sourceBefore);
@@ -102,7 +103,7 @@ beforeAll(async () => {
 	index = { schema_version: 1, version: "1.2.3", source_tag: "v1.2.3", assets: { [key]: asset } };
 	writeFileSync(indexPath, `${JSON.stringify(index)}\n`);
 	writeFileSync(join(output, `${asset.filename}.sigstore.json`), '{"fixture":true}\n');
-}, 30_000);
+}, fixtureDeadlineS(300) * 1_000);
 afterAll(() => {
 	const archived = join(output, "archived-source");
 	try {
@@ -127,13 +128,13 @@ function installArgs(name: string): { home: string; prefix: string; command: str
 }
 async function installCandidate(name: string): Promise<Candidate> {
 	const { home, prefix, command, options } = installArgs(name);
-	const installed = await releaseProcess(command, { ...options, stdout: "pipe", stderr: "pipe", deadline_s: 120 });
+	const installed = await releaseProcess(command, { ...options, stdout: "pipe", stderr: "pipe", deadline_s: fixtureDeadlineS(120) });
 	expect(installed.exitCode, installed.stdout.toString() + installed.stderr.toString()).toBe(0);
 	return { home, installedRoot: join(prefix, "releases", "1.2.3"), installedBinary: join(prefix, "bin", "omp-kit") };
 }
 type Run = { exitCode: number | null; stdout: string; stderr: string };
 async function run(command: string[], options: { cwd: string; env: Record<string, string | undefined> }): Promise<Run> {
-	const child = await releaseProcess(command, { ...options, deadline_s: 120 });
+	const child = await releaseProcess(command, { ...options, deadline_s: fixtureDeadlineS(120) });
 	return { exitCode: child.exitCode, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
 }
 function candidateEnv(home: string, extra: Record<string, string> = {}): Record<string, string | undefined> {

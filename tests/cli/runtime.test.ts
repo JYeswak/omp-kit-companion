@@ -436,8 +436,9 @@ for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) 
 			return diagnostics;
 		})();
 		// A watchdog bounds a real OS-process test; readiness is signaled by actual stage output, not a sleep.
+		// Fixture wait: the bound scales with host contention (fixtureDeadlineS), not a fixed 6 s wall clock.
 		let timer: NodeJS.Timeout | undefined;
-		const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("owned runtime interruption deadline")), 6000); });
+		const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("owned runtime interruption deadline")), fixtureDeadlineS(6) * 1000); });
 		try {
 			if (interruption === "SIGTERM") {
 				await Promise.race([ready, deadline, child.exited.then(() => { throw new Error("runner exited before stage readiness"); })]);
@@ -496,7 +497,7 @@ for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) 
 			}
 			await Promise.allSettled([child.exited, stdout, stderr]);
 		}
-	}, 12_000);
+	}, fixtureDeadlineS(12) * 1000);
 }
 
 test("isolated child exit unconfirmed keeps the runner note out of the child stderr bytes and their identity", async () => {

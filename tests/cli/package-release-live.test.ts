@@ -5,6 +5,7 @@ import { resolveOmpIdentity } from "../../src/paths.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
 import { caseCwd, nativeCacheEnv, output, sourceRevision, installCandidate } from "./package-release-fixture.ts";
 import { releaseProcess } from "./release-process.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 test("installed integrations and invariant gate run from the package", async () => {
 	const { home, installedBinary } = await installCandidate("integrations-home");
 	const agentDir = join(home, ".omp", "profiles", "packaging-probe", "agent");
@@ -18,7 +19,7 @@ test("installed integrations and invariant gate run from the package", async () 
 	const args = [installedBinary, "test", "--integrations", "--profile", "packaging-probe", "--json"];
 	const env = { ...process.env, HOME: home, TMPDIR: output, TMP: output, TEMP: output, PATH: stubBin,
 		OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" };
-	const installed = await releaseProcess(args, { cwd: home, env, stdout: "pipe", stderr: "pipe", deadline_s: 120 });
+	const installed = await releaseProcess(args, { cwd: home, env, stdout: "pipe", stderr: "pipe", deadline_s: fixtureDeadlineS(120) });
 	const stdout = installed.stdout.toString();
 	expect(installed.exitCode, `${stdout}\n${installed.stderr.toString()}`).toBe(0);
 	const report = JSON.parse(stdout) as {
@@ -41,7 +42,7 @@ test("installed integrations and invariant gate run from the package", async () 
 		if (value !== undefined) appliedEnv[name] = value;
 	}
 	const appliedRules = await runBounded([installedBinary, "apply", "rules", "--apply", "--yes", "--json"], {
-		cwd: home, env: appliedEnv, deadline_s: 120,
+		cwd: home, env: appliedEnv, deadline_s: fixtureDeadlineS(120),
 	});
 	const applyStdout = new TextDecoder().decode(appliedRules.stdout);
 	const applyStderr = new TextDecoder().decode(appliedRules.stderr);
@@ -49,7 +50,7 @@ test("installed integrations and invariant gate run from the package", async () 
 	const full = await releaseProcess([installedBinary, "test", "--full", "--json"], { cwd: home,
 		env: { ...packageEnv, OMP: ompIdentity.launcher, OMP_BIN: ompIdentity.launcher,
 			OMP_PATH: ompIdentity.launcher, OMP_SRC: ompIdentity.source },
-		stdout: "pipe", stderr: "pipe", deadline_s: 900 });
+		stdout: "pipe", stderr: "pipe", deadline_s: fixtureDeadlineS(900) });
 	const fullOutput = `${full.stdout.toString()}\n${full.stderr.toString()}`;
 	expect(full.exitCode, fullOutput).toBe(0);
 	const fullReport = JSON.parse(full.stdout.toString()).data.test;
@@ -62,4 +63,4 @@ test("installed integrations and invariant gate run from the package", async () 
 		retention: { status: "UNRETAINED", durable: false },
 	});
 // The full ladder runs the complete e2e-live suite (~200 s locally); same budget as kit-update's N+2 journey.
-}, 900_000);
+}, fixtureDeadlineS(900) * 1_000);

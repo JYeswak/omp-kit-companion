@@ -5,6 +5,7 @@ import { cpus } from "node:os";
 import { ownedTmp } from "../../src/kitlib/tmp";
 import { runSync } from "../../src/kitlib/run";
 import { gateFunctions } from "./fresh-gate.helpers";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const metrics = join(root, "scripts/suite-metrics.py");
@@ -30,11 +31,11 @@ function fixture() {
 		XDG_DATA_HOME: join(dir, "home/.local/share"), XDG_STATE_HOME: join(dir, "home/.state"),
 		GIT_CONFIG_GLOBAL: join(dir, "home/.gitconfig"),
 		OMP_KIT_SUITE_HERMETIC_ENABLE: "0", OMP_KIT_CC: "0" });
-	const invoke = (argv: string[], deadline = 30) => {
+	const invoke = (argv: string[], deadline = fixtureDeadlineS(30)) => {
 		const result = runSync(argv, { cwd: dir, env, deadline_s: deadline });
 		return { ...result, out: Buffer.from(result.stdout).toString() + Buffer.from(result.stderr).toString() };
 	};
-	const load = (paths: string[], policyRoot = root, workers = width, deadline = 30) => invoke([
+	const load = (paths: string[], policyRoot = root, workers = width, deadline = fixtureDeadlineS(30)) => invoke([
 		"python3", metrics, "load", "--cwd", dir, "--tree", tree,
 		"--records", join(dir, `records-${Math.random().toString(36).slice(2)}`), "--changed-files", join(dir, "changed"),
 		"--policy-root", policyRoot, "--workers", String(workers), ...paths,
@@ -105,7 +106,7 @@ test("LOADGATE1: changed file keeps the linked runtime with K private temp copie
 		expect(loadCopies.every(copy => !existsSync(copy.tmp) && !existsSync(copy.wave))).toBe(true);
 		console.log(result.out.split("\n").find(line => line.startsWith("LOADGATE1 GREEN")));
 	} finally { fx.scratch.cleanup(); }
-}, 30_000);
+}, fixtureDeadlineS(30) * 1000);
 
 test("LOADGATE1: an explicitly enabled scrubbed suite keeps the same wrapper mode", () => {
 	const fx = fixture();
@@ -118,7 +119,7 @@ test("LOADGATE1: an explicitly enabled scrubbed suite keeps the same wrapper mod
 		expect(result.rc, result.out).toBe(0);
 		expect(result.out.split("\n").find(line => line.startsWith("LOADGATE1 GREEN"))).toContain(" env=scrubbed ");
 	} finally { fx.scratch.cleanup(); }
-}, 20_000);
+}, fixtureDeadlineS(20) * 1000);
 
 test("LOADGATE1 planted deadline holds alone but the concurrent wave refuses, naming case, concurrency and load1", () => {
 	const fx = fixture();
@@ -143,7 +144,7 @@ test("deadline-only-alone plant", async () => {
 		expect(result.out).toContain(`LOADGATE1 file=tests/cli/control.test.ts concurrency=${width} load1=`);
 		expect(result.out).toContain("affected tests did not pass");
 	} finally { fx.scratch.cleanup(); }
-}, 30_000);
+}, fixtureDeadlineS(30) * 1000);
 
 test("LOADGATE1: no changed selected files means no copies, including deleted paths", () => {
 	const fx = fixture();
@@ -179,7 +180,7 @@ test("LOADGATE1: canonical grandfather ceiling passes above default cap and boun
 		expect(red.out).toContain("grandfather timeout plant");
 		expect(red.out).toContain("LOADGATE1 RED file=tests/cli/grandfather.test.sh concurrency=2");
 	} finally { fx.scratch.cleanup(); }
-}, 20_000);
+}, fixtureDeadlineS(20) * 1000);
 
 test.skipIf(process.env.OMP_KIT_LITERAL_LOAD_BUDGET !== "1")("LOADGATE1 literal grandfather: 91 seconds passes above 90 under its 100-second ceiling", () => {
 	const fx = fixture();
@@ -192,4 +193,4 @@ test.skipIf(process.env.OMP_KIT_LITERAL_LOAD_BUDGET !== "1")("LOADGATE1 literal 
 		expect(result.out).toContain("ceiling_s=100 contention_allowance=2");
 		console.log(result.out);
 	} finally { fx.scratch.cleanup(); }
-}, 120_000);
+}, fixtureDeadlineS(120) * 1000);

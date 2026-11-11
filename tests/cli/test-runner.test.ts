@@ -11,6 +11,7 @@ import { nativeCacheEnv, writeBundledHarness, writeReleaseManifest } from "./rel
 import { countCaseRows, runFastTest, type FastTestInput, type FastTestReport, type MatcherObservationInput, type MatcherObservationReport } from "../../src/test-runner.ts";
 import { EXTERNAL_PACK_LIMITS, readExternalPackSnapshot, runExternalPackTest } from "../../src/external-pack.ts";
 import { run as kitlibRun } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
  const REPO_ROOT = resolve(import.meta.dir, "../..");
  // l9pt box 4: suite-owned TMPDIR. Fixtures must never land in the ambient
@@ -691,7 +692,7 @@ describe("runFastTest", () => {
 		expect(JSON.parse(quiet.stdout.toString())).toMatchObject({ status: "OK", whole: "quiet", prefix: null });
 	});
 
-	test("observes the 41 KB long-token close fire within the bounded CPU-time budget", { timeout: 60_000 }, () => {
+	test("observes the 41 KB long-token close fire within the bounded CPU-time budget", { timeout: fixtureDeadlineS(60) * 1000 }, () => {
 		const identity = resolveOmpIdentity(process.env);
 		// Candidate grading may prepend an OMP policy shim that is not Tern-verified.
 		// Resolve a same-source launcher whose identity is verified against Tern state.
@@ -734,7 +735,7 @@ describe("runFastTest", () => {
 		const ruleHash = createHash("sha256").update(readFileSync(rulePath)).digest("hex");
 		writeFileSync(cases, CASE_HEADER + "\n" + rule + "\tfire\ttool\tbash\t-\t" + command + "\tlong actor token\t\n");
 		const run = (control?: "wall-stall" | "slow-fire") => {
-			const timeoutMs = control ? 10_000 : 2_500;
+			const timeoutMs = control ? Math.round(fixtureDeadlineS(10) * 1000) : Math.round(fixtureDeadlineS(2.5) * 1000);
 			// Controls inject delay/work; keep the production-path watchdog unchanged.
 			const started = performance.now();
 			const result = Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", join(REPO_ROOT, "rules"), "--cases", cases, "--rule", rule, "--line", "2", "--rule-sha256", ruleHash, "--timeout-ms", String(timeoutMs)], {

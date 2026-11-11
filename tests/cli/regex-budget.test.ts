@@ -190,7 +190,7 @@ test("literal-first fixture control compiles and stays below the budget", async 
 	try {
 		const result = await measureCondition({
 			rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern,
-			sizes: [4096, 8192, 16384], shapes: ["literal"], encodings: ["raw"], streamWire: "x".repeat(33), workerTimeoutMs: 2_000,
+			sizes: [4096, 8192, 16384], shapes: ["literal"], encodings: ["raw"], streamWire: "x".repeat(33), workerTimeoutMs: Math.round(fixtureDeadlineS(2) * 1000),
 		});
 		expect(result.failures).toEqual([]);
 		expect(result.stream_deltas).toBe(3);
