@@ -13,7 +13,9 @@ configured `pre-push` hooks remain active. An optional repo check is registered 
 the exact regular UTF-8 blob in the landing base is the registration. A check
 runs only when the exact candidate contains the same bytes; a new or changed
 check is reported `SKIP` for that landing and may become active on a later one.
-The file needs an absolute interpreter shebang; the process receives
+The file needs a #! line whose interpreter resolves on the machine; the file is
+executed directly, so any shebang works (#!/bin/sh, #!/bin/bash,
+#!/usr/bin/env bash) and the recorded version is `unknown`.
 `OMP_LAND_REPOSITORY`, `OMP_LAND_CANDIDATE_SHA`, `OMP_LAND_CHECK_PATH`, and
 `OMP_LAND_CHECK_SHA256` for candidate inspection. Exit 0 is `PASS`, exit 77 is
 `SKIP`, and other nonzero exits are `FAIL`. If the base has no registered check

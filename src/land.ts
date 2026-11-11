@@ -1,4 +1,4 @@
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { ownedTmp, type OwnedTmp } from "./kitlib/tmp.ts";
 import { run as kitlibRun, runSync as kitlibRunSync } from "./kitlib/run.ts";
 import type { RunResult } from "./kitlib/run.ts";
@@ -8,7 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import type { CliResult, ParsedCommand } from "./cli.ts";
 import { authorizeSourceAct } from "./source-authority.ts";
-import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { convergeRepository } from "./converge.ts";
 import type { ConvergeResult } from "./converge.ts";
 import { defaultLiveness, defaultRunner, disposalGate } from "./scratch.ts";
@@ -196,25 +196,35 @@ export async function executePushCheckScript(repo: string, script: Buffer, execu
 	env.OMP_LAND_CHECK_PATH = PUSH_CHECK_PATH;
 	env.OMP_LAND_CHECK_SHA256 = checkSha256;
 	const common = { ...base, selected_executable: executable, selected_version: version, candidate_sha: candidateSha, checked_sha: candidateSha };
-	// The check's temporary files go to an owned dir of its own, removed when it ends (never an
-	// unowned system temp dir, never the caller's scratch).
+	// The check runs as its own file from an owned dir of its own, so the kernel
+	// honors any shebang; the same owned dir is its TMPDIR, and both are removed
+	// when it ends (never an unowned system temp dir, never the caller's scratch).
 	let scratch: OwnedTmp;
 	try { scratch = ownedTmp("push-check-tmp"); }
 	catch { return { ...common, exit_code: null, status: "UNRUN", reason: "check_execution_unavailable" }; }
-	env.TMPDIR = scratch.path;
-	let run: RunResult;
 	try {
-		run = await kitlibRun([executable, "-s"], { cwd, env, stdin: script, deadline_s: Math.max(1, Math.floor(deadlineS)), max_output_bytes: 8 * 1024 * 1024 });
-	} catch {
-		return { ...common, exit_code: null, status: "UNRUN", reason: "check_execution_unavailable" };
+		env.TMPDIR = scratch.path;
+		const checkPath = join(scratch.path, "push-check");
+		try {
+			writeFileSync(checkPath, script, { mode: 0o755 });
+			chmodSync(checkPath, 0o755);
+		} catch {
+			return { ...common, exit_code: null, status: "UNRUN", reason: "check_execution_unavailable" };
+		}
+		let run: RunResult;
+		try {
+			run = await kitlibRun([checkPath], { cwd, env, deadline_s: Math.max(1, Math.floor(deadlineS)), max_output_bytes: 8 * 1024 * 1024 });
+		} catch {
+			return { ...common, exit_code: null, status: "UNRUN", reason: "check_execution_unavailable" };
+		}
+		const exitCode = run.rc !== null && run.rc >= 0 ? run.rc : null;
+		if (run.timed_out || exitCode === null) return { ...common, exit_code: exitCode, status: "UNRUN", reason: "check_execution_unavailable" };
+		if (exitCode === 0) return { ...common, exit_code: exitCode, status: "PASS", reason: undefined };
+		if (exitCode === 77) return { ...common, exit_code: exitCode, status: "SKIP", reason: "check_not_applicable" };
+		return { ...common, exit_code: exitCode, status: "FAIL", reason: "check_failed" };
 	} finally {
 		try { scratch.cleanup(); } catch { /* the owned-temp exit hook retries */ }
 	}
-	const exitCode = run.rc !== null && run.rc >= 0 ? run.rc : null;
-	if (run.timed_out || exitCode === null) return { ...common, exit_code: exitCode, status: "UNRUN", reason: "check_execution_unavailable" };
-	if (exitCode === 0) return { ...common, exit_code: exitCode, status: "PASS", reason: undefined };
-	if (exitCode === 77) return { ...common, exit_code: exitCode, status: "SKIP", reason: "check_not_applicable" };
-	return { ...common, exit_code: exitCode, status: "FAIL", reason: "check_failed" };
 }
 
 /** sha256 of the .omp/push-check blob at a revision, or null when absent/unreadable (never throws). */
@@ -237,23 +247,55 @@ export function pushCheckHeadBytes(repo: string, revision = "HEAD"): { bytes: Bu
 	return { bytes: blob.bytes, sha256: createHash("sha256").update(blob.bytes).digest("hex"), oid: entry.oid };
 }
 
-/** Validate a push-check script the way land does: absolute #! interpreter whose --version answers. */
+/** The recorded push-check version: the file itself runs, so no interpreter probe answers it. */
+const UNKNOWN_PUSH_CHECK_VERSION = "unknown";
+
+/** One executable file that resolves on this machine, or null. Cheap and synchronous: realpath plus an exec-bit read, never a probe run. */
+function resolvedExecutable(path: string): string | null {
+	try {
+		const real = realpathSync(path);
+		accessSync(real, constants.X_OK);
+		return real;
+	} catch {
+		return null;
+	}
+}
+
+/** One bare command name resolved against PATH, or null. */
+function resolvedOnPath(name: string): string | null {
+	if (name === "" || name === "." || name === ".." || name.includes("/")) return null;
+	const pathEnv = process.env.PATH ?? "/usr/bin:/bin";
+	for (const dir of pathEnv.split(":")) {
+		if (dir === "") continue;
+		const found = resolvedExecutable(join(dir, name));
+		if (found !== null) return found;
+	}
+	return null;
+}
+
+/** Validate a push-check script the way land does: a #! line whose interpreter resolves on this machine. The file itself is executed from an owned dir, so any shebang form runs (including #!/usr/bin/env); the recorded version is always unknown. */
 export function resolvePushCheckExecutable(repo: string, script: Buffer, sha256: string): { executable: string; version: string } | { reason: string } {
 	const firstLineEnd = script.indexOf(0x0a);
 	const firstLine = script.subarray(0, firstLineEnd < 0 ? script.length : firstLineEnd).toString("utf8").replace(/\r$/, "");
 	if (!firstLine.startsWith("#!")) return { reason: "check_interpreter_unavailable" };
-	const interpreter = firstLine.slice(2).trim();
-	if (!isAbsolute(interpreter) || interpreter.includes(" ") || interpreter.includes("\t"))
-		return { reason: "check_interpreter_unavailable" };
-	let executable: string;
-	try { executable = realpathSync(interpreter); }
-	catch { return { reason: "check_interpreter_unavailable" }; }
-	const versionRun = spawnSync(executable, ["--version"], { cwd: repo, env: gitEnvironment(), encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024 });
-	const versionText = `${String(versionRun.stdout ?? "")}\n${String(versionRun.stderr ?? "")}`.trim();
-	const version = versionText.split("\n")[0]?.trim() ?? "";
-	if (versionRun.error || versionRun.status !== 0 || !version)
-		return { reason: "check_interpreter_unavailable" };
-	return { executable, version };
+	// The kernel's script handler splits the same way: interpreter token, then an
+	// optional remainder passed through at exec time (no quoting or escapes).
+	const words: string[] = [];
+	let current = "";
+	for (const char of firstLine.slice(2).trim()) {
+		if (char === " " || char === "\t") {
+			if (current !== "") { words.push(current); current = ""; }
+		} else current += char;
+	}
+	if (current !== "") words.push(current);
+	if (words.length === 0) return { reason: "check_interpreter_unavailable" };
+	const head = words[0] as string;
+	const tail = words[1] as string | undefined;
+	const executable = basename(head) === "env" && isAbsolute(head) && tail !== undefined
+		? (tail.includes("/") ? (isAbsolute(tail) ? resolvedExecutable(tail) : null) : resolvedOnPath(tail))
+		: (isAbsolute(head) ? resolvedExecutable(head) : null);
+	if (executable === null) return { reason: "check_interpreter_unavailable" };
+	return { executable, version: UNKNOWN_PUSH_CHECK_VERSION };
 }
 
 /** Append one push-check verdict row (HANDOFFPUSHCHECK1 record). Best-effort: false when the ledger could not be written. */

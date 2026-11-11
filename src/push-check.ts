@@ -82,7 +82,7 @@ export async function pushCheckCommand(request: ParsedCommand): Promise<CliResul
 	const resolved = resolvePushCheckExecutable(repo, head.bytes, head.sha256);
 	if ("reason" in resolved) {
 		return refusal(77, { status: "UNRUN", path: ".omp/push-check", sha256: head.sha256, reason: resolved.reason },
-			{ code: "PUSH_CHECK_UNAVAILABLE", message: `The registered repo check is unavailable: ${resolved.reason}`, remediation: "Start .omp/push-check with #! and an absolute interpreter path taking no arguments whose --version answers (e.g. #!/bin/bash; #!/usr/bin/env bash is not accepted), commit it, and retry; nothing was recorded." });
+			{ code: "PUSH_CHECK_UNAVAILABLE", message: `The registered repo check is unavailable: ${resolved.reason}`, remediation: "Start .omp/push-check with #! and an interpreter that resolves on this machine (e.g. #!/bin/sh), commit it, and retry; nothing was recorded." });
 	}
 	let exportRoot: string;
 	try {

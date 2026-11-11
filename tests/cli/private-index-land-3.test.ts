@@ -3,11 +3,11 @@
 // scripts/suite-hermetic-env.sh scripts/kitlib_tmp.py
 // scripts/check-stale-worktree.sh scripts/kitlib-tmp.sh
 import { expect, setDefaultTimeout, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { run as kitlibRun } from "../../src/kitlib/run.ts";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
-import { qualifyPublicationCandidate } from "../../src/land.ts";
+import { qualifyPublicationCandidate, resolvePushCheckExecutable } from "../../src/land.ts";
 import {
 	EXPECTED_SERVICE, SERVICE_BASE, actualParentSetup, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, patchHold, registerPushCheck, remoteHead, repoRoot, responseCode, scratch, verdictPath, writeServiceLines, LAND_DEFAULT_TIMEOUT_MS,
 } from "./private-index-land.helpers.ts";
@@ -234,5 +234,43 @@ test("a candidate that replaces an unrunnable registered check lands with the ch
 	expect(data.check.sha256).toBe(brokenSha);
 	expect(remoteHead(work)).toBe(data.commit);
 	expect(git(work, ["show", `${data.commit}:.omp/push-check`])).toBe(repairedBody);
+});
+
+test("PUSHCHECKSH1 a dash-like check runs without a --version probe and records version unknown", () => {
+	// Debian/Ubuntu /bin/sh is dash, which rejects --version (rc 2). The old
+	// interpreter rule probed `<interpreter> --version` and left every #!/bin/sh
+	// check UNRUN there, and it rejected #!/usr/bin/env outright. The fake
+	// interpreter below is executable but refuses --version exactly like dash,
+	// so the old rule refuses this land while the direct-exec rule lands it PASS.
+	const { work, fakeBin } = fixture();
+	writeFileSync(join(fakeBin, "mydash"), "#!/bin/bash\nif [ \"$1\" = \"--version\" ]; then printf 'Illegal option --\\n' >&2; exit 2; fi\nexec /bin/bash \"$@\"\n", { mode: 0o755 });
+	chmodSync(join(fakeBin, "mydash"), 0o755);
+	const checkBody = "#!/usr/bin/env mydash\nexit 0\n";
+	const checkSha = registerPushCheck(work, checkBody);
+	writeFileSync(join(work, "owned.txt"), "candidate under a dash-like check\n");
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	const data = run.body.data as {
+		overall: string;
+		commit: string;
+		check: { status: string; sha256: string; selected_executable: string; selected_version: string };
+	};
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("PUSHED");
+	expect(data.check.status).toBe("PASS");
+	expect(data.check.sha256).toBe(checkSha);
+	expect(data.check.selected_executable).toBe(realpathSync(join(fakeBin, "mydash")));
+	expect(data.check.selected_version).toBe("unknown");
+	expect(remoteHead(work)).toBe(data.commit);
+	// The portable header itself resolves on this machine and needs no probe.
+	expect(resolvePushCheckExecutable(work, Buffer.from("#!/bin/sh\nexit 0\n", "utf8"), checkSha)).toEqual({
+		executable: realpathSync("/bin/sh"),
+		version: "unknown",
+	});
+	// A missing interpreter still refuses instead of running.
+	expect(resolvePushCheckExecutable(work, Buffer.from("#!/not/a/real/land-check-runner\nexit 0\n", "utf8"), checkSha)).toEqual({
+		reason: "check_interpreter_unavailable",
+	});
 });
 
