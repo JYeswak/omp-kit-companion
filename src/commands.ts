@@ -341,6 +341,12 @@ const scratchMineData: DataSchema = { type: "object", required: ["overall", "dir
 		dir: { type: "string" }, label: { type: "string" }, state: { enum: ["unreleased", "released", "held", "hold-expired"] },
 		bin: { enum: ["throwaway", "evidence", "promote", "hold", "unbinned"] },
 	} } },
+	ovnfs: { enum: ["present", "absent", "unavailable"] },
+	checkouts: { type: "array", items: { type: "object", required: ["name", "path", "dirty", "remove"], properties: {
+		name: { type: "string" }, path: { type: "string" }, dirty: { type: "boolean" },
+		age_s: { type: ["number", "null"] }, touched_hours_ago: { type: ["number", "null"] }, remove: { type: "string" },
+	} } },
+	ovnfsNote: { type: "string" },
 } };
 const scratchGateData: DataSchema = { type: "object", required: ["overall", "point", "owed"], properties: {
 	overall: { enum: ["OK", "REFUSED", "UNPROVEN"] }, point: { type: "string" },
@@ -443,6 +449,11 @@ const landData: DataSchema = { type: "object", required: ["overall", "check"], p
 	commit: { type: ["string", "null"] }, candidate_sha: { type: ["string", "null"] }, pushed_sha: { type: ["string", "null"] }, owner: { type: "string" },
 	paths: { type: "array", items: { type: "string" } }, base: { type: "string" },
 	localMain: { type: "string" }, convergence: convergeData, check: landCheckData, phases: { type: "object" },
+	ovnfs: { enum: ["present", "absent", "unavailable"] }, checkoutScan: { enum: ["OK", "TIMED_OUT", "SKIPPED", "UNAVAILABLE"] },
+	checkoutsRemoved: { type: "array", items: { type: "string" } },
+	checkoutsKept: { type: "array", items: { type: "object", required: ["name", "unappliedPaths"], properties: { name: { type: "string" }, unappliedPaths: { type: "array", items: { type: "string" } } } } },
+	checkoutsMatching: { type: "array", items: { type: "string" } },
+	checkout_text: { type: "string" }, text: { type: "string" },
 }, allOf: [{
 	if: { properties: { overall: { const: "PUSHED" } } },
 	then: { required: ["commit", "candidate_sha", "pushed_sha", "owner", "paths", "base", "convergence"], properties: { commit: { type: "string" }, pushed_sha: { type: "string" } } },
@@ -539,13 +550,15 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--ours", value: "PATH", repeatable: true, description: "Explicit owner decision to keep the integrated local path" },
 		{ name: "--theirs", value: "PATH", repeatable: true, description: "Explicit owner decision to take the origin path" },
 	], example: "omp-kit converge --repo . --json", runnable: false, mutation: true, dataSchema: convergeData },
-	{ name: "land", description: "Commit exactly reserved paths to shared main and publish through owner-resolved convergence", usage: "land --paths PATH... --message MSG --apply --yes | land --patch FILE [--base SHA] --message MSG --apply --yes", flags: [
+	{ name: "land", description: "Commit exactly reserved paths to shared main and publish through owner-resolved convergence", usage: "land --paths PATH... --message MSG --apply --yes [--checkout NAME] [--keep-checkout] | land --patch FILE [--base SHA] --message MSG --apply --yes [--checkout NAME] [--keep-checkout]", flags: [
 		{ name: "--paths", value: "PATH", repeatable: true, description: "Exact repository-relative file path; repeat for each reserved file (path mode; refused with --patch)" },
 		{ name: "--patch", value: "FILE", description: "Caller-produced unified diff whose selected hunks are reconstructed onto fresh origin/main (patch mode; refused with --paths)" },
 		{ name: "--base", value: "SHA", description: "Base commit the patch was produced from; must apply cleanly there and is recorded as an Authored-On trailer (patch mode only)" },
 		{ name: "--message", value: "MSG", aliases: ["-m"], description: "Commit message for the shared-main commit" },
 		{ name: "--apply", description: "Request owner-bound save and publication" },
 		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
+		{ name: "--checkout", value: "NAME", description: "Remove only this named ovnfs checkout after publishing; without it land only reports matches" },
+		{ name: "--keep-checkout", description: "Keep the named ovnfs checkout instead of removing it after publishing" },
 	], example: "omp-kit land --paths src/a.ts --message 'fix: x [pending]' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
 	{ name: "push-check", description: "Run the repo's committed .omp/push-check against a commit and record the verdict the author handoff reads", usage: "push-check --commit SHA [--repo PATH]", flags: [
 		{ name: "--commit", value: "SHA", description: "Commit whose tree the HEAD push-check runs against" },

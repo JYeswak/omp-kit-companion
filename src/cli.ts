@@ -13,8 +13,8 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
 import { RELEASE_DATA } from "./release-assets.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
-import { run as runBounded } from "./kitlib/run.ts";
-import { runtimeTempRoot } from "./runtime.ts";
+import { run as runBounded, runSync as runBoundedSync } from "./kitlib/run.ts";
+import { listRepoCheckouts } from "./ovnfs-checkouts.ts";
 import { audit, undo, why } from "./audit.ts";
 import { LAND_GUARD_PUBLIC_IDENTITY, inspectLandGuard, landCommand } from "./land.ts";
 import { pushCheckCommand } from "./push-check.ts";
@@ -4260,8 +4260,22 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		const rows = ownedScratch(home, censusDeps);
 		const unreleased = rows.filter(owesRelease);
 		if (point !== undefined) logOwedFlag(home, point, rows);
+		let repoRoot: string | null = null;
+		try {
+			const top = runBoundedSync(["git", "rev-parse", "--show-toplevel"], { cwd: process.cwd(), deadline_s: 3, max_output_bytes: 64 * 1024 });
+			if (!top.timed_out && !top.killed && !top.truncated && top.rc === 0) {
+				const out = new TextDecoder().decode(top.stdout).trim();
+				if (out.length > 0) repoRoot = out;
+			}
+		} catch {
+			repoRoot = null;
+		}
+		const inventory = repoRoot === null
+			? { ovnfs: "unavailable" as const, checkouts: [], note: "ovnfs checkouts omitted: not inside a Git repository." }
+			: listRepoCheckouts(repoRoot);
 		return { code: 0, data: { overall: unreleased.length > 0 ? "FINDINGS" : "OK", dirs: rows, unreleased: unreleased.length,
 			overBudget: rows.filter(row => row.overBudget).length,
+			ovnfs: inventory.ovnfs, checkouts: inventory.checkouts, ovnfsNote: inventory.note,
 			note: "Read-only apart from --at, which appends one flag row to the reap log. Release each unreleased dir with omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref ...]; a hold is declared at creation." }, verification: "UNVERIFIED" };
 	}
 	if (sub === "gate") {

@@ -26,6 +26,7 @@ execution is `UNRUN`.
 Failed admission does not publish, and an origin advance after checking
 is refused without force or retry. `UNRUN` means admission or publication could
 not be verified. `SKIP` does not prove that a full suite passed.
+On `PUSHED`, land removes only the named ovnfs checkout (`--checkout NAME`, or `land --patch` when the patch file lies inside a checkout's path) after re-checking its diff and bytes plus modes right before `ovnfs rm`; without a name it only reports matches with their `ovnfs rm` lines and removes nothing. All files inside a removed checkout, including untracked and ignored ones, are removed with it. Pass `--keep-checkout` to keep even the named checkout; `ovnfs rm <name>` is for abandoned ones.
 
 | Result | Exit | Meaning |
 |---|---|---|
@@ -68,9 +69,7 @@ for each landed commit, and ordinary non-force push runs publication hooks.
 No stash, rebase, restore or automatic conflict resolution runs. A hook/push
 failure after application retains the applied changes and any earlier landed
 commits on main for inspection; `applied`, `commit`, `commits` and `published`
-describe that partial state. It never discards bytes to roll back. The worker
-branch and worktree remain intact on both refusal and success; the lead removes
-them only after verifying landing.
+describe that partial state. It never discards bytes to roll back. On success land removes only the named ovnfs checkout (`--checkout NAME`, or `--patch` inside a checkout); without a name it reports matches and removes nothing, and `ovnfs rm <name>` is for abandoned ones. All files inside a removed checkout, including untracked and ignored ones, are removed with it. On refusal the worker branch and worktree remain intact for inspection; the lead removes worker branches only after verifying landing.
 
 `PUSHED` requires origin main, local main, and the landed paths' index and
 working tree to agree with the captured worker tip. The lock serializes

@@ -14,6 +14,7 @@ import type { ConvergeResult } from "./converge.ts";
 import { defaultLiveness, defaultRunner, disposalGate } from "./scratch.ts";
 import { parseReservationRead } from "./fleet-guard/git.ts";
 import type { AttestedReservation } from "./fleet-guard/git.ts";
+import { reapLandedCheckouts } from "./ovnfs-checkouts.ts";
 
 
 type GitResult = { code: number; out: string; err: string; interrupted: boolean; timedOut: boolean };
@@ -1278,7 +1279,8 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 		// Path mode writes no trailer; patch mode with --base records the
 		// proven base so the stale-worktree hook judges provenance.
 		const landedMessage = authoredOn === null ? message : `${message}\n\nAuthored-On: ${authoredOn}`;
-		result = await commitOwnedPathsAndPublish(repo, { paths, message: landedMessage, owner: owner.owner, base, pushDeadlineS: landPushDeadlineSeconds() });
+		const namedFlag = request.flags.get("--checkout");
+		result = await commitOwnedPathsAndPublish(repo, { paths, message: landedMessage, owner: owner.owner, base, pushDeadlineS: landPushDeadlineSeconds(), keepCheckout: request.flags.has("--keep-checkout"), namedCheckout: typeof namedFlag === "string" ? namedFlag : null, patchFile: patchPath });
 		published = (result.data as { overall?: string } | null)?.overall === "PUSHED";
 		return result;
 	} finally {
@@ -1295,9 +1297,20 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
  * same contract as Git's native --only transaction. */
 async function commitOwnedPathsAndPublish(
 	repo: string,
-	input: { paths: string[]; message: string; owner: string; base: string; pushDeadlineS?: number },
+	input: { paths: string[]; message: string; owner: string; base: string; pushDeadlineS?: number; keepCheckout?: boolean; namedCheckout?: string | null; patchFile?: string | null },
 ): Promise<CliResult> {
 	const { paths, message, owner, base } = input;
+function landedBaseTimeMs(repo: string, base: string): number | null {
+	try {
+		const run = git(repo, ["show", "-s", "--format=%ct", `${base}^{commit}`]);
+		if (run.code !== 0 || run.interrupted) return null;
+		const seconds = Number(run.out.trim());
+		if (!Number.isFinite(seconds) || seconds <= 0) return null;
+		return seconds * 1000;
+	} catch {
+		return null;
+	}
+}
 	let checkPreflight = preparePushCheck(repo, base);
 	if (checkReplaceable(checkPreflight) && paths.includes(PUSH_CHECK_PATH)) {
 		const checkDiff = git(repo, ["diff", "--quiet", "HEAD", "--", `:(literal)${PUSH_CHECK_PATH}`]);
@@ -1470,9 +1483,18 @@ async function commitOwnedPathsAndPublish(
 					: pushUnverified
 						? pushUnverifiedFailure(repo, input.pushDeadlineS ?? landPushDeadlineSeconds(), convergence)
 						: { code: "LAND_PUBLICATION_REFUSED", message: `The exact checked candidate was not published: ${convergence.reason ?? "publication was not verified"}`, remediation: "Preserve the candidate and resolve the typed refusal before another landing." });
+		let checkoutFields: Record<string, unknown> = {};
+		if (published && pushedSha !== null) {
+			try {
+				const reap = reapLandedCheckouts({ repo, landedPaths: paths, landedRev: pushedSha, landedBaseTimeMs: landedBaseTimeMs(repo, base), namedCheckout: input.namedCheckout ?? null, patchFile: input.patchFile ?? null, keepCheckout: input.keepCheckout === true });
+				checkoutFields = { ovnfs: reap.ovnfs, checkoutScan: reap.checkoutScan, checkoutsRemoved: reap.checkoutsRemoved, checkoutsKept: reap.checkoutsKept, checkoutsMatching: reap.checkoutsMatching, checkout_text: reap.checkout_text, text: reap.checkout_text };
+			} catch {
+				checkoutFields = { ovnfs: "unavailable", checkoutScan: "UNAVAILABLE", checkoutsRemoved: [], checkoutsKept: [], checkoutsMatching: [], checkout_text: "Checkout scan unavailable; land published, nothing removed.", text: "Checkout scan unavailable; land published, nothing removed." };
+			}
+		}
 		return {
 			code: published ? 0 : overall === "UNRUN" ? 77 : 1,
-			data: { overall, commit: sha, candidate_sha: candidateSha, pushed_sha: pushedSha, owner, paths, base, localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence: convergenceData, check: checkResult, phases, ...(scratchNotice !== null ? { scratch_disposal_notice: scratchNotice } : {}) },
+			data: { overall, commit: sha, candidate_sha: candidateSha, pushed_sha: pushedSha, owner, paths, base, localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence: convergenceData, check: checkResult, phases, ...(scratchNotice !== null ? { scratch_disposal_notice: scratchNotice } : {}), ...checkoutFields },
 			...(failure ? { errors: [failure] } : {}),
 			verification: overall === "UNRUN" ? "UNVERIFIED" : "PERFORMED",
 		};
@@ -1533,5 +1555,6 @@ export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 	const currentOwner = authorizedOwner(repo, paths);
 	if ("error" in currentOwner) return currentOwner.error;
 	if (currentOwner.owner !== owner.owner) return refused("OWNER_MISMATCH", "The live pane owner changed before saving", "Reacquire the correct identity and reservation; nothing was committed.");
-	return commitOwnedPathsAndPublish(repo, { paths, message, owner: owner.owner, base: head.out.trim() });
+	const checkoutFlag = request.flags.get("--checkout");
+	return commitOwnedPathsAndPublish(repo, { paths, message, owner: owner.owner, base: head.out.trim(), keepCheckout: request.flags.has("--keep-checkout"), namedCheckout: typeof checkoutFlag === "string" ? checkoutFlag : null, patchFile: null });
 }
