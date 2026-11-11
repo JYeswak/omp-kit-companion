@@ -3,3 +3,4 @@
 - The push-time verification-level guard accepts the folded close, so level-less pushes are still refused under their own pre-push code while commit-time closes live in the aggregator.
 - The folded commit-msg refusal now exits 1 (was 4 for a missing bead id); the finding text still names the check and its fix.
 - The four helpers live beside 55 in `scripts/` (never shadowing a legacy sibling); a repo with an upgraded 55 but no helpers warns with the reinstall command and skips those checks instead of blocking every commit, while `install --check` reports the missing helpers stale.
+- The commit gate runs each folded check with the shell its script names, so the bash-only checks work where `sh` is dash (Ubuntu).

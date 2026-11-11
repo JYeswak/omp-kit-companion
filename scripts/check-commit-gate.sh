@@ -82,7 +82,12 @@ agg_run() {
 	_errf="$agg_work/err"
 	: > "$_errf" 2>/dev/null || _errf="/dev/null"
 	_rc=0
-	sh "$_helper_path" "$@" 2>"$_errf" || _rc=$?
+	# Each helper runs under the shell its shebang names: two of them are bash scripts (set -o pipefail),
+	# which a POSIX sh such as Ubuntu's dash refuses.
+	_interp="sh"
+	IFS= read -r _shebang < "$_helper_path" || _shebang=
+	case "$_shebang" in *bash*) _interp=bash ;; esac
+	"$_interp" "$_helper_path" "$@" 2>"$_errf" || _rc=$?
 	if [ "$_rc" -ne 0 ]; then
 		_last=$(grep -m1 -E 'REFUSE|refusing|FAIL|error|DEPLOY_STEP_MISSING|verification-level|commit-notes' "$_errf" 2>/dev/null | tr '\t' ' ')
 		if [ -z "$_last" ]; then _last=$(grep -v '^$' "$_errf" 2>/dev/null | head -n 1 | tr '\t' ' '); fi
