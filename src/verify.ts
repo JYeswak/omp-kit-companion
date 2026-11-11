@@ -30,7 +30,7 @@
  * for bead_lint's create and update admission (REPLAYABLE1 ompkit-fp72.135.3.71).
  */
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { availableParallelism, homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { run, type RunResult } from "./kitlib/run.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
@@ -144,7 +144,7 @@ export interface AcceptanceRollback {
 }
 export interface VerifyResult {
 	ok: boolean;
-	code: "CLOSED" | "REWORK" | "ACT_FAILED" | "LESSON_MISSING" | "ENVIRONMENT" | "NON_AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "PENDING" | "NOT_PUBLISHED" | "UNKNOWN";
+	code: "CLOSED" | "REWORK" | "ACT_FAILED" | "LESSON_MISSING" | "ENVIRONMENT" | "DEPENDENCIES_NOT_LOCKED" | "NON_AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "PENDING" | "NOT_PUBLISHED" | "UNKNOWN";
 	bead: string;
 	export: string;
 	replays: BoxReplay[];
@@ -311,6 +311,180 @@ function ompEnvironmentFailure(out: string, env: Record<string, string>): string
 	}
 	return null;
 }
+/**
+ * VERIFYDEPS1 (ompkit-1ra0d.154): the export has no node_modules, so every JS box fails with
+ * Cannot find package. Provision dependencies from the export's own lockfiles before replaying:
+ * for each directory holding a lockfile that a box's cwd is in or under, install frozen from
+ * that lockfile (never resolve outside it). A missing or out-of-date lockfile is the named
+ * refusal DEPENDENCIES_NOT_LOCKED, never a silent pass. The working repo's node_modules is
+ * never copied: that would replay against unverified bytes.
+ *
+ * Scripts run as the package manager does by default (no --ignore-scripts): the replay already
+ * executes the project's own code from the same commit, so install scripts are the same trust
+ * domain, and native deps (esbuild, sentry-cli) need their postinstall builds. Because install
+ * scripts run, the install step gets a scrubbed env: any *TOKEN*, any *_AUTH*, and npm registry
+ * auth config never reach it (HOME and the package-manager cache dirs stay, so offline
+ * --prefer-offline installs still hit the user's cache). Installs are offline-first from the
+ * user's package cache where the tool supports it (--prefer-offline for npm/pnpm/yarn; bun
+ * consults its cache automatically), falling back to the registry. pnpm gets --store-dir pointed
+ * at the user's own store (`pnpm store path` from $HOME), so it never invents a project-local
+ * `.pnpm-store` in the tree under test. After a successful install
+ * the dir's node_modules/.bin fronts the replay PATH, so bare runner binaries (`vitest run`)
+ * resolve the lockfile-pinned binary, never a caller-global one. NODE_PATH and NODE_OPTIONS
+ * are stripped from the replay env so the working repo's closure cannot leak in either.
+ */
+const JS_RUNTIME = /\b(bun|node|npm|pnpm|yarn|npx|bunx|corepack|deno|tsc|tsx|ts-node|vitest|jest|mocha)\b/;
+interface LockKind { file: string; argv: string[] }
+function lockKind(dir: string): LockKind | null {
+	if (existsSync(join(dir, "bun.lockb"))) return { file: "bun.lockb", argv: ["bun", "install", "--frozen-lockfile"] };
+	if (existsSync(join(dir, "bun.lock"))) return { file: "bun.lock", argv: ["bun", "install", "--frozen-lockfile"] };
+	if (existsSync(join(dir, "package-lock.json"))) return { file: "package-lock.json", argv: ["npm", "ci", "--prefer-offline", "--no-audit", "--no-fund"] };
+	if (existsSync(join(dir, "pnpm-lock.yaml"))) return { file: "pnpm-lock.yaml", argv: ["pnpm", "install", "--frozen-lockfile", "--prefer-offline"] };
+	if (existsSync(join(dir, "yarn.lock"))) return existsSync(join(dir, ".yarnrc.yml"))
+		? { file: "yarn.lock", argv: ["yarn", "install", "--immutable"] }
+		: { file: "yarn.lock", argv: ["yarn", "install", "--frozen-lockfile", "--prefer-offline"] };
+	if (existsSync(join(dir, "deno.lock"))) return { file: "deno.lock", argv: ["deno", "install", "--frozen"] };
+	return null;
+}
+/** A box that invokes the deno toolchain (as opposed to a node box that merely runs near deno files). */
+const DENO = /\bdeno\b/;
+/** A box's cwd: the export dir advanced through leading `cd <dir> &&` segments (quotes stripped). */
+function boxCwd(command: string, exportDir: string): string {
+	let cwd = exportDir;
+	let rest = command;
+	for (let i = 0; i < 50 && rest !== ""; i++) {
+		const m = /^\s*cd\s+("[^"]+"|'[^']+'|\S+)\s*&&\s*/.exec(rest);
+		if (m === null) return cwd;
+		let target = m[1]!;
+		if ((target.startsWith('"') && target.endsWith('"')) || (target.startsWith("'") && target.endsWith("'"))) target = target.slice(1, -1);
+		if (target !== "") cwd = isAbsolute(target) ? target : resolve(cwd, target);
+		rest = rest.slice(m[0].length);
+	}
+	return cwd;
+}
+type ProvisionOutcome = { ok: true } | { ok: false; detail: string };
+/** Env keys that must never reach a dependency install. Installs run install scripts, so caller
+ * credentials (any *TOKEN*, any *_AUTH*, npm registry auth config) would be visible to the
+ * project's own postinstall code. Kept: HOME and the package-manager cache dirs, so offline
+ * (--prefer-offline) installs still hit the user's package cache. Scrubbed for installs only;
+ * the replay itself keeps the caller's env (minus the tracker/git bindings replayBase strips). */
+function isInstallSecret(key: string): boolean {
+	if (key.includes("TOKEN")) return true;
+	if (/(?:^|_)AUTH(?:$|_)/.test(key)) return true;
+	return /^npm_config_/i.test(key) && /auth/i.test(key);
+}
+/**
+ * The user's own pnpm store, resolved the way pnpm itself resolves it for the user, never the
+ * project: `pnpm store path` run from $HOME. pnpm invents a project-local `.pnpm-store` when the
+ * export sits on a different filesystem than its default store, dropping a large untracked
+ * store into the tree under test; pinning --store-dir to the user's store prevents that.
+ * Null on any failure (missing pnpm included): the install then runs without --store-dir,
+ * fail-closed downstream as before.
+ */
+async function pnpmStoreDir(env: Record<string, string>): Promise<string | null> {
+	let result: RunResult;
+	try {
+		result = await run(["pnpm", "store", "path"], { cwd: env.HOME ?? homedir(), deadline_s: 60, env, max_output_bytes: 64 * 1024 });
+	} catch {
+		return null;
+	}
+	if (result.rc !== 0 || result.truncated || result.total_truncated) return null;
+	const dir = text(result.stdout).trim();
+	if (dir === "" || dir.includes("\n") || !isAbsolute(dir)) return null;
+	return dir;
+}
+async function installLockedDeps(lockDir: string, lock: LockKind, env: Record<string, string>, log: string[]): Promise<ProvisionOutcome> {
+	// Load-scaled deadline: room for a cold cache on a busy machine, bounded so a hung
+	// registry cannot stall the close past the box budget.
+	let cpus = 4;
+	try { cpus = Math.max(1, availableParallelism()); } catch { /* keep default */ }
+	const deadline = Math.min(900, 180 + 60 * cpus);
+	const started = Date.now();
+	const installEnv: Record<string, string> = {};
+	let scrubbed = 0;
+	for (const [key, value] of Object.entries(env)) {
+		if (isInstallSecret(key)) { scrubbed += 1; continue; }
+		installEnv[key] = value;
+	}
+	let argv = lock.argv;
+	if (lock.file === "pnpm-lock.yaml") {
+		const store = await pnpmStoreDir(installEnv);
+		if (store !== null) {
+			argv = [...argv, "--store-dir", store];
+			log.push(`deps pinned pnpm --store-dir ${store}`);
+		}
+	}
+	let result: RunResult;
+	try {
+		result = await run(argv, { cwd: lockDir, deadline_s: deadline, env: installEnv, max_output_bytes: 4 * 1024 * 1024 });
+	} catch (error) {
+		const detail = `environment prerequisite unmet: dependency install cannot run ${argv.join(" ")} in ${lockDir}: ${(error as Error).message.slice(0, 200)}`;
+		log.push(`deps ${detail}`);
+		return { ok: false, detail };
+	}
+	const out = text(result.stdout) + text(result.stderr);
+	const elapsed = Date.now() - started;
+	log.push(`deps ${argv.join(" ")} in ${lockDir} rc ${result.rc} (${elapsed} ms, ${scrubbed} secret env vars scrubbed): ${out.replace(/\n/g, " | ").slice(-1500)}`);
+	if (result.rc === 0) return { ok: true };
+	// Frozen installs fail closed on a stale lock (npm "ci can only", pnpm ERR_PNPM_OUTDATED_LOCKFILE,
+	// bun/yarn frozen mismatches, deno "lockfile is out of date"): the project must commit an
+	// up-to-date lockfile, not resolve past it.
+	if (/lockfile|frozen|outdated|out-of-date|up-to-date|needs update|npm ci can only/i.test(out)) {
+		return { ok: false, detail: `DEPENDENCIES_NOT_LOCKED: ${lock.file} in ${lockDir} is missing or out of date (install rc ${result.rc}); commit an up-to-date lockfile, never resolve outside it` };
+	}
+	return { ok: false, detail: `environment prerequisite unmet: dependency install failed in ${lockDir} (rc ${result.rc}): ${out.slice(-500).replace(/\n/g, " | ")}` };
+}
+/**
+ * After a successful install, resolve bare runner binaries (`vitest run`) to the lockfile-pinned
+ * one, never a caller-global one: accumulate the provisioned dir's node_modules/.bin at the front
+ * of the replay PATH (deduped, so the per-dir cache keeps it fronted once; deno installs have no
+ * .bin, so the missing dir is a no-op).
+ */
+function prependProvisionedBin(lockDir: string, env: Record<string, string>, log: string[]): void {
+	const bin = join(lockDir, "node_modules", ".bin");
+	if (!existsSync(bin)) return;
+	const paths = (env.PATH ?? "").split(delimiter);
+	if (paths.includes(bin)) return;
+	env.PATH = [bin, ...paths].join(delimiter);
+	log.push(`deps prepended ${bin} to the replay PATH`);
+}
+/**
+ * Ensure one box command's JS dependencies are provisioned. Null: no JS runtime involved, so
+ * nothing to do. Otherwise the box cwd's nearest lockfile dir up to the export root, installed
+ * once per directory (cache). A package.json with no covering lockfile is the named refusal,
+ * as is a deno box in a deno project (deno.json/deno.jsonc) with no deno.lock: without the
+ * lockfile deno would resolve against the global cache and registry, unpinned.
+ */
+async function ensureBoxDeps(command: string, exportDir: string, env: Record<string, string>, log: string[], cache: Map<string, ProvisionOutcome>): Promise<ProvisionOutcome | null> {
+	if (!JS_RUNTIME.test(command)) return null;
+	const cwd = boxCwd(command, exportDir);
+	const rel = relative(exportDir, cwd);
+	if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+	let dir = cwd;
+	let hasPackageJson = false;
+	let hasDenoConfig = false;
+	for (;;) {
+		if (existsSync(join(dir, "package.json"))) hasPackageJson = true;
+		if (existsSync(join(dir, "deno.json")) || existsSync(join(dir, "deno.jsonc"))) hasDenoConfig = true;
+		const lock = lockKind(dir);
+		if (lock !== null) {
+			const hit = cache.get(dir);
+			if (hit !== undefined) return hit.ok ? null : hit;
+			const outcome = await installLockedDeps(dir, lock, env, log);
+			cache.set(dir, outcome);
+			if (!outcome.ok) return outcome;
+			prependProvisionedBin(dir, env, log);
+			return null;
+		}
+		if (dir === exportDir) break;
+		const up = dirname(dir);
+		if (up === dir || up.length < exportDir.length) break;
+		dir = up;
+	}
+	if (DENO.test(command) && hasDenoConfig) return { ok: false, detail: `DEPENDENCIES_NOT_LOCKED: no deno.lock covers ${cwd}; commit one, never resolve outside it` };
+	if (!hasPackageJson) return null;
+	return { ok: false, detail: `DEPENDENCIES_NOT_LOCKED: no lockfile (bun.lock/bun.lockb, package-lock.json, pnpm-lock.yaml, yarn.lock, deno.lock) covers ${cwd}; commit one, never resolve outside it` };
+}
 
 /** `laneParent` overrides LANE_PARENT (a tracker without the omp-kit lane, such as a fixture). */
 export interface VerifyInput { bead: string; exportSha: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; laneParent?: string; lesson?: string }
@@ -413,6 +587,10 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	delete replayBase.BEADS_DB;
 	delete replayBase.GIT_DIR;
 	delete replayBase.GIT_WORK_TREE;
+	// VERIFYDEPS1: NODE_PATH would resolve unpinned packages from the working repo's closure
+	// and NODE_OPTIONS can --require arbitrary code into every node box; neither reaches replay.
+	delete replayBase.NODE_PATH;
+	delete replayBase.NODE_OPTIONS;
 	replayBase.PATH = (env.PATH ?? "/usr/bin:/bin").split(delimiter)
 		.filter(dir => basename(resolve(dir)) !== "agent-bin" && basename(realOrLexical(dir)) !== "agent-bin").join(delimiter);
 	if (!realBr.ok) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`UNJUDGED: ${realBr.reason}`).join("\n"), acts };
@@ -445,6 +623,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const environmentFailures: string[] = [];
 	type ReplayOutcome = Pick<RunResult, "rc" | "timed_out" | "killed" | "truncated" | "total_truncated" | "stdout" | "stderr"> & { out: string; elapsedMs: number };
 	const commandResults = new Map<string, ReplayOutcome>();
+	const provisioned = new Map<string, ProvisionOutcome>();
 	for (const box of replayable) {
 		if (box.phase === "live" || box.phase === "after") {
 			const command = commandOf(box.body)!;
@@ -466,6 +645,13 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		}
 		for (const m of paths.mapped) log.push(`${tag(box)} REPO_PATH_MAPPED ${JSON.stringify(m.token)} -> ${m.to} (export, not live tree)`);
 		const command = paths.command; // what runs; `named` is the box's own text, reported everywhere
+		const deps = await ensureBoxDeps(command, exportDir, replayEnv, log, provisioned);
+		if (deps !== null && !deps.ok) {
+			environmentFailures.push(`${tag(box)} ${deps.detail}`);
+			replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: null, pass: null, detail: `${deps.detail}; not executed` });
+			log.push(`${tag(box)} ${deps.detail}; not executed; needs-director`);
+			continue;
+		}
 		const cached = commandResults.get(named);
 		const reused = cached !== undefined;
 		let replay: ReplayOutcome;
@@ -537,14 +723,17 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		return { ok: false, code: input.dryRun ? "DRY_RUN" : "REWORK", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts };
 	}
 	if (environmentFailures.length > 0) {
-		const comment = `ENVIRONMENT ${input.bead}: ${environmentFailures.join("; ")}\n${log.join("\n")}`;
+		// A missing or out-of-date lockfile is its own named refusal, never a silent pass or a
+		// generic environment failure: the project must commit an up-to-date lockfile.
+		const code = environmentFailures.some(f => f.includes("DEPENDENCIES_NOT_LOCKED")) ? "DEPENDENCIES_NOT_LOCKED" : "ENVIRONMENT";
+		const comment = `${code} ${input.bead}: ${environmentFailures.join("; ")}\n${log.join("\n")}`;
 		acts.push(["br", "update", input.bead, "--add-label", "needs-director", "--actor", input.actor]);
 		acts.push(["br", "comments", "add", input.bead, "--actor", input.actor, "-m", comment]);
 		if (!input.dryRun) {
 			const done = await executeActs(acts, input.repo, env);
 			if (done.failure !== null) log.push(done.failure);
 		}
-		return { ok: false, code: "ENVIRONMENT", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts };
+		return { ok: false, code, bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts };
 	}
 	const ran = replays.filter(r => r.pass === true);
 	if (ran.length === 0) {
