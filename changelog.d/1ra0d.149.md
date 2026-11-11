@@ -1,0 +1,1 @@
+- `omp-kit verify` can create a live-readback child even when another bead's live readback has a similar title; the duplicate check no longer compares readback children with each other.

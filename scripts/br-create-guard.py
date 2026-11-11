@@ -233,8 +233,12 @@ def main(argv: list[str]) -> int:
             # (verify's LIVEREADBACK child carries its parent's title and links it this way).
             related = {item.partition(":")[2].strip() for item in (parsed.get("deps") or "").split(",")
                        if item.partition(":")[0].strip() == "related"}
+            # LIVEREADBACK1: a readback child linked to its verified bead never duplicates another bead's
+            # readback (each reads back a different bead; verify reuses the same bead's existing child).
+            readback = parsed["title"].startswith("LIVEREADBACK: ") and bool(related)
             matches = [(score, row) for score, row in duplicate_matches(parsed["title"], issues)
-                       if row["id"] not in related]
+                       if row["id"] not in related
+                       and not (readback and str(row.get("title", "")).startswith("LIVEREADBACK: "))]
             not_duplicate = custom.get("--not-duplicate")
             matching_ids = {row["id"] for _, row in matches}
             if matches and not_duplicate is None:

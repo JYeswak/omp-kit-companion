@@ -68,6 +68,28 @@ else
 	fail=$((fail + 1))
 	printf 'FAIL duplicate-related-partial: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
 fi
+# LIVEREADBACK1: a related-linked readback child is not a duplicate of another bead's readback child,
+# but still refuses on an ordinary similar bead.
+cp "$BR_CREATE_FIXTURE" "$TMP/fixture.saved"
+cat > "$BR_CREATE_FIXTURE" <<'EOF'
+{"issues":[
+  {"id":"ompkit-rb1","title":"LIVEREADBACK: OUTSIDERDOCS1: the README fails a stranger on a fresh HOME in fourteen places","status":"open","priority":2,"created_at":"2026-10-16T10:00:00Z","created_by":"Other"},
+  {"id":"ompkit-od2","title":"OUTSIDERDOCS2: seven places the README fails a stranger on a fresh HOME","status":"open","priority":2,"created_at":"2026-10-16T10:01:00Z","created_by":"Other"},
+  {"id":"ompkit-od3","title":"README fails a stranger on a fresh HOME in seven places after the release","status":"open","priority":2,"created_at":"2026-10-16T10:02:00Z","created_by":"Other"}
+],"total":3,"offset":0,"has_more":false}
+EOF
+: > "$TMP/argv"
+br_create_valid --title "LIVEREADBACK: OUTSIDERDOCS2: seven places the README fails a stranger on a fresh HOME" \
+	--deps "related:ompkit-od2" > "$TMP/out" 2>&1
+got_rc=$?
+if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -Fq "ompkit-od3" "$TMP/out" && ! grep -Fq "ompkit-rb1 (" "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1))
+	printf 'FAIL readback-not-duplicate-of-readback: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
+fi
+cp "$TMP/fixture.saved" "$BR_CREATE_FIXTURE"
+
 
 printf '## Bulk import fixture\n' > "$TMP/bulk.md"
 : > "$TMP/argv"
