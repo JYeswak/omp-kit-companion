@@ -119,7 +119,20 @@ function enclosingPackage(start: string): { root: string; version: unknown } | n
 		if (parent === dir) return null;
 	}
 }
+/**
+ * The version the nearest enclosing OMP package names for a launcher, or
+ * null when no ancestor package.json names the OMP package. A pure filesystem
+ * read: never spawns and never touches the network, so cheap probes (the
+ * update job's repeat suppression) can name the judged version without
+ * resolving the full matcher identity the postcheck itself requires.
+ */
+export function enclosingOmpPackageVersion(launcher: string): string | null {
+	const found = enclosingPackage(launcher);
+	if (!found || typeof found.version !== "string" || !found.version.trim()) return null;
+	return found.version.trim();
+}
 
+/** The @oh-my-pi/pi-coding-agent package containing `start`, or null when `start` is outside any. */
 export function observeOmpLauncherVersion(launcher: string, env: Record<string, string | undefined>): string | null {
 	// From the launcher's own directory: a trust-gated launcher refuses to run inside an untrusted
 	// project, which is exactly where the kit is often invoked.
@@ -422,17 +435,57 @@ export function resolveBundledScript(script: string, root: string): string {
 	return realScript;
 }
 
-/** Resolve the PATH-selected OMP package and reject every inherited identity override that disagrees. */
-export function resolveOmpIdentity(env: Record<string, string | undefined> = process.env): OmpIdentity {
-	const pathValue = env.PATH;
-	const pathLauncher = resolveOmpLauncher(env);
-	if (!pathLauncher) throw new Error("omp executable not found on PATH");
-	const identity = identityFor(pathLauncher, env);
+/** A Tern app-support directory from the existing daemon-socket detection, never a hardcoded home. */
+function ternSupportDirs(env: Record<string, string | undefined>): string[] {
+	const dirs: string[] = [];
+	const socket = env.TERN_DAEMON_SOCKET;
+	if (typeof socket === "string" && socket.trim() !== "") dirs.push(dirname(socket));
+	const configDir = env.TERN_CONFIG_DIR;
+	if (typeof configDir === "string" && configDir.trim() !== "") dirs.push(configDir);
+	const home = env.HOME;
+	if (typeof home === "string" && home !== "") dirs.push(join(home, "Library", "Application Support", "Tern"));
+	return dirs;
+}
 
+/** Which omp pool a seat-omp resolution came from: Tern's bundle when present, else PATH. */
+export type SeatOmpSource = "tern-bundle" | "path";
+export interface SeatOmpResolution {
+	/** Absolute real launcher path, as resolveOmpLauncher reports. */
+	launcher: string;
+	resolvedFrom: SeatOmpSource;
+	/**
+	 * PATH directory to prepend so a plain PATH resolution finds this launcher
+	 * (the Tern wrapper dir; null when the launcher is already PATH-first).
+	 */
+	pathDir: string | null;
+}
+
+/**
+ * The omp a seat runs: Tern's bundled omp when present, else the first omp on
+ * PATH. Never throws and never executes anything; identity checks run later.
+ */
+export function resolveSeatOmp(env: Record<string, string | undefined> = process.env): SeatOmpResolution | null {
+	for (const dir of ternSupportDirs(env)) {
+		const wrapper = join(dir, "omp", "bin", "omp");
+		try {
+			const real = realpathSync(wrapper);
+			if (statSync(real).isFile()) {
+				accessSync(real, constants.X_OK);
+				return { launcher: real, resolvedFrom: "tern-bundle", pathDir: dirname(wrapper) };
+			}
+		} catch { /* absent or unusable: the next candidate, then PATH, decides */ }
+	}
+	const launcher = resolveOmpLauncher(env);
+	return launcher ? { launcher, resolvedFrom: "path", pathDir: null } : null;
+}
+
+/** Full identity for an explicitly chosen launcher, rejecting inherited identity overrides that disagree. */
+export function identityForLauncher(launcher: string, env: Record<string, string | undefined>): OmpIdentity {
+	const identity = identityFor(launcher, env);
 	for (const key of ["OMP_PATH", "OMP_BIN", "OMP"] as const) {
 		const value = env[key];
 		if (!value) continue;
-		const override = explicitLauncher(value, pathValue, key);
+		const override = explicitLauncher(value, env.PATH, key);
 		if (override !== identity.launcher) {
 			throw new Error(`${key} conflicts with the PATH-selected OMP launcher; refusing mixed OMP identities`);
 		}
@@ -445,4 +498,21 @@ export function resolveOmpIdentity(env: Record<string, string | undefined> = pro
 		}
 	}
 	return identity;
+}
+
+/** Resolve the PATH-selected OMP package and reject every inherited identity override that disagrees. */
+export function resolveOmpIdentity(env: Record<string, string | undefined> = process.env): OmpIdentity {
+	const pathLauncher = resolveOmpLauncher(env);
+	if (!pathLauncher) throw new Error("omp executable not found on PATH");
+	return identityForLauncher(pathLauncher, env);
+}
+
+/**
+ * The seat's OMP package: Tern's bundled omp when present, else the
+ * PATH-selected one. Throws exactly like resolveOmpIdentity when unresolvable.
+ */
+export function resolveSeatOmpIdentity(env: Record<string, string | undefined> = process.env): { identity: OmpIdentity; resolvedFrom: SeatOmpSource } {
+	const seat = resolveSeatOmp(env);
+	if (!seat) throw new Error("omp executable not found on PATH");
+	return { identity: identityForLauncher(seat.launcher, env), resolvedFrom: seat.resolvedFrom };
 }

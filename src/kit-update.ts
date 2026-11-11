@@ -7,7 +7,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { assertFreshKitPlan, parseReleaseIndexJson, previewKitRelease, stageKitRelease, type BinaryReleaseInfo, type KitReleasePlan, type ReleaseManifest, type ReleasePlatform } from "./kit-release.ts";
 import { redactFullTestCause, type FullTestCause, type FullTestReport } from "./full-test-runner.ts";
 import { abortCompensatedKitUpdateReceipt, acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate, reconcileKitUpdateReceipt, writePrivate } from "./mutations.ts";
-import { resolveOmpIdentity } from "./paths.ts";
+import { enclosingOmpPackageVersion, observeOmpLauncherVersion, resolveSeatOmp, resolveSeatOmpIdentity, type SeatOmpSource } from "./paths.ts";
 import type { PresentationResult } from "./output.ts";
 import { isSha256Hex } from "./regex-guards.ts";
 import installerVerifierPath from "../installer/install.py";
@@ -39,7 +39,7 @@ export type KitUpdateRefusal = { status: "REFUSED" | "NETWORK_UNAVAILABLE"; exit
 export type KitUpdatePreview = KitUpdatePlan | KitUpdateRefusal;
 /** DEFERRED: heavy admission refused a ladder stage, so the release was never judged; it is not PASS and not a FAIL verdict. */
 export type KitPostcheck = { status: "PASS" | "FAIL" | "DEFERRED" | "NOT_RUN"; matcher: "PASS" | "FAIL" | "NOT_RUN"; live: "PASS" | "FAIL" | "NOT_RUN"; report?: FullTestReport; reason?: string; cause?: FullTestCause };
-export type KitUpdateResult = { status: "UPDATED" | "CURRENT" | "PARTIAL"; exitCode: 0 | 1; receiptId: string | null; activeVersion: string | null; postcheck: KitPostcheck; provenance: "INTEGRITY_ONLY" | "SIGSTORE_VERIFIED" };
+export type KitUpdateResult = { status: "UPDATED" | "CURRENT" | "PARTIAL"; exitCode: 0 | 1; receiptId: string | null; activeVersion: string | null; postcheck: KitPostcheck; provenance: "INTEGRITY_ONLY" | "SIGSTORE_VERIFIED"; omp?: UpdateOmpSelection | null };
 export type KitUndoInput = {
  prefix: string; stateRoot: string; receiptId: string;
  /** Only the current tick's failed, kit-only postcheck may authorize unattended compensation. Omit for manual undo. */
@@ -243,14 +243,54 @@ function matches(prefix: string, image: KitInstallation): boolean {
  } catch { return false; }
 }
 /**
- * Run exactly one postcheck in the authenticated target's runtime. The target owns its stage vocabulary,
- * harness environment and service-state policy; the updater only checks transport and judges its report.
+ * The omp the update postcheck judges: the omp seats run (Tern's bundled omp
+ * when present, else the first omp on PATH), with its exact version. Null
+ * when no omp resolves at all; the judge then reports OMP_VERSION_UNVERIFIED.
+ * A pure local probe (package read, at most one `omp --version` spawn): never
+ * resolves the matcher identity and never touches the network, so the job's
+ * repeat suppression stays cheap. The postcheck itself still binds the full
+ * identity through selectedOmpSnapshot.
  */
+export interface UpdateOmpSelection { launcher: string; version: string; resolvedFrom: SeatOmpSource }
+export function selectUpdateOmp(env: Record<string, string | undefined> = process.env): UpdateOmpSelection | null {
+	try {
+		const seat = resolveSeatOmp(env);
+		if (!seat) return null;
+		const packaged = enclosingOmpPackageVersion(seat.launcher);
+		const live = observeOmpLauncherVersion(seat.launcher, env);
+		// A packaged version the launcher itself disagrees with is unverified,
+		// never stamped: the postcheck still binds the full identity and judges.
+		if (packaged !== null && live !== null && packaged !== live) return null;
+		const version = packaged ?? live;
+		if (!version || !VERSION.test(version)) return null;
+		return { launcher: seat.launcher, version, resolvedFrom: seat.resolvedFrom };
+	} catch { return null; }
+}
+/**
+ * The postcheck child's environment: the seat omp's wrapper dir first on PATH
+ * so the child's own PATH resolution judges the same launcher the parent
+ * selected. The Tern bundle is looked up under the managed home (the service
+ * home in production, a fixture home in tests), never the ambient one, so a
+ * fixture PATH stays hermetic where no bundle lives. A PATH-selected omp needs
+ * no change. Never mutates its input.
+ */
+export function updatePostcheckEnv(env: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+	const seat = resolveSeatOmp(env);
+	if (!seat?.pathDir) return { ...env };
+	const pathValue = env.PATH;
+	return { ...env, PATH: pathValue ? `${seat.pathDir}:${pathValue}` : seat.pathDir };
+}
+
+ /**
+  * Run exactly one postcheck in the authenticated target's runtime. The target owns its stage vocabulary,
+  * harness environment and service-state policy; the updater only checks transport and judges its report.
+  */
 export async function runKitPostcheck(input: { executablePath: string; home: string; stateRoot: string; project?: string }): Promise<FullTestReport> {
  const argv = [input.executablePath, "test", "--full", "--json"];
  if (input.project) argv.push("--project", input.project);
+ const seatEnv = updatePostcheckEnv({ ...process.env, HOME: input.home });
  const env: Record<string, string> = {};
- for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
+ for (const [key, value] of Object.entries(seatEnv)) if (value !== undefined) env[key] = value;
  env.HOME = input.home;
  env.OMP_KIT_POSTCHECK_STATE_ROOT = input.stateRoot;
  const result = await run(argv, { deadline_s: 1200, max_output_bytes: 16 * 1024 * 1024, env, cwd: input.home });
@@ -276,10 +316,11 @@ export async function runKitPostcheck(input: { executablePath: string; home: str
 const notRun = (): KitPostcheck => ({ status: "NOT_RUN", matcher: "NOT_RUN", live: "NOT_RUN" });
 
 type OmpSnapshot = { launcher: string; packageRoot: string; source: string; nativeRoot: string;
- version: string; launcherSha256: string; manifestSha256: string; matcherSha256: string };
-function selectedOmpSnapshot(): OmpSnapshot | null {
+ version: string; launcherSha256: string; manifestSha256: string; matcherSha256: string; resolvedFrom: SeatOmpSource };
+function selectedOmpSnapshot(home?: string): OmpSnapshot | null {
  try {
-  const identity = resolveOmpIdentity(process.env);
+  const env = home === undefined ? process.env : { ...process.env, HOME: home };
+  const { identity, resolvedFrom } = resolveSeatOmpIdentity(env);
   const manifestPath = join(identity.packageRoot, "package.json");
   const parsed: unknown = JSON.parse(readFileSync(manifestPath, "utf8"));
   if (!parsed || typeof parsed !== "object" || !("version" in parsed) || typeof parsed.version !== "string" || !VERSION.test(parsed.version))
@@ -288,7 +329,7 @@ function selectedOmpSnapshot(): OmpSnapshot | null {
   for (const file of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"])
    matcher.update(shaFile(join(identity.source, file)));
   return { ...identity, version: parsed.version, launcherSha256: shaFile(identity.launcher),
-   manifestSha256: shaFile(manifestPath), matcherSha256: matcher.digest("hex") };
+   manifestSha256: shaFile(manifestPath), matcherSha256: matcher.digest("hex"), resolvedFrom };
  } catch { return null; }
 }
 function sameOmpSnapshot(before: OmpSnapshot | null, after: OmpSnapshot | null): boolean {
@@ -423,7 +464,7 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
    rmSync(targetRoot, { recursive: true, force: true });
    syncDirectory(join(plan.prefix, "releases"));
   }
-  const selectedOmp = selectedOmpSnapshot();
+  const selectedOmp = selectedOmpSnapshot(plan.home);
   // Authenticate a private snapshot before any extraction, candidate execution, or activation.
   const archive = regular(source.archivePath);
   await authenticateUpdateArchive(plan, archive);
@@ -443,7 +484,7 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
    switchLink(plan.prefix, staged.version);
    if (!matches(plan.prefix, next)) throw new Error("KIT_POSTIMAGE_CHANGED");
    const report = await runKitPostcheck({ executablePath: next.binary, home: plan.home, stateRoot: plan.stateRoot, project: plan.project });
-   const observedOmp = selectedOmpSnapshot();
+   const observedOmp = selectedOmpSnapshot(plan.home);
    const ompIdentityKnown = selectedOmp !== null && observedOmp !== null && report.omp_version !== null && report.omp_version === selectedOmp.version;
    const ompChanged = selectedOmp !== null && observedOmp !== null &&
     (!sameOmpSnapshot(selectedOmp, observedOmp) || (report.omp_version !== null && report.omp_version !== selectedOmp.version));
@@ -453,15 +494,17 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
     !verifiedRelease(targetRoot, staged.manifest, plan.release.asset.manifest_sha256)) throw new Error(postcheck.reason ?? "KIT_POSTCHECK_FAILED");
    reconcileKitUpdateReceipt(plan.stateRoot, heldLock, receiptId, () => matches(plan.prefix, next) &&
     verifiedRelease(targetRoot, staged.manifest, plan.release.asset.manifest_sha256) &&
-    sameOmpSnapshot(selectedOmp, selectedOmpSnapshot()) && postcheck.status === "PASS");
-   return { status: "UPDATED", exitCode: 0, receiptId, activeVersion: next.version, postcheck, provenance: "SIGSTORE_VERIFIED" };
+    sameOmpSnapshot(selectedOmp, selectedOmpSnapshot(plan.home)) && postcheck.status === "PASS");
+   const omp: UpdateOmpSelection | null = selectedOmp ? { launcher: selectedOmp.launcher, version: selectedOmp.version, resolvedFrom: selectedOmp.resolvedFrom } : null;
+   return { status: "UPDATED", exitCode: 0, receiptId, activeVersion: next.version, postcheck, provenance: "SIGSTORE_VERIFIED", omp };
   } catch (error) {
    if (!receiptId) throw error;
    const cause = updateFailureCause(error, [plan.home, plan.stateRoot, plan.prefix, plan.project ?? ""]);
-   const message = selectedOmp && !sameOmpSnapshot(selectedOmp, selectedOmpSnapshot())
+   const message = selectedOmp && !sameOmpSnapshot(selectedOmp, selectedOmpSnapshot(plan.home))
     ? "OMP_CHANGED_DURING_KIT_UPDATE" : error instanceof Error ? error.message : "KIT_UPDATE_INTERRUPTED";
+   const omp: UpdateOmpSelection | null = selectedOmp ? { launcher: selectedOmp.launcher, version: selectedOmp.version, resolvedFrom: selectedOmp.resolvedFrom } : null;
    return { status: "PARTIAL", exitCode: 1, receiptId, activeVersion: matches(plan.prefix, next) ? next.version : matches(plan.prefix, current) ? current.version : null,
-    postcheck: { ...postcheck, reason: /^[A-Z][A-Z_]+$/.test(message) ? message : "KIT_UPDATE_INTERRUPTED", cause }, provenance: "SIGSTORE_VERIFIED" };
+    postcheck: { ...postcheck, reason: /^[A-Z][A-Z_]+$/.test(message) ? message : "KIT_UPDATE_INTERRUPTED", cause }, provenance: "SIGSTORE_VERIFIED", omp };
   }
  } catch (error) {
   const message = error instanceof Error ? error.message : "KIT_UPDATE_REFUSED";

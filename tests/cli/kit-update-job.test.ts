@@ -6,6 +6,7 @@ import { kitUpdateJobOverall, pollPublishedRelease, runKitUpdateJob, type KitUpd
 import { reconcilePendingUpdate, type KitUpdateResult } from "../../src/kit-update.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import type { PluginReceipt } from "../../src/apply-plugin.ts";
+import { resolveOmpLauncher } from "../../src/paths.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 const dirs: string[] = [];
@@ -709,6 +710,182 @@ test("poll-only install uses the published tuple when the static fallback is nul
 		});
 		expect(seen).toEqual(["1.2.4"]);
 		expect(result).toMatchObject({ status: "UPDATED", receiptId: "r6", activeVersion: "1.2.4", relink: "APPLIED", pluginReceiptId: "plugin-r6", pluginUndoCommand: "omp-kit undo plugin-r6 --yes", service: "APPLIED" });
+	});
+});
+
+/** A standalone omp install the kit matcher can bind: package, matcher source and natives. */
+function ompInstall(root: string, version: string): void {
+	mkdirSync(root, { recursive: true });
+	writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }));
+	for (const relativePath of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) {
+		const sourcePath = join(root, "src", relativePath);
+		mkdirSync(dirname(sourcePath), { recursive: true });
+		writeFileSync(sourcePath, "export {};\n");
+	}
+	const nativePackage = join(root, "node_modules", "@oh-my-pi", "pi-natives");
+	mkdirSync(nativePackage, { recursive: true });
+	writeFileSync(join(nativePackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-natives" }));
+}
+
+type SeatOmpProbe = {
+	selectUpdateOmp?: (env: Record<string, string | undefined>) => { launcher: string; version: string; resolvedFrom: "tern-bundle" | "path" } | null;
+	updatePostcheckEnv?: (env: Record<string, string | undefined>) => Record<string, string | undefined>;
+};
+
+test("KITUPDATEOMP1: the update postcheck judges the seat omp, not the stale service PATH", async () => {
+	// Intentional module-loading boundary (not a literal-specifier shortcut):
+	// the planted negative is that the unchanged code has no seat-aware
+	// selection at all, so a static import would fail the whole file there
+	// instead of failing just this test.
+	const probed = await import("../../src/kit-update.ts") as unknown as SeatOmpProbe;
+	expect(typeof probed.selectUpdateOmp).toBe("function");
+	expect(typeof probed.updatePostcheckEnv).toBe("function");
+	const selectUpdateOmp = probed.selectUpdateOmp!;
+	const updatePostcheckEnv = probed.updatePostcheckEnv!;
+	const root = realpathSync(ownedTmp("l8-seat-omp", { root: process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp") }).path); dirs.push(root);
+	// The stale service PATH: a first-on-PATH omp no seat runs.
+	const staleBin = join(root, "service-bin");
+	mkdirSync(staleBin, { recursive: true });
+	ompInstall(staleBin, "18.10.3");
+	writeFileSync(join(staleBin, "omp"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+	// The seat's Tern bundle: the wrapper seats run plus its versioned binary.
+	const home = join(root, "home");
+	const ternBin = join(home, "Library", "Application Support", "Tern", "omp", "bin");
+	const ternVersions = join(home, "Library", "Application Support", "Tern", "omp", "versions");
+	mkdirSync(ternVersions, { recursive: true });
+	mkdirSync(ternBin, { recursive: true });
+	ompInstall(join(home, "Library", "Application Support", "Tern", "omp"), "18.18.8");
+	writeFileSync(join(ternVersions, "18.18.8"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+	symlinkSync(join("..", "versions", "18.18.8"), join(ternBin, "omp"));
+	const staleEnv = { PATH: `${staleBin}:/usr/bin:/bin`, HOME: join(root, "no-tern-home") };
+	const seatEnv = { PATH: `${staleBin}:/usr/bin:/bin`, HOME: home };
+	// Planted negative, still true after the fix: the old PATH-first resolver
+	// picks the stale binary the defect judged. The update must not use it.
+	expect(resolveOmpLauncher(staleEnv)).toBe(realpathSync(join(staleBin, "omp")));
+	expect(resolveOmpLauncher(seatEnv)).toBe(realpathSync(join(staleBin, "omp")));
+	const selected = selectUpdateOmp(seatEnv);
+	expect(selected).toMatchObject({ version: "18.18.8", resolvedFrom: "tern-bundle" });
+	expect(selected!.launcher).toBe(realpathSync(join(ternBin, "omp")));
+	// PATH stays the portable default where no Tern bundle is present.
+	expect(selectUpdateOmp(staleEnv)).toMatchObject({ launcher: realpathSync(join(staleBin, "omp")), version: "18.10.3", resolvedFrom: "path" });
+	// The postcheck child env judges the same launcher the parent selected.
+	const childEnv = updatePostcheckEnv(seatEnv);
+	expect(childEnv.PATH!.split(":")[0]).toBe(ternBin);
+	expect(resolveOmpLauncher(childEnv)).toBe(selected!.launcher);
+	expect(seatEnv.PATH).toBe(`${staleBin}:/usr/bin:/bin`);
+	// A packaged version the launcher itself disagrees with is unverified, never stamped.
+	const otherHome = join(root, "other-home");
+	const otherBin = join(otherHome, "Library", "Application Support", "Tern", "omp", "bin");
+	const otherVersions = join(otherHome, "Library", "Application Support", "Tern", "omp", "versions");
+	mkdirSync(otherVersions, { recursive: true });
+	mkdirSync(otherBin, { recursive: true });
+	ompInstall(join(otherHome, "Library", "Application Support", "Tern", "omp"), "18.18.8");
+	writeFileSync(join(otherVersions, "18.18.8"), "#!/bin/sh\nprintf '18.10.3\\n'\n", { mode: 0o755 });
+	symlinkSync(join("..", "versions", "18.18.8"), join(otherBin, "omp"));
+	expect(selectUpdateOmp({ PATH: `${staleBin}:/usr/bin:/bin`, HOME: otherHome })).toBeNull();
+
+});
+
+test("KITUPDATEOMP1-once: a second scheduled run after an UNDONE for the same cause skips without unpacking", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		mkdirSync(value.stateRoot, { recursive: true, mode: 0o700 });
+		writeFileSync(join(value.stateRoot, "kit-update-job-11111111-1111-4111-8111-111111111111.json"), JSON.stringify({
+			schema_version: 1, run_id: "11111111-1111-4111-8111-111111111111", status: "UNDONE", receiptId: "r-old", activeVersion: "1.2.3",
+			notification: true, receipt: "ABORTED_AFTER_COMPENSATION", postcheck: "FAIL", postcheckReason: "KIT_LIVE_TEST_FAILED",
+			targetVersion: "1.2.4", ompResolvedFrom: "path", ompVersion: "18.10.3", ompLauncher: "/service/omp", relink: "NOT_RUN", service: "NOT_RUN",
+		}));
+		const staleOmp = { launcher: "/service/omp", version: "18.10.3", resolvedFrom: "path" as const };
+		const notes: string[] = [];
+		let applied = 0;
+		const skipped = await runKitUpdateJob(value, {
+			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+			apply: async () => { applied++; throw new Error("a suppressed repeat must not unpack or postcheck"); },
+			omp: () => staleOmp,
+			notify: message => { notes.push(String(message)); },
+		});
+		expect(applied).toBe(0);
+		expect(notes).toHaveLength(0);
+		expect(skipped).toMatchObject({ status: "SKIPPED", targetVersion: "1.2.4", postcheckReason: "KIT_LIVE_TEST_FAILED",
+			ompResolvedFrom: "path", ompVersion: "18.10.3", ompLauncher: "/service/omp", notification: false, reason: "KIT_UPDATE_REPEAT_SUPPRESSED" });
+		expect(kitUpdateJobOverall(skipped)).toBe("OK");
+		// A changed omp version retries the same target instead of skipping.
+		const freshOmp = { launcher: "/seat/omp", version: "18.18.8", resolvedFrom: "tern-bundle" as const };
+		const retried = await runKitUpdateJob(value, {
+			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+			apply: async () => { applied++; return { status: "UPDATED", exitCode: 0, receiptId: "r-new", activeVersion: "1.2.4", postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY", omp: freshOmp }; },
+			relink: async () => ({ ok: true, detail: "", receiptId: "plugin-new", undoCommand: "omp-kit undo plugin-new --yes" }),
+			reconcile: async () => ({ ok: true, detail: "" }),
+			omp: () => freshOmp,
+			notify: message => { notes.push(String(message)); },
+		});
+		expect(applied).toBe(1);
+		expect(retried).toMatchObject({ status: "UPDATED", targetVersion: "1.2.4", ompResolvedFrom: "tern-bundle", ompVersion: "18.18.8" });
+		// A changed kit version retries even when the omp is unchanged.
+		value.pollRelease = async () => ({ indexPath: join(value.prefix, "i"), archivePath: join(value.prefix, "a"), version: "1.2.5", sourceTag: "v1.2.5" });
+		const newer = await runKitUpdateJob(value, {
+			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+			apply: async () => { applied++; return { status: "UPDATED", exitCode: 0, receiptId: "r-newer", activeVersion: "1.2.5", postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY", omp: freshOmp }; },
+			relink: async () => ({ ok: true, detail: "", receiptId: "plugin-newer", undoCommand: "omp-kit undo plugin-newer --yes" }),
+			reconcile: async () => ({ ok: true, detail: "" }),
+			omp: () => freshOmp,
+			notify: message => { notes.push(String(message)); },
+		});
+		expect(applied).toBe(2);
+		expect(newer).toMatchObject({ status: "UPDATED", targetVersion: "1.2.5" });
+	});
+});
+
+test("KITUPDATEOMP1-once: transient causes retry after six hours, deterministic causes never do", async () => {
+	await withPollEnv(null, async () => {
+		const staleOmp = { launcher: "/service/omp", version: "18.10.3", resolvedFrom: "path" as const };
+		const old = new Date(Date.now() - 7 * 3600 * 1000);
+		const seedUndone = (value: KitUpdateJobConfig, postcheckReason: string, postcheckDetail?: unknown) => {
+			mkdirSync(value.stateRoot, { recursive: true, mode: 0o700 });
+			const name = "kit-update-job-22222222-2222-4222-8222-222222222222.json";
+			writeFileSync(join(value.stateRoot, name), JSON.stringify({ schema_version: 1, run_id: "22222222-2222-4222-8222-222222222222",
+				status: "UNDONE", receiptId: "r-old", activeVersion: "1.2.3", notification: true, receipt: "ABORTED_AFTER_COMPENSATION",
+				postcheck: "FAIL", postcheckReason, ...(postcheckDetail === undefined ? {} : { postcheckDetail }),
+				targetVersion: "1.2.4", ompResolvedFrom: "path", ompVersion: "18.10.3", ompLauncher: "/service/omp", relink: "NOT_RUN", service: "NOT_RUN" }));
+			utimesSync(join(value.stateRoot, name), old, old);
+		};
+		const skipRun = (value: KitUpdateJobConfig, notes: string[], applied: { count: number }) => runKitUpdateJob(value, {
+			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+			apply: async () => { applied.count++; throw new Error("a suppressed repeat must not unpack or postcheck"); },
+			omp: () => staleOmp,
+			notify: message => { notes.push(String(message)); },
+		});
+		// A transient live-test failure older than the window retries.
+		const aged = config(); installSymlink(aged.prefix, "1.2.3"); seedUndone(aged, "KIT_LIVE_TEST_FAILED");
+		const agedNotes: string[] = []; const agedApplied = { count: 0 };
+		const retried = await runKitUpdateJob(aged, {
+			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+			apply: async () => { agedApplied.count++; return { status: "UPDATED", exitCode: 0, receiptId: "r-new", activeVersion: "1.2.4", postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY", omp: staleOmp }; },
+			relink: async () => ({ ok: true, detail: "", receiptId: "plugin-new", undoCommand: "omp-kit undo plugin-new --yes" }),
+			reconcile: async () => ({ ok: true, detail: "" }),
+			omp: () => staleOmp,
+			notify: message => { agedNotes.push(String(message)); },
+		});
+		expect(agedApplied.count).toBe(1);
+		expect(retried).toMatchObject({ status: "UPDATED", targetVersion: "1.2.4" });
+		// A deterministic omp cause never retries, however old.
+		const deterministic = config(); installSymlink(deterministic.prefix, "1.2.3"); seedUndone(deterministic, "OMP_VERSION_MISMATCH");
+		const deterministicNotes: string[] = []; const deterministicApplied = { count: 0 };
+		const deterministicSkipped = await skipRun(deterministic, deterministicNotes, deterministicApplied);
+		expect(deterministicApplied.count).toBe(0);
+		expect(deterministicNotes).toHaveLength(0);
+		expect(deterministicSkipped).toMatchObject({ status: "SKIPPED", postcheckReason: "OMP_VERSION_MISMATCH" });
+		expect(kitUpdateJobOverall(deterministicSkipped)).toBe("OK");
+		// A cause that names the judged omp never retries, however old.
+		const named = config(); installSymlink(named.prefix, "1.2.3");
+		seedUndone(named, "KIT_POSTCHECK_FAILED", { status: "FAIL", omp_version: "18.10.3",
+			live: { status: "FAIL", expected_scenarios: 1, observed_scenarios: 0, plant: "NOT_RUN" }, failed_stages: [], deferred_stages: [],
+			current_stage: null, cause: { cause_code: "Error", cause_name: "Error", cause_message: "live check against judged omp 18.10.3 failed", cause_stack_head: null },
+			changed_operator_paths: [], live_state_paths: [], failures: ["live check against judged omp 18.10.3 failed"] });
+		const namedNotes: string[] = []; const namedApplied = { count: 0 };
+		const namedSkipped = await skipRun(named, namedNotes, namedApplied);
+		expect(namedApplied.count).toBe(0);
+		expect(namedSkipped).toMatchObject({ status: "SKIPPED", postcheckReason: "KIT_POSTCHECK_FAILED" });
 	});
 });
 

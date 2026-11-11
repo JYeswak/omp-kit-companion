@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { parseReleaseIndexJson } from "./kit-release.ts";
-import { applyKitUpdate, kitPostcheckDetail, planKitUpdate, undoKitUpdate, type KitPostcheck, type KitPostcheckDetail, type KitUndoResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult } from "./kit-update.ts";
+import { applyKitUpdate, kitPostcheckDetail, planKitUpdate, selectUpdateOmp, undoKitUpdate, type KitPostcheck, type KitPostcheckDetail, type KitUndoResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult, type UpdateOmpSelection } from "./kit-update.ts";
 import { refreshFleetHooksLive, type HookRefreshReport } from "./hook-refresh.ts";
 import { acquireKitUpdateLock, inspectPendingKitUpdate, type UpdateLockToken } from "./mutations.ts";
 import { makeDirsWritable } from "./kitlib/tmp.ts";
@@ -38,9 +38,11 @@ export type KitUpdateJobDependencies = {
 	 * pull-enabled fleet-watch repo; hermetic when HOME names no fleet config.
 	 */
 	refreshHooks?: (store: string, home: string) => Promise<HookRefreshReport>;
+	/** The omp the postcheck judges; production resolves the seat's omp. Tests inject a fixed selection. */
+	omp?: () => UpdateOmpSelection | null;
 };
 export type KitUpdateJobResult = {
-	status: "DISABLED" | "CURRENT" | "UPDATED" | "UNDONE" | "REFUSED" | "PENDING" | "FAILED"; receiptId: string | null; activeVersion: string | null; notification: boolean; reason?: string;
+	status: "DISABLED" | "CURRENT" | "UPDATED" | "UNDONE" | "REFUSED" | "PENDING" | "FAILED" | "SKIPPED"; receiptId: string | null; activeVersion: string | null; notification: boolean; reason?: string;
 	/** Failed, safely restored updates are compensated, never relabeled as successful postchecks. */
 	receipt?: "RECONCILED" | "ABORTED_AFTER_COMPENSATION" | "PENDING";
 	/** Preserve the release's full-test verdict even when the tick safely restores its prior binary. */
@@ -53,6 +55,10 @@ export type KitUpdateJobResult = {
 	 */
 	hooks?: { status: "APPLIED" | "PENDING_COMMIT" | "FAILED" | "NOT_RUN"; repos: number; refreshed: number; fresh: number; pending_commit: number; failed: number };
 	retention?: { status: "APPLIED" | "FAILED"; kept: string[]; removed: string[]; pollsRemoved: string[]; reason?: string };
+	/** The release version this tick attempted; a repeat for the same target suppresses on it. */
+	targetVersion?: string;
+	/** Which omp pool the postcheck judged (the seat's omp), and its exact version and launcher. */
+	ompResolvedFrom?: "tern-bundle" | "path"; ompVersion?: string | null; ompLauncher?: string | null;
 };
 
 /** OK only for a clean cycle, including postchecks, relink, service reconcile, hook refresh and release retention. */
@@ -327,8 +333,57 @@ export function retainReleases(prefix: string, stateRoot: string, active: string
 	}
 	return report;
 }
+/**
+ * KITUPDATEOMP1: the newest UNDONE-or-SKIPPED run record for one target and
+ * one judged omp version. A second scheduled tick for the same target and
+ * cause skips instead of reinstalling; a changed kit version (new target), a
+ * changed omp version, or an operator run (`omp-kit update --apply` bypasses
+ * the job entirely) retries. No new state file: the window re-arms from the
+ * records the ticks already write.
+ */
+function newestRepeatForOmp(stateRoot: string, targetVersion: string, ompVersion: string): { mtime: number; postcheckReason?: string; postcheckDetail?: unknown } | null {
+	let names: string[];
+	try { names = readdirSync(stateRoot); } catch { return null; }
+	let best: { mtime: number; postcheckReason?: string; postcheckDetail?: unknown } | null = null;
+	for (const name of names) {
+		if (!RUN_RECORD_NAME.test(name)) continue;
+		try {
+			const mtime = lstatSync(join(stateRoot, name)).mtimeMs;
+			if (best && mtime <= best.mtime) continue;
+			const parsed: unknown = JSON.parse(readFileSync(join(stateRoot, name), "utf8"));
+			if (!parsed || typeof parsed !== "object") continue;
+			const rec = parsed as Record<string, unknown>;
+			if ((rec.status !== "UNDONE" && rec.status !== "SKIPPED") || rec.targetVersion !== targetVersion || rec.ompVersion !== ompVersion) continue;
+			best = { mtime,
+				...(typeof rec.postcheckReason === "string" ? { postcheckReason: rec.postcheckReason } : {}),
+				...("postcheckDetail" in rec ? { postcheckDetail: rec.postcheckDetail } : {}) };
+		} catch { continue; }
+	}
+	return best;
+}
 
-/** One opt-in poll/apply cycle. No network or service installation occurs unless the caller enables it. */
+/** A repeat suppresses without limit only for omp-attributed deterministic causes. */
+const DETERMINISTIC_OMP_REASONS: readonly string[] = ["OMP_VERSION_MISMATCH", "OMP_VERSION_UNVERIFIED"];
+
+/** One retry per window for every other cause: a transient live/stage flake may clear on its own. */
+export const KIT_UPDATE_REPEAT_WINDOW_MS = 6 * 3600 * 1000;
+
+function repeatCauseText(detail: unknown): string {
+	if (!detail || typeof detail !== "object") return "";
+	const rec = detail as Record<string, unknown>;
+	const cause = rec.cause;
+	const message = cause !== null && typeof cause === "object" && "cause_message" in cause && typeof (cause as Record<string, unknown>).cause_message === "string"
+		? (cause as Record<string, unknown>).cause_message as string : "";
+	const failures = Array.isArray(rec.failures) ? rec.failures.filter((failure): failure is string => typeof failure === "string").join("\n") : "";
+	return `${message}\n${failures}`;
+}
+
+function repeatSuppressesForever(postcheckReason: string | undefined, postcheckDetail: unknown, ompVersion: string): boolean {
+	if (postcheckReason !== undefined && (DETERMINISTIC_OMP_REASONS.includes(postcheckReason) || postcheckReason.includes(ompVersion))) return true;
+	return repeatCauseText(postcheckDetail).includes(ompVersion);
+}
+
+ /** One opt-in poll/apply cycle. No network or service installation occurs unless the caller enables it. */
 export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: KitUpdateJobDependencies = {}): Promise<KitUpdateJobResult> {
 	if (!config.enabled) return { status: "DISABLED", receiptId: null, activeVersion: null, notification: false };
 	const plan = dependencies.plan ?? planKitUpdate;
@@ -368,6 +423,22 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		if (preview.status === "CURRENT") { pruneKitUpdateRunRecords(config.stateRoot); return { status: "CURRENT", receiptId: null, activeVersion: preview.current.version, notification: false, relink: "NOT_RUN" }; }
 		// Never a project: launchd runs the job from HOME, and watching HOME's .omp/.agents/.claude as one made every live postcheck fail.
 		if (preview.status !== "UPDATE_AVAILABLE") { const refusal = preview as KitUpdateRefusal; return record(config.stateRoot, runId, { status: "REFUSED", receiptId: null, activeVersion: null, notification: false, reason: refusal.reason, relink: "NOT_RUN" }); }
+		// KITUPDATEOMP1: after one UNDONE for this target and this cause, a
+		// scheduled tick skips without unpacking or postchecking. Deterministic
+		// omp-attributed causes suppress without limit; any other cause allows
+		// one retry per window (timed from the newest UNDONE/SKIPPED record).
+		// A newer kit, a newer omp, or an operator run retries; the skip writes
+		// one small record and exits 0 without notifying (the UNDONE tick
+		// already notified once).
+		const judgedOmp = (dependencies.omp ?? (() => selectUpdateOmp({ ...process.env, HOME: config.home })))();
+		const repeat = judgedOmp ? newestRepeatForOmp(config.stateRoot, source.version, judgedOmp.version) : null;
+		const repeatForever = repeat !== null && repeatSuppressesForever(repeat.postcheckReason, repeat.postcheckDetail, judgedOmp!.version);
+		const repeatWithinWindow = repeat !== null && (Date.now() - repeat.mtime) < KIT_UPDATE_REPEAT_WINDOW_MS;
+		if (judgedOmp && repeat && (repeatForever || repeatWithinWindow)) {
+			return record(config.stateRoot, runId, { status: "SKIPPED", receiptId: null, activeVersion: installedVersion(config.prefix),
+				notification: false, reason: "KIT_UPDATE_REPEAT_SUPPRESSED", targetVersion: source.version, ...(repeat.postcheckReason !== undefined ? { postcheckReason: repeat.postcheckReason } : {}),
+				ompResolvedFrom: judgedOmp.resolvedFrom, ompVersion: judgedOmp.version, ompLauncher: judgedOmp.launcher, relink: "NOT_RUN", service: "NOT_RUN" });
+		}
 		const runningVersion = runningReleaseVersion(config.prefix);
 		const result = await apply(preview);
 		if (result.status !== "UPDATED" && result.status !== "PARTIAL") return record(config.stateRoot, runId, { status: result.status, receiptId: result.receiptId, activeVersion: result.activeVersion, notification: false, relink: "NOT_RUN" });
@@ -414,6 +485,8 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 			: undefined;
 		return record(config.stateRoot, runId, { status: "UNDONE", receiptId: result.receiptId, activeVersion: restored.activeVersion,
 			notification: true, receipt: "ABORTED_AFTER_COMPENSATION", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN",
+			targetVersion: source.version,
+			...(result.omp ? { ompResolvedFrom: result.omp.resolvedFrom, ompVersion: result.omp.version, ompLauncher: result.omp.launcher } : {}),
 			...(undoneRetention ? { retention: undoneRetention } : {}) });
 		}
 		// The kit symlink now points at the new release; relink every covered OMP
@@ -428,7 +501,9 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		const pluginReceipt = link.receiptId
 			? { pluginReceiptId: link.receiptId, ...(link.undoCommand ? { pluginUndoCommand: link.undoCommand } : {}) }
 			: {};
-		const activated = { status: "UPDATED" as const, receiptId: result.receiptId, activeVersion, notification: true, receipt: "RECONCILED" as const, ...postcheck };
+		const activated = { status: "UPDATED" as const, receiptId: result.receiptId, activeVersion, notification: true, receipt: "RECONCILED" as const, ...postcheck,
+			targetVersion: source.version,
+			...(result.omp ? { ompResolvedFrom: result.omp.resolvedFrom, ompVersion: result.omp.version, ompLauncher: result.omp.launcher } : {}) };
 		if (!link.ok) {
 			const recovery = link.receiptId && link.undoCommand
 				? `; plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\``
