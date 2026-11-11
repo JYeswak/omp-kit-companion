@@ -7,14 +7,26 @@ import { projectRoot } from "./kit-guard-optin";
 
 export type FleetPolicyState =
 	| { kind: "off"; root: string }
-	| { kind: "on"; root: string }
+	| { kind: "on"; root: string; notice?: string }
 	| { kind: "unavailable"; root: string; reason: string };
 
 const POLICY_LIMIT = 16_384;
 const runFile = promisify(execFile);
+function isUnder(path: string, root: string): boolean {
+	return path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
+}
+
+/** Last verified `on` state per repository root; a failed re-verification inside the TTL
+ * enforces the cached policy instead of refusing (the safe direction). */
+const verifiedCache = new Map<string, { state: Extract<FleetPolicyState, { kind: "on" }>; at: number }>();
+const VERIFIED_TTL_MS = 600_000;
+/** Roots already warned while serving the cached policy; cleared on fresh verification. */
+const staleWarned = new Set<string>();
+/** Bounded delay before the single verification retry. */
+const VERIFY_RETRY_DELAY_MS = 100;
 
 /** Repository-local opt-in only. Stock roots require no executable or filesystem mutation. */
-export async function fleetPolicyState(cwd: string): Promise<FleetPolicyState> {
+export async function fleetPolicyState(cwd: string, seen: readonly string[] = []): Promise<FleetPolicyState> {
 	let root = resolve(cwd);
 	let reason = "repository path is unavailable";
 	try {
@@ -69,6 +81,14 @@ export async function fleetPolicyState(cwd: string): Promise<FleetPolicyState> {
 		if (!policy.enabled) return { kind: "off", root };
 
 		// Probe Git only after explicit opt-in. Inherited Git routing/config cannot select another root.
+		// Git is the authority on repository boundaries: it understands `.git` files (ovnfs checkouts,
+		// linked worktrees), symlinked gitdirs, and nested repositories, while the existsSync walk above
+		// can stop at a boundary git does not honor (an empty `.git` directory). A call in such a
+		// directory is judged under the nearest real repository's policy (APPLICSCRATCH1). A git
+		// verification failure stays `unavailable`, except: one retry after a short bounded delay, and
+		// the last verified policy inside its TTL (enforcing the last verified policy is the safe
+		// direction). A boundary git rejects, or a git that cannot run at all with nothing verified,
+		// keeps the refusal (a real hazard: the opt-in may be spoofed and nothing disproves it).
 		reason = "explicit fleet opt-in cannot be verified against the nearest real Git repository";
 		const env = { ...process.env };
 		for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
@@ -76,12 +96,42 @@ export async function fleetPolicyState(cwd: string): Promise<FleetPolicyState> {
 			GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0",
 			GIT_NO_LAZY_FETCH: "1", GIT_OPTIONAL_LOCKS: "0",
 		});
-		const { stdout } = await runFile("git", ["--no-pager", "-c", "core.fsmonitor=false",
-			"-c", "core.hooksPath=/dev/null", "-C", physicalCwd, "rev-parse", "--show-toplevel"],
-			{ env, timeout: 1000, maxBuffer: POLICY_LIMIT, encoding: "utf8" });
-		const reported = stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout;
-		if (!isAbsolute(reported) || await realpath(reported) !== root) return { kind: "unavailable", root, reason };
-		return { kind: "on", root };
+		const probe = async (): Promise<string | null> => {
+			try {
+				const { stdout } = await runFile("git", ["--no-pager", "-c", "core.fsmonitor=false",
+					"-c", "core.hooksPath=/dev/null", "-C", physicalCwd, "rev-parse", "--show-toplevel"],
+					{ env, timeout: 1000, maxBuffer: POLICY_LIMIT, encoding: "utf8" });
+				const reported = stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout;
+				if (!isAbsolute(reported)) return null;
+				return await realpath(reported);
+			} catch { return null; }
+		};
+		let real = await probe();
+		if (real === null) {
+			const { promise, resolve: wake } = Promise.withResolvers<void>();
+			setTimeout(wake, VERIFY_RETRY_DELAY_MS);
+			await promise;
+			real = await probe();
+		}
+		if (real === null) {
+			const cached = verifiedCache.get(root);
+			if (cached !== undefined && Date.now() - cached.at <= VERIFIED_TTL_MS) {
+				if (!staleWarned.has(root)) {
+					staleWarned.add(root);
+					console.warn(`fleet-guard: git verification failed at ${root}; enforcing last verified policy.`);
+				}
+				return { ...cached.state, notice: `fleet-guard: git verification failed; enforcing last verified policy for ${root}.` };
+			}
+			return { kind: "unavailable", root, reason };
+		}
+		if (real === root) {
+			const state = { kind: "on", root } as const;
+			verifiedCache.set(root, { state, at: Date.now() });
+			staleWarned.delete(root);
+			return state;
+		}
+		if (!seen.includes(real) && (real === physicalCwd || isUnder(physicalCwd, real))) return fleetPolicyState(real, [...seen, root]);
+		return { kind: "unavailable", root, reason };
 	} catch {
 		return { kind: "unavailable", root, reason };
 	}

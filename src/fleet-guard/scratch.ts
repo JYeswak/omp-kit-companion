@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandFromEvent, commandName, executedShellCommands, type ShellWord } from "./git";
@@ -299,15 +299,71 @@ const FD_REDIRECT = /^(?:\d*)&>{1,2}$/;
 
 /** Write-target operands of one shell command: redirect targets, tee/cp/mv/mkdir destinations. */
 export function shellWriteTargets(command: string): string[] {
+	return collectShellWrites(command, null).map(({ target }) => target);
+}
+
+/** A shell write target with the directory the command had reached when the target opens. */
+export interface ShellWriteAtBase { target: string; base: string }
+
+const CD_OPTION = /^(?:-[LPe@]+|--)$/;
+const CD_DYNAMIC = /[$`\\*?[\]{}()|&;<>!]/;
+
+/**
+ * The directory a `cd` simple command moves to, resolved against the current base. Static
+ * operands (absolute, `~`-home-relative, or plain relative literals) move the base; a dynamic
+ * destination (`$dir`, `-`, `~user`, computed text) or an unknown home returns null and leaves
+ * the base unchanged rather than guessed.
+ */
+function cdTargetDir(operands: ShellToken[], base: string, home: string): string | null {
+	let at = 0;
+	while (at < operands.length && !operands[at]!.quoted && CD_OPTION.test(operands[at]!.text)) at++;
+	const operand = operands[at];
+	if (operand === undefined) return home !== "" ? home : null;
+	const text = operand.text;
+	if (operand.quoted) {
+		// A quoted `~` never expands, so it cannot name home; keep the pre-cd base.
+		if (text === "" || text === "-" || text.startsWith("-") || text.startsWith("~") || CD_DYNAMIC.test(text)) return null;
+		return resolve(base, text);
+	}
+	if (text === "~") return home !== "" ? home : null;
+	if (text.startsWith("~/")) return CD_DYNAMIC.test(text) ? null : home !== "" ? home + text.slice(1) : null;
+	if (text === "" || text === "-" || text.startsWith("-") || text.startsWith("~") || CD_DYNAMIC.test(text)) return null;
+	return resolve(base, text);
+}
+
+/**
+ * The single walk behind shellWriteTargets and shellWriteBases. A static `cd` into an existing
+ * directory moves the physical base (realpath) for every later target, applied at the next
+ * command separator, since a redirect in the `cd` command itself opens first; a `cd` inside
+ * `(...)` or `$(...)` is scoped by the parentheses and never leaks out, and a lone `&` or `|`
+ * drops the pending move (backgrounded/piped `cd` never moves the parent). Every other `cd`
+ * keeps the pre-cd base, unchanged.
+ */
+function collectShellWrites(command: string, track: { cwd: string; home: string } | null): ShellWriteAtBase[] {
 	const tokens = shellTokens(command);
-	const targets: string[] = [];
- const isSep = (token: ShellToken): boolean => !token.quoted && /^[;&|()]$/.test(token.text);
+	const targets: ShellWriteAtBase[] = [];
+	const isSep = (token: ShellToken): boolean => !token.quoted && /^[;&|()]$/.test(token.text);
+	let base = track?.cwd ?? "";
+	const stack: string[] = [];
+	let pending: string | null = null;
+	const settle = (): void => { if (pending !== null) { base = pending; pending = null; } };
 	let i = 0;
 	while (i < tokens.length) {
 		const token = tokens[i]!;
+		if (!token.quoted && token.text === "(") { settle(); stack.push(base); i++; continue; }
+		if (!token.quoted && token.text === ")") { if (stack.length > 0) base = stack.pop()!; pending = null; i++; continue; }
+		if (isSep(token)) {
+			// `&&` and `||` sequence one shell; a lone `&` backgrounds and a lone `|` pipes,
+			// so the `cd` ran in a subshell and never moves the parent's base: drop it.
+			const next = tokens[i + 1];
+			if ((token.text === "&" || token.text === "|") && (next === undefined || next.text !== token.text || next.quoted)) pending = null;
+			else settle();
+			i++;
+			continue;
+		}
 		if (!token.quoted && (REDIRECT.test(token.text) || FD_REDIRECT.test(token.text))) {
 			const next = tokens[i + 1];
-			if (next && next.text !== "" && !isSep(next)) targets.push(next.text);
+			if (next && next.text !== "" && !isSep(next)) targets.push({ target: next.text, base });
 			i += 2;
 			continue;
 		}
@@ -317,7 +373,7 @@ export function shellWriteTargets(command: string): string[] {
 				const arg = tokens[i]!;
 				if (arg.text === "-") { i++; continue; }
 				if (!arg.quoted && arg.text.startsWith("-")) { i++; continue; }
-				targets.push(arg.text);
+				targets.push({ target: arg.text, base });
 				i++;
 			}
 			continue;
@@ -339,20 +395,44 @@ export function shellWriteTargets(command: string): string[] {
 				i++;
 			}
 			const dest = dashT ?? operands.at(-1);
-			if (dest !== undefined) targets.push(dest);
+			if (dest !== undefined) targets.push({ target: dest, base });
 			continue;
 		}
 		const atCommand = i === 0 || isSep(tokens[i - 1]!);
+		if (track !== null && atCommand && !token.quoted && commandName(token.text) === "cd") {
+			const operands: ShellToken[] = [];
+			for (let j = i + 1; j < tokens.length && !isSep(tokens[j]!); j++) operands.push(tokens[j]!);
+			// Follow only a static `cd` into an existing directory (one bounded stat); in every
+			// other case keep today's pre-cd resolution, unchanged. The base is the physical
+			// directory (one bounded realpath of a proven-existing path), so a symlinked `cd`
+			// target is judged where the write really lands.
+			const dest = cdTargetDir(operands, base, track.home);
+			if (dest !== null && existsSync(dest)) {
+				try { pending = realpathSync(dest); }
+				catch { /* raced away between stat and resolve: keep the pre-cd base */ }
+			}
+		}
 		const name = token.quoted || !atCommand ? "" : commandName(token.text);
 		if (name === "git" || name === "rsync" || name === "tar") {
 			const args: ShellToken[] = [];
 			for (i++; i < tokens.length && !isSep(tokens[i]!); i++) args.push(tokens[i]!);
-			targets.push(...(name === "git" ? gitWriteTargets(args) : name === "rsync" ? rsyncWriteTargets(args) : tarWriteTargets(args)));
+			targets.push(...(name === "git" ? gitWriteTargets(args) : name === "rsync" ? rsyncWriteTargets(args) : tarWriteTargets(args)).map((target) => ({ target, base })));
 			continue;
 		}
 		i++;
 	}
-	return targets.filter(target => target !== "");
+	return targets.filter(({ target }) => target !== "");
+}
+
+/**
+ * Write targets of one shell command with the directory each target opens under, so
+ * `cd var/agent-tmp/w && echo hi > ../../out` resolves where the agent wrote (inside the
+ * repository) instead of against the session root (which looks like a home-root write).
+ * Only a static `cd` into an existing directory moves the base; every other shape resolves
+ * exactly as shellWriteTargets does (APPLICSCRATCH1, ompkit-1ra0d.127).
+ */
+export function shellWriteBases(command: string, cwd: string, home: string): ShellWriteAtBase[] {
+	return collectShellWrites(command, { cwd, home });
 }
 
 const isOption = (arg: ShellToken): boolean => !arg.quoted && arg.text.startsWith("-") && arg.text !== "-";
@@ -492,10 +572,11 @@ function checkBashTargets(event: FleetGuardEvent, context: FleetGuardContext): F
 	if (tool !== "bash" || !command) return undefined;
 	const cwd = eventCwd(event, context);
 	const home = homeDir();
-	for (const target of shellWriteTargets(command)) {
-		const abs = resolveCandidate(cwd, target);
+	const writes = shellWriteBases(command, cwd, home);
+	for (const { target, base } of writes) {
+		const abs = resolveCandidate(base, target);
 		if (abs === null) continue;
-		const root = forbiddenTarget(abs, home, cwd);
+		const root = forbiddenTarget(abs, home, base);
 		if (root !== null) return blockScratch("scratch-write", target, root);
 	}
 	return undefined;
@@ -622,7 +703,12 @@ export function checkSystemTemp(event: FleetGuardEvent, context: FleetGuardConte
 		}
 	const argvs = "refusal" in inspection ? segments.filter(argv => argv.length > 0) : inspection.commands.map(({ argv }) => argv);
 	const allocations = argvs.flatMap(argv => mktempWriteTargets(argv));
-	for (const target of [...shellWriteTargets(command), ...allocations]) {
+	const writes = shellWriteBases(command, cwd, homeDir());
+	for (const { target, base } of writes) {
+		const block = refuse(target, resolveCandidate(base, target));
+		if (block) return block;
+	}
+	for (const target of allocations) {
 		const block = refuse(target, resolveCandidate(cwd, target));
 		if (block) return block;
 	}

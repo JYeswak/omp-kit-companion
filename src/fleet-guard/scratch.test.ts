@@ -1,8 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { ownedTmp, type OwnedTmp } from "../kitlib/tmp.ts";
-import { check, checkSystemTemp, gitBlanketArgs, hostAgentName, shellTokens, shellWriteTargets, scratchDirFor, writeScratchOwner, applyScratchEnv } from "./scratch.ts";
+import { runFixture } from "../../tests/cli/fixture-process.ts";
+import { fleetPolicyState } from "../../extensions/fleet-policy.ts";
+import { check, checkSystemTemp, gitBlanketArgs, hostAgentName, shellTokens, shellWriteBases, shellWriteTargets, scratchDirFor, writeScratchOwner, applyScratchEnv } from "./scratch.ts";
 
 const agentTmp = join(import.meta.dir, "../../var/agent-tmp");
 mkdirSync(agentTmp, { recursive: true });
@@ -386,4 +388,94 @@ test("TMPWRITE1: checkSystemTemp refuses every system-temp sink with the scratch
 	expect(checkSystemTemp({ toolName: "write", input: { path: `${hosted}/f` } }, ctx(hosted))?.block).toBe(true);
 	expect(checkSystemTemp({ toolName: "bash", input: { command: "echo x > var/agent-tmp/f" } }, ctx("/tmp"))?.block).toBe(true);
 	expect(check({ toolName: "write", input: { path: "/var/folders/zz/T/other/var/agent-tmp/f" } }, ctx(hosted))?.block).toBe(true);
+});
+
+// APPLICSCRATCH1 (ompkit-1ra0d.127): a call inside an ovnfs checkout (an external gitdir file,
+// not an ordinary .git directory) is judged under that repository's own policy instead of refused
+// as unverifiable; a dead gitdir pointer with a marker stays unavailable (never verified).
+function applicGitInit(dir: string): void {
+	const result = runFixture(["git", "init", "-q", dir], { cwd: dirname(dir), label: "applic-git-init" });
+	if (result.rc !== 0) throw new Error(`git init failed: ${new TextDecoder().decode(result.stderr)}`);
+}
+
+test("APPLICSCRATCH1: an edit inside an ovnfs checkout of an opted-in repository is judged under its policy", async () => {
+	const donor = ownedRoot("applic-donor");
+	applicGitInit(donor);
+	const co = ownedRoot("applic-co");
+	writeFileSync(join(co, ".git"), `gitdir: ${join(donor, ".git")}\n`);
+	mkdirSync(join(co, ".omp"), { recursive: true });
+	writeFileSync(join(co, ".omp", "fleet.json"), '{"enabled":true}');
+	expect(await fleetPolicyState(co)).toEqual({ kind: "on", root: co });
+	// planted negative: the empty-.git-dir shape refuses on the old code; the new code defers
+	// to the nearest real repository's policy.
+	const fake = join(co, "sub");
+	mkdirSync(join(fake, ".git"), { recursive: true });
+	mkdirSync(join(fake, ".omp"), { recursive: true });
+	writeFileSync(join(fake, ".omp", "fleet.json"), '{"enabled":true}');
+	expect(await fleetPolicyState(fake)).toEqual({ kind: "on", root: co });
+	// escape shape: a dead gitdir pointer plus marker inside an opted-in repo stays unavailable.
+	const evil = join(co, "evil");
+	mkdirSync(evil, { recursive: true });
+	writeFileSync(join(evil, ".git"), "gitdir: /nonexistent/ovnfs/git/applic-evil\n");
+	mkdirSync(join(evil, ".omp"), { recursive: true });
+	writeFileSync(join(evil, ".omp", "fleet.json"), '{"enabled":true}');
+	expect(await fleetPolicyState(evil)).toMatchObject({ kind: "unavailable", root: evil });
+});
+
+test("APPLICSCRATCH1-path: a sibling-relative redirect after cd resolves where the agent wrote", () => {
+	const dir = home();
+	const repo = join(dir, "work", "proj");
+	mkdirSync(join(repo, "var", "agent-tmp", "w"), { recursive: true });
+	// the ledger shape: cd into an existing scratch dir, write ../../name — the file lands
+	// in-repo, so nothing is blocked.
+	expect(check({ toolName: "bash", input: { command: "cd var/agent-tmp/w && echo hi > ../../out" } }, ctx(repo))).toBeUndefined();
+	// cd into a missing dir keeps today's resolution: the write would land in the home root.
+	const missing = check({ toolName: "bash", input: { command: "cd var/agent-tmp/NOPE && echo hi > ../../out" } }, ctx(repo));
+	expect(missing?.block).toBe(true);
+	expect(missing?.reason).toContain("under $HOME");
+	// the same redirect without cd is a real home-root write: still refused.
+	const blocked = check({ toolName: "bash", input: { command: "echo hi > ../../out" } }, ctx(repo));
+	expect(blocked?.block).toBe(true);
+	expect(blocked?.reason).toContain("under $HOME");
+	// a cd into system temp does not smuggle the write past the temp rule.
+	const tmp = checkSystemTemp({ toolName: "bash", input: { command: "cd /tmp && echo hi > x" } }, ctx(repo));
+	expect(tmp?.block).toBe(true);
+	expect(tmp?.reason).toContain("fleet-guard system-temp");
+	expect(shellWriteBases("cd var/agent-tmp/w && echo hi > ../../out", repo, dir))
+		.toEqual([{ target: "../../out", base: join(repo, "var", "agent-tmp", "w") }]);
+	expect(shellWriteBases("cd var/agent-tmp/NOPE && echo hi > ../../out", repo, dir))
+		.toEqual([{ target: "../../out", base: repo }]);
+	expect(shellWriteBases("cd $D && echo hi > ../../out", repo, dir)).toEqual([{ target: "../../out", base: repo }]);
+	expect(shellWriteBases('cd "~/w" && echo hi > ../../out', repo, dir)).toEqual([{ target: "../../out", base: repo }]);
+	// a symlinked cd target is judged where the write really lands.
+	symlinkSync("/tmp", join(repo, "var", "agent-tmp", "ltmp"));
+	const linkedTmp = checkSystemTemp({ toolName: "bash", input: { command: "cd var/agent-tmp/ltmp && echo hi > x" } }, ctx(repo));
+	expect(linkedTmp?.block).toBe(true);
+	expect(linkedTmp?.reason).toContain("fleet-guard system-temp");
+	symlinkSync(dir, join(repo, "var", "agent-tmp", "lhome"));
+	const linkedHome = check({ toolName: "bash", input: { command: "cd var/agent-tmp/lhome && echo hi > notes.md" } }, ctx(repo));
+	expect(linkedHome?.block).toBe(true);
+	expect(linkedHome?.reason).toContain("under $HOME");
+	// a backgrounded or piped cd never moves the parent: the pending move is dropped.
+	expect(shellWriteBases("cd var/agent-tmp/w & echo hi > ../../out", repo, dir))
+		.toEqual([{ target: "../../out", base: repo }]);
+	expect(shellWriteBases("cd /tmp | cat; echo hi > x", repo, dir)).toEqual([{ target: "x", base: repo }]);
+	const bg = check({ toolName: "bash", input: { command: "cd var/agent-tmp/w & echo hi > ../../out" } }, ctx(repo));
+	expect(bg?.block).toBe(true);
+	expect(bg?.reason).toContain("under $HOME");
+	expect(checkSystemTemp({ toolName: "bash", input: { command: "cd /tmp | cat; echo hi > x" } }, ctx(repo))).toBeUndefined();
+	// a cd settled inside parentheses never leaks out: the subshell is gone when `)` closes.
+	const sub = check({ toolName: "bash", input: { command: "(cd var/agent-tmp/w && true); echo hi > ../../out" } }, ctx(repo));
+	expect(sub?.block).toBe(true);
+	expect(sub?.reason).toContain("under $HOME");
+	expect(shellWriteBases("(cd var/agent-tmp/w && true); echo hi > ../../out", repo, dir))
+		.toEqual([{ target: "../../out", base: repo }]);
+	const subst = check({ toolName: "bash", input: { command: "x=$(cd var/agent-tmp/w && pwd); echo hi > ../../out" } }, ctx(repo));
+	expect(subst?.block).toBe(true);
+	expect(subst?.reason).toContain("under $HOME");
+	const nested = check({ toolName: "bash", input: { command: "((cd var/agent-tmp/w && true)); echo hi > ../../out" } }, ctx(repo));
+	expect(nested?.block).toBe(true);
+	expect(nested?.reason).toContain("under $HOME");
+	// an unbalanced `)` never underflows the scope stack.
+	expect(shellWriteBases("echo hi > x)", repo, dir)).toEqual([{ target: "x", base: repo }]);
 });

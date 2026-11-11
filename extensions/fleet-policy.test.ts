@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fleetPolicyState } from "./fleet-policy";
@@ -73,14 +73,70 @@ test("only a real nearest repository with explicit true enables fleet policy", a
 	expect(await fleetPolicyState(nested)).toEqual({ kind: "on", root: nested });
 });
 
-test("a fake nested Git boundary cannot activate or inherit fleet policy", async () => {
+test("an invalid nested Git boundary defers to the nearest real repository", async () => {
 	const root = repo();
 	policy(root, '{"enabled":true}');
 	const fake = freshDir(root, "not-a-repo-");
 	mkdirSync(join(fake, ".git"));
 	expect(await fleetPolicyState(fake)).toEqual({ kind: "off", root: fake });
 	policy(fake, '{"enabled":true}');
-	expect(await fleetPolicyState(fake)).toMatchObject({ kind: "unavailable", root: fake });
+	// git ignores the empty `.git` directory, so the call is judged under the real
+	// repository's own opt-in (APPLICSCRATCH1): the fake marker activates nothing by itself.
+	expect(await fleetPolicyState(fake)).toEqual({ kind: "on", root });
+	const plain = repo();
+	const fake2 = freshDir(plain, "not-a-repo-");
+	mkdirSync(join(fake2, ".git"));
+	policy(fake2, '{"enabled":true}');
+	expect(await fleetPolicyState(fake2)).toEqual({ kind: "off", root: plain });
+});
+
+test("a dead gitdir pointer plus marker stays unavailable without a verified state", async () => {
+	// escape shape: a planted evil/.git pointer and marker inside an opted-in repo must not
+	// switch the guard off (APPLICSCRATCH1, ompkit-1ra0d.127).
+	const root = repo();
+	policy(root, '{"enabled":true}');
+	expect(await fleetPolicyState(root)).toEqual({ kind: "on", root });
+	const evil = freshDir(root, "evil-");
+	writeFileSync(join(evil, ".git"), "gitdir: /nonexistent/ovnfs/git/evil\n");
+	policy(evil, '{"enabled":true}');
+	expect(await fleetPolicyState(evil)).toMatchObject({ kind: "unavailable", root: evil });
+	expect(await fleetPolicyState(root)).toEqual({ kind: "on", root });
+});
+
+test("a transient git failure retries once and succeeds", async () => {
+	const root = repo();
+	policy(root, '{"enabled":true}');
+	const bin = freshDir(base, "failonce-bin-");
+	const failOnce = join(bin, "gitfailed");
+	const git = process.env.PATH !== undefined && existsSync("/usr/bin/git") ? "/usr/bin/git" : "git";
+	writeFileSync(join(bin, "git"), `#!/bin/sh\nif [ ! -f "${failOnce}" ]; then touch "${failOnce}"; exit 128; fi\nexec ${git} "$@"\n`, { mode: 0o755 });
+	const savedPath = process.env.PATH;
+	process.env.PATH = `${bin}${process.platform === "win32" ? ";" : ":"}${savedPath ?? ""}`;
+	try {
+		expect(await fleetPolicyState(root)).toEqual({ kind: "on", root });
+	} finally {
+		if (savedPath === undefined) delete process.env.PATH;
+		else process.env.PATH = savedPath;
+	}
+	expect(existsSync(failOnce)).toBe(true);
+});
+
+test("a verified root keeps enforcing its policy while re-verification fails", async () => {
+	const root = repo();
+	policy(root, '{"enabled":true}');
+	expect(await fleetPolicyState(root)).toEqual({ kind: "on", root });
+	renameSync(join(root, ".git"), join(root, ".git-hidden"));
+	writeFileSync(join(root, ".git"), "gitdir: /nonexistent/ovnfs/git/broken\n");
+	try {
+		const state = await fleetPolicyState(root);
+		expect(state.kind).toBe("on");
+		expect(state).toMatchObject({ root });
+		if (state.kind === "on") expect(state.notice).toContain("last verified policy");
+	} finally {
+		rmSync(join(root, ".git"));
+		renameSync(join(root, ".git-hidden"), join(root, ".git"));
+	}
+	expect(await fleetPolicyState(root)).toEqual({ kind: "on", root });
 });
 
 test("malformed and unsupported enabled states are unavailable, never stock off", async () => {
