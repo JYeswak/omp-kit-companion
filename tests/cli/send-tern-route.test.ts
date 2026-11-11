@@ -53,7 +53,10 @@ function busyJournal(repo: string, sessionUuid: string): string {
 
 interface TernFixtureOpts {
 	session?: string;
-	paneId?: number;
+	// WAKEPENDING1: block ids exceed 2^53, so no JS number carries them (9374096836001793 rounds to
+	// ...792 at the literal). The id stays an exact decimal string and is spliced raw into the fake
+	// wire text, exactly as `tern inspect --json` emits it.
+	paneId?: string;
 	repo?: string;
 	identityProject?: string;
 	agentName?: string;
@@ -74,9 +77,10 @@ interface TernFixtureOpts {
  * payload and journals it as a USER entry, exactly like the OMP composer.
  * `taken.luaDispatches` counts native effects: negatives must stay zero.
  */
-function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: { runs: string[][]; luaDispatches: number }; repo: string; finishTurn: () => void } {
+function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: { runs: string[][]; luaDispatches: number; blocks: string[] }; repo: string; finishTurn: () => void } {
 	const session = opts.session ?? "omp-test";
-	const paneId = opts.paneId ?? 5;
+	const paneId = opts.paneId ?? "5";
+	if (!/^[0-9]+$/.test(paneId)) throw new Error(`fixture pane id must be decimal digits: ${paneId}`);
 	const repo = opts.repo ?? repoDir();
 	const identityProject = opts.identityProject ?? repo;
 	const agentName = opts.agentName ?? "FixtureSeat";
@@ -93,13 +97,14 @@ function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: {
 	let journal = (opts.journal ?? idleJournal)(repo, uuid);
 	let activeParentId = opts.journal === busyJournal ? "m3" : "m2";
 	writeFileSync(sessionFile, journal);
-	const taken = { runs: [] as string[][], luaDispatches: 0 };
+	const taken = { runs: [] as string[][], luaDispatches: 0, blocks: [] as string[] };
 	let pendingPrompt: string | null = null;
-	const inspect = () => JSON.stringify(listSession
-		? { sessions: [{ id: 7, name: session, tabs: [{ blocks: [{ id: paneId, exited }] }] }],
-			panes: [{ pane: paneId, cwd: repo, working, exited, omp_session_file: sessionFile }] }
-		: { sessions: [], panes: [] });
-	const process = JSON.stringify({ pane: paneId, foreground: { argv: ["omp"], pid: 1234, cwd: repo, name: "omp" } });
+	// Raw wire text: Tern emits block ids as bare JSON numbers (past 2^53), so the fixture splices the
+	// exact decimal digits, never a JS number (JSON.stringify(9374096836001793) emits ...792).
+	const inspect = () => listSession
+		? `{"sessions":[{"id":7,"name":${JSON.stringify(session)},"tabs":[{"blocks":[{"id":${paneId},"exited":${JSON.stringify(exited)}}]}]}],"panes":[{"pane":${paneId},"cwd":${JSON.stringify(repo)},"working":${JSON.stringify(working)},"exited":${JSON.stringify(exited)},"omp_session_file":${JSON.stringify(sessionFile)}}]}`
+		: `{"sessions":[],"panes":[]}`;
+	const process = `{"pane":${paneId},"foreground":{"argv":["omp"],"pid":1234,"cwd":${JSON.stringify(repo)},"name":"omp"}}`;
 	const io: TernObserverIo = {
 		run(argv) {
 			taken.runs.push([...argv]);
@@ -107,6 +112,8 @@ function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: {
 				taken.luaDispatches++;
 				const lua = argv[argv.length - 1] ?? "";
 				const groups = [...lua.matchAll(/string\.char\(([\d,]+)\)/g)].map((m) => m[1]!);
+				// First char group is the addressed block (buildNativeSendTurn), last is the payload.
+				taken.blocks.push(Buffer.from((groups[0] ?? "").split(",").filter(Boolean).map(Number)).toString("utf8"));
 				const payloadBytes = groups.length >= 2 ? groups[groups.length - 1]!.split(",").map(Number) : [];
 				const payload = Buffer.from(payloadBytes).toString("utf8");
 				if (working) pendingPrompt = payload;
@@ -345,4 +352,25 @@ test("TERNADDR1: the native admission turn addresses the configured control endp
 	expect(got).toMatchObject({ status: "OK", code: "PROVEN" });
 	const turn = taken.runs.find((argv) => argv.includes("carly"))!;
 	expect(turn.slice(turn.indexOf("--window"), turn.indexOf("--window") + 2)).toEqual(["--window", WINDOW]);
+});
+
+// WAKEPENDING1 (ompkit-774u.99): the two skillgrowth seats live on Tern blocks past 2^53. A send to
+// each is delivered to exactly that block and proven from its journal. The ids stay decimal strings:
+// as JS numbers 9374096836001793 already reads as ...792, so a numeric fixture would wake a neighbour.
+test("WAKEPENDING1: sends to 64-bit Tern blocks deliver to exactly that pane and prove from its journal", async () => {
+	for (const id of ["9374092541034498", "9374096836001793"]) {
+		const dir = dropDir();
+		const { io, taken, repo } = ternFixture({ paneId: id });
+		const got = await proveTernCliSend({ session: "omp-test", pane: `tern:${id}`, message: "status update",
+			dropDir: dir, cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50,
+			wait: noWait, io, env: { AGENT_MAIL_PROJECT: repo } });
+		expect(got).toMatchObject({ status: "OK", code: "PROVEN" });
+		expect(got.sends).toBe(1);
+		expect(taken.luaDispatches).toBe(1);
+		expect(taken.blocks).toEqual([id]);
+		expect(got.marker).toMatch(/^kit-send-[0-9a-f]+$/);
+		expect(got.offset).toBeGreaterThan(0);
+		expect(got.drop_path).toBeNull();
+		expect(got.detail).toContain("USER entry proven at offset");
+	}
 });

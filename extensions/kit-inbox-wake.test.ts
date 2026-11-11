@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
-import kitInboxWake, { cursorPath, type InboxEvent, type InboxRead, type InboxWakeDeps, wakeText } from "./kit-inbox-wake";
+import kitInboxWake, { cursorPath, registeredRepo, type InboxEvent, type InboxRead, type InboxWakeDeps, wakeText } from "./kit-inbox-wake";
 import { fixtureDeadlineS } from "../tests/cli/fixture-process.ts";
 
 type Sent = { customType: string; content: string; deliverAs?: string; triggerTurn?: boolean };
@@ -187,5 +187,23 @@ describe("kit-inbox-wake", () => {
 		const text = wakeText("QuietBadger", [event(1, 1), event(2, 2)]);
 		expect(text.split("\n")[0]).toBe("MAIL WAKE for QuietBadger: 2 new Agent Mail message(s).");
 		expect(text).toContain("acknowledge each one after acting on it");
+	});
+
+	// WAKEPENDING1 (ompkit-774u.99): the two skillgrowth seats sit on blocks past 2^53. A JS number
+	// cannot carry them (String(Number("9374096836001793")) is ...792), so the pane stays an exact
+	// decimal string; anything else is not a pane.
+	test("WAKEPENDING1: registeredRepo resolves 64-bit Tern panes exactly", () => {
+		const dir = ownedTmp("inbox-wake-pane");
+		dirs.push(dir);
+		const seats = ["9374092541034498", "9374096836001793"].map((pane) => ({ pane: `tern:${pane}`, role: "chief" }));
+		const registryPath = join(dir.path, "seats.v1.json");
+		writeFileSync(registryPath, JSON.stringify({ schema_version: "omp-kit.cc.seats.v1",
+			sessions: [{ repo: "/repo", seats }] }));
+		const env = (pane: string) => ({ TERN_PANE: pane, CC_SEATS: registryPath });
+		expect(registeredRepo(dir.path, env("9374092541034498"))).toBe("/repo");
+		expect(registeredRepo(dir.path, env("9374096836001793"))).toBe("/repo");
+		expect(registeredRepo(dir.path, env("1756641624081"))).toBeNull();
+		expect(registeredRepo(dir.path, env("007"))).toBeNull();
+		expect(registeredRepo(dir.path, env(""))).toBeNull();
 	});
 });

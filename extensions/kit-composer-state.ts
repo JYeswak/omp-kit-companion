@@ -65,7 +65,9 @@ export interface ComposerStateDeps {
 /** A registered seat's repo owns its opt-in, even when its process starts above that repo. */
 function policyCwd(cwd: string, home: string, env: Readonly<Record<string, string | undefined>>): string {
 	const pane = env.TERN_PANE;
-	if (!pane || !Number.isSafeInteger(Number(pane)) || Number(pane) < 0 || String(Number(pane)) !== pane) return cwd;
+	// WAKEPENDING1: block ids exceed 2^53, so no JS number can carry them (9374096836001793 rounds to
+	// ...792; 9374092541034498 is no safe integer). They stay exact decimal strings end to end.
+	if (!pane || !/^[1-9][0-9]*$/.test(pane)) return cwd;
 	try {
 		const registry: unknown = JSON.parse(readFileSync(env.CC_SEATS || join(home, ".local", "state", "omp-kit", "cc", "seats.v1.json"), "utf8"));
 		if (typeof registry !== "object" || registry === null || !("schema_version" in registry) ||

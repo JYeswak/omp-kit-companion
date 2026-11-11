@@ -73,7 +73,9 @@ export interface InboxWakeDeps {
 /** The repo a registered Tern seat belongs to (the CC seat registry), else null. */
 export function registeredRepo(home: string, env: Readonly<Record<string, string | undefined>>): string | null {
 	const pane = env.TERN_PANE;
-	if (!pane || String(Number(pane)) !== pane) return null;
+	// WAKEPENDING1: block ids exceed 2^53, so no JS number can carry them (9374096836001793 rounds to
+	// ...792; 9374092541034498 is no safe integer). They stay exact decimal strings end to end.
+	if (!pane || !/^[1-9][0-9]*$/.test(pane)) return null;
 	try {
 		const registry = JSON.parse(readFileSync(env.CC_SEATS || join(home, ".local", "state", "omp-kit", "cc", "seats.v1.json"), "utf8"));
 		if (registry?.schema_version !== "omp-kit.cc.seats.v1" || !Array.isArray(registry.sessions)) return null;

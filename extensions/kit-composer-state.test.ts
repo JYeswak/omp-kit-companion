@@ -134,6 +134,20 @@ test("planted: a registered chief publishes from a cwd outside its policy repo",
 	expect(s.record()).toEqual({ schema: 1, session_file: realpathSync(s.sessionFile), pid: 4242, at: 1_000, empty: true, idle: true, ...EMPTY_DIGEST });
 });
 
+// WAKEPENDING1 (ompkit-774u.99): the two skillgrowth seats sit on blocks past 2^53. A JS number
+// cannot carry them, so the pane stays an exact decimal string when the registry is consulted.
+test("WAKEPENDING1: a registered seat on a 64-bit block publishes from outside its policy repo", async () => {
+	for (const pane of ["9374092541034498", "9374096836001793"]) {
+		const policy = repo(true);
+		const registry = { schema_version: "omp-kit.cc.seats.v1",
+			sessions: [{ plane: "tern", repo: policy, session: "omp-chief", tern_session: "Default",
+				seats: [{ pane: `tern:${pane}`, role: "chief" }] }] };
+		const s = await seat({ cwd: chiefCwd, env: { TERN_PANE: pane }, registry });
+		await s.fire("session_start");
+		expect(s.record()).toMatchObject({ empty: true, idle: true });
+	}
+});
+
 test("control: an unregistered pane outside the policy repo stays silent tick after tick", async () => {
 	const s = await seat({ cwd: chiefCwd, env: { TERN_PANE: "99" }, registry: registeredSeat(repo(true)) });
 	await s.fire("session_start");
