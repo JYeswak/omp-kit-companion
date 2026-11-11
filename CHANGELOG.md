@@ -4,6 +4,13 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.121] - 2026-11-11
+
+### Changed
+
+- `omp-kit verify` no longer refuses `DEPENDENCIES_NOT_LOCKED` for a project whose `package.json` declares no dependencies (the kit's own repository): only a manifest with a non-empty dependency map needs a committed lockfile.
+- `omp-kit verify` probes Agent Mail for the verifier once per project and actor per run, bounded at 10 s, instead of up to 60 s on every verify; a slow or exhausted mail server no longer stalls concurrent verifies (the probe was already inconclusive on timeout).
+
 ## [0.2.120] - 2026-11-11
 
 ### Changed
