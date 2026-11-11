@@ -1,4 +1,5 @@
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,7 @@ import { checkPublishedCommits, extractCitedCommitReferences, type PublishedComm
 import { recordGateEvent } from "./gate-events.ts";
 import { seatIdentity } from "../src/fleet-guard/write-own.ts";
 import { shellTokenSpans, shellTokens } from "../src/fleet-guard/scratch.ts";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 
 /**
  * kit-agent-mail-guard (AMGUARD1, ompkit-774u.13.2): a seat's Agent Mail calls are checked at the act.
@@ -51,13 +53,17 @@ import { shellTokenSpans, shellTokens } from "../src/fleet-guard/scratch.ts";
  *   AM_DONE_NOT_PUBLISHED: a send_message whose subject starts with DONE must cite commit SHA(s)
  *     reachable from freshly fetched origin/main. Plain citations use project_key; explicit
  *     absolute-repository `path@SHA` citations are checked in that source repository.
- *   AM_BODY_TOO_LONG: only a body over four times the cap; a shorter over-cap body is sent with an
- *     AM_BODY_NOTICE. Flooding another seat's context is not undone by a notice.
+ *   AM_BODY_OVERFLOW (AMGUARDSOFT1, ompkit-1ra0d.167): a body over the cap is completed, not
+ *     refused. The full text is stored in an owned bounded overflow file (attached via
+ *     attachment_paths) and the send carries the first cap characters plus a one-line pointer,
+ *     with an AM_BODY_NOTICE. AM_BODY_TOO_LONG is retired: no body length refuses.
  * Reversible acts are admitted with a one-line AM_*_NOTICE and one gate-events row with kind notice,
- * never kind refuse (MAILGUARDSLIM1): a non-vocabulary subject (AM_SUBJECT_NOTICE), an ack_required the
- * subject cannot carry (dropped by rewriteArgs, AM_ACK_NOTICE), an ask whose bead id does not resolve
- * (sent with ack kept, AM_ACK_BEAD_NOTICE), a second fetch_inbox inside the window (AM_INBOX_NOTICE),
- * unknown registration arguments (stripped by rewriteArgs, AM_REGISTRATION_NOTICE). A notice never
+ * never kind refuse (MAILGUARDSLIM1, AMGUARDSOFT1): a non-vocabulary subject (AM_SUBJECT_NOTICE),
+ * an ack_required the subject cannot carry (dropped by rewriteArgs, AM_ACK_NOTICE), an ask whose bead
+ * id does not resolve (sent with ack kept, AM_ACK_BEAD_NOTICE), a fetch_inbox inside the per-agent
+ * per-project window (admitted with an AM_INBOX_NOTICE naming its age and the next allowed time;
+ * a since_ts newer than the last fetch passes clean; AM_INBOX_RATE is retired), unknown registration
+ * arguments (stripped by rewriteArgs, AM_REGISTRATION_NOTICE). A notice never
  * skips a later check (GATEDEMOTE1): the secret scan, roster, identity and DONE checks still run after
  * every notice, and a secret in a noticed body is still refused under AM_BODY_SECRET. An inner typed
  * refusal surfaces under its own code; only a genuine failure keeps AM_GUARD_FAILED.
@@ -77,9 +83,12 @@ import { shellTokenSpans, shellTokens } from "../src/fleet-guard/scratch.ts";
  */
 
 export const AM_BODY_CAP = 1800;
-/** A body up to this many characters is sent with an AM_BODY_NOTICE; beyond it the refusal stays. */
-export const AM_BODY_NOTICE_CAP = AM_BODY_CAP * 4;
-/** Minimum spacing between one seat's fetch_inbox calls. */
+/** Longest body stored whole in one overflow file; a longer body is stored truncated with a marker. */
+export const AM_BODY_STORE_MAX = 512 * 1024;
+/** Overflow-file retention per guard instance: oldest files are evicted past either bound. */
+export const AM_OVERFLOW_KEEP_FILES = 32;
+export const AM_OVERFLOW_KEEP_BYTES = 4 * 1024 * 1024;
+/** Minimum spacing between one seat's fetch_inbox calls, per agent and project. */
 export const AM_INBOX_INTERVAL_MS = 60_000;
 const MAX_BEAD_CANDIDATES = 5;
 const MAIL_PREFIX = "mcp__mcp_agent_mail_";
@@ -141,6 +150,8 @@ export interface AgentMailGuardDeps {
 	scanBudgetMs?: number;
 	/** The mail wake (MAILWAKE1); defaults to createMailWake over pi.exec. Injectable for tests. */
 	mailWake?: MailWakeHooks;
+	/** Overflow-file root; defaults to a per-instance ownedTmp dir (bounded, reaper-owned). Injectable so tests stay inside their tree. */
+	overflowRoot?: string;
 	/** Ledger writer for notice rows; defaults to the shared gate-events ledger. Injectable so tests never touch the live ledger. */
 	recordEvent?: typeof recordGateEvent;
 }
@@ -456,8 +467,23 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 	const now = deps.now ?? Date.now;
 	const rulePath = deps.secretRulePath ?? join(dirname(fileURLToPath(import.meta.url)), SECRET_RULE_REL_PATH);
 	let scanner: RegExp[] | null = null;
-	let lastInbox: number | null = null;
-	let lastInboxToolCallId: string | null = null;
+	/**
+	 * AMGUARDSOFT1: the last fetch_inbox per seat, keyed by agent+project (owner-only: a
+	 * seat's window never covers another agent's fetches). The tool_call hook can block or
+	 * rewrite input but cannot return a substitute result, so an in-window fetch is admitted
+	 * (never refused) with a one-line note naming its age and the next allowed time.
+	 */
+	const lastInbox = new Map<string, { at: number; toolCallId: string | null }>();
+	/**
+	 * AMGUARDSOFT1: overflow-file retention per guard instance. The full body of one
+	 * over-cap send lands in an owned (mode 0700 dir, 0600 file) bounded location: past
+	 * AM_OVERFLOW_KEEP_FILES files or AM_OVERFLOW_KEEP_BYTES bytes the oldest are evicted.
+	 * The dir is an ownedTmp root (autoCleanup false), so a live seat keeps its pointers
+	 * valid and the scratch reaper reclaims a dead seat's dir via its .owner record.
+	 */
+	let overflowRoot: string | null = deps.overflowRoot ?? null;
+	let overflowSeq = 0;
+	const overflowKept: { path: string; bytes: number }[] = [];
 	const wake: MailWakeHooks = deps.mailWake ?? createMailWake({ exec: pi.exec, env, home });
 	const record = deps.recordEvent ?? recordGateEvent;
 	/**
@@ -523,6 +549,75 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 	function secretScanner(): RegExp[] {
 		scanner ??= ruleConditions(readFileSync(rulePath, "utf8")).map(source => new RegExp(source));
 		return scanner;
+	}
+	/**
+	 * AMGUARDSOFT1: the owner-only inbox window key: the fetching agent plus the project it
+	 * fetches. A seat's window never covers another agent's fetches or another project's inbox.
+	 */
+	function inboxKey(value: unknown, ctx: FlywheelContext): string {
+		const claimed = prop(value, "agent_name");
+		const project = prop(value, "project_key");
+		const agent = typeof claimed === "string" && claimed.trim() !== "" ? claimed.trim().toLowerCase() : "";
+		const key = typeof project === "string" && project !== "" ? project : ctx.cwd;
+		return `${agent}\n${key}`;
+	}
+	/**
+	 * AMGUARDSOFT1: an explicit lower bound the fetch carries (since_ts, since, after_ts), as ms
+	 * since epoch when it parses. A bound newer than the last fetch is a genuinely new query,
+	 * not a duplicate poll, so it passes without the nag notice.
+	 */
+	function fetchSince(value: unknown): number | null {
+		for (const field of ["since_ts", "since", "after_ts"]) {
+			const raw = prop(value, field);
+			if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+			if (typeof raw === "string" && raw.trim() !== "") {
+				const asNum = Number(raw.trim());
+				if (Number.isFinite(asNum)) return asNum;
+				const asDate = Date.parse(raw.trim());
+				if (!Number.isNaN(asDate)) return asDate;
+			}
+		}
+		return null;
+	}
+	function overflowDir(): string {
+		overflowRoot ??= ownedTmp("agent-mail-overflow", { autoCleanup: false }).path;
+		return overflowRoot;
+	}
+	function evictOverflow(dir: string): void {
+		while ((overflowKept.length > AM_OVERFLOW_KEEP_FILES
+			|| overflowKept.reduce((sum, kept) => sum + kept.bytes, 0) > AM_OVERFLOW_KEEP_BYTES)
+			&& overflowKept.length > 1) {
+			const oldest = overflowKept.shift();
+			if (oldest === undefined) return;
+			try { unlinkSync(oldest.path); } catch { /* Best effort: a kept file that is already gone stays gone. */ }
+		}
+	}
+	/**
+	 * AMGUARDSOFT1: complete an over-cap body. The full text lands in an owned (0600) file under
+	 * the bounded overflow root; the filename is a content hash plus a per-instance counter, so no
+	 * caller text ever reaches the filesystem. Returns the file path, or null when the store
+	 * itself fails (the caller then fails closed under AM_GUARD_FAILED: the completion genuinely
+	 * cannot complete).
+	 */
+	function storeOverflow(body: string): { path: string; truncated: boolean } | null {
+		try {
+			const dir = overflowDir();
+			overflowSeq += 1;
+			const digest = createHash("sha256").update(body).digest("hex").slice(0, 16);
+			const name = `overflow-${digest}-${overflowSeq}.md`;
+			const path = join(dir, name);
+			const truncated = body.length > AM_BODY_STORE_MAX;
+			const stored = truncated
+				? body.slice(0, AM_BODY_STORE_MAX) + `\n[kit-agent-mail-guard AM_BODY_OVERFLOW: stored ${AM_BODY_STORE_MAX} of ${body.length} characters]`
+				: body;
+			writeFileSync(path, stored, { mode: 0o600 });
+			const bytes = Buffer.byteLength(stored);
+			overflowKept.push({ path, bytes });
+			evictOverflow(dir);
+			return { path, truncated };
+		} catch {
+			return null;
+		}
 	}
 
 	async function seatNames(ctx: FlywheelContext, projectKey: unknown): Promise<{ names: string[]; project: string; unbound: BoundCaller | null }> {
@@ -869,23 +964,38 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		}
 		const body = prop(current, "body_md");
 		if (typeof body !== "string") return { verdict: refuse("AM_ARGS_UNREADABLE", "body_md is missing or not a string."), value: current };
-		if (body.length > AM_BODY_CAP) {
-			if (body.length > AM_BODY_NOTICE_CAP) {
-				return { verdict: refuse("AM_BODY_TOO_LONG", `the body is ${body.length} characters, over four times the ${AM_BODY_CAP} cap. Put the evidence in a bead comment (br comments add <bead-id> ...) and send a short pointer.`), value: current };
-			}
-			await queueNotice("AM_BODY_NOTICE", `the body is ${body.length} characters, over the ${AM_BODY_CAP} cap; sent anyway (up to ${AM_BODY_NOTICE_CAP}). Put the evidence in a bead comment (br comments add <bead-id> ...) and send a short pointer next time.`);
-		}
+		const fullBody = body;
 		let patterns: RegExp[];
 		try { patterns = secretScanner(); }
 		catch (error) {
 			return { verdict: refuse("AM_SCANNER_UNAVAILABLE", `the secret scanner rule (${rulePath}) cannot be loaded (${error instanceof Error ? error.message : String(error)}); a body that cannot be scanned is not sent.`), value: current };
 		}
-		if (patterns.some(pattern => pattern.test(body))) {
+		if (patterns.some(pattern => pattern.test(fullBody))) {
 			return { verdict: refuse("AM_BODY_SECRET", "the body holds what the secret scanner flags as a literal credential. Never mail a secret: name where it lives (Infisical key name) instead."), value: current };
+		}
+		// AMGUARDSOFT1: an over-cap body completes instead of refusing (AM_BODY_TOO_LONG is
+		// retired). The hook can rewrite arguments but cannot fetch the file back later, so the
+		// full text is stored now in an owned bounded overflow file, attached via
+		// attachment_paths, and the send carries the first cap characters plus a pointer line.
+		if (fullBody.length > AM_BODY_CAP) {
+			const stored = storeOverflow(fullBody);
+			if (stored === null) {
+				return { verdict: refuse("AM_GUARD_FAILED", "the over-cap body cannot be stored for completion (the overflow file failed); nothing was sent."), value: current };
+			}
+			const pointer = `Full body is ${fullBody.length} characters, over the ${AM_BODY_CAP} cap: the complete text is stored at ${stored.path}${stored.truncated ? ` (stored truncated at ${AM_BODY_STORE_MAX} characters)` : ""} and attached.`;
+			const record = current as Record<string, unknown>;
+			const kept = prop(record, "attachment_paths");
+			const attachments = Array.isArray(kept) ? [...kept, stored.path] : [stored.path];
+			current = {
+				...record,
+				body_md: `${fullBody.slice(0, AM_BODY_CAP)}\n\n[kit-agent-mail-guard AM_BODY_OVERFLOW: ${pointer}]`,
+				attachment_paths: attachments,
+			};
+			await queueNotice("AM_BODY_NOTICE", `the body is ${fullBody.length} characters, over the ${AM_BODY_CAP} cap; the full text is stored at ${stored.path} and attached, and the send carries the first ${AM_BODY_CAP} characters plus a pointer.`);
 		}
 		if (doneCallback) {
 			const project = prop(current, "project_key");
-			const citations = extractCitedCommitReferences(body);
+			const citations = extractCitedCommitReferences(fullBody);
 			if (citations.length === 0) {
 				return { verdict: refuse("AM_DONE_NOT_PUBLISHED", "DONE is not sendable: NOT_PUBLISHED UNKNOWN; the body must cite at least one commit SHA. Save and publish on origin/main with git_converge.py --push."), value: current };
 			}
@@ -1113,20 +1223,30 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			if (call.tool === "fetch_inbox") {
 				const at = now();
 				const id = event.toolCallId;
-				const sameLogicalCall = typeof id === "string" && id !== "" && id === lastInboxToolCallId;
+				const value = call.args.ok ? call.args.value : undefined;
+				const key = inboxKey(value, ctx);
+				const prior = lastInbox.get(key);
+				const sameLogicalCall = typeof id === "string" && id !== "" && prior !== undefined && id === prior.toolCallId;
 				if (sameLogicalCall) return undefined;
-				// MAILGUARDSLIM1 (3): the fetch is admitted with a notice that wakes deliver mail;
-				// no refusal. Every admitted fetch advances the window, noticed or not.
-				if (lastInbox !== null && at - lastInbox < AM_INBOX_INTERVAL_MS) {
-					const line = `kit-agent-mail-guard AM_INBOX_NOTICE: fetch_inbox ran ${Math.round((at - lastInbox) / 1000)} s ago; admitted anyway — inbox wakes deliver new mail, polling every ${AM_INBOX_INTERVAL_MS / 1000} s is unnecessary.`;
-					lastInbox = at;
-					lastInboxToolCallId = typeof id === "string" && id !== "" ? id : null;
-					const claimed = call.args.ok ? prop(call.args.value, "agent_name") : undefined;
+				const fresh = prior === undefined || at - prior.at >= AM_INBOX_INTERVAL_MS;
+				const since = fetchSince(value);
+				// AMGUARDSOFT1: admit when the window lapsed or the caller bounds the query past
+				// the last fetch (a genuinely new query, not a duplicate poll). Otherwise admit
+				// with a one-line note naming the fetch's age and the next allowed time; the
+				// tool_call hook can block or rewrite input but cannot return a substitute
+				// result, so there is no cached-result short-circuit, only this note. No refusal:
+				// AM_INBOX_RATE is retired. Every admitted fetch advances the window, noticed or not.
+				if (!fresh && !(since !== null && prior !== undefined && since > prior.at)) {
+					const ageS = Math.max(0, Math.round((at - prior!.at) / 1000));
+					const waitS = Math.max(1, Math.ceil((AM_INBOX_INTERVAL_MS - (at - prior!.at)) / 1000));
+					const nextAt = new Date(prior!.at + AM_INBOX_INTERVAL_MS).toISOString();
+					const line = `kit-agent-mail-guard AM_INBOX_NOTICE: fetch_inbox ran ${ageS} s ago; admitted anyway — next fetch allowed in ${waitS} s (${nextAt}); inbox wakes deliver new mail, polling every ${AM_INBOX_INTERVAL_MS / 1000} s is unnecessary.`;
+					lastInbox.set(key, { at, toolCallId: typeof id === "string" && id !== "" ? id : null });
+					const claimed = prop(value, "agent_name");
 					await ledgerNotice(ctx, "AM_INBOX_NOTICE", line, typeof claimed === "string" ? claimed : null, call.tool, null, id);
 					return { additionalContext: line };
 				}
-				lastInbox = at;
-				lastInboxToolCallId = typeof id === "string" && id !== "" ? id : null;
+				lastInbox.set(key, { at, toolCallId: typeof id === "string" && id !== "" ? id : null });
 				return undefined;
 			}
 			if (!call.args.ok) return refuse("AM_ARGS_UNREADABLE", `${call.tool}: ${call.args.why}.`);
@@ -1151,7 +1271,15 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			if (wakeVerdict !== undefined) return wakeVerdict;
 			const tokenPatch = injectSenderToken(checked.value, event, names);
 			const extra = checked.verdict?.additionalContext;
-			if (tokenPatch === undefined) return extra === undefined ? undefined : { additionalContext: extra };
+			// AMGUARDSOFT1: the guard's own input revision (a dropped ack_required, a completed
+			// over-cap body) rides on every verdict, not only on the token stamp.
+			const revised = checked.verdict !== undefined && typeof checked.verdict === "object" && "input" in checked.verdict
+				? { input: checked.verdict.input }
+				: undefined;
+			if (tokenPatch === undefined) {
+				if (revised === undefined) return extra === undefined ? undefined : { additionalContext: extra };
+				return extra === undefined ? revised : { ...revised, additionalContext: extra };
+			}
 			return extra === undefined ? tokenPatch : { ...tokenPatch, additionalContext: extra };
 		} catch (error) {
 			// MAILGUARDSLIM1 (2): AM_GUARD_FAILED never wraps a typed refusal. An inner AM_* (or

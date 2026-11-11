@@ -5,7 +5,6 @@ import { join } from "node:path";
 import kitAgentMailGuard, {
 	ACK_VOCABULARY,
 	AM_BODY_CAP,
-	AM_BODY_NOTICE_CAP,
 	AM_INBOX_INTERVAL_MS,
 	ruleConditions,
 	SUBJECT_VOCABULARY,
@@ -532,22 +531,24 @@ test("ack_required: a reply drops it with a notice (no subject to check); omitte
 
 // --- shape ---------------------------------------------------------------------------------------
 
-test("body: the cap is inclusive; over the cap is sent with a notice up to four times the cap", async () => {
+test("body: the cap is inclusive; any over-cap body completes with its full text stored, never refuses", async () => {
 	const h = await createHost();
 	const cwd = fleetRepo();
 	expect(AM_BODY_CAP).toBe(1800);
 	// A PROGRESS subject isolates the body finding: DONE would add its citation check after the notice.
 	const progress = (body_md: string) => send({ subject: `PROGRESS ${BEAD}: x`, body_md });
 	expect(await h.mail(cwd, "send_message", progress("x".repeat(AM_BODY_CAP)))).toBeUndefined();
-	// MAILGUARDSLIM1: over the cap is sent with a notice; the secret scan still runs after it.
+	// AMGUARDSOFT1 (ompkit-1ra0d.167): over the cap is completed with an overflow file, not
+	// refused; the secret scan still runs on the full body after it. AM_BODY_TOO_LONG is retired.
 	const noticed = await h.mail(cwd, "send_message", progress("x".repeat(AM_BODY_CAP + 1)));
 	expect(code(noticed)).toBeUndefined();
 	expect(noticed?.additionalContext).toContain("AM_BODY_NOTICE");
 	expect(h.notices.at(-1)).toMatchObject({ gate: "AM_BODY_NOTICE", kind: "notice" });
-	expect((await h.mail(cwd, "send_message", progress("x".repeat(AM_BODY_NOTICE_CAP))))?.additionalContext).toContain("AM_BODY_NOTICE");
-	const kept = await h.mail(cwd, "send_message", progress("x".repeat(AM_BODY_NOTICE_CAP + 1)));
-	expect(code(kept)).toBe("AM_BODY_TOO_LONG");
-	expect(kept?.reason).toContain("bead comment");
+	for (const size of [AM_BODY_CAP * 4, AM_BODY_CAP * 4 + 1, AM_BODY_CAP * 8]) {
+		const completed = await h.mail(cwd, "send_message", progress("x".repeat(size)));
+		expect(code(completed)).toBeUndefined();
+		expect(completed?.additionalContext).toContain("AM_BODY_NOTICE");
+	}
 	// A DONE mail with a cited over-cap body is sent with the same notice.
 	const done = await h.mail(cwd, "send_message", send({ body_md: `commit ${PUBLISHED_TEST_SHA}\n` + "x".repeat(AM_BODY_CAP) }));
 	expect(code(done)).toBeUndefined();
