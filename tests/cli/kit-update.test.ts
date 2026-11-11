@@ -73,7 +73,21 @@ test("KITUPDATELOAD1: a candidate scenario that cannot pass names its FAIL line 
 			return { report, detail: kitPostcheckDetail(judgeKitPostcheck(report, { identityKnown: true, changed: false }), [scratchRoot]) };
 		};
 		const control = await detailOf(await buildCompiledReleaseFixture(scratchRoot, repoRoot, buildHome, "1.2.3", hostPlatform));
-		expect(control.report.status, JSON.stringify(control.report.failures)).toBe("PASS");
+		// A host too slow to judge defers the regex-budget stage instead of failing it
+		// (POSTCHECKLOAD1, REFERENCE_RATIO_ABOVE_CLAMP): the control then proves the
+		// deferral receipt and still proves no FAIL line. Slow-host DEFERRED walls in
+		// release verdicts: 158.47 s (6ee501), 159.43 s (580721), 183.11 s (a0b0),
+		// 394.89 s (aa92), each passing on rerun; any FAIL stage still yields FAIL by
+		// construction (judgeKitPostcheck's sole-non-PASS condition).
+		const slowHost = control.report.status === "DEFERRED"
+			&& control.report.failures.some(line => line.includes("REFERENCE_RATIO_ABOVE_CLAMP"));
+		if (slowHost) {
+			const deferredStages = control.detail !== null && "deferred_stages" in control.detail
+				? control.detail.deferred_stages : undefined;
+			expect(deferredStages, JSON.stringify(control.detail)).toEqual(["regex-budget"]);
+		} else {
+			expect(control.report.status, JSON.stringify(control.report.failures)).toBe("PASS");
+		}
 		expect(control.detail?.failures.filter(line => line.startsWith("FAIL  ")) ?? []).toEqual([]);
 		// Planted: close-bare-fire still expects its block, but its command no longer closes anything.
 		const planted = await detailOf(await buildCompiledReleaseFixture(scratchRoot, repoRoot, buildHome, "1.2.4", hostPlatform, source => {

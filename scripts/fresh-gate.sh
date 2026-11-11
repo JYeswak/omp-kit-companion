@@ -728,14 +728,32 @@ gate_focused() {
 # local builds (0.11.0 stays silent on SC2015-info and exits 0). Run the
 # pinned CI version via docker so the push gate refuses what CI refuses
 # (ompkit-f2e4 gap: release-train.sh SC2015 turned main red for 4 commits).
+# A wedged container daemon must fail this gate in minutes, naming docker, instead
+# of hanging the push (and the release suite behind it) forever: on 2026-11-11 a
+# wedged OrbStack file share hung `docker run -v` without limit, so the local share
+# of verdict 35b47a3e never finished savefirst-pre-push.test.sh and the whole suite
+# ate its 1800 s budget. Every docker reach below runs under the sanctioned pysafe
+# bound (exit 124 on timeout, naming the full docker argv on stderr). The bounds are
+# fixed at 4x or more over healthy times (`docker image inspect` 0.2 s measured on
+# this host; one-file scans take seconds and never trip commit-preflight's 15 s bound
+# for the same invocation), so host load cannot trip them but a wedged daemon trips
+# the first one within a minute.
+docker_bounded() (
+	timeout_s=$1; shift
+	# Static script word: the staged-pysafe gate refuses a dynamic Python
+	# argument before the execution mode is known, so resolve the directory
+	# first and name pysafe.py literally (house shape, as in
+	# check-staged-kitlib.sh).
+	CDPATH='' cd -- "$SCRIPT_DIR" && exec python3 -B pysafe.py run --timeout "$timeout_s" -- docker "$@"
+)
 PINNED_SHELLCHECK_IMAGE="koalaman/shellcheck:v0.9.0"
 if [ "$needs_shell" = 1 ]; then
 	shellcheck_runner=""
 	if command -v docker >/dev/null 2>&1; then
-		if docker image inspect "$PINNED_SHELLCHECK_IMAGE" >/dev/null 2>&1; then
+		if docker_bounded 60 image inspect "$PINNED_SHELLCHECK_IMAGE" >/dev/null; then
 			shellcheck_runner="pinned"
 		else
-			if docker pull "$PINNED_SHELLCHECK_IMAGE" >/dev/null 2>&1; then
+			if docker_bounded 300 pull "$PINNED_SHELLCHECK_IMAGE" >/dev/null; then
 				shellcheck_runner="pinned"
 			fi
 		fi
@@ -754,7 +772,7 @@ if [ "$needs_shell" = 1 ]; then
 				scripts/*.sh|checkers/*.sh|installer/*.sh|tests/cli/*.sh|tests/e2e/*.sh)
 					if [ -e "$ARCHIVE_DIR/$file" ]; then
 						if [ "$shellcheck_runner" = "pinned" ]; then
-							if docker run --rm -v "$ARCHIVE_DIR:/archive:ro" "$PINNED_SHELLCHECK_IMAGE" -x -P /archive "/archive/$file"; then
+							if docker_bounded 60 run --rm -v "$ARCHIVE_DIR:/archive:ro" "$PINNED_SHELLCHECK_IMAGE" -x -P /archive "/archive/$file"; then
 								:
 							else
 								shell_rc=1

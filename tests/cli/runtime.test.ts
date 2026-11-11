@@ -481,8 +481,24 @@ for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) 
 			expect(existsSync(dirname(privateHome))).toBe(false);
 			for (const file of ["child.pid", "grandchild.pid"]) {
 				const pid = Number(readFileSync(join(base, file), "utf8").trim());
-				const probe = Bun.spawnSync(["/bin/ps", "-o", "stat=", "-p", String(pid)], { stdout: "pipe", stderr: "pipe" });
-				const state = probe.stdout.toString().trim();
+				// The probe races group-KILL delivery and init reaping: verdict 6ee501
+				// read a transitional `?E` (exiting) state 245 ms after the runner exited
+				// while the rerun read gone at 169 ms. Poll for the settled state instead
+				// of asserting one sample; the bound still fails a true leak (a descendant
+				// the runner never stops stays live past it). Fake timers cannot settle
+				// kernel reap state, so this is a bounded condition poll, not a sleep as
+				// proof: it exits on the first settled sample. Bound fixtureDeadlineS(5):
+				// 20-80x over the 245 ms transitional observation, inside this test's
+				// fixtureDeadlineS(12) deadline.
+				const reapStart = performance.now();
+				let state = "";
+				for (;;) {
+					const probe = Bun.spawnSync(["/bin/ps", "-o", "stat=", "-p", String(pid)], { stdout: "pipe", stderr: "pipe" });
+					state = probe.stdout.toString().trim();
+					if (state === "" || state.startsWith("Z")) break;
+					if (performance.now() - reapStart > fixtureDeadlineS(5) * 1000) break;
+					await Bun.sleep(20);
+				}
 				expect(state === "" || state.startsWith("Z"), `${file} remains live: ${state}`).toBe(true);
 			}
 		} finally {

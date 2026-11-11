@@ -681,7 +681,7 @@ export async function runCompiledUpdateJourney(mode: "success" | "relink"): Prom
 		const successEnvelope = JSON.parse(successStdout) as {
 			data: {
 				action: string; active_version: string | null; postcheck: string; reason?: string | null;
-				postcheck_detail?: { failed_stages?: string[]; failures?: string[] };
+				postcheck_detail?: { failed_stages?: string[]; deferred_stages?: string[]; failures?: string[] };
 				plugin_relink: string; plugin_relink_detail?: string;
 				manifest: { status: string; rules_applied: number; extensions_applied: number; skipped: { item: string }[]; failed: { item: string; detail: string }[] };
 			};
@@ -695,20 +695,41 @@ export async function runCompiledUpdateJourney(mode: "success" | "relink"): Prom
 			error_codes: successEnvelope.errors?.map(error => error.code),
 		});
 		expect(success.timed_out, failureSummary).toBe(false);
-		expect(success.rc, failureSummary).toBe(0);
-		expect(successEnvelope.data).toMatchObject({
-			action: "UPDATED", active_version: candidate.version, postcheck: "PASS", plugin_relink: "APPLIED",
-		});
-		expect(successEnvelope.data.manifest.status).toBe("APPLIED");
-		expect(successEnvelope.data.manifest.rules_applied).toBeGreaterThan(0);
-		expect(successEnvelope.data.manifest.extensions_applied).toBeGreaterThan(0);
-		expect(successEnvelope.data.manifest.failed).toEqual([]);
-		expect(successEnvelope.data.manifest.skipped.filter(row => row.item.startsWith("service:")))
-			.toHaveLength(Object.keys(KNOWN_JOBS).length);
-		for (const profile of RECONCILE_PROFILES)
-			expect(realpathSync(reconcilePluginLink(negativeHome, profile)))
-				.toBe(realpathSync(join(negativePrefix, "releases", candidate.version)));
-		expect(readlinkSync(negativeStable)).toBe(`../releases/${candidate.version}/bin/omp-kit`);
+		// Same slow-host deferral as KITUPDATELOAD1's control: the release is active
+		// but unverified (PARTIAL) with the clamp receipt, and activation — the stable
+		// link and active_version — still switched. Verdict walls: 110.74 s (a0b0),
+		// 166.74 s (5045), each passing on rerun. Relink and the activation manifest
+		// only run on UPDATED (cli.ts returns the bare envelope otherwise), so their
+		// assertions stay on the PASS path; UPDATERELINK1 covers the relink itself.
+		// Any FAIL stage still yields FAIL, never this branch, by construction
+		// (judgeKitPostcheck's sole-non-PASS condition).
+		const slowHost = successEnvelope.data?.action === "PARTIAL"
+			&& successEnvelope.data?.postcheck === "DEFERRED"
+			&& (successEnvelope.data?.postcheck_detail?.failed_stages ?? []).length === 0
+			&& (successEnvelope.data?.postcheck_detail?.deferred_stages ?? []).join(",") === "regex-budget"
+			&& (successEnvelope.data?.postcheck_detail?.failures ?? []).some(line => line.includes("REFERENCE_RATIO_ABOVE_CLAMP"))
+			&& successEnvelope.data?.active_version === candidate.version;
+		expect(success.rc, failureSummary).toBe(slowHost ? 1 : 0);
+		if (slowHost) {
+			expect(successEnvelope.data).toMatchObject({
+				action: "PARTIAL", active_version: candidate.version, postcheck: "DEFERRED", reason: "KIT_POSTCHECK_DEFERRED",
+			});
+			expect(readlinkSync(negativeStable)).toBe(`../releases/${candidate.version}/bin/omp-kit`);
+		} else {
+			expect(successEnvelope.data).toMatchObject({
+				action: "UPDATED", active_version: candidate.version, postcheck: "PASS", plugin_relink: "APPLIED",
+			});
+			expect(successEnvelope.data.manifest.status).toBe("APPLIED");
+			expect(successEnvelope.data.manifest.rules_applied).toBeGreaterThan(0);
+			expect(successEnvelope.data.manifest.extensions_applied).toBeGreaterThan(0);
+			expect(successEnvelope.data.manifest.failed).toEqual([]);
+			expect(successEnvelope.data.manifest.skipped.filter(row => row.item.startsWith("service:")))
+				.toHaveLength(Object.keys(KNOWN_JOBS).length);
+			for (const profile of RECONCILE_PROFILES)
+				expect(realpathSync(reconcilePluginLink(negativeHome, profile)))
+					.toBe(realpathSync(join(negativePrefix, "releases", candidate.version)));
+			expect(readlinkSync(negativeStable)).toBe(`../releases/${candidate.version}/bin/omp-kit`);
+		}
 		liveOutput.push(successStdout, successStderr);
 		} else {
 		const failureCandidate = await buildCompiledReleaseFixture(scratchRoot, repoRoot, buildHome, "1.2.4", hostPlatform);
