@@ -145,13 +145,13 @@ test("focused selection skips deleted suites, fails a closed deleted shell entry
 	mkdirSync(fakeBin);
 	writeFileSync(join(fakeBin, "shellcheck"), "#!/bin/sh\n[ -e \"$1\" ] || { echo \"shellcheck: missing $1\" >&2; exit 2; }\necho \"SHELLCHECK $1\"\n");
 	chmodSync(join(fakeBin, "shellcheck"), 0o755);
-	writeFileSync(join(fakeBin, "docker"), "#!/bin/sh\n# fake docker: emulate the pinned shellcheck image by delegating to the fake shellcheck.\nif [ \"$1\" = \"image\" ]; then echo \"fake image present\"; exit 0; fi\nif [ \"$1\" = \"pull\" ]; then echo \"fake pull ok\"; exit 0; fi\nif [ \"$1\" = \"run\" ]; then\n  file=\"\"\n  for arg in \"$@\"; do case \"$arg\" in /archive/*) file=\"$arg\" ;; esac; done\n  echo \"DOCKER-SHELLCHECK $file\"\n  exit 0\nfi\necho \"fake docker: unexpected $*\" >&2; exit 2\n");
+	writeFileSync(join(fakeBin, "docker"), "#!/bin/sh\n# fake docker: emulate the no-bind-mount pinned runner (create/cp/start/rm, never run -v).\necho \"$*\" >> \"$DOCKER_ARGV_LOG\"\nif [ \"$1\" = \"image\" ]; then echo \"fake image present\"; exit 0; fi\nif [ \"$1\" = \"pull\" ]; then echo \"fake pull ok\"; exit 0; fi\nif [ \"$1\" = \"create\" ]; then\n  file=\"\"\n  for arg in \"$@\"; do case \"$arg\" in /archive/*) file=\"$arg\" ;; esac; done\n  echo \"$file\" > \"$DOCKER_STATE_FILE\"\n  echo \"fakecid001\"\n  exit 0\nfi\nif [ \"$1\" = \"cp\" ]; then exit 0; fi\nif [ \"$1\" = \"start\" ]; then\n  echo \"DOCKER-SHELLCHECK $(cat \"$DOCKER_STATE_FILE\")\"\n  exit 0\nfi\nif [ \"$1\" = \"rm\" ]; then exit 0; fi\necho \"fake docker: unexpected $*\" >&2; exit 2\n");
 	chmodSync(join(fakeBin, "docker"), 0o755);
 		const probe = join(dir, "focused-probe.sh");
 		// The real selector and gate_focused; only the bun test run is a stand-in that checks its argv exists.
 		writeFileSync(probe, `run_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "test_workers", "changed_code", "deleted_code", "expand_changed_with_importers", "apply_ci_only", "record_run", "gate_focused"])}gate_focused\n`);
 		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
-			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "", WORK: dir },
+			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "", WORK: dir, DOCKER_ARGV_LOG: join(dir, "docker-argv.log"), DOCKER_STATE_FILE: join(dir, "docker-state") },
 			stdout: "pipe", stderr: "pipe",
 		});
 		const deleted = focused("tests/cli/gone.test.ts\nscripts/gone.sh");
@@ -168,6 +168,12 @@ test("focused selection skips deleted suites, fails a closed deleted shell entry
 		expect(mixed.exitCode).toBe(0);
 		expect(mixedOut).toContain("RAN tests/cli/kept.test.ts");
 	expect(mixedOut).toContain("DOCKER-SHELLCHECK /archive/scripts/kept.sh");
+		// DOCKERMOUNTWEDGE1: the verdict must arrive without any bind mount.
+		const argvLog = readFileSync(join(dir, "docker-argv.log"), "utf8");
+		expect(argvLog).toContain("create ");
+		expect(argvLog).toContain("start ");
+		expect(argvLog).toContain("rm -f fakecid001");
+		expect(argvLog).not.toContain(" -v ");
 		expect(mixedOut).not.toContain("RAN tests/cli/gone.test.ts");
 		expect(mixedOut).not.toContain("missing");
 	} finally {
@@ -189,12 +195,12 @@ test("focused shellcheck refuses an A && B || C guard through the pinned runner"
 		mkdirSync(fakeBin);
 		writeFileSync(join(fakeBin, "shellcheck"), "#!/bin/sh\necho \"SHELLCHECK $1\"\n");
 		chmodSync(join(fakeBin, "shellcheck"), 0o755);
-		writeFileSync(join(fakeBin, "docker"), "#!/bin/sh\n# fake docker: emulate pinned v0.9.0, which refuses A && B || C (SC2015) where newer builds stay silent.\nif [ \"$1\" = \"image\" ]; then echo \"fake image present\"; exit 0; fi\nif [ \"$1\" = \"pull\" ]; then echo \"fake pull ok\"; exit 0; fi\nif [ \"$1\" = \"run\" ]; then\n  file=\"\"\n  for arg in \"$@\"; do case \"$arg\" in /archive/*) file=\"$arg\" ;; esac; done\n  real=\"$FAKE_ARCHIVE${file#/archive}\"\n  if grep -q '|| {' \"$real\" 2>/dev/null; then echo \"DOCKER-SHELLCHECK $file: SC2015 (info): A && B || C is not if-then-else\" >&2; exit 1; fi\n  echo \"DOCKER-SHELLCHECK $file: clean\"\n  exit 0\nfi\necho \"fake docker: unexpected $*\" >&2; exit 2\n");
+		writeFileSync(join(fakeBin, "docker"), "#!/bin/sh\n# fake docker: emulate pinned v0.9.0, which refuses A && B || C (SC2015) where newer builds stay silent.\necho \"$*\" >> \"$DOCKER_ARGV_LOG\"\nif [ \"$1\" = \"image\" ]; then echo \"fake image present\"; exit 0; fi\nif [ \"$1\" = \"pull\" ]; then echo \"fake pull ok\"; exit 0; fi\nif [ \"$1\" = \"create\" ]; then\n  file=\"\"\n  for arg in \"$@\"; do case \"$arg\" in /archive/*) file=\"$arg\" ;; esac; done\n  echo \"$file\" > \"$DOCKER_STATE_FILE\"\n  echo \"fakecid002\"\n  exit 0\nfi\nif [ \"$1\" = \"cp\" ]; then exit 0; fi\nif [ \"$1\" = \"start\" ]; then\n  file=\"$(cat \"$DOCKER_STATE_FILE\")\"\n  real=\"$FAKE_ARCHIVE${file#/archive}\"\n  if grep -q '|| {' \"$real\" 2>/dev/null; then echo \"DOCKER-SHELLCHECK $file: SC2015 (info): A && B || C is not if-then-else\" >&2; exit 1; fi\n  echo \"DOCKER-SHELLCHECK $file: clean\"\n  exit 0\nfi\nif [ \"$1\" = \"rm\" ]; then exit 0; fi\necho \"fake docker: unexpected $*\" >&2; exit 2\n");
 		chmodSync(join(fakeBin, "docker"), 0o755);
 		const probe = join(dir, "focused-probe.sh");
 		writeFileSync(probe, `set -e\nprint_budget_skip() { echo "BUDGET-SKIP"; }\nrun_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "test_workers", "changed_code", "deleted_code", "expand_changed_with_importers", "apply_ci_only", "record_run", "gate_focused"])}gate_focused\n`);
 		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
-			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, FAKE_ARCHIVE: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "", WORK: dir },
+			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, FAKE_ARCHIVE: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "", WORK: dir, DOCKER_ARGV_LOG: join(dir, "docker-argv.log"), DOCKER_STATE_FILE: join(dir, "docker-state") },
 			stdout: "pipe", stderr: "pipe",
 		});
 		const bad = focused("scripts/bad.sh");
@@ -204,6 +210,11 @@ test("focused shellcheck refuses an A && B || C guard through the pinned runner"
 		const good = focused("scripts/good.sh");
 		expect(good.exitCode).toBe(0);
 		expect(good.stdout.toString()).toContain("DOCKER-SHELLCHECK /archive/scripts/good.sh: clean");
+		// DOCKERMOUNTWEDGE1: the refusal must arrive without any bind mount.
+		const argvLog2 = readFileSync(join(dir, "docker-argv.log"), "utf8");
+		expect(argvLog2).toContain("create ");
+		expect(argvLog2).toContain("rm -f fakecid002");
+		expect(argvLog2).not.toContain(" -v ");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

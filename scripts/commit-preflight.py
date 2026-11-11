@@ -24,6 +24,43 @@ from kitlib_tmp import owned_tmp
 
 HERE = Path(__file__).resolve().parent
 
+# Pinned engine shared with fresh-gate's focused stage. Same tag, default
+# severity and checker options in both runners.
+SHELLCHECK_IMAGE = 'koalaman/shellcheck:v0.9.0'
+
+
+def shellcheck_judge(path, staging, env):
+    """Judge one staged shell file with the pinned engine, without a bind mount.
+
+    DOCKERMOUNTWEDGE1: the staging tree may live on an NFS-backed checkout, and
+    `docker run -v <nfs>:/archive` hangs OrbStack's file sharing. The engine
+    image is scratch-based with no shell, so bake the judge argv at create
+    time, `docker cp` the staging tree in (the client streams host bytes over
+    the API; no guest mount), `docker start -a`, then remove the container by
+    its id. Every docker call runs under command()'s bound, so a wedged daemon
+    fails UNJUDGED in seconds instead of hanging the gate.
+    """
+    created = command(['docker', 'create', '--pull=never', '--network', 'none',
+                       SHELLCHECK_IMAGE, '-x', '-P', '/archive', '/archive/' + path], env)
+    if created.rc:
+        raise RuntimeError('shellcheck create did not judge ' + path + ': '
+                           + created.stderr.decode(errors='replace').strip())
+    cid = created.stdout.decode(errors='replace').strip()
+    if not cid:
+        raise RuntimeError('shellcheck create returned no container id for ' + path)
+    try:
+        copied = command(['docker', 'cp', str(staging) + '/.', cid + ':/archive'], env)
+        if copied.rc:
+            raise RuntimeError('shellcheck stage copy did not judge ' + path + ': '
+                               + copied.stderr.decode(errors='replace').strip())
+        return command(['docker', 'start', '-a', cid], env)
+    finally:
+        removed = command(['docker', 'rm', '-f', cid], env)
+        if removed.rc:
+            raise RuntimeError('shellcheck container ' + cid + ' for ' + path
+                               + ' was not removed and may leak (' +
+                               removed.stderr.decode(errors='replace').strip() + ')')
+
 
 def command(argv, env=None, cwd=None):
     result = run(argv, deadline_s=15, grace_s=0.2, max_output_bytes=8 * 1024 * 1024,
@@ -269,11 +306,10 @@ def main():
             if dest.is_file() and not dest.is_symlink():
                 dest.write_bytes(required(['git', 'show', ':' + path], env))
             # Same engine, default severity and checker options as fresh-gate's
-            # focused stage. Local 0.11 misses SC2015 that pinned CI 0.9 reports.
+            # focused stage (see shellcheck_judge for the no-bind-mount runner).
+            # Local 0.11 misses SC2015 that pinned CI 0.9 reports.
             # Never download during cheap feedback or silently substitute local.
-            checks.append(('shellcheck:' + path, ['docker', 'run', '--pull=never', '--rm',
-                           '-v', str(shell_root) + ':/archive:ro', '-w', '/archive',
-                           'koalaman/shellcheck:v0.9.0', '-x', '-P', '/archive', '/archive/' + path]))
+            checks.append(('shellcheck:' + path, None))
         shellcheck_probe = None
         for name, argv in checks:
             print('== ' + name, flush=True)
@@ -281,10 +317,12 @@ def main():
                 if name.startswith('shellcheck:'):
                     if shellcheck_probe is None:
                         shellcheck_probe = command(['docker', 'image', 'inspect',
-                                                    'koalaman/shellcheck:v0.9.0', '--format', '{{.Id}}'], env)
+                                                    SHELLCHECK_IMAGE, '--format', '{{.Id}}'], env)
                     if shellcheck_probe.rc:
                         raise RuntimeError('pinned ShellCheck unavailable: ' + shellcheck_probe.stderr.decode(errors='replace').strip())
-                result = command(argv, env, cwd=shell_root if name.startswith('shellcheck:') else None)
+                    result = shellcheck_judge(name[len('shellcheck:'):], shell_root, env)
+                else:
+                    result = command(argv, env)
                 sys.stdout.write(result.stdout.decode(errors='replace'))
                 sys.stdout.write(result.stderr.decode(errors='replace'))
                 if name.startswith('shellcheck:') and result.rc not in (0, 1):

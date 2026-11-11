@@ -732,7 +732,11 @@ gate_focused() {
 # of hanging the push (and the release suite behind it) forever: on 2026-11-11 a
 # wedged OrbStack file share hung `docker run -v` without limit, so the local share
 # of verdict 35b47a3e never finished savefirst-pre-push.test.sh and the whole suite
-# ate its 1800 s budget. Every docker reach below runs under the sanctioned pysafe
+# ate its 1800 s budget. The pinned runs below never bind-mount a host path at all
+# (DOCKERMOUNTWEDGE1: ARCHIVE_DIR may sit on an NFS-backed checkout whose guest
+# mount hangs): the judge argv is baked at `create` time, the tree is copied in
+# over the client API with `cp`, the container runs attached with `start -a`, and
+# is removed by id. Every docker reach below runs under the sanctioned pysafe
 # bound (exit 124 on timeout, naming the full docker argv on stderr). The bounds are
 # fixed at 4x or more over healthy times (`docker image inspect` 0.2 s measured on
 # this host; one-file scans take seconds and never trip commit-preflight's 15 s bound
@@ -772,10 +776,22 @@ if [ "$needs_shell" = 1 ]; then
 				scripts/*.sh|checkers/*.sh|installer/*.sh|tests/cli/*.sh|tests/e2e/*.sh)
 					if [ -e "$ARCHIVE_DIR/$file" ]; then
 						if [ "$shellcheck_runner" = "pinned" ]; then
-							if docker_bounded 60 run --rm -v "$ARCHIVE_DIR:/archive:ro" "$PINNED_SHELLCHECK_IMAGE" -x -P /archive "/archive/$file"; then
+							sc_cid=""
+							if sc_cid="$(docker_bounded 60 create --pull=never --network none "$PINNED_SHELLCHECK_IMAGE" -x -P /archive "/archive/$file")" \
+								&& [ -n "$sc_cid" ] \
+								&& docker_bounded 60 cp "$ARCHIVE_DIR/." "$sc_cid:/archive" \
+								&& docker_bounded 60 start -a "$sc_cid"; then
 								:
 							else
 								shell_rc=1
+							fi
+							if [ -n "$sc_cid" ]; then
+								if docker_bounded 60 rm -f "$sc_cid" >/dev/null; then
+									:
+								else
+									echo "focused shellcheck: could not remove container for $file; it may leak server-side" >&2
+									shell_rc=1
+								fi
 							fi
 						else
 							if shellcheck -x -P "$ARCHIVE_DIR" "$ARCHIVE_DIR/$file"; then

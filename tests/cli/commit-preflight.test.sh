@@ -185,6 +185,30 @@ try:
     offline_text = (offline.stdout+offline.stderr).decode()
     assert offline.rc == 1 and 'UNJUDGED shellcheck:clean.sh' in offline_text and 'docker pull koalaman/shellcheck:v0.9.0' in offline_text, offline_text
     passed += 1
+    # DOCKERMOUNTWEDGE1: the pinned run must not bind-mount the staging tree.
+    # Fake docker speaks create/cp/start/rm and refuses `run -v`. A judged
+    # clean file proves the verdict came through the no-mount protocol.
+    fakebin = root/'fakebin'
+    fakebin.mkdir()
+    argv_log = root/'docker-argv.log'
+    (fakebin/'docker').write_text(
+        '#!/bin/sh\nlog="$DOCKER_ARGV_LOG"\n'
+        'printf "%s\\n" "$*" >> "$log"\n'
+        'if [ "$1" = "image" ]; then printf "sha256:fake\\n"; exit 0\nfi\n'
+        'if [ "$1" = "create" ]; then printf "fakecid001\\n"; exit 0\nfi\n'
+        'if [ "$1" = "cp" ]; then exit 0\nfi\n'
+        'if [ "$1" = "start" ]; then exit 0\nfi\n'
+        'if [ "$1" = "rm" ]; then exit 0\nfi\n'
+        'echo "fake docker: unexpected $*" >&2\nexit 2\n')
+    (fakebin/'docker').chmod(0o755)
+    fake_env = dict(env, PATH=str(fakebin) + os.pathsep + env['PATH'], DOCKER_ARGV_LOG=str(argv_log))
+    nomount = cmd(['sh',str(scripts/'commit-preflight.sh'),'--files','clean.sh'],root,fake_env)
+    nomount_text = (nomount.stdout+nomount.stderr).decode()
+    assert nomount.rc == 0, nomount_text
+    logged = argv_log.read_text()
+    assert 'create ' in logged and 'start -a' in logged and 'rm -f fakecid001' in logged, logged
+    assert '-v ' not in logged and ':/archive:ro' not in logged and ' run ' not in logged, logged
+    passed += 1
     assert cmd(['git','add','clean.sh'],root,env).rc == 0
     (root/'clean.sh').write_text('#!/bin/sh\necho $unstaged\n')
     staged = cmd(['sh',str(scripts/'commit-preflight.sh')],root,env)
