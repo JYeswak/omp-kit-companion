@@ -37,18 +37,24 @@ const VOLATILE_CACHE_DIR_NAMES: Record<string, true> = {
 /**
  * Live-fleet namespaces of the kit state root: every seat's guard/wake/write-ledger/upgrade-notice extensions
  * append their own records, seats' `omp-kit send` drops land in send-drop, scratch accounting churns on its own
- * clock, and the installed kit-update job records its own runs. None are kit install writes, and the post-run
- * concurrent-writer probe cannot catch writes minutes apart, so the snapshot does not judge them. Matched by
- * exact top-level name or literal prefix (never a broad pattern); the named subdirectories skip wholesale.
+ * clock, the installed kit-update job records its own runs, and live seats rewrite their own runtime state on
+ * their own clock: goal-state records (extensions/kit-goal-state.ts), the imessage-bridge relay cursors and
+ * delivery ledgers (src/imessage-bridge.ts), and the send plane's locks and pending proofs (src/send.ts).
+ * None are kit install writes, and the post-run concurrent-writer probe cannot catch writes minutes apart,
+ * so the snapshot does not judge them. Matched by exact top-level name, literal top-level prefix, whole
+ * subdirectory, or anchored file prefix inside one named subdirectory (never a broad pattern).
  * Everything else under the state root stays watched.
  */
 const LIVE_FLEET_TOP_FILES: Record<string, true> = { "gate-events.jsonl": true, "mail-wake.jsonl": true, "scratch-budgets.json": true };
 const LIVE_FLEET_TOP_PREFIXES: readonly string[] = ["kit-update-job-", "git-lock-rate.", "upgrade-notice-"];
-const LIVE_FLEET_SUBDIRS: Record<string, true> = { "inbox-wake": true, "scratch-users": true, "send-drop": true, "write-ledger": true };
+const LIVE_FLEET_SUBDIRS: Record<string, true> = { "goal-state": true, "inbox-wake": true, "scratch-users": true, "send-drop": true, "send-locks": true, "tern-pending": true, "write-ledger": true };
+/** Anchored file prefixes inside one named subdirectory: the rest of that subdirectory stays watched. */
+const LIVE_FLEET_SUBDIR_PREFIXES: Record<string, readonly string[]> = { "jobs": ["imessage-bridge."] };
 
 /**
  * The live-fleet anchor for a path under the state root, or null when the path stays watched. Top-level
- * live files anchor at themselves; anything under a live subdirectory anchors at that subdirectory.
+ * live files anchor at themselves; anything under a live subdirectory anchors at that subdirectory; a file
+ * directly under a prefixed subdirectory whose name carries the anchored prefix anchors at itself.
  */
 function liveFleetAnchor(stateRoot: string, path: string): string | null {
 	const rel = relative(stateRoot, path);
@@ -60,7 +66,13 @@ function liveFleetAnchor(stateRoot: string, path: string): string | null {
 		return null;
 	}
 	const top = rel.slice(0, slash);
-	return LIVE_FLEET_SUBDIRS[top] === true ? join(stateRoot, top) : null;
+	if (LIVE_FLEET_SUBDIRS[top] === true) return join(stateRoot, top);
+	const rest = rel.slice(slash + 1);
+	if (!rest.includes("/")) {
+		const prefixes = LIVE_FLEET_SUBDIR_PREFIXES[top];
+		if (prefixes !== undefined && prefixes.some(prefix => rest.startsWith(prefix))) return path;
+	}
+	return null;
 }
 
 /** True when `path` is, or lies under, state an installed service job writes on its own clock. */

@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { classifyLadder, fullTestVerdict, runFullTest } from "../../src/full-test-runner.ts";
 import { runIsolatedShell } from "../../src/runtime.ts";
@@ -764,6 +764,50 @@ test("POSTCHECKBROWSER1 planted negative: an isolated test write to operator sta
 	expect(comparison.changed_paths).toContain("~/.agents/rules/isolated-test.md");
 	expect(comparison.skipped_paths).toEqual([]);
 }));
+
+// ompkit-1ra0d.186 POSTCHECKSEATSTATE1: live seats rewriting their own runtime state during the postcheck
+// window (goal-state records, imessage-bridge relay files, send locks, pending proofs) leave the update
+// UPDATED; only gate-events.jsonl and inbox-wake/* were tolerated before, so every install read PARTIAL.
+test("POSTCHECKSEATSTATE1: seat runtime writes during the postcheck are live state; an unowned write still fails", () => {
+	const home = ownedTmp("kit-update-seatstate", { root: scratch }).path;
+	const state = join(home, ".local", "state", "omp-kit");
+	for (const dir of ["goal-state", "jobs", "send-locks", "tern-pending"]) mkdirSync(join(state, dir), { recursive: true });
+	// Seed every owned seat-runtime path before the postcheck takes its before snapshot.
+	writeFileSync(join(state, "goal-state", "357591cf7316fe5a.json"), "{\"goal\":1}\n");
+	writeFileSync(join(state, "jobs", "imessage-bridge.cursor.json"), "{\"last_key\":\"a\"}\n");
+	writeFileSync(join(state, "jobs", "imessage-bridge.deliveries.jsonl"), "{}\n");
+	writeFileSync(join(state, "send-locks", "deadbeef-0.lock"), "1234\n");
+	writeFileSync(join(state, "tern-pending", "marker-1.json"), "{}\n");
+	const paths = operatorWatchedPaths(home, state);
+	const before = snapshotWatched(paths);
+	// The fleet's own clock during the isolated run: a goal rewrite plus a leftover tmp, relay appends and a
+	// fresh cursor, a new send lock, a new pending proof.
+	writeFileSync(join(state, "goal-state", "357591cf7316fe5a.json"), "{\"goal\":2}\n");
+	writeFileSync(join(state, "goal-state", "357591cf7316fe5a.4242.tmp"), "partial\n");
+	appendFileSync(join(state, "jobs", "imessage-bridge.deliveries.jsonl"), "{}\n");
+	writeFileSync(join(state, "jobs", "imessage-bridge.replies.jsonl"), "{}\n");
+	writeFileSync(join(state, "send-locks", "deadbeef-1.lock"), "5678\n");
+	writeFileSync(join(state, "tern-pending", "marker-2.json"), "{}\n");
+	const quiet = compareWatched(before, snapshotWatched(paths), home);
+	expect(quiet, JSON.stringify(quiet)).toMatchObject({ unchanged: true, complete: true, changed_paths: [], incomplete_paths: [] });
+	expect(quiet.live_state_paths).toEqual([
+		"~/.local/state/omp-kit/goal-state",
+		"~/.local/state/omp-kit/jobs/imessage-bridge.cursor.json",
+		"~/.local/state/omp-kit/jobs/imessage-bridge.deliveries.jsonl",
+		"~/.local/state/omp-kit/jobs/imessage-bridge.replies.jsonl",
+		"~/.local/state/omp-kit/send-locks",
+		"~/.local/state/omp-kit/tern-pending",
+	]);
+	// Planted negative: the anchoring is exact — a top-level lookalike and any other jobs/ file stay watched.
+	const beforeUnowned = snapshotWatched(paths);
+	writeFileSync(join(state, "goal-state.json"), "{}\n");
+	writeFileSync(join(state, "jobs", "other-writer.json"), "{}\n");
+	const negative = compareWatched(beforeUnowned, snapshotWatched(paths), home);
+	expect(negative.changed_paths).toEqual([
+		"~/.local/state/omp-kit/goal-state.json",
+		"~/.local/state/omp-kit/jobs/other-writer.json",
+	]);
+});
 
 
 // ompkit-2pkp1: heavy admission deferring a ladder stage means the release was never judged; the update says DEFERRED.
