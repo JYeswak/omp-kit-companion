@@ -284,7 +284,7 @@ async function publicationGit(repo: string, args: string[]): Promise<string> {
 	return decoder.decode(result.stdout).trim();
 }
 
-test("PUBLISHGATE1 actual br shim refuses transitions until origin/main contains cited commits", async () => {
+test("PUBLISHGATE1 actual br shim holds close until origin/main contains cited commits; in_review hands off local commits", async () => {
 	const scratch = ownedTmp("publish-gate-shim");
 	try {
 		const repo = join(scratch.path, "repo");
@@ -353,16 +353,19 @@ esac
 		};
 		const update = (reason: string) => runShim(["update", "k-pub", "--status", "in_review", "--transition-comment", reason]);
 		const close = (reason: string) => runShim(["close", "k-pub", "--reason", reason]);
-		for (const rejected of [
-			await update(`DONE k-pub ${sha} evidence`),
-			await close(`Lesson: none\nexport ${sha}`),
-		]) {
-			expect(rejected.rc, rejected.output).toBe(4);
-			expect(rejected.output).toContain("NOT_PUBLISHED");
-			expect(rejected.output).toContain(sha);
-			expect(rejected.output).toContain("git_converge.py --push");
-		}
-		expect(existsSync(mutations)).toBe(false);
+		// HANDOFFUNPUB1 (ompkit-1ra0d.157): the in_review update is a builder handoff, not a
+		// publication claim: a cited sha that resolves in the cited repository is admitted before
+		// push. Only close demands origin/main ancestry, so only it refuses here.
+		const handoff = await update(`DONE k-pub ${sha} evidence`);
+		expect(handoff.rc, handoff.output).toBe(0);
+		expect(handoff.output).toContain("close-guard: OK");
+		const unpublishedClose = await close(`Lesson: none\nexport ${sha}`);
+		expect(unpublishedClose.rc, unpublishedClose.output).toBe(4);
+		expect(unpublishedClose.output).toContain("NOT_PUBLISHED");
+		expect(unpublishedClose.output).toContain(sha);
+		expect(unpublishedClose.output).toContain("git_converge.py --push");
+		// Only the admitted handoff reached the real tracker: the refused close wrote nothing.
+		expect(readFileSync(mutations, "utf8").split("\n").filter(line => line !== "")).toHaveLength(1);
 		for (const reason of ["export 0000000000000000000000000000000000000000"]) {
 			const rejected = await update(reason);
 			expect(rejected.rc, rejected.output).toBe(4);
@@ -379,11 +382,16 @@ esac
 		}
 		const beforeFetchFailure = readFileSync(mutations, "utf8");
 		await publicationGit(repo, ["remote", "set-url", "origin", join(scratch.path, "missing.git")]);
-		const fetchFailure = await update(`DONE k-pub ${sha} evidence`);
-		expect(fetchFailure.rc, fetchFailure.output).toBe(4);
-		expect(fetchFailure.output).toContain("NOT_PUBLISHED");
-		expect(fetchFailure.output).toContain("UNKNOWN");
-		expect(readFileSync(mutations, "utf8")).toBe(beforeFetchFailure);
+		// The handoff path never fetches, so it stays admitted with a broken remote; close still
+		// needs freshly fetched origin/main and refuses when the fetch fails.
+		const offlineHandoff = await update(`DONE k-pub ${sha} evidence`);
+		expect(offlineHandoff.rc, offlineHandoff.output).toBe(0);
+		expect(offlineHandoff.output).toContain("close-guard: OK");
+		const offlineClose = await close(`Lesson: none\nexport ${sha}`);
+		expect(offlineClose.rc, offlineClose.output).toBe(4);
+		expect(offlineClose.output).toContain("NOT_PUBLISHED");
+		expect(offlineClose.output).toContain("UNKNOWN");
+		expect(readFileSync(mutations, "utf8").split("\n").filter(line => line !== "")).toHaveLength(4);
 		const beforeNoCitation = readFileSync(mutations, "utf8");
 		const noCitationClose = await close("Lesson: none");
 		expect(noCitationClose.rc, noCitationClose.output).toBe(0);
