@@ -6,7 +6,6 @@ import { fleetPolicyState } from "./fleet-policy";
 import {
 	paneIdentities,
 	readBeadState,
-	shellCommands,
 	type FlywheelContext,
 	type FlywheelExec,
 	type FlywheelToolCallEvent,
@@ -15,29 +14,29 @@ import {
 } from "./kit-flywheel-guard";
 import { createMailWake, type MailCaller, type MailToolResultEvent, type MailWake } from "./kit-mail-wake";
 import { checkPublishedCommits, extractCitedCommitReferences, type PublishedCommitStatus } from "./kit-published-commit.ts";
-import { nativeReservationIdentity } from "./native-identity.ts";
+import { recordGateEvent } from "./gate-events.ts";
+import { seatIdentity } from "../src/fleet-guard/write-own.ts";
+import { shellTokenSpans, shellTokens } from "../src/fleet-guard/scratch.ts";
 
 /**
  * kit-agent-mail-guard (AMGUARD1, ompkit-774u.13.2): a seat's Agent Mail calls are checked at the act.
  *
  * OMP routes an MCP call as a `write` to `xd://mcp__mcp_agent_mail_<tool>` whose `content` is the JSON
- * arguments. This guard reads that call before it runs and refuses:
+ * arguments. This guard checks that call before it runs. Hazardous acts are refused:
  *   AM_IDENTITY_MISMATCH / AM_IDENTITY_UNKNOWN: send_message or reply_message whose sender_name is not the
- *     seat's own name (AGENT_NAME; with none, the Agent Mail pane identity of $TMUX_PANE).
- *     The reservation tools (file_reservation_paths, renew_file_reservations,
+ *     seat's own name (AGENT_NAME; with none, the Agent Mail pane identity of $TMUX_PANE). A background
+ *     child's native mail calls are not admitted: one AM_IDENTITY_MISMATCH refusal tells the child to
+ *     report to the parent instead. Shell `am` calls are not judged here. The reservation
+ *     tools (file_reservation_paths, renew_file_reservations,
  *     release_file_reservations) and the reservation macro (macro_file_reservation_cycle) carry
- *     the caller as agent_name and have no sender_name; another seat's name there is refused,
- *     and a missing agent_name is refused naming agent_name (AMRENEW1).
- *   AM_SUBJECT_VOCAB: a send_message subject that does not start with the protocol vocabulary.
- *   AM_ACK_SUBJECT / AM_ACK_NO_BEAD / AM_ACK_BEAD_UNRESOLVED / AM_ACK_REPLY: ack_required true without a
- *     QUESTION, BLOCKED, APPROVAL, DECISION or HANDOFF subject that names a bead id `br show` resolves.
- *     reply_message carries no subject of its own (the server inherits the original's), so an explicit
- *     ack_required true on a reply cannot be verified and is refused.
- *   AM_BODY_TOO_LONG: a body over AM_BODY_CAP characters. Long evidence goes in a bead comment.
+ *     the caller as agent_name and have no sender_name; a child's call is rewritten to its parent
+ *     seat's name (WRITEOWNCHILD1 seatIdentity, no second resolution) and admitted with an
+ *     AM_CHILD_RESERVATION_NOTICE. Another seat's name there is refused, and a missing agent_name
+ *     is refused naming agent_name (AMRENEW1).
  *   AM_BODY_SECRET / AM_SCANNER_UNAVAILABLE: a body the kit secret scanner flags, or no scanner to ask.
  *   AM_BULK_READ: a bulk read tool, even if the server ever re-exposes one.
- *   AM_INBOX_RATE: a second fetch_inbox inside 60 s from the same seat (AMSTORM1).
- *   AM_ARGS_UNREADABLE: arguments of a guarded tool that do not parse; nothing is guessed.
+ *   AM_ARGS_UNREADABLE: arguments of a guarded tool that do not parse, or a registration whose project
+ *     key is not absolute; nothing is guessed.
  *   AM_PHANTOM_REFUSED: a send_message whose recipient is not registered under project_key. The
  *     error names the projects where the name IS registered (a deadline-bounded roster scan), or
  *     says it is registered nowhere; nothing is sent and no recipient is created (AMPHANTOM1).
@@ -49,10 +48,19 @@ import { nativeReservationIdentity } from "./native-identity.ts";
  *   AM_PROJECT_AMBIGUOUS (warning, sent anyway): the recipient is registered in more than one
  *     project and the target is not the most recently active one; names each project's last
  *     activity.
- *
  *   AM_DONE_NOT_PUBLISHED: a send_message whose subject starts with DONE must cite commit SHA(s)
  *     reachable from freshly fetched origin/main. Plain citations use project_key; explicit
  *     absolute-repository `path@SHA` citations are checked in that source repository.
+ *   AM_BODY_TOO_LONG: only a body over four times the cap; a shorter over-cap body is sent with an
+ *     AM_BODY_NOTICE. Flooding another seat's context is not undone by a notice.
+ * Reversible acts are admitted with a one-line AM_*_NOTICE and one gate-events row with kind notice,
+ * never kind refuse (MAILGUARDSLIM1): a non-vocabulary subject (AM_SUBJECT_NOTICE), an ack_required the
+ * subject cannot carry (dropped by rewriteArgs, AM_ACK_NOTICE), an ask whose bead id does not resolve
+ * (sent with ack kept, AM_ACK_BEAD_NOTICE), a second fetch_inbox inside the window (AM_INBOX_NOTICE),
+ * unknown registration arguments (stripped by rewriteArgs, AM_REGISTRATION_NOTICE). A notice never
+ * skips a later check (GATEDEMOTE1): the secret scan, roster, identity and DONE checks still run after
+ * every notice, and a secret in a noticed body is still refused under AM_BODY_SECRET. An inner typed
+ * refusal surfaces under its own code; only a genuine failure keeps AM_GUARD_FAILED.
  * Inert unless the repo opted into the fleet (`.omp/fleet.json` {"enabled": true}, see fleet-policy.ts);
  * a stock session touches no br, tmux or Agent Mail. An opted-in repo whose marker is unreadable refuses
  * Agent Mail calls, as fleet-guard does.
@@ -69,6 +77,8 @@ import { nativeReservationIdentity } from "./native-identity.ts";
  */
 
 export const AM_BODY_CAP = 1800;
+/** A body up to this many characters is sent with an AM_BODY_NOTICE; beyond it the refusal stays. */
+export const AM_BODY_NOTICE_CAP = AM_BODY_CAP * 4;
 /** Minimum spacing between one seat's fetch_inbox calls. */
 export const AM_INBOX_INTERVAL_MS = 60_000;
 const MAX_BEAD_CANDIDATES = 5;
@@ -131,6 +141,8 @@ export interface AgentMailGuardDeps {
 	scanBudgetMs?: number;
 	/** The mail wake (MAILWAKE1); defaults to createMailWake over pi.exec. Injectable for tests. */
 	mailWake?: MailWakeHooks;
+	/** Ledger writer for notice rows; defaults to the shared gate-events ledger. Injectable so tests never touch the live ledger. */
+	recordEvent?: typeof recordGateEvent;
 }
 
 /** One registered agent row, as `am agents list -p <key> --json` returns it. */
@@ -186,6 +198,173 @@ function prop(value: unknown, key: string): unknown {
 
 function refuse(code: string, text: string): FlywheelToolCallResult {
 	return { block: true, reason: `kit-agent-mail-guard ${code}: ${text} Nothing was sent.` };
+}
+
+/**
+ * MAILGUARDSLIM1: a reversible act is admitted with a one-line notice. The act proceeds; the text
+ * names the convention and the notice never skips a later check (GATEDEMOTE1).
+ */
+function notice(code: string, text: string): FlywheelToolCallResult {
+	return { additionalContext: `kit-agent-mail-guard ${code}: ${text}` };
+}
+
+/** Verbs whose shell form carries the agent as a positional (PROJECT AGENT ...). */
+const CHILD_RESERVATION_VERBS: Record<string, true> = { reserve: true, renew: true, release: true };
+
+/** Emit an agent name into shell source: safe tokens bare, anything else single-quoted. */
+function shellAgentWord(seat: string): string {
+	return /^[A-Za-z0-9._-]+$/.test(seat) ? seat : `'${seat.split("'").join(`'\\''`)}'`;
+}
+
+/**
+ * MAILGUARDSLIM1: agent-token indexes of the `am file_reservations <verb>` calls in a bash command.
+ * Mirrors the positional grammars of bashReservationCalls/bashReleaseScope (PROJECT AGENT ... with
+ * --ttl/--extend-seconds/--reason/--paths/--ids consuming the next word). Only unquoted heads count,
+ * so echoed text never triggers. A call with ambiguous flags reports its verb with agent -1: the
+ * caller admits it with a notice naming the seat instead of guessing a rewrite.
+ */
+interface ChildShellToken { text: string; quoted: boolean; span: { start: number; end: number } | null }
+
+/**
+ * shellTokens plus one `\n` marker per newline-bearing gap, for the guard's own
+ * newline-separated-call handling. shellTokens itself is untouched: every other caller keeps its
+ * whitespace folding. Null when the span map diverges from the token split.
+ */
+function childShellTokens(command: string): ChildShellToken[] | null {
+	const tokens = shellTokens(command);
+	const spans = shellTokenSpans(command);
+	if (spans.length !== tokens.length || spans.some((span, index) => span.text !== tokens[index]!.text || span.quoted !== tokens[index]!.quoted)) return null;
+	const out: ChildShellToken[] = [];
+	let prevEnd = 0;
+	for (let index = 0; index < tokens.length; index++) {
+		const span = spans[index]!;
+		if (command.slice(prevEnd, span.start).includes("\n")) out.push({ text: "\n", quoted: false, span: null });
+		out.push({ text: tokens[index]!.text, quoted: tokens[index]!.quoted, span });
+		prevEnd = span.end;
+	}
+	return out;
+}
+
+/** Separators after which a new command may start (single-char tokens, as shellTokens splits them). */
+const CHILD_COMMAND_SEPARATORS: Record<string, true> = { ";": true, "&": true, "|": true, "(": true, "{": true, "\n": true };
+
+/**
+ * True when tokens[i] is the executed `am` command rather than an argument: at command start, or
+ * after a separator, or after a chain of VAR= assignments and bare sudo/env prefixes. `echo am ...`
+ * is never a head; an unrecognised sudo/env shape stops the prefix walk and the call is unjudged.
+ */
+function childCommandHeadAt(tokens: ChildShellToken[], i: number): boolean {
+	const head = tokens[i]!;
+	if (head.quoted || (head.text !== "am" && !head.text.endsWith("/am"))) return false;
+	let j = i - 1;
+	while (j >= 0) {
+		const prev = tokens[j]!;
+		if (!prev.quoted && (prev.text === "sudo" || prev.text === "env" || /^[A-Za-z_][A-Za-z0-9_]*=/.test(prev.text))) { j--; continue; }
+		break;
+	}
+	if (j < 0) return true;
+	const before = tokens[j]!;
+	return !before.quoted && CHILD_COMMAND_SEPARATORS[before.text] === true;
+}
+
+function childShellReservationAgents(command: string): { verb: string; agent: number }[] {
+	const tokens = childShellTokens(command);
+	return tokens === null ? [] : findReservationCalls(tokens);
+}
+
+function findReservationCalls(tokens: ChildShellToken[]): { verb: string; agent: number }[] {
+	const found: { verb: string; agent: number }[] = [];
+	for (let i = 0; i + 2 < tokens.length; i++) {
+		if (!childCommandHeadAt(tokens, i)) continue;
+		const scope = tokens[i + 1]!;
+		if (scope.quoted || (scope.text !== "file_reservations" && scope.text !== "file-reservations")) continue;
+		const verb = tokens[i + 2]!;
+		if (verb.quoted || CHILD_RESERVATION_VERBS[verb.text] !== true) continue;
+		const positionals: number[] = [];
+		let ambiguous = false;
+		let noMoreFlags = false;
+		let j = i + 3;
+		for (; j < tokens.length; j++) {
+			const word = tokens[j]!;
+			if (!word.quoted && /^(?:;|&&|\|\||\||&|\n)$/.test(word.text)) break;
+			if (!word.quoted && (word.text === ">" || word.text === "<"
+				|| (/^\d+$/.test(word.text) && j + 1 < tokens.length && !tokens[j + 1]!.quoted && (tokens[j + 1]!.text === ">" || tokens[j + 1]!.text === "<")))) {
+				// A redirect target is never a positional (e.g. `> /tmp/out`, `2>&1`). The op
+				// chars (`>&2`: ">", "&", "2") are consumed with it. Any redirect before the
+				// agent is resolved makes the call ambiguous instead of a guessed rewrite.
+				if (positionals.length < 2) ambiguous = true;
+				let k = j + (/^\d+$/.test(word.text) ? 2 : 1);
+				while (k < tokens.length && !tokens[k]!.quoted && (/^[><&|]$/.test(tokens[k]!.text) || /^\d+$/.test(tokens[k]!.text))) k++;
+				j = k;
+				if (j >= tokens.length || (!tokens[j]!.quoted && /^(?:;|&&|\|\||\||&|\n)$/.test(tokens[j]!.text))) j--;
+				continue;
+			}
+			// A bare `--` ends flag parsing: everything after is positional. Any other
+			// unrecognised dash flag may carry a space-separated value that would shift the
+			// positionals (e.g. `--agent-name Foo PROJ AGENT`), so the call is ambiguous and
+			// is never rewritten — a guessed positional could reserve under the wrong name.
+			// Only the CLI's own documented flags are trusted: value flags consume the next
+			// word, --shared/--exclusive/--help/-h take none.
+			if (!word.quoted && !noMoreFlags && word.text === "--") { noMoreFlags = true; continue; }
+			if (!word.quoted && !noMoreFlags && ["--ttl", "--extend-seconds", "--reason", "--paths", "--ids"].includes(word.text)) { j++; continue; }
+			if (!word.quoted && !noMoreFlags && (word.text === "--shared" || word.text === "--exclusive" || word.text === "--help" || word.text === "-h")) continue;
+			if (!word.quoted && !noMoreFlags && word.text.startsWith("-")) {
+				if (!word.text.includes("=")) ambiguous = true;
+				continue;
+			}
+			positionals.push(j);
+		}
+		i = j - 1;
+		found.push({ verb: verb.text, agent: ambiguous || positionals.length < 2 ? -1 : positionals[1]! });
+	}
+	return found;
+}
+
+/**
+ * MAILGUARDSLIM1: splice the seat name over each reservation call's agent token, preserving every
+ * other byte. The span map is checked against the native shellTokens split (text and quoting of
+ * every token); any divergence leaves that call unrewritten, never a guessed edit. Each call reports
+ * its own outcome so the notice can say which call was rewritten and which was left unchanged.
+ */
+export type ChildShellCallOutcome = "rewrote" | "already-seat" | "ambiguous" | "span-mismatch";
+export interface ChildShellCall { verb: string; agentText: string | null; outcome: ChildShellCallOutcome }
+function rewriteChildShellAgents(command: string, seat: string): { command: string; calls: ChildShellCall[] } {
+	const tokens = childShellTokens(command);
+	if (tokens === null) return { command, calls: [] };
+	const found = findReservationCalls(tokens);
+	if (found.length === 0) return { command, calls: [] };
+	const replacement = shellAgentWord(seat);
+	let next = command;
+	const calls: ChildShellCall[] = [];
+	const edits: { start: number; end: number }[] = [];
+	for (const call of found) {
+		if (call.agent < 0) { calls.push({ verb: call.verb, agentText: null, outcome: "ambiguous" }); continue; }
+		const token = tokens[call.agent]!;
+		const span = token.span;
+		if (span === null) { calls.push({ verb: call.verb, agentText: token.text, outcome: "span-mismatch" }); continue; }
+		if (token.text === seat) { calls.push({ verb: call.verb, agentText: token.text, outcome: "already-seat" }); continue; }
+		const inner = token.quoted ? sliceQuoted(next, span) : next.slice(span.start, span.end);
+		if (inner === null || inner !== token.text) { calls.push({ verb: call.verb, agentText: token.text, outcome: "span-mismatch" }); continue; }
+		edits.push(token.quoted
+			? { start: span.start + 1, end: span.end - 1 }
+			: { start: span.start, end: span.end });
+		calls.push({ verb: call.verb, agentText: token.text, outcome: "rewrote" });
+	}
+	edits.sort((a, b) => b.start - a.start);
+	for (const edit of edits) next = `${next.slice(0, edit.start)}${replacement}${next.slice(edit.end)}`;
+	return { command: next, calls };
+}
+
+/**
+ * The literal inside a quoted span: the quote characters themselves are the span edges, so the
+ * inner slice must reproduce the token text exactly or the rewrite is aborted for that call.
+ */
+function sliceQuoted(source: string, span: { start: number; end: number }): string | null {
+	if (span.end - span.start < 2) return null;
+	const open = source[span.start];
+	const close = source[span.end - 1];
+	if ((open !== "'" && open !== '"') || open !== close) return null;
+	return source.slice(span.start + 1, span.end - 1);
 }
 
 /** A proven caller plus `paneName`, the one name its block's pane identity files give it (MAILBIND1). */
@@ -280,6 +459,21 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 	let lastInbox: number | null = null;
 	let lastInboxToolCallId: string | null = null;
 	const wake: MailWakeHooks = deps.mailWake ?? createMailWake({ exec: pi.exec, env, home });
+	const record = deps.recordEvent ?? recordGateEvent;
+	/**
+	 * MAILGUARDSLIM1: every notice is one line in the tool result and one gate-events row with kind
+	 * notice, never kind refuse (only refuse rows count toward mail-guard refusals). Best effort:
+	 * a ledger failure is notified, never a refusal.
+	 */
+	async function ledgerNotice(ctx: FlywheelContext, gate: string, line: string, seat: string | null, act: string, repo: string | null, attempt: unknown): Promise<void> {
+		const row = await record({
+			seat, act, target: null, gate, kind: "notice",
+			...(repo === null ? {} : { repo }),
+			...(typeof attempt === "string" && attempt !== "" ? { attempt, event_id: attempt } : {}),
+			detail: line.slice(0, 400),
+		}, { env, home });
+		if (!row.ok) ctx.ui?.notify(`kit-agent-mail-guard GATE_LEDGER_UNWRITTEN: ${row.why}; the verdict stands.`, "warning");
+	}
 	let callerResolver = wake.caller;
 
 	function sessionFile(ctx: FlywheelContext): string | null {
@@ -343,10 +537,15 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		return { names: named ? names.filter(name => name.toLowerCase() === named.toLowerCase()) : names, project, unbound: null };
 	}
 
-	async function resolvesBead(subject: string, cwd: string): Promise<FlywheelToolCallResult | undefined> {
+	/**
+	 * MAILGUARDSLIM1: the ask's bead id, checked natively in the repo. Null when a candidate resolves
+	 * (the ack stands); otherwise notice text asking for the bead id next time. The send is admitted
+	 * with ack kept either way: the ack is a reversible nudge, not a hazard.
+	 */
+	async function beadNotice(subject: string, cwd: string): Promise<string | null> {
 		const candidates = beadCandidates(subject);
 		if (candidates.length === 0) {
-			return refuse("AM_ACK_NO_BEAD", `ack_required needs the bead id the ask is about in the subject ("${subject.slice(0, 80)}" names none). Put the id after the vocabulary word, e.g. "QUESTION <bead-id>: ...".`);
+			return `ack_required names no bead id in the subject ("${subject.slice(0, 80)}" names none); sent with ack kept. Put the id after the vocabulary word next time, e.g. "QUESTION <bead-id>: ...".`;
 		}
 		const request: TrackerRequest = {
 			bin: "br", ids: candidates, cwd, identities: [], operation: "claim", addLabels: [],
@@ -356,10 +555,10 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		let why = "";
 		for (const id of candidates) {
 			const found = await readBeadState(pi.exec, request, id);
-			if (found.ok) return undefined;
+			if (found.ok) return null;
 			why = found.why;
 		}
-		return refuse("AM_ACK_BEAD_UNRESOLVED", `no bead id in the subject resolves in the tracker at ${cwd} (${candidates.join(", ")}; last: ${why}). ack_required is for a real ask about a bead that exists.`);
+		return `no bead id in the subject resolves in the tracker at ${cwd} (${candidates.join(", ")}; last: ${why}); sent with ack kept. Name a bead id the tracker resolves next time.`;
 	}
 	const amBin = deps.amBin ?? "am";
 	const scanBudgetMs = deps.scanBudgetMs ?? AM_SCAN_BUDGET_MS;
@@ -594,68 +793,108 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		return refuse("AM_PHANTOM_REFUSED", `"${name}" is not registered under project_key ${key}, so the send is refused before a phantom recipient is created. The wider lookup is incomplete (${coverage}): confirm with \`${amBin} agents list -p <suspected-key> --json\`, or register the recipient first.`);
 	}
 
-	async function checkMessage(tool: "send_message" | "reply_message", value: unknown, ctx: FlywheelContext, names: string[]): Promise<FlywheelToolCallResult | undefined> {
+	/**
+	 * MAILGUARDSLIM1: reversible acts are admitted with a notice, never refused, and a notice never
+	 * skips a later check (GATEDEMOTE1). Returns the verdict (a block for a kept refusal, else the
+	 * accumulated notices and the pre-existing ambiguity warning) plus the effective arguments
+	 * (ack_required dropped when the subject cannot carry it). The secret scan, roster, identity and
+	 * DONE checks still run after every notice.
+	 */
+	async function checkMessage(tool: "send_message" | "reply_message", value: unknown, ctx: FlywheelContext, names: string[], event: FlywheelToolCallEvent): Promise<{ verdict: FlywheelToolCallResult | undefined; value: unknown }> {
 		const sender = prop(value, "sender_name");
 		if (names.length === 0) {
-			return refuse("AM_IDENTITY_UNKNOWN", "this seat has no identity (AGENT_NAME is unset and no Agent Mail pane identity names this pane), so sender_name cannot be checked. Launch the seat with AGENT_NAME set.");
+			return { verdict: refuse("AM_IDENTITY_UNKNOWN", "this seat has no identity (AGENT_NAME is unset and no Agent Mail pane identity names this pane), so sender_name cannot be checked. Launch the seat with AGENT_NAME set."), value };
 		}
 		if (typeof sender !== "string" || !names.some(name => name.toLowerCase() === sender.trim().toLowerCase())) {
-			return refuse("AM_IDENTITY_MISMATCH", `sender_name ${typeof sender === "string" ? `"${sender}"` : "is missing"} is not this seat (${names.join(", ")}). Send as yourself; never as another agent.`);
+			return { verdict: refuse("AM_IDENTITY_MISMATCH", `sender_name ${typeof sender === "string" ? `"${sender}"` : "is missing"} is not this seat (${names.join(", ")}). Send as yourself; never as another agent.`), value };
 		}
-		let doneCallback = false;
-		let notice: FlywheelToolCallResult | undefined;
+		const seat = names[0] ?? null;
+		const attempt = prop(event, "toolCallId");
+		const projectOf = (args: unknown): string | null => {
+			const key = prop(args, "project_key");
+			return typeof key === "string" && isAbsolute(key) ? key : null;
+		};
+		const notices: string[] = [];
+		const queueNotice = async (gate: string, text: string): Promise<void> => {
+			const line = `kit-agent-mail-guard ${gate}: ${text}`;
+			notices.push(line);
+			const row = await (deps.recordEvent ?? recordGateEvent)({
+				seat, act: tool, target: null, gate, kind: "notice",
+				...(projectOf(value) === null ? {} : { repo: projectOf(value) }),
+				...(typeof attempt === "string" && attempt !== "" ? { attempt, event_id: attempt } : {}),
+				detail: line.slice(0, 400),
+			}, { env, home });
+			if (!row.ok) ctx.ui?.notify(`kit-agent-mail-guard GATE_LEDGER_UNWRITTEN: ${row.why}; the verdict stands.`, "warning");
+		};
+		let current = value;
+		let warning: FlywheelToolCallResult | undefined;
 		if (tool === "send_message") {
-			notice = await checkRecipients(sender, value, ctx);
-			if (notice?.block === true) return notice;
+			warning = await checkRecipients(sender, value, ctx);
+			if (warning?.block === true) return { verdict: warning, value: current };
 		}
 		const ack = prop(value, "ack_required");
 		const ackOn = ack === true || (typeof ack === "string" && ack.trim().toLowerCase() === "true");
+		const dropAck = async (why: string): Promise<void> => {
+			if (typeof current === "object" && current !== null && !Array.isArray(current)) {
+				const next = { ...(current as Record<string, unknown>) };
+				delete next.ack_required;
+				current = next;
+			}
+			await queueNotice("AM_ACK_NOTICE", `ack_required was dropped: ${why} The send proceeds without an ack.`);
+		};
+		let doneCallback = false;
 		if (tool === "send_message") {
 			const subject = prop(value, "subject");
 			const lead = typeof subject === "string" ? subjectLead(subject) : null;
 			if (typeof subject !== "string" || lead === null) {
-				return refuse("AM_SUBJECT_VOCAB", `the subject must start with one of ${Object.keys(SUBJECT_VOCABULARY).join(", ")} and name the bead id, e.g. "DONE <bead-id>: ..." (got "${typeof subject === "string" ? subject.slice(0, 80) : ""}").`);
-			}
-			doneCallback = lead === "DONE";
-			if (ackOn) {
-				if (ACK_VOCABULARY[lead] !== true) {
-					return refuse("AM_ACK_SUBJECT", `ack_required is only for a real ask: start the subject with ${Object.keys(ACK_VOCABULARY).join(", ")} (got ${lead}). Status and FYI mail never needs an ack.`);
+				await queueNotice("AM_SUBJECT_NOTICE", `the subject does not start with one of ${Object.keys(SUBJECT_VOCABULARY).join(", ")} (got "${typeof subject === "string" ? subject.slice(0, 80) : ""}"); sent anyway. Start with the vocabulary word and name the bead id next time.`);
+				if (ackOn) await dropAck("without a vocabulary subject the ask cannot be checked.");
+			} else {
+				doneCallback = lead === "DONE";
+				if (ackOn) {
+					if (ACK_VOCABULARY[lead] !== true) {
+						await dropAck(`${lead} is status or FYI mail, not a real ask (${Object.keys(ACK_VOCABULARY).join(", ")} carry acks).`);
+					} else {
+						// AMACKPROJECT1 (rz5.163): project_key is the recipient's repo, so the ask's bead lives in its
+						// tracker. The session cwd is only the fallback when project_key names no tracker on this host.
+						const key = prop(value, "project_key");
+						const tracker = typeof key === "string" && isAbsolute(key) && existsSync(join(key, ".beads")) ? key : ctx.cwd;
+						const missing = await beadNotice(subject, tracker);
+						if (missing !== null) await queueNotice("AM_ACK_BEAD_NOTICE", missing);
+					}
 				}
-				// AMACKPROJECT1 (rz5.163): project_key is the recipient's repo, so the ask's bead lives in its
-				// tracker. The session cwd is only the fallback when project_key names no tracker on this host.
-				const key = prop(value, "project_key");
-				const tracker = typeof key === "string" && isAbsolute(key) && existsSync(join(key, ".beads")) ? key : ctx.cwd;
-				const unresolved = await resolvesBead(subject, tracker);
-				if (unresolved !== undefined) return unresolved;
 			}
 		} else if (ackOn) {
-			return refuse("AM_ACK_REPLY", "a reply has no subject of its own to check, so ack_required true cannot be verified. Omit it (the reply inherits the original's flag) or send a typed send_message naming the bead.");
+			await dropAck("a reply has no subject of its own to check (the reply inherits the original's flag).");
 		}
-		const body = prop(value, "body_md");
-		if (typeof body !== "string") return refuse("AM_ARGS_UNREADABLE", "body_md is missing or not a string.");
+		const body = prop(current, "body_md");
+		if (typeof body !== "string") return { verdict: refuse("AM_ARGS_UNREADABLE", "body_md is missing or not a string."), value: current };
 		if (body.length > AM_BODY_CAP) {
-			return refuse("AM_BODY_TOO_LONG", `the body is ${body.length} characters, over the ${AM_BODY_CAP} cap. Put the evidence in a bead comment (br comments add <bead-id> ...) and send a short pointer.`);
+			if (body.length > AM_BODY_NOTICE_CAP) {
+				return { verdict: refuse("AM_BODY_TOO_LONG", `the body is ${body.length} characters, over four times the ${AM_BODY_CAP} cap. Put the evidence in a bead comment (br comments add <bead-id> ...) and send a short pointer.`), value: current };
+			}
+			await queueNotice("AM_BODY_NOTICE", `the body is ${body.length} characters, over the ${AM_BODY_CAP} cap; sent anyway (up to ${AM_BODY_NOTICE_CAP}). Put the evidence in a bead comment (br comments add <bead-id> ...) and send a short pointer next time.`);
 		}
 		let patterns: RegExp[];
 		try { patterns = secretScanner(); }
 		catch (error) {
-			return refuse("AM_SCANNER_UNAVAILABLE", `the secret scanner rule (${rulePath}) cannot be loaded (${error instanceof Error ? error.message : String(error)}); a body that cannot be scanned is not sent.`);
+			return { verdict: refuse("AM_SCANNER_UNAVAILABLE", `the secret scanner rule (${rulePath}) cannot be loaded (${error instanceof Error ? error.message : String(error)}); a body that cannot be scanned is not sent.`), value: current };
 		}
 		if (patterns.some(pattern => pattern.test(body))) {
-			return refuse("AM_BODY_SECRET", "the body holds what the secret scanner flags as a literal credential. Never mail a secret: name where it lives (Infisical key name) instead.");
+			return { verdict: refuse("AM_BODY_SECRET", "the body holds what the secret scanner flags as a literal credential. Never mail a secret: name where it lives (Infisical key name) instead."), value: current };
 		}
 		if (doneCallback) {
-			const project = prop(value, "project_key");
+			const project = prop(current, "project_key");
 			const citations = extractCitedCommitReferences(body);
 			if (citations.length === 0) {
-				return refuse("AM_DONE_NOT_PUBLISHED", "DONE is not sendable: NOT_PUBLISHED UNKNOWN; the body must cite at least one commit SHA. Save and publish on origin/main with git_converge.py --push.");
+				return { verdict: refuse("AM_DONE_NOT_PUBLISHED", "DONE is not sendable: NOT_PUBLISHED UNKNOWN; the body must cite at least one commit SHA. Save and publish on origin/main with git_converge.py --push."), value: current };
 			}
 			if (typeof project !== "string" || !isAbsolute(project)) {
-				return refuse("AM_DONE_NOT_PUBLISHED", "DONE is not sendable: NOT_PUBLISHED UNKNOWN; project_key must identify the local repository to verify. Save and publish on origin/main with git_converge.py --push.");
+				return { verdict: refuse("AM_DONE_NOT_PUBLISHED", "DONE is not sendable: NOT_PUBLISHED UNKNOWN; project_key must identify the local repository to verify. Save and publish on origin/main with git_converge.py --push."), value: current };
 			}
 			const invalid = citations.find(citation => citation.invalidQualifier !== undefined);
 			if (invalid !== undefined) {
-				return refuse("AM_DONE_NOT_PUBLISHED", `DONE is not sendable: UNKNOWN ${invalid.sha}: unsupported repository qualifier "${invalid.invalidQualifier}". Use an absolute repository path followed by @SHA.`);
+				return { verdict: refuse("AM_DONE_NOT_PUBLISHED", `DONE is not sendable: UNKNOWN ${invalid.sha}: unsupported repository qualifier "${invalid.invalidQualifier}". Use an absolute repository path followed by @SHA.`), value: current };
 			}
 			const citationsByRepo = new Map<string, string[]>();
 			for (const citation of citations) {
@@ -682,10 +921,17 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			}
 			const failed = checks.find(check => check.status !== "PUBLISHED");
 			if (failed !== undefined) {
-				return refuse("AM_DONE_NOT_PUBLISHED", `DONE is not sendable: ${failed.status} ${failed.sha || "(no SHA)"} in ${failed.repo}: ${failed.detail}. Save and publish on origin/main with git_converge.py --push.`);
+				return { verdict: refuse("AM_DONE_NOT_PUBLISHED", `DONE is not sendable: ${failed.status} ${failed.sha || "(no SHA)"} in ${failed.repo}: ${failed.detail}. Save and publish on origin/main with git_converge.py --push.`), value: current };
 			}
 		}
-		return notice;
+		const parts = [...notices, ...(warning?.additionalContext !== undefined ? [warning.additionalContext] : [])];
+		if (current !== value) {
+			const patch = rewriteArgs(event, current as Record<string, unknown>);
+			if (parts.length === 0) return { verdict: patch, value: current };
+			return { verdict: { ...patch, additionalContext: parts.join(" ") }, value: current };
+		}
+		if (parts.length === 0) return { verdict: undefined, value: current };
+		return { verdict: { additionalContext: parts.join(" ") }, value: current };
 	}
 	function rewriteArgs(event: FlywheelToolCallEvent, value: Record<string, unknown>): { input: Record<string, unknown> } | undefined {
 		const raw = event.input;
@@ -706,10 +952,9 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 	 * only the raw execution input is revised — the token never appears in a reason string.
 	 * Returns undefined when there is nothing to inject: the send runs as written.
 	 */
-	function injectSenderToken(call: MailCall, event: FlywheelToolCallEvent, names: string[]): { input: Record<string, unknown> } | undefined {
+	function injectSenderToken(value: unknown, event: FlywheelToolCallEvent, names: string[]): { input: Record<string, unknown> } | undefined {
 		const token = env.AGENT_MAIL_SENDER_TOKEN?.trim();
-		if (!token || !call.args.ok) return undefined;
-		const value = call.args.value;
+		if (!token) return undefined;
 		if (typeof value !== "object" || value === null) return undefined;
 		const sender = prop(value, "sender_name");
 		if (typeof sender !== "string" || !names.some(name => name.toLowerCase() === sender.trim().toLowerCase())) return undefined;
@@ -719,11 +964,40 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 	}
 
 	pi.on("tool_call", async (event, ctx) => {
+		// MAILGUARDSLIM1 (1): a background child's `am` shell reservation is rewritten to its parent
+		// seat's name (WRITEOWNCHILD1 seatIdentity, no second resolution) and admitted with a notice
+		// per call. A call that cannot be rewritten safely is left unchanged and admitted with a
+		// notice saying which call and why, so the server's answer is explained. Reads and
+		// non-reservation shell pass through untouched. AM_NATIVE_TOOL_REQUIRED is deleted: it has
+		// no other caller.
 		if (ctx.agent?.kind === "sub" && event.toolName === "bash") {
 			const command = prop(event.input, "command");
-			if (typeof command === "string" && shellCommands(command).some(words => words.some((word, at) =>
-				word.split("/").at(-1) === "am" && ["file_reservations", "file-reservations", "reservations"].includes(words[at + 1] ?? "")))) {
-				return refuse("AM_NATIVE_TOOL_REQUIRED", "Native children must reserve, renew and release through the mounted Agent Mail tools under their authenticated child name; the shell inherits the parent's identity.");
+			if (typeof command === "string" && childShellReservationAgents(command).length > 0) {
+				const seat = seatIdentity({ agentName: env.AGENT_NAME, childAgentName: typeof ctx.agent?.id === "string" ? ctx.agent.id : undefined }, env);
+				if (seat === undefined) {
+					return refuse("AM_IDENTITY_MISMATCH", "a background child reserves under its parent seat's name, which does not resolve here (AGENT_NAME is unset). Report to the parent instead.");
+				}
+				const rewritten = rewriteChildShellAgents(command, seat);
+				const lines: string[] = [];
+				for (const call of rewritten.calls) {
+					if (call.outcome === "already-seat") continue;
+					if (call.outcome === "rewrote") {
+						lines.push(`kit-agent-mail-guard AM_CHILD_RESERVATION_NOTICE: background child ${call.verb} admitted under the parent seat's name ${seat}; a child does not reserve for itself.`);
+					} else {
+						const why = call.outcome === "ambiguous"
+							? "unrecognised flags may carry a value that shifts the positionals, so no token was rewritten"
+							: "the agent token could not be located without guessing, so nothing was rewritten";
+						lines.push(`kit-agent-mail-guard AM_CHILD_RESERVATION_NOTICE: background child ${call.verb} left unchanged (${why}); reserve under the parent seat's name ${seat} instead, or report to the parent.`);
+					}
+				}
+				if (lines.length === 0) return undefined;
+				for (const line of lines) await ledgerNotice(ctx, "AM_CHILD_RESERVATION_NOTICE", line, seat, "bash", ctx.cwd, event.toolCallId);
+				const additionalContext = lines.join(" ");
+				const raw = event.input;
+				if (typeof raw !== "object" || raw === null) return { additionalContext };
+				return rewritten.command === command
+					? { additionalContext }
+					: { input: { ...raw, command: rewritten.command }, additionalContext };
 			}
 		}
 		const call = mailCall(event);
@@ -736,19 +1010,32 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		const guarded = reservation || reservationMacro || bulk || registration || call.tool === "send_message" || call.tool === "reply_message" || call.tool === "fetch_inbox";
 		if (!guarded) return undefined;
 		try {
-			// NATIVEPREGRADE1: a child's inherited AGENT_NAME never owns reservations.
-			// This also runs in a stock repo: bypassing a fleet marker cannot release the parent's holds.
-			if (reservation && ctx.agent?.kind === "sub") {
-				if (!call.args.ok) return refuse("AM_ARGS_UNREADABLE", `${call.tool}: ${call.args.why}.`);
-				const name = nativeReservationIdentity(ctx, prop(call.args.value, "agent_name"));
-				const project = prop(call.args.value, "project_key");
-				if (typeof project !== "string" || !isAbsolute(project)) return refuse("AM_REGISTRATION_SCHEMA", "A child reservation requires an absolute project_key.");
-				const roster = await fetchRoster(project, AM_ROSTER_TIMEOUT_MS);
-				if (!roster.ok) return refuse("AM_ROSTER_UNAVAILABLE", roster.why);
-				if (!roster.rows.some(row => row.name.toLowerCase() === name.toLowerCase())) {
-					return refuse("IDENTITY_UNBOUND", `Native child ${name} is not registered in ${project}. Agent Mail requires a registered agent name; the kit cannot substitute the parent's registration.`);
+			// MAILGUARDSLIM1 (1): a background child neither registers nor reserves for itself. A child's
+			// reservation call is rewritten to its parent seat's name (WRITEOWNCHILD1 seatIdentity, no
+			// second resolution) and admitted with a one-line notice; a child's register/send call gets
+			// one refusal naming no further command.
+			if (ctx.agent?.kind === "sub" && (reservation || reservationMacro || registration || call.tool === "send_message" || call.tool === "reply_message")) {
+				const seat = seatIdentity({ agentName: env.AGENT_NAME, childAgentName: typeof ctx.agent?.id === "string" ? ctx.agent.id : undefined }, env);
+				if (registration || call.tool === "send_message" || call.tool === "reply_message") {
+					return refuse("AM_IDENTITY_MISMATCH", seat === undefined
+						? "a background child's native register and mail calls are not admitted, and no parent seat name resolves here (AGENT_NAME is unset). Report to the parent instead."
+						: `a background child's native register and mail calls are not admitted; the parent seat ${seat} holds the registration and mailbox. Report to the parent instead.`);
 				}
-				return undefined;
+				if (!call.args.ok) return refuse("AM_ARGS_UNREADABLE", `${call.tool}: ${call.args.why}.`);
+				if (seat === undefined) {
+					return refuse("AM_IDENTITY_MISMATCH", "a background child reserves under its parent seat's name, which does not resolve here (AGENT_NAME is unset). Report to the parent instead.");
+				}
+				if (typeof call.args.value !== "object" || call.args.value === null || Array.isArray(call.args.value)) {
+					return refuse("AM_ARGS_UNREADABLE", `${call.tool}: arguments do not parse as an object.`);
+				}
+				const claimed = prop(call.args.value, "agent_name");
+				if (typeof claimed === "string" && claimed.toLowerCase() === seat.toLowerCase()) return undefined;
+				const line = `kit-agent-mail-guard AM_CHILD_RESERVATION_NOTICE: background child reservation admitted under the parent seat's name ${seat}; a child does not reserve for itself.`;
+				const project = prop(call.args.value, "project_key");
+				await ledgerNotice(ctx, "AM_CHILD_RESERVATION_NOTICE", line, seat, call.tool,
+					typeof project === "string" && isAbsolute(project) ? project : null, event.toolCallId);
+				const rewritten = rewriteArgs(event, { ...(call.args.value as Record<string, unknown>), agent_name: seat });
+				return rewritten === undefined ? { additionalContext: line } : { ...rewritten, additionalContext: line };
 			}
 			// MAILWAKE1.2 (ompkit-uk9wn.2): a send names the RECIPIENT's repo in project_key. A seat whose own cwd
 			// carries no fleet opt-in (the chief tab runs in ~/Developer, 2026-10-25: every chief-tab send bypassed the
@@ -767,11 +1054,8 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			// caller as agent_name; their schemas have no sender_name. Judge each call by the
 			// identity field its own schema really has: the seat's own name passes, another
 			// seat's name is refused, and a missing agent_name is refused naming agent_name
-			// (never as impersonation). Native children keep what the guard does for them
-			// today: the three direct tools take the IDENTITY_UNBOUND path above, and a child
-			// calling the reservation macro passes through unjudged here.
+			// (never as impersonation). Background children are rewritten to the seat above.
 			if (reservation || reservationMacro) {
-				if (ctx.agent?.kind === "sub") return undefined;
 				if (!call.args.ok) return refuse("AM_ARGS_UNREADABLE", `${call.tool}: ${call.args.why}.`);
 				const { names: reservationNames, project: reservationProject, unbound: reservationUnbound } = await seatNames(ctx, prop(call.args.value, "project_key"));
 				if (reservationNames.length === 0) {
@@ -790,17 +1074,20 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			}
 			if (registration) {
 				if (!call.args.ok || typeof call.args.value !== "object" || call.args.value === null || Array.isArray(call.args.value)) {
-					return refuse("AM_REGISTRATION_SCHEMA", `${call.tool}: schema requires an object with project, program and model strings.`);
+					return refuse("AM_ARGS_UNREADABLE", `${call.tool}: registration arguments do not parse as an object.`);
 				}
+				// MAILGUARDSLIM1 (3): unknown arguments are stripped by rewriteArgs and admitted
+				// with a notice, so a server can never silently discard them; a missing absolute
+				// project key reports under AM_ARGS_UNREADABLE.
 				const allowed = REGISTRATION_KEYS[call.tool]!;
-				for (const key in call.args.value) {
-					if (Object.prototype.hasOwnProperty.call(call.args.value, key) && !Object.prototype.hasOwnProperty.call(allowed, key)) {
-						return refuse("AM_REGISTRATION_SCHEMA", `${call.tool}: unknown argument '${key}'. Schema keys: ${Object.keys(allowed).join(", ")}.`);
-					}
+				const stripped: Record<string, unknown> = { ...(call.args.value as Record<string, unknown>) };
+				const dropped: string[] = [];
+				for (const key of Object.keys(stripped)) {
+					if (!Object.prototype.hasOwnProperty.call(allowed, key)) { dropped.push(key); delete stripped[key]; }
 				}
-				const value = call.args.value;
+				const value = stripped;
 				const project = prop(value, call.tool === "macro_start_session" ? "human_key" : "project_key");
-				if (typeof project !== "string" || !isAbsolute(project)) return refuse("AM_REGISTRATION_SCHEMA", `${call.tool}: schema requires an absolute project key.`);
+				if (typeof project !== "string" || !isAbsolute(project)) return refuse("AM_ARGS_UNREADABLE", `${call.tool}: a registration needs an absolute project key (project_key, or human_key for macro_start_session).`);
 				const seat = await caller(ctx, project);
 				const nameKey = call.tool === "macro_start_session" ? "agent_name" : "name";
 				const claimedName = prop(value, nameKey);
@@ -814,7 +1101,11 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 				if (!pane || (requested !== undefined && requested !== null && requested !== pane)) {
 					return refuse("IDENTITY_UNBOUND", `${call.tool}: current caller pane is unproven or pane_id differs from the actual caller. Register only your own Tern session or TMUX_PANE.`);
 				}
-				return rewriteArgs(event, { ...value, ...(ownName ? { [nameKey]: ownName } : {}), pane_id: pane });
+				const patched = rewriteArgs(event, { ...value, ...(ownName ? { [nameKey]: ownName } : {}), pane_id: pane });
+				if (dropped.length === 0) return patched;
+				const line = `kit-agent-mail-guard AM_REGISTRATION_NOTICE: unknown argument(s) ${dropped.join(", ")} stripped (schema keys: ${Object.keys(allowed).join(", ")}); the registration proceeded without them.`;
+				await ledgerNotice(ctx, "AM_REGISTRATION_NOTICE", line, typeof ownName === "string" ? ownName : null, call.tool, project, event.toolCallId);
+				return patched === undefined ? { additionalContext: line } : { ...patched, additionalContext: line };
 			}
 			if (bulk) {
 				return refuse("AM_BULK_READ", `${call.tool} is a bulk read. Read one message at a time (fetch_inbox with a small limit, or fetch one id); read state is not obligation state.`);
@@ -824,8 +1115,15 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 				const id = event.toolCallId;
 				const sameLogicalCall = typeof id === "string" && id !== "" && id === lastInboxToolCallId;
 				if (sameLogicalCall) return undefined;
+				// MAILGUARDSLIM1 (3): the fetch is admitted with a notice that wakes deliver mail;
+				// no refusal. Every admitted fetch advances the window, noticed or not.
 				if (lastInbox !== null && at - lastInbox < AM_INBOX_INTERVAL_MS) {
-					return refuse("AM_INBOX_RATE", `fetch_inbox ran ${Math.round((at - lastInbox) / 1000)} s ago; one fetch per ${AM_INBOX_INTERVAL_MS / 1000} s per seat. Wake on events instead of polling.`);
+					const line = `kit-agent-mail-guard AM_INBOX_NOTICE: fetch_inbox ran ${Math.round((at - lastInbox) / 1000)} s ago; admitted anyway — inbox wakes deliver new mail, polling every ${AM_INBOX_INTERVAL_MS / 1000} s is unnecessary.`;
+					lastInbox = at;
+					lastInboxToolCallId = typeof id === "string" && id !== "" ? id : null;
+					const claimed = call.args.ok ? prop(call.args.value, "agent_name") : undefined;
+					await ledgerNotice(ctx, "AM_INBOX_NOTICE", line, typeof claimed === "string" ? claimed : null, call.tool, null, id);
+					return { additionalContext: line };
 				}
 				lastInbox = at;
 				lastInboxToolCallId = typeof id === "string" && id !== "" ? id : null;
@@ -842,18 +1140,27 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 					: "No identity file binds this sender's actual pane. Run register_agent or macro_start_session for this pane before sending.");
 			}
 			const tool = call.tool === "send_message" ? "send_message" : "reply_message";
-			const verdict = await checkMessage(tool, call.args.value, ctx, names);
-			if (verdict?.block === true) return verdict;
+			const checked = await checkMessage(tool, call.args.value, ctx, names, event);
+			if (checked.verdict?.block === true) return checked.verdict;
 			// MAILWAKE1 (ompkit-uk9wn): plan the recipients' wake only once every check passed; an ask with no
-			// wake path is refused here (NO_WAKE_PATH) before anything is sent.
-			const projectKey = prop(call.args.value, "project_key");
-			const wakeVerdict = await wake.beforeSend(event.toolCallId, tool, call.args.value,
+			// wake path is refused here (NO_WAKE_PATH) before anything is sent. The wake and the token
+			// stamp run on the effective arguments, so a dropped ack_required stays dropped.
+			const projectKey = prop(checked.value, "project_key");
+			const wakeVerdict = await wake.beforeSend(event.toolCallId, tool, checked.value,
 				typeof projectKey === "string" && projectKey !== "" ? projectKey : ctx.cwd);
 			if (wakeVerdict !== undefined) return wakeVerdict;
-			const tokenPatch = injectSenderToken(call, event, names);
-			return tokenPatch === undefined ? verdict : { ...verdict, ...tokenPatch };
+			const tokenPatch = injectSenderToken(checked.value, event, names);
+			const extra = checked.verdict?.additionalContext;
+			if (tokenPatch === undefined) return extra === undefined ? undefined : { additionalContext: extra };
+			return extra === undefined ? tokenPatch : { ...tokenPatch, additionalContext: extra };
 		} catch (error) {
-			return refuse("AM_GUARD_FAILED", `the check failed (${error instanceof Error ? error.message : String(error)}).`);
+			// MAILGUARDSLIM1 (2): AM_GUARD_FAILED never wraps a typed refusal. An inner AM_* (or
+			// IDENTITY_UNBOUND) failure surfaces under its own code; only a genuine failure keeps
+			// AM_GUARD_FAILED.
+			const message = error instanceof Error ? error.message : String(error);
+			const inner = /^(AM_[A-Z0-9_]+|IDENTITY_UNBOUND):\s*([\s\S]*)$/.exec(message);
+			if (inner) return refuse(inner[1]!, inner[2]!.trim() === "" ? message : inner[2]!);
+			return refuse("AM_GUARD_FAILED", `the check failed (${message}).`);
 		}
 	});
 

@@ -15,7 +15,7 @@ import { captureMineReplay, readMineReplay, type MineReplay } from "../src/mine-
  * `gate` names the check that answered (CLAIM_REFUSED, SELF_CLOSE_REFUSED, commit-notes, ...).
  * Writing is best effort and never throws into the guard: a ledger failure is reported, never a refusal.
  */
-export type GateEventKind = "pass" | "refuse" | "inject" | "auto_complete";
+export type GateEventKind = "pass" | "refuse" | "inject" | "auto_complete" | "notice";
 
 export interface GateEvent {
 	seat: string | null;

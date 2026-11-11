@@ -294,6 +294,68 @@ export function shellTokens(command: string): ShellToken[] {
 	return tokens.filter(token => token.text !== "" || token.quoted);
 }
 
+/** A shellTokens token with its byte span, for surgical rewrites that preserve every other byte. */
+export interface ShellTokenSpan { text: string; quoted: boolean; start: number; end: number }
+
+/**
+ * shellTokens with byte spans. The split mirrors shellTokens exactly (whitespace separates;
+ * `;&|()><` are standalone tokens; quotes and escapes join); callers must verify the returned
+ * texts against shellTokens and abort the rewrite on any divergence.
+ */
+export function shellTokenSpans(command: string): ShellTokenSpan[] {
+	const spans: ShellTokenSpan[] = [];
+	let text = "", quoted = false, partQuoted = false, start = -1;
+	let single = false, double = false, escaped = false;
+	const open = (index: number): void => { if (start < 0) start = index; };
+	const flush = (end: number): void => {
+		if (text !== "" || quoted) spans.push({ text, quoted, start: start < 0 ? end : start, end });
+		text = "";
+		quoted = false;
+		partQuoted = false;
+		start = -1;
+	};
+	for (let index = 0; index < command.length; index++) {
+		const char = command[index]!;
+		if (escaped) { open(index - 1); text += char; escaped = false; continue; }
+		if (single) {
+			if (char === "'") single = false;
+			else text += char;
+			continue;
+		}
+		if (double) {
+			if (char === '"') double = false;
+			else if (char === "\\") { open(index); escaped = true; }
+			else text += char;
+			continue;
+		}
+		if (char === "\\") { open(index); escaped = true; continue; }
+		if (char === "'") { open(index); single = true; partQuoted = true; continue; }
+		if (char === '"') { open(index); double = true; partQuoted = true; continue; }
+		if (char === " " || char === "\t" || char === "\n") {
+			quoted = quoted || partQuoted;
+			flush(index);
+			continue;
+		}
+		if (char === ";" || char === "&" || char === "|" || char === "(" || char === ")") {
+			quoted = quoted || partQuoted;
+			flush(index);
+			spans.push({ text: char, quoted: false, start: index, end: index + 1 });
+			continue;
+		}
+		if (char === ">" || char === "<") {
+			quoted = quoted || partQuoted;
+			flush(index);
+			spans.push({ text: char, quoted: false, start: index, end: index + 1 });
+			continue;
+		}
+		open(index);
+		text += char;
+	}
+	quoted = quoted || partQuoted;
+	flush(command.length);
+	return spans.filter(span => span.text !== "" || span.quoted);
+}
+
 const REDIRECT = /^(?:\d*)>{1,2}\|?$/;
 const FD_REDIRECT = /^(?:\d*)&>{1,2}$/;
 

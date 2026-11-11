@@ -5,6 +5,7 @@ import { join } from "node:path";
 import kitAgentMailGuard, {
 	ACK_VOCABULARY,
 	AM_BODY_CAP,
+	AM_BODY_NOTICE_CAP,
 	AM_INBOX_INTERVAL_MS,
 	ruleConditions,
 	SUBJECT_VOCABULARY,
@@ -38,6 +39,8 @@ type Responder = (call: ExecCall) => FlywheelExecResult | Promise<FlywheelExecRe
 type ToolHandler = (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown;
 type ResultHandler = (event: { toolCallId?: unknown; content?: unknown; isError?: unknown }, ctx: FlywheelContext) => unknown;
 
+interface GateNoticeRow { seat: string | null; act: string; target: string | null; gate: string; kind: string; repo?: string | null; detail?: string | null }
+
 interface Host {
 	call(event: FlywheelToolCallEvent, cwd: string, toolCallId?: string | null): Promise<FlywheelToolCallResult | undefined>;
 	/** A `write` to xd://mcp__mcp_agent_mail_<tool>, the way OMP routes an MCP call. */
@@ -45,7 +48,11 @@ interface Host {
 	/** OMP's tool_result for one call, through every registered tool_result handler. */
 	result(cwd: string, toolCallId: string, content: unknown[], isError?: boolean): Promise<unknown>;
 	execs: ExecCall[];
+	/** gate-events rows the guard wrote for admitted-with-notice acts (kind notice, never refuse). */
+	notices: GateNoticeRow[];
 }
+
+type SubAgent = { kind: "sub"; id?: string; parentId?: string };
 
 /** A wake that records every call and wakes nobody: the default, so guard tests never touch Tern. */
 function recordingWake(block: string | null = null): MailWakeHooks & { before: unknown[][]; after: unknown[] } {
@@ -135,10 +142,11 @@ function fleetRespond(rosters: Record<string, TestRosterRow[]>, ...ids: string[]
 	};
 }
 
-async function createHost(deps: AgentMailGuardDeps & { sessionFile?: string } = {}, respond: Responder = brKnows(BEAD)): Promise<Host> {
+async function createHost(deps: AgentMailGuardDeps & { sessionFile?: string; agent?: SubAgent } = {}, respond: Responder = brKnows(BEAD)): Promise<Host> {
 	const handlers: ToolHandler[] = [];
 	const resultHandlers: ResultHandler[] = [];
 	const execs: ExecCall[] = [];
+	const notices: GateNoticeRow[] = [];
 	let dispatch = 0;
 	const pi: AgentMailGuardApi = {
 		on: ((event: string, handler: ToolHandler & ResultHandler) => {
@@ -153,7 +161,12 @@ async function createHost(deps: AgentMailGuardDeps & { sessionFile?: string } = 
 	};
 	const env: Record<string, string | undefined> = { TMUX_PANE: "%9", ...(deps.env ?? { AGENT_NAME: "PlumRaven" }) };
 	const home = deps.home ?? freshDir(base, "bound-sender-");
-	await kitAgentMailGuard(pi, { mailWake: recordingWake(), ...deps, env, home });
+	await kitAgentMailGuard(pi, {
+		mailWake: recordingWake(),
+		...deps,
+		env, home,
+		recordEvent: async row => { notices.push(row as unknown as GateNoticeRow); return { ok: true as const, path: "test-ledger" }; },
+	});
 	const call: Host["call"] = async (event, cwd, toolCallId) => {
 		if (deps.home === undefined && env.AGENT_NAME && env.TMUX_PANE) {
 			const identity = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(cwd).digest("hex").slice(0, 12));
@@ -161,7 +174,7 @@ async function createHost(deps: AgentMailGuardDeps & { sessionFile?: string } = 
 			writeFileSync(join(identity, env.TMUX_PANE.slice(1)), JSON.stringify({ name: env.AGENT_NAME }));
 		}
 		const id = toolCallId === null ? undefined : toolCallId ?? `dispatch-${++dispatch}`;
-		const ctx = { cwd, isIdle: () => true, sessionManager: { getSessionFile: () => deps.sessionFile } };
+		const ctx = { cwd, isIdle: () => true, sessionManager: { getSessionFile: () => deps.sessionFile }, ...(deps.agent ? { agent: deps.agent } : {}) };
 		let result: unknown;
 		for (const handler of handlers) result = (await handler({ type: "tool_call", ...event, toolCallId: id }, ctx)) ?? result;
 		return result as FlywheelToolCallResult | undefined;
@@ -174,7 +187,7 @@ async function createHost(deps: AgentMailGuardDeps & { sessionFile?: string } = 
 		for (const handler of resultHandlers) patched = (await handler({ toolCallId, content, isError }, ctx)) ?? patched;
 		return patched;
 	};
-	return { call, mail, result, execs };
+	return { call, mail, result, execs, notices };
 }
 test("reads: outer write and mounted fetch share one accepted logical call ID", async () => {
 	let clock = 1_000_000;
@@ -184,10 +197,14 @@ test("reads: outer write and mounted fetch share one accepted logical call ID", 
 	const id = "omp-logical-fetch";
 	expect(await h.mail(cwd, "fetch_inbox", fetch, id)).toBeUndefined();
 	expect(await h.call({ toolName: "mcp__mcp_agent_mail_fetch_inbox", input: fetch }, cwd, id)).toBeUndefined();
-	expect(code(await h.mail(cwd, "fetch_inbox", fetch, "distinct-fetch"))).toBe("AM_INBOX_RATE");
+	// MAILGUARDSLIM1: a second fetch inside the window is admitted with a notice, not refused.
+	const noticed = await h.mail(cwd, "fetch_inbox", fetch, "distinct-fetch");
+	expect(code(noticed)).toBeUndefined();
+	expect(noticed?.additionalContext).toContain("AM_INBOX_NOTICE");
+	expect(h.notices.at(-1)).toMatchObject({ gate: "AM_INBOX_NOTICE", kind: "notice" });
 	clock += AM_INBOX_INTERVAL_MS - 1;
-	expect(code(await h.mail(cwd, "fetch_inbox", fetch, "distinct-fetch-2"))).toBe("AM_INBOX_RATE");
-	clock += 1;
+	expect((await h.mail(cwd, "fetch_inbox", fetch, "distinct-fetch-2"))?.additionalContext).toContain("AM_INBOX_NOTICE");
+	clock += AM_INBOX_INTERVAL_MS;
 	expect(await h.mail(cwd, "fetch_inbox", fetch, "distinct-fetch-3")).toBeUndefined();
 });
 test("reads: delayed nested reentry does not restart the accepted logical call window", async () => {
@@ -199,15 +216,15 @@ test("reads: delayed nested reentry does not restart the accepted logical call w
 	clock += AM_INBOX_INTERVAL_MS;
 	expect(await h.call({ toolName: "mcp__mcp_agent_mail_fetch_inbox", input: fetch }, cwd, "original")).toBeUndefined();
 	expect(await h.mail(cwd, "fetch_inbox", fetch, "next")).toBeUndefined();
-	expect(code(await h.mail(cwd, "fetch_inbox", fetch, "distinct"))).toBe("AM_INBOX_RATE");
+	expect((await h.mail(cwd, "fetch_inbox", fetch, "distinct"))?.additionalContext).toContain("AM_INBOX_NOTICE");
 });
 test("reads: missing and empty toolCallIds do not exempt distinct fetches", async () => {
 	const h = await createHost();
 	const cwd = fleetRepo();
 	const fetch = { project_key: "/abs/path/backend", agent_name: "PlumRaven", limit: 1, include_bodies: true, mark_read: false };
 	expect(await h.mail(cwd, "fetch_inbox", fetch, null)).toBeUndefined();
-	expect(code(await h.mail(cwd, "fetch_inbox", fetch, ""))).toBe("AM_INBOX_RATE");
-	expect(code(await h.mail(cwd, "fetch_inbox", fetch, null))).toBe("AM_INBOX_RATE");
+	expect((await h.mail(cwd, "fetch_inbox", fetch, ""))?.additionalContext).toContain("AM_INBOX_NOTICE");
+	expect((await h.mail(cwd, "fetch_inbox", fetch, null))?.additionalContext).toContain("AM_INBOX_NOTICE");
 });
 
 function gitInit(parent: string): string {
@@ -400,7 +417,7 @@ test("AMRENEW1: a missing agent_name is refused naming agent_name, never as impe
 
 // --- subject vocabulary ------------------------------------------------------------------------
 
-test("subject: every vocabulary word passes, free text and near misses are refused", async () => {
+test("subject: every vocabulary word passes; free text and near misses are admitted with a notice", async () => {
 	const h = await createHost();
 	const cwd = fleetRepo();
 	for (const word of Object.keys(SUBJECT_VOCABULARY)) {
@@ -408,10 +425,13 @@ test("subject: every vocabulary word passes, free text and near misses are refus
 		expect(subjectLead(`${word}: x`)).toBe(word);
 	}
 	for (const subject of ["Plan for /api/users", "", "done ompkit-1abc: x", "DONEZO ompkit-1abc", "DONE-ish ompkit-1abc", " DONE ompkit-1abc", "[DONE] ompkit-1abc"]) {
-		const refused = await h.mail(cwd, "send_message", send({ subject }));
-		expect(code(refused)).toBe("AM_SUBJECT_VOCAB");
+		// MAILGUARDSLIM1: a non-vocabulary subject is sent with a notice, never refused.
+		const admitted = await h.mail(cwd, "send_message", send({ subject }));
+		expect(code(admitted)).toBeUndefined();
+		expect(admitted?.additionalContext).toContain("AM_SUBJECT_NOTICE");
 	}
-	expect(code(await h.mail(cwd, "send_message", send({ subject: undefined })))).toBe("AM_SUBJECT_VOCAB");
+	expect((await h.mail(cwd, "send_message", send({ subject: undefined })))?.additionalContext).toContain("AM_SUBJECT_NOTICE");
+	expect(h.notices.filter(row => row.gate === "AM_SUBJECT_NOTICE").every(row => row.kind === "notice")).toBe(true);
 });
 
 // --- obligations ---------------------------------------------------------------------------------
@@ -428,23 +448,36 @@ test("ack_required: a typed subject naming a resolvable bead passes; the bead is
 	expect(show[0]?.options?.cwd).toBe(cwd);
 });
 
-test("ack_required: an in-vocabulary but non-ask subject is refused, the same send without ack passes", async () => {
+test("ack_required: an in-vocabulary but non-ask subject is dropped with a notice, the same send without ack passes", async () => {
 	const h = await createHost();
 	const cwd = fleetRepo();
 	expect(await h.mail(cwd, "send_message", send({ subject: `DONE ${BEAD}: x`, ack_required: false }))).toBeUndefined();
-	expect(code(await h.mail(cwd, "send_message", send({ subject: `DONE ${BEAD}: x`, ack_required: true })))).toBe("AM_ACK_SUBJECT");
-	expect(code(await h.mail(cwd, "send_message", send({ subject: `PROGRESS ${BEAD}: x`, ack_required: "true" })))).toBe("AM_ACK_SUBJECT");
+	// MAILGUARDSLIM1: ack_required is dropped by rewriteArgs and the send proceeds with a notice.
+	for (const subject of [`DONE ${BEAD}: x`, `PROGRESS ${BEAD}: x`]) {
+		const admitted = await h.mail(cwd, "send_message", send({ subject, ack_required: true }));
+		expect(code(admitted)).toBeUndefined();
+		expect(admitted?.additionalContext).toContain("AM_ACK_NOTICE");
+		expect(stampedArgs(admitted)).not.toHaveProperty("ack_required");
+		expect(h.notices.at(-1)).toMatchObject({ gate: "AM_ACK_NOTICE", kind: "notice" });
+	}
+	const droppedString = await h.mail(cwd, "send_message", send({ subject: `PROGRESS ${BEAD}: x`, ack_required: "true" }));
+	expect(stampedArgs(droppedString)).not.toHaveProperty("ack_required");
 	expect(h.execs.filter(call => call.command === "br")).toEqual([]);
 });
 
-test("ack_required: a typed subject with no bead id, or an id the tracker does not resolve, is refused", async () => {
+test("ack_required: a typed subject with no bead id, or an id the tracker does not resolve, is sent with ack kept and a notice", async () => {
 	const h = await createHost();
 	const cwd = fleetRepo();
 	expect(await h.mail(cwd, "send_message", send({ subject: `QUESTION ${BEAD}: which?`, ack_required: true }))).toBeUndefined();
-	expect(code(await h.mail(cwd, "send_message", send({ subject: "QUESTION which database?", ack_required: true })))).toBe("AM_ACK_NO_BEAD");
+	// MAILGUARDSLIM1: sent with ack kept; the notice asks for the bead id next time.
+	const missing = await h.mail(cwd, "send_message", send({ subject: "QUESTION which database?", ack_required: true }));
+	expect(code(missing)).toBeUndefined();
+	expect(missing?.additionalContext).toContain("AM_ACK_BEAD_NOTICE");
 	const unresolved = await h.mail(cwd, "send_message", send({ subject: "QUESTION ompkit-zzzz: which?", ack_required: true }));
-	expect(code(unresolved)).toBe("AM_ACK_BEAD_UNRESOLVED");
-	expect(unresolved?.reason).toContain("Issue not found");
+	expect(code(unresolved)).toBeUndefined();
+	expect(unresolved?.additionalContext).toContain("AM_ACK_BEAD_NOTICE");
+	expect(unresolved?.additionalContext).toContain("Issue not found");
+	expect(unresolved).not.toHaveProperty("input");
 	// A word that merely looks like an id does not stop a real id later in the subject from resolving.
 	expect(await h.mail(cwd, "send_message", send({ subject: `QUESTION re-run ${BEAD}: which?`, ack_required: true }))).toBeUndefined();
 });
@@ -455,14 +488,15 @@ test("ack_required: the bead resolves in the project_key repo's tracker, not the
 	expect(await h.mail(cwd, "send_message", send({ project_key: recipient, subject: `QUESTION ${BEAD}: which?`, ack_required: true }))).toBeUndefined();
 	expect(h.execs.filter(call => call.command === "br").at(-1)?.options?.cwd).toBe(recipient);
 	const unknown = await h.mail(cwd, "send_message", send({ project_key: recipient, subject: "QUESTION ompkit-zzzz: which?", ack_required: true }));
-	expect(code(unknown)).toBe("AM_ACK_BEAD_UNRESOLVED");
-	expect(unknown?.reason).toContain(`tracker at ${recipient}`);
+	expect(code(unknown)).toBeUndefined();
+	expect(unknown?.additionalContext).toContain("AM_ACK_BEAD_NOTICE");
+	expect(unknown?.additionalContext).toContain(`tracker at ${recipient}`);
 	// A project_key with no tracker on this host keeps the cwd fallback.
 	expect(await h.mail(cwd, "send_message", send({ subject: `QUESTION ${BEAD}: which?`, ack_required: true }))).toBeUndefined();
 	expect(h.execs.filter(call => call.command === "br").at(-1)?.options?.cwd).toBe(cwd);
 });
 
-test("ack_required: an unreadable tracker fails closed (br missing, br throwing, br garbage)", async () => {
+test("ack_required: an unreadable tracker is sent with a notice, not failed closed", async () => {
 	const cwd = fleetRepo();
 	const subject = `BLOCKED ${BEAD}: need a decision`;
 	const down: Responder[] = [
@@ -470,38 +504,56 @@ test("ack_required: an unreadable tracker fails closed (br missing, br throwing,
 		() => { throw new Error("spawn br ENOENT"); },
 		() => ({ stdout: "not json", stderr: "", code: 0 }),
 	];
-	// A `br` outage only: the roster reads stay up, so status mail still flows and asks still fail closed.
+	// A `br` outage only: the roster reads stay up, so status mail still flows and asks are sent
+	// with ack kept and a notice asking for the bead id next time.
 	const mailUp = fleetRespond(defaultRosters());
 	for (const respond of down) {
 		const brOutage: Responder = call => call.command === "am" ? mailUp(call) : call.command === "git" ? brKnows()(call) : respond(call);
 		const h = await createHost({}, brOutage);
-		expect(code(await h.mail(cwd, "send_message", send({ subject, ack_required: true })))).toBe("AM_ACK_BEAD_UNRESOLVED");
+		const admitted = await h.mail(cwd, "send_message", send({ subject, ack_required: true }));
+		expect(code(admitted)).toBeUndefined();
+		expect(admitted?.additionalContext).toContain("AM_ACK_BEAD_NOTICE");
 		// Without ack_required the tracker is never asked, so an outage does not stop status mail.
 		expect(await h.mail(cwd, "send_message", send({ subject: `DONE ${BEAD}: x` }))).toBeUndefined();
 	}
 });
 
-test("ack_required: a reply cannot assert it (no subject to check); omitted or false passes", async () => {
+test("ack_required: a reply drops it with a notice (no subject to check); omitted or false passes", async () => {
 	const h = await createHost();
 	const cwd = fleetRepo();
 	expect(await h.mail(cwd, "reply_message", reply())).toBeUndefined();
 	expect(await h.mail(cwd, "reply_message", reply({ ack_required: false }))).toBeUndefined();
-	expect(code(await h.mail(cwd, "reply_message", reply({ ack_required: true })))).toBe("AM_ACK_REPLY");
+	// MAILGUARDSLIM1: ack_required is dropped by rewriteArgs and the reply proceeds with a notice.
+	const admitted = await h.mail(cwd, "reply_message", reply({ ack_required: true }));
+	expect(code(admitted)).toBeUndefined();
+	expect(admitted?.additionalContext).toContain("AM_ACK_NOTICE");
+	expect(stampedArgs(admitted)).not.toHaveProperty("ack_required");
 });
 
 // --- shape ---------------------------------------------------------------------------------------
 
-test("body: the cap is inclusive; one character over is refused and points at a bead comment", async () => {
+test("body: the cap is inclusive; over the cap is sent with a notice up to four times the cap", async () => {
 	const h = await createHost();
 	const cwd = fleetRepo();
 	expect(AM_BODY_CAP).toBe(1800);
-	const prefix = `commit ${PUBLISHED_TEST_SHA}\n`;
-	expect(await h.mail(cwd, "send_message", send({ body_md: prefix + "x".repeat(AM_BODY_CAP - prefix.length) }))).toBeUndefined();
-	const refused = await h.mail(cwd, "send_message", send({ body_md: "x".repeat(AM_BODY_CAP + 1) }));
-	expect(code(refused)).toBe("AM_BODY_TOO_LONG");
-	expect(refused?.reason).toContain("bead comment");
+	// A PROGRESS subject isolates the body finding: DONE would add its citation check after the notice.
+	const progress = (body_md: string) => send({ subject: `PROGRESS ${BEAD}: x`, body_md });
+	expect(await h.mail(cwd, "send_message", progress("x".repeat(AM_BODY_CAP)))).toBeUndefined();
+	// MAILGUARDSLIM1: over the cap is sent with a notice; the secret scan still runs after it.
+	const noticed = await h.mail(cwd, "send_message", progress("x".repeat(AM_BODY_CAP + 1)));
+	expect(code(noticed)).toBeUndefined();
+	expect(noticed?.additionalContext).toContain("AM_BODY_NOTICE");
+	expect(h.notices.at(-1)).toMatchObject({ gate: "AM_BODY_NOTICE", kind: "notice" });
+	expect((await h.mail(cwd, "send_message", progress("x".repeat(AM_BODY_NOTICE_CAP))))?.additionalContext).toContain("AM_BODY_NOTICE");
+	const kept = await h.mail(cwd, "send_message", progress("x".repeat(AM_BODY_NOTICE_CAP + 1)));
+	expect(code(kept)).toBe("AM_BODY_TOO_LONG");
+	expect(kept?.reason).toContain("bead comment");
+	// A DONE mail with a cited over-cap body is sent with the same notice.
+	const done = await h.mail(cwd, "send_message", send({ body_md: `commit ${PUBLISHED_TEST_SHA}\n` + "x".repeat(AM_BODY_CAP) }));
+	expect(code(done)).toBeUndefined();
+	expect(done?.additionalContext).toContain("AM_BODY_NOTICE");
 	expect(await h.mail(cwd, "reply_message", reply({ body_md: "x".repeat(AM_BODY_CAP) }))).toBeUndefined();
-	expect(code(await h.mail(cwd, "reply_message", reply({ body_md: "x".repeat(AM_BODY_CAP + 1) })))).toBe("AM_BODY_TOO_LONG");
+	expect((await h.mail(cwd, "reply_message", reply({ body_md: "x".repeat(AM_BODY_CAP + 1) })))?.additionalContext).toContain("AM_BODY_NOTICE");
 	expect(code(await h.mail(cwd, "send_message", send({ body_md: undefined })))).toBe("AM_ARGS_UNREADABLE");
 });
 
@@ -551,17 +603,22 @@ test("reads: bulk read tools are refused; targeted reads and acknowledgements pa
 	}
 });
 
-test("reads: one fetch_inbox per 60 s per seat; a refused call does not restart the window", async () => {
+test("reads: one fetch_inbox per 60 s per seat; over-frequent fetches are admitted with a notice", async () => {
 	let clock = 1_000_000;
 	const h = await createHost({ now: () => clock });
 	const cwd = fleetRepo();
 	const fetch = { project_key: "/abs/path/backend", agent_name: "PlumRaven", limit: 1, include_bodies: true, mark_read: false };
 	expect(await h.mail(cwd, "fetch_inbox", fetch)).toBeUndefined();
+	// MAILGUARDSLIM1: admitted with a notice that wakes deliver mail; the window slides on every
+	// admitted fetch, noticed or not.
 	clock += AM_INBOX_INTERVAL_MS / 2;
-	expect(code(await h.mail(cwd, "fetch_inbox", fetch))).toBe("AM_INBOX_RATE");
-	clock += AM_INBOX_INTERVAL_MS / 2 - 1;
-	expect(code(await h.mail(cwd, "fetch_inbox", fetch))).toBe("AM_INBOX_RATE");
-	clock += 1;
+	const first = await h.mail(cwd, "fetch_inbox", fetch);
+	expect(code(first)).toBeUndefined();
+	expect(first?.additionalContext).toContain("AM_INBOX_NOTICE");
+	expect(h.notices.at(-1)).toMatchObject({ gate: "AM_INBOX_NOTICE", kind: "notice", act: "fetch_inbox" });
+	clock += AM_INBOX_INTERVAL_MS / 2;
+	expect((await h.mail(cwd, "fetch_inbox", fetch))?.additionalContext).toContain("AM_INBOX_NOTICE");
+	clock += AM_INBOX_INTERVAL_MS;
 	expect(await h.mail(cwd, "fetch_inbox", fetch)).toBeUndefined();
 	// Another seat (another extension instance) has its own window.
 	expect(await (await createHost({ now: () => clock })).mail(cwd, "fetch_inbox", fetch)).toBeUndefined();
@@ -689,7 +746,11 @@ test("warnings: project ambiguity cannot bypass security, authentication or wake
 	const host = await createHost({ env }, respond);
 	const cwd = fleetRepo();
 	const target = { project_key: OMPKIT, to: ["IcyBarn"], cc: [] };
-	expect(code(await host.mail(cwd, "send_message", send({ ...target, subject: "untyped update" })))).toBe("AM_SUBJECT_VOCAB");
+	// MAILGUARDSLIM1: the untyped subject is sent with a notice; the ambiguity warning still rides along.
+	const untyped = await host.mail(cwd, "send_message", send({ ...target, subject: "untyped update" }));
+	expect(code(untyped)).toBeUndefined();
+	expect(untyped?.additionalContext).toContain("AM_SUBJECT_NOTICE");
+	expect(untyped?.additionalContext).toContain("AM_PROJECT_AMBIGUOUS");
 	const secret = await host.mail(cwd, "send_message", send({ ...target, body_md: `run: export ${secretName}=${secretValue}` }));
 	expect(code(secret)).toBe("AM_BODY_SECRET");
 	expect(JSON.stringify(secret)).not.toContain(secretValue);
@@ -909,13 +970,20 @@ test("wake: control, a repo that did not opt into the fleet plans no wake", asyn
 	expect(wake.before).toHaveLength(0);
 });
 
-test.each(["register_agent", "macro_start_session"])("MAILWAKE1.2 refuses unknown %s arguments before registration", async tool => {
+test.each(["register_agent", "macro_start_session"])("MAILWAKE1.2 strips unknown %s arguments with a notice and registers without them", async tool => {
 	const h = await createHost();
 	const cwd = fleetRepo();
 	const args = tool === "register_agent"
 		? { project_key: BACKEND, program: "omp", model: "test", name: "PlumRaven", unexpected_registration_key: true }
 		: { human_key: BACKEND, program: "omp", model: "test", agent_name: "PlumRaven", unexpected_registration_key: true };
-	expect(code(await h.mail(cwd, tool, args))).toBe("AM_REGISTRATION_SCHEMA");
+	// MAILGUARDSLIM1: unknown arguments are stripped by rewriteArgs and the call proceeds with a notice.
+	const admitted = await h.mail(cwd, tool, args);
+	expect(code(admitted)).toBeUndefined();
+	expect(admitted?.additionalContext).toContain("AM_REGISTRATION_NOTICE");
+	expect(h.notices.at(-1)).toMatchObject({ gate: "AM_REGISTRATION_NOTICE", kind: "notice" });
+	const content = stampedArgs(admitted);
+	expect(content).not.toHaveProperty("unexpected_registration_key");
+	expect(content).toMatchObject({ pane_id: "%9" });
 	expect(h.execs).toEqual([]);
 });
 
@@ -1213,4 +1281,208 @@ test("MAILBIND1 a project where the pane's name is not registered stays IDENTITY
 	expect(code(refused)).toBe("IDENTITY_UNBOUND");
 	expect(refused?.reason).toContain(`its pane identity names PeachLeopard, who is not registered in that project`);
 	expect(refused?.reason).toContain(`Run register_agent (project_key ${seat.unregistered}, name PeachLeopard, pane_id tern:91)`);
+});
+
+// --- MAILGUARDSLIM1 (ompkit-1ra0d.143): keep the hazard refusals, demote or complete the rest ------------
+
+const childAgent = { kind: "sub", id: "child-99", parentId: "parent-1" } as const;
+
+/** The rewritten bash command from a guard verdict, or "" when the guard returned no input patch. */
+function commandOf(result: FlywheelToolCallResult | undefined): string {
+	if (typeof result !== "object" || result === null || !("input" in result)) return "";
+	const input: unknown = result.input;
+	if (typeof input !== "object" || input === null || !("command" in input)) return "";
+	const command: unknown = input.command;
+	return typeof command === "string" ? command : "";
+}
+
+test("MAILGUARDSLIM1 [a] a child's reservation is admitted under its parent seat's name with one notice", async () => {
+	const h = await createHost({ agent: { ...childAgent } });
+	const cwd = fleetRepo();
+	// Planted negative: the old guard refused this call and advised register_agent (a second
+	// refusal); the new guard admits it under the seat's name with exactly one notice.
+	for (const [tool, args] of [
+		["file_reservation_paths", reserveArgs({ agent_name: "child-99" })],
+		["renew_file_reservations", renewArgs({ agent_name: "child-99" })],
+		["release_file_reservations", releaseArgs({ agent_name: "child-99" })],
+		["macro_file_reservation_cycle", reservationCycleArgs({ agent_name: "child-99" })],
+	] as const) {
+		const admitted = await h.mail(cwd, tool, args);
+		expect(code(admitted)).toBeUndefined();
+		expect(admitted?.additionalContext).toContain("AM_CHILD_RESERVATION_NOTICE");
+		expect(admitted?.additionalContext).not.toContain("register_agent");
+		expect(stampedArgs(admitted)).toMatchObject({ agent_name: "PlumRaven" });
+		expect(h.notices.at(-1)).toMatchObject({ gate: "AM_CHILD_RESERVATION_NOTICE", kind: "notice", act: tool });
+	}
+	// A child that already names the seat is admitted silently: nothing to rewrite.
+	expect(await h.mail(cwd, "file_reservation_paths", reserveArgs())).toBeUndefined();
+});
+
+test("MAILGUARDSLIM1 [a] a child's shell reservation is rewritten to the seat and admitted", async () => {
+	const h = await createHost({ agent: { ...childAgent } });
+	const cwd = fleetRepo();
+	const admitted = await h.call({ toolName: "bash", input: { command: `am file_reservations reserve ${cwd} child-99 .beads/issues.jsonl --exclusive` } }, cwd);
+	expect(admitted?.block).not.toBe(true);
+	expect(commandOf(admitted)).toContain("PlumRaven");
+	expect(commandOf(admitted)).not.toContain("child-99");
+	expect(admitted?.additionalContext).toContain("AM_CHILD_RESERVATION_NOTICE");
+	// Quoted paths, chained calls and the other verbs rewrite byte-identically except the agent token.
+	const chained = await h.call({ toolName: "bash", input: { command: `am file_reservations renew ${cwd} child-99 --extend-seconds 60 && am file_reservations release ${cwd} child-99 --ids 7` } }, cwd);
+	expect(commandOf(chained)).toBe(`am file_reservations renew ${cwd} PlumRaven --extend-seconds 60 && am file_reservations release ${cwd} PlumRaven --ids 7`);
+	const quoted = await h.call({ toolName: "bash", input: { command: `am file_reservations reserve ${cwd} child-99 "my dir/file.ts" --reason 'a quoted reason'` } }, cwd);
+	expect(commandOf(quoted)).toBe(`am file_reservations reserve ${cwd} PlumRaven "my dir/file.ts" --reason 'a quoted reason'`);
+	// Already under the seat, and pure reads, pass through untouched.
+	expect(await h.call({ toolName: "bash", input: { command: `am file_reservations reserve ${cwd} PlumRaven paths --exclusive` } }, cwd)).toBeUndefined();
+	expect(await h.call({ toolName: "bash", input: { command: "am agents list -p /abs/path/backend --json" } }, cwd)).toBeUndefined();
+});
+
+test("MAILGUARDSLIM1 [a] an unrecognised shell flag is never guessed: the call is left unchanged with a notice", async () => {
+	const h = await createHost({ agent: { ...childAgent } });
+	const cwd = fleetRepo();
+	// Reviewer case: `--agent-name Foo` may carry a value, so PROJ is not provably the project and
+	// AGENTX is not provably the agent. The command runs unchanged with a notice saying which call.
+	const raw = `am file_reservations reserve --agent-name Foo PROJ AGENTX --exclusive`;
+	const left = await h.call({ toolName: "bash", input: { command: raw } }, cwd);
+	expect(left?.block).not.toBe(true);
+	expect(commandOf(left)).toBe("");
+	expect(left?.additionalContext).toContain("AM_CHILD_RESERVATION_NOTICE");
+	expect(left?.additionalContext).toContain("reserve");
+	expect(left?.additionalContext).toContain("left unchanged");
+	expect(left?.additionalContext).toContain("reserve under the parent seat's name PlumRaven instead");
+	expect(h.notices.at(-1)).toMatchObject({ gate: "AM_CHILD_RESERVATION_NOTICE", kind: "notice", act: "bash" });
+	// A bare `--` ends flag parsing: everything after is positional, so the rewrite applies.
+	const ended = await h.call({ toolName: "bash", input: { command: `am file_reservations reserve -- ${cwd} child-99 paths` } }, cwd);
+	expect(commandOf(ended)).toBe(`am file_reservations reserve -- ${cwd} PlumRaven paths`);
+	expect(ended?.additionalContext).toContain("admitted under the parent seat's name PlumRaven");
+	// A mixed chain names which call was rewritten and which was left unchanged.
+	const mixed = await h.call({ toolName: "bash", input: { command: `am file_reservations reserve ${cwd} child-99 x && am file_reservations release --agent-name Foo P A` } }, cwd);
+	expect(commandOf(mixed)).toBe(`am file_reservations reserve ${cwd} PlumRaven x && am file_reservations release --agent-name Foo P A`);
+	expect(mixed?.additionalContext).toContain("reserve");
+	expect(mixed?.additionalContext).toContain("release");
+	expect(mixed?.additionalContext).toContain("left unchanged");
+});
+
+test("MAILGUARDSLIM1 [a] redirects, newlines and non-head am are handled without guessing", async () => {
+	const h = await createHost({ agent: { ...childAgent } });
+	const cwd = fleetRepo();
+	// Planted negative vs the pre-fix walker: a redirect target counted as a positional, a `\n`
+	// call was folded into the previous one, and `echo am ...` was rewritten.
+	const redirected = await h.call({ toolName: "bash", input: { command: `am file_reservations reserve > /tmp/out ${cwd} child-99` } }, cwd);
+	expect(redirected?.block).not.toBe(true);
+	expect(commandOf(redirected)).toBe("");
+	expect(redirected?.additionalContext).toContain("AM_CHILD_RESERVATION_NOTICE");
+	expect(redirected?.additionalContext).toContain("reserve");
+	expect(redirected?.additionalContext).toContain("left unchanged");
+	const fdDup = await h.call({ toolName: "bash", input: { command: `am file_reservations release ${cwd} child-99 --ids 3 2>/tmp/err` } }, cwd);
+	expect(commandOf(fdDup)).toBe(`am file_reservations release ${cwd} PlumRaven --ids 3 2>/tmp/err`);
+	// A redirect after the agent is identified does not disturb the rewrite.
+	const trailing = await h.call({ toolName: "bash", input: { command: `am file_reservations reserve ${cwd} child-99 x > /tmp/out` } }, cwd);
+	expect(commandOf(trailing)).toBe(`am file_reservations reserve ${cwd} PlumRaven x > /tmp/out`);
+	// Newline-separated calls are judged as two calls: both rewritten, both named.
+	const twoLines = await h.call({ toolName: "bash", input: { command: `am file_reservations reserve ${cwd} child-99 x\nam file_reservations release ${cwd} child-99 --ids 3` } }, cwd);
+	expect(commandOf(twoLines)).toBe(`am file_reservations reserve ${cwd} PlumRaven x\nam file_reservations release ${cwd} PlumRaven --ids 3`);
+	expect(twoLines?.additionalContext).toContain("reserve");
+	expect(twoLines?.additionalContext).toContain("release");
+	// `am` as an argument is never a command head; VAR=, sudo and env prefixes still are.
+	expect(await h.call({ toolName: "bash", input: { command: "echo am file_reservations reserve /proj child-99" } }, cwd)).toBeUndefined();
+	const sudoed = await h.call({ toolName: "bash", input: { command: `sudo am file_reservations reserve ${cwd} child-99 x` } }, cwd);
+	expect(commandOf(sudoed)).toContain("PlumRaven");
+	const enved = await h.call({ toolName: "bash", input: { command: `FOO=1 env BAR=2 am file_reservations reserve ${cwd} child-99 x` } }, cwd);
+	expect(commandOf(enved)).toContain("PlumRaven");
+});
+
+test("MAILGUARDSLIM1 [a] a child's register and send calls are refused once with no further command to run", async () => {
+	const h = await createHost({ agent: { ...childAgent } });
+	const cwd = fleetRepo();
+	for (const [tool, args] of [
+		["register_agent", { project_key: BACKEND, program: "omp", model: "test", name: "PlumRaven" }],
+		["macro_start_session", { human_key: BACKEND, program: "omp", model: "test", agent_name: "PlumRaven" }],
+		["send_message", send()],
+		["reply_message", reply()],
+	] as const) {
+		const refused = await h.mail(cwd, tool, args);
+		expect(code(refused)).toBe("AM_IDENTITY_MISMATCH");
+		expect(refused?.block).toBe(true);
+		expect(refused?.reason).toContain("native register and mail calls are not admitted");
+		expect(refused?.reason).toContain("Report to the parent instead");
+		// No register/send advice that leads to a second refusal.
+		expect(refused?.reason).not.toMatch(/run register_agent|run `|send mail from|macro_start_session for/);
+	}
+});
+
+test("MAILGUARDSLIM1-notice [b] a notice never skips the secret scan", async () => {
+	const h = await createHost();
+	const cwd = fleetRepo();
+	const leak = (body_md: string) => body_md.replace("CREDENTIAL", `${secretName}=${secretValue}`);
+	// Planted negative: a demoted finding that returned early would let the secret through.
+	const shapes: Array<[string, Record<string, unknown>]> = [
+		["free-text subject", send({ subject: "a status update", body_md: leak("note CREDENTIAL here") })],
+		["over-cap body", send({ subject: `PROGRESS ${BEAD}: x`, body_md: `commit ${PUBLISHED_TEST_SHA}\n` + leak("x".repeat(AM_BODY_CAP) + " CREDENTIAL") })],
+		["ack on status", send({ subject: `DONE ${BEAD}: x`, ack_required: true, body_md: leak("done CREDENTIAL") })],
+		["ack on reply", reply({ ack_required: true, body_md: leak("looping CREDENTIAL") })],
+		["unresolvable ask", send({ subject: "QUESTION ompkit-zzzz: which?", ack_required: true, body_md: leak("ask CREDENTIAL") })],
+	];
+	for (const [shape, args] of shapes) {
+		const tool = shape === "ack on reply" ? "reply_message" : "send_message";
+		const refused = await h.mail(cwd, tool, args);
+		expect(code(refused)).toBe("AM_BODY_SECRET");
+		expect(JSON.stringify(refused)).not.toContain(secretValue);
+	}
+});
+
+test("MAILGUARDSLIM1-notice [b] over-frequent fetch and stripped registration admit with kind-notice rows", async () => {
+	let clock = 2_000_000;
+	const h = await createHost({ now: () => clock });
+	const cwd = fleetRepo();
+	const fetch = { project_key: "/abs/path/backend", agent_name: "PlumRaven", limit: 1, include_bodies: true, mark_read: false };
+	expect(await h.mail(cwd, "fetch_inbox", fetch)).toBeUndefined();
+	clock += 1;
+	const noticed = await h.mail(cwd, "fetch_inbox", fetch);
+	expect(code(noticed)).toBeUndefined();
+	expect(noticed?.additionalContext).toContain("AM_INBOX_NOTICE");
+	expect(h.notices.at(-1)).toMatchObject({ gate: "AM_INBOX_NOTICE", kind: "notice" });
+	const registered = await h.mail(cwd, "register_agent",
+		{ project_key: BACKEND, program: "omp", model: "test", name: "PlumRaven", unexpected_registration_key: true });
+	expect(code(registered)).toBeUndefined();
+	expect(registered?.additionalContext).toContain("AM_REGISTRATION_NOTICE");
+	expect(stampedArgs(registered)).not.toHaveProperty("unexpected_registration_key");
+	expect(h.notices.at(-1)).toMatchObject({ gate: "AM_REGISTRATION_NOTICE", kind: "notice" });
+	expect(h.notices.every(row => row.kind === "notice")).toBe(true);
+});
+
+test("MAILGUARDSLIM1-kept [c] sending, reserving or registering as another seat still refuses", async () => {
+	const h = await createHost();
+	const cwd = fleetRepo();
+	// Planted negative: sending as another seat would pass if the identity check were demoted.
+	expect(code(await h.mail(cwd, "send_message", send({ sender_name: "BlueLake" })))).toBe("AM_IDENTITY_MISMATCH");
+	expect(code(await h.mail(cwd, "reply_message", reply({ sender_name: "BlueLake" })))).toBe("AM_IDENTITY_MISMATCH");
+	expect(code(await h.mail(cwd, "file_reservation_paths", reserveArgs({ agent_name: "BlueLake" })))).toBe("AM_IDENTITY_MISMATCH");
+	expect(code(await h.mail(cwd, "register_agent", { project_key: BACKEND, program: "omp", model: "test", name: "BlueLake" }))).toBe("AM_IDENTITY_MISMATCH");
+});
+
+test("MAILGUARDSLIM1-kept [c] a typed inner refusal surfaces under its own code, never AM_GUARD_FAILED", async () => {
+	const cwd = fleetRepo();
+	// An inner AM_* failure (here from the wake) surfaces under its own code.
+	const typed = await createHost({ mailWake: { beforeSend: async () => { throw new Error("AM_ROSTER_UNAVAILABLE: wake ledger down"); }, afterSend: async e => e } });
+	expect(code(await typed.mail(cwd, "send_message", send()))).toBe("AM_ROSTER_UNAVAILABLE");
+	// Only a genuine failure keeps AM_GUARD_FAILED.
+	const genuine = await createHost({ mailWake: { beforeSend: async () => { throw new Error("wake exploded"); }, afterSend: async e => e } });
+	const failed = await genuine.mail(cwd, "send_message", send());
+	expect(code(failed)).toBe("AM_GUARD_FAILED");
+	expect(failed?.reason).toContain("wake exploded");
+});
+
+test("MAILGUARDSLIM1-kept [c] every kept hazard refusal still refuses under its own code", async () => {
+	const cwd = fleetRepo();
+	const h = await createHost();
+	expect(code(await h.mail(cwd, "mark_all_read", { project_key: BACKEND, agent_name: "PlumRaven" }))).toBe("AM_BULK_READ");
+	expect(code(await h.mail(cwd, "send_message", send({ to: ["NobodyHere"], cc: [] })))).toBe("AM_PHANTOM_REFUSED");
+	expect(code(await h.mail(cwd, "send_message", send({ body_md: "Done; no commit cited." })))).toBe("AM_DONE_NOT_PUBLISHED");
+	expect(code(await h.mail(cwd, "send_message", send({ project_key: "/abs/path/missing", to: ["BlueLake"], cc: [] })))).toBe("AM_ROSTER_UNAVAILABLE");
+	expect(code(await h.call({ toolName: "write", input: { path: `${MAIL}send_message`, content: "{not json" } }, cwd))).toBe("AM_ARGS_UNREADABLE");
+	expect(code(await h.mail(cwd, "send_message", send(), null))).toBe("AM_CALL_ID_REQUIRED");
+	expect(code(await (await createHost({ secretRulePath: join(base, "no-such-rule.md") })).mail(cwd, "send_message", send()))).toBe("AM_SCANNER_UNAVAILABLE");
+	const anonymous = await createHost({ env: {}, home: freshDir(base, "mailguard-anon-") });
+	expect(code(await anonymous.mail(cwd, "send_message", send({ sender_name: "RedCat" })))).toBe("IDENTITY_UNBOUND");
+	expect(code(await h.mail(fleetRepo(), "send_message", send({ sender_name: undefined })))).toBe("AM_IDENTITY_MISMATCH");
 });

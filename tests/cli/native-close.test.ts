@@ -31,40 +31,55 @@ test("reservations: different spawn-minted children retain distinct server names
 	expect(() => nativeReservationIdentity(one, "PeachLeopard")).toThrow("AM_IDENTITY_MISMATCH");
 	expect(() => nativeReservationIdentity(two, one.agent!.id)).toThrow("AM_IDENTITY_MISMATCH");
 });
-
-test("reservations guard: inherited-parent release and unregistered child holds are refused before server acts", async () => {
+/** The JSON arguments a guard input-revision runs with (write-form content), or undefined. */
+function revisedArgs(result: unknown): Record<string, unknown> | undefined {
+	if (typeof result !== "object" || result === null || !("input" in result)) return undefined;
+	const input: unknown = result.input;
+	if (typeof input !== "object" || input === null || !("content" in input) || typeof input.content !== "string") return undefined;
+	let parsed: unknown;
+	try { parsed = JSON.parse(input.content); } catch { return undefined; }
+	// typeof-object is the boundary invariant for the args bag (same convention as stampedArgs).
+	return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
+}
+test("reservations guard: a child's reservation is rewritten to the parent seat and admitted", async () => {
 	const { child } = contexts();
+	const notices: Array<{ gate: string; kind: string }> = [];
 	let handler: (event: unknown, ctx: NativeContext) => Promise<unknown>;
 	await kitAgentMailGuard({
 		on: ((event: string, fn: typeof handler) => { if (event === "tool_call") handler = fn; }) as never,
 		exec: async () => ({ code: 0, stdout: JSON.stringify([]), stderr: "" }),
-	}, { env: { AGENT_NAME: "PeachLeopard" }, home: base });
+	}, { env: { AGENT_NAME: "PeachLeopard" }, home: base, recordEvent: async row => { notices.push(row); return { ok: true as const, path: "test-ledger" }; } });
+	// MAILGUARDSLIM1: the seat's own name passes silently; anything else is rewritten, not refused.
 	const release = { toolName: "write", input: { path: "xd://mcp__mcp_agent_mail_release_file_reservations", content: JSON.stringify({ project_key: repo, agent_name: "PeachLeopard" }) } };
-	const refused = await handler!(release, child) as { block?: boolean; reason?: string };
-	expect(refused.block).toBe(true);
-	expect(refused.reason).toContain("AM_IDENTITY_MISMATCH");
-	const shellRelease = await handler!({ toolName: "bash", input: { command: 'am file_reservations release "$PWD" "$AGENT_NAME"' } }, child) as { block?: boolean; reason?: string };
-	expect(shellRelease.block).toBe(true);
-	expect(shellRelease.reason).toContain("AM_NATIVE_TOOL_REQUIRED");
+	expect(await handler!(release, child)).toBeUndefined();
+	const shellRelease = await handler!({ toolName: "bash", input: { command: 'am file_reservations release "$PWD" "$AGENT_NAME"' } }, child) as { block?: boolean; reason?: string; additionalContext?: string; input?: { command: string } };
+	expect(shellRelease.block).not.toBe(true);
+	expect(shellRelease.additionalContext).toContain("AM_CHILD_RESERVATION_NOTICE");
+	expect(shellRelease.input?.command).toContain("PeachLeopard");
 	const ownHold = { toolName: "write", input: { path: "xd://mcp__mcp_agent_mail_file_reservation_paths", content: JSON.stringify({ project_key: repo, agent_name: child.agent!.id, paths: ["feature.ts"], exclusive: true }) } };
-	const unregistered = await handler!(ownHold, child) as { block?: boolean; reason?: string };
-	expect(unregistered.block).toBe(true);
-	expect(unregistered.reason).toContain("not registered");
-	expect(unregistered.reason).toContain("cannot substitute the parent's registration");
+	const admitted = await handler!(ownHold, child) as { block?: boolean; additionalContext?: string };
+	expect(admitted.block).not.toBe(true);
+	expect(admitted.additionalContext).toContain("AM_CHILD_RESERVATION_NOTICE");
+	expect(revisedArgs(admitted)).toMatchObject({ agent_name: "PeachLeopard" });
+	expect(notices.filter(row => row.gate === "AM_CHILD_RESERVATION_NOTICE").every(row => row.kind === "notice")).toBe(true);
 });
 
-test("reservations guard: registered child names pass unchanged, never rewritten to parent", async () => {
+test("reservations guard: even a registered child name is rewritten to the parent seat", async () => {
 	const one = contexts().child;
 	const two = contexts().child;
 	let handler: (event: unknown, ctx: NativeContext) => Promise<unknown>;
 	await kitAgentMailGuard({
 		on: ((event: string, fn: typeof handler) => { if (event === "tool_call") handler = fn; }) as never,
 		exec: async () => ({ code: 0, stdout: JSON.stringify([one, two].map(ctx => ({ name: ctx.agent!.id, program: "omp", model: "fixture" }))), stderr: "" }),
-	}, { env: { AGENT_NAME: "PeachLeopard" }, home: base });
+	}, { env: { AGENT_NAME: "PeachLeopard" }, home: base, recordEvent: async () => ({ ok: true as const, path: "test-ledger" }) });
+	// MAILGUARDSLIM1: custody is always the seat; the child's own exclusive holds add cover without
+	// renaming the owner, so the guard rewrites instead of passing the child name through.
 	for (const ctx of [one, two]) {
 		const event = { toolName: "write", input: { path: "xd://mcp__mcp_agent_mail_file_reservation_paths", content: JSON.stringify({ project_key: repo, agent_name: ctx.agent!.id, paths: ["feature.ts"], exclusive: true }) } };
-		expect(await handler!(event, ctx)).toBeUndefined();
-		expect(JSON.parse(event.input.content).agent_name).toBe(ctx.agent!.id);
+		const admitted = await handler!(event, ctx) as { block?: boolean; additionalContext?: string };
+		expect(admitted.block).not.toBe(true);
+		expect(admitted.additionalContext).toContain("AM_CHILD_RESERVATION_NOTICE");
+		expect(revisedArgs(admitted)).toMatchObject({ agent_name: "PeachLeopard" });
 	}
 });
 

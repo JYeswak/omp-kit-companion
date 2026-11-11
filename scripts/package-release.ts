@@ -66,6 +66,8 @@ const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/kit-goal-keepalive.ts": "GOAL_KEEPALIVE_BUNDLE_FAILED",
 	"extensions/kit-inbox-wake.ts": "INBOX_WAKE_BUNDLE_FAILED",
 	"extensions/kit-composer-state.ts": "COMPOSER_STATE_BUNDLE_FAILED",
+	// MAILGUARDSLIM1: the guard reuses src/fleet-guard's shell tokenizer and seat identity.
+	"extensions/kit-agent-mail-guard.ts": "AGENT_MAIL_GUARD_BUNDLE_FAILED",
 	"scripts/ttsr-harness.ts": "HARNESS_BUNDLE_FAILED",
 	"scripts/external-live.mjs": "EXTERNAL_LIVE_BUNDLE_FAILED",
 	// REPLAYABLE1: bead_lint's box grammar is src/verify.ts's own; bundled, the installed lint needs no checkout src/.

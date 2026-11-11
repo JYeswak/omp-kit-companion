@@ -294,11 +294,12 @@ function shellCandidates(inspection: ShellInspection, cwd: string): Candidate[] 
 interface Judged { candidate: Candidate; rel: string; probe: string }
 
 /** WRITEOWNCHILD1 (a): custody belongs to the parent seat. The seat's name is the caller's AGENT_NAME
- * (context.agentName, else the process environment); a native child's spawn-minted name never is, so a
- * caller that passes only the child's name falls back to the seat. */
-function seatIdentity(context: WriteOwnContext): string | undefined {
+ * (context.agentName, else the given environment); a native child's spawn-minted name never is, so a
+ * caller that passes only the child's name falls back to the seat. MAILGUARDSLIM1 reuses this for a
+ * child's Agent Mail reservation rewrite: no second seat resolution. */
+export function seatIdentity(context: { agentName?: string; childAgentName?: string }, env: Record<string, string | undefined> = process.env): string | undefined {
 	if (context.agentName !== undefined && context.agentName !== context.childAgentName) return context.agentName;
-	const seat = process.env.AGENT_NAME;
+	const seat = env.AGENT_NAME;
 	return seat !== undefined && seat.trim() !== "" ? seat.trim() : undefined;
 }
 
