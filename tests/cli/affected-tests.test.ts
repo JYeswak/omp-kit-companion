@@ -95,6 +95,54 @@ test("changed tests run themselves; deleted paths and fixture trees select nothi
 	}
 });
 
+test("deleted modules report their tip importers for the changed set", () => {
+	const dir = tree(FILES);
+	try {
+		const run = (changed: string[]) => {
+			const result = runSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", selector, "--root", dir, "--importers", ...changed.flatMap((path) => ["--changed-file", path])], { deadline_s: fixtureDeadlineS(120) });
+			expect(result.rc).toBe(0);
+			return decoder.decode(result.stdout).split("\n").filter(Boolean);
+		};
+		// src/leaf.ts is imported by src/mid.ts (via ./leaf.js) and tests/cli/leaf.test.ts.
+		expect(run(["src/leaf.ts"])).toEqual(["src/mid.ts", "tests/cli/leaf.test.ts"]);
+		// An importer reached through a with-extension specifier counts too.
+		expect(run(["src/mid.ts"])).toEqual(["src/cli.ts"]);
+		// No deletions, no importers.
+		expect(run([])).toEqual([]);
+		expect(run(["docs/guide.md"])).toEqual([]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("deleted shell libs report tip sourcers: quoted, nested, escaped, heredoc, junk", () => {
+	const dir = tree({
+		"scripts/lib.sh": "lib_msg() { printf 'ok'; }\n",
+		"scripts/tool.sh": '#!/bin/sh\n. "$(dirname "$0")/lib.sh"\necho tool\n',
+		"scripts/esc.sh": "#!/bin/sh\nsource my\\ dir/lib.sh\n",
+		"my dir/lib.sh": "#!/bin/sh\n",
+		"scripts/doc.sh": "#!/bin/sh\ncat <<'EOF'\nsource scripts/lib.sh\nEOF\n",
+		"scripts/junk.sh": "#!/bin/sh\necho foo.source bar\na.b; echo hi\n",
+		"scripts/exec.sh": '#!/bin/sh\nsh "$ROOT/scripts/lib.sh"\n',
+		"scripts/broken.sh": '#!/bin/sh\nsource "never closed\n',
+	});
+	try {
+		const run = (changed: string[]) => {
+			const result = runSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", selector, "--root", dir, "--importers", ...changed.flatMap((path) => ["--changed-file", path])], { deadline_s: fixtureDeadlineS(120) });
+			expect(result.rc).toBe(0);
+			return decoder.decode(result.stdout).split("\n").filter(Boolean);
+		};
+		// Nested dirname quotes resolve; a heredoc body counts conservatively.
+		expect(run(["scripts/lib.sh"])).toEqual(["scripts/doc.sh", "scripts/tool.sh"]);
+		// Backslash-escaped blanks resolve to the spaced path.
+		expect(run(["my dir/lib.sh"])).toEqual(["scripts/esc.sh"]);
+		// Mid-word dots and execution (not sourcing) select nothing.
+		expect(run(["scripts/tool.sh"])).toEqual([]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("mutant: without transitive import edges, a src change misses the test that reaches it through cli.ts", () => {
 	const dir = tree(FILES);
 	try {

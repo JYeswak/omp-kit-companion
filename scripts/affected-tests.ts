@@ -5,6 +5,9 @@
 //            [--status-out FILE]
 //        bun scripts/affected-tests.ts --plan --budget-secs N --workers K [--timings FILE] [--deferred-out FILE]
 //            [--changed-file PATH ...] -- TEST...   (wall-budget plan; see planBudget)
+//        bun scripts/affected-tests.ts --root DIR --importers [--changed-file PATH ...]
+//            (tip files importing the deleted changed paths; the gate adds them to the
+//            changed set before selection)
 //
 // DIR is the exact-commit export the gate judges (no .git needed). Test files are bun suites
 // (*.test.ts and kin), shell suites (*.test.sh) and python suites (*_test.py, test_*.py). A test file
@@ -187,6 +190,124 @@ export function declaredEmbeds(text: string, rel: string): Record<string, string
 	return parsed as Record<string, string[]>;
 }
 
+/**
+ * Tip files that import a deleted path: for each deleted repo path, every kept
+ * source whose import/export/require/import() specifier resolves to it (relative
+ * specifiers, with or without an extension; TypeScript "./x.js" means ./x.ts), or
+ * whose Python import names its module stem from the same directory (or scripts/),
+ * or whose shell `source`/`. ` operand resolves to it (relative, repo-relative, or
+ * `$(dirname "$0")`-anchored, with or without the .sh extension).
+ * Resolution reuses resolveSpecifier/pythonImports against the tip tree plus the
+ * deleted paths, so only specifiers that would have reached the file count. A
+ * deleted module's importers join the changed set before selection, so their
+ * suites run even when the importers themselves are unchanged.
+ *
+ * Out of scope: dynamic/computed imports of a deleted path (variable specifiers,
+ * eval, generated `source` lines). Such an importer's own suite must be selected
+ * some other way: its own change entry, an explicit mapping, or a naming edge.
+ */
+export function findImportersOfDeleted(root: string, deleted: readonly string[]): string[] {
+	const gone = new Set(deleted.filter((path) => path !== "" && !path.startsWith("/")));
+	if (gone.size === 0) return [];
+	const all = walk(root);
+	const augmented = new Set([...all, ...gone]);
+	const strippedSh = new Map<string, string>();
+	for (const path of gone) {
+		if (path.endsWith(".sh")) strippedSh.set(path.slice(0, -".sh".length), path);
+	}
+	const found = new Set<string>();
+	for (const rel of all) {
+		const text = readFileSync(join(root, rel), "utf8");
+		if (SOURCE_EXT.some((ext) => rel.endsWith(ext))) {
+			let imports: { path: string }[] = [];
+			try { imports = new Bun.Transpiler({ loader: loaderFor(rel) }).scanImports(text); }
+			catch { /* An unparsable source contributes no import edges. */ }
+			for (const item of imports) {
+				const target = resolveSpecifier(augmented, rel, item.path);
+				if (target !== null && gone.has(target)) { found.add(rel); break; }
+			}
+		} else if (rel.endsWith(".py")) {
+			for (const module of pythonImports(text)) {
+				if ([join(dirname(rel), `${module}.py`), `scripts/${module}.py`].some((target) => gone.has(target))) {
+					found.add(rel);
+					break;
+				}
+			}
+		} else if (rel.endsWith(".sh") && strippedSh.size > 0) {
+			for (const match of text.matchAll(SH_SOURCE_RE)) {
+				const word = firstShellWord(text.slice((match.index ?? 0) + match[0].length));
+				if (word === null) continue;
+				const target = resolveShOperand(rel, word);
+				const stripped = target === null ? null : target.endsWith(".sh") ? target.slice(0, -".sh".length) : target;
+				if (stripped !== null && strippedSh.has(stripped)) { found.add(rel); break; }
+			}
+		}
+	}
+	return [...found].sort();
+}
+
+// A shell `source`/`. ` command: line-start or after a command separator, with a
+// space following, so mid-word `.` and bare `source` names never match. The
+// operand is read by firstShellWord, which understands quotes and nesting that
+// a flat pattern cannot (notably `"$(dirname "$0")/..."`). Heredoc bodies and
+// other inert text are read as code: a conservative over-selection that can only
+// add suites, never silently drop a real importer.
+const SH_SOURCE_RE = /(?:^|[;|&]|\bthen\b|\bdo\b)[ \t]*(?:source|\.)(?=[ \t])/gm;
+
+// First shell word of the text after a command: quotes pair (with `$( )`
+// nesting tracked, so inner quotes like `"$(dirname "$0")/..."` do not toggle
+// the outer state), backslash escapes outside single quotes, and blanks, newlines,
+// `;`/`#` end the word only when unquoted. Adjacent-quote concatenation and line
+// continuations are outside the pinned subset: unbalanced state fails visibly
+// with null and the line contributes no importer. Linear in the rest length.
+// Tested quoted, escaped, nested, heredoc and prefix-plus-junk inputs.
+function firstShellWord(rest: string): string | null {
+	let i = 0;
+	while (i < rest.length && (rest[i] === " " || rest[i] === "\t")) i++;
+	if (i >= rest.length || rest[i] === "#" || rest[i] === ";") return null;
+	let out = "";
+	let quote: string | null = null;
+	let depth = 0;
+	while (i < rest.length) {
+		const c = rest[i];
+		if (quote === null && (c === " " || c === "\t" || c === "\n" || c === "\r" || c === ";" || c === "#")) break;
+		if (quote !== "'" && c === "\\" && i + 1 < rest.length) {
+			const n = rest[i + 1];
+			if (quote === null || n === "$" || n === "`" || n === '"' || n === "\\" || n === "\n") out += n;
+			else out += c + n;
+			i += 2;
+			continue;
+		}
+		if ((c === '"' || c === "'") && quote === null) { quote = c; out += c; i++; continue; }
+		if (c === quote && depth === 0) { quote = null; out += c; i++; continue; }
+		if (quote !== "'" && c === "$" && rest[i + 1] === "(") { depth++; out += "$("; i += 2; continue; }
+		if (depth > 0 && c === ")") { depth--; out += c; i++; continue; }
+		out += c;
+		i++;
+	}
+	if (quote !== null || depth !== 0) return null;
+	return out === "" ? null : out;
+}
+
+/** A shell `source`/`. ` operand resolved against its file: relative, repo-relative,
+ * or `$(dirname "$0")`-anchored; env-absolute, bare PATH names, and `..` escapes
+ * do not resolve. Returns the repo-relative candidate, or null. */
+function resolveShOperand(fromRel: string, operand: string): string | null {
+	let bare = operand.trim();
+	if (bare.length >= 2 && ((bare.startsWith('"') && bare.endsWith('"')) || (bare.startsWith("'") && bare.endsWith("'")))) {
+		bare = bare.slice(1, -1).trim();
+	}
+	const dirPrefixes = ['$(dirname "$0")/', "$(dirname $0)/", "${0%/*}/"];
+	const anchored = dirPrefixes.find((prefix) => bare.startsWith(prefix));
+	let base: string | null = null;
+	if (anchored !== undefined) base = normalize(join(dirname(fromRel), bare.slice(anchored.length))).split(sep).join("/");
+	else if (bare.startsWith("./") || bare.startsWith("../")) base = normalize(join(dirname(fromRel), bare)).split(sep).join("/");
+	else if (bare.startsWith("/") || bare.startsWith("$") || !bare.includes("/")) return null;
+	else base = bare;
+	if (base.startsWith("../")) return null;
+	return base;
+}
+
 export function selectAffected(root: string, changed: readonly string[]): Selection {
 	const all = walk(root);
 	const files = new Set(all);
@@ -347,11 +468,13 @@ export function planBudget(tests: readonly string[], changed: ReadonlySet<string
 }
 
 const USAGE = "usage: affected-tests.ts --root DIR [--changed-file PATH ...] [--explain] [--order path|distance] [--status-out FILE]\n" +
-	"       affected-tests.ts --plan --budget-secs N --workers K [--timings FILE ...] [--deferred-out FILE] [--changed-file PATH ...] -- TEST...\n";
+	"       affected-tests.ts --plan --budget-secs N --workers K [--timings FILE ...] [--deferred-out FILE] [--changed-file PATH ...] -- TEST...\n" +
+	"       affected-tests.ts --root DIR --importers [--changed-file PATH ...]\n";
 
 function main(argv: readonly string[]): number {
 	let root = "";
 	let explain = false;
+	let importersOnly = false;
 	let order = "path";
 	let plan = false;
 	let budgetSecs = Number.NaN;
@@ -366,6 +489,7 @@ function main(argv: readonly string[]): number {
 		const value = argv[i + 1];
 		if (arg === "--") { i++; break; }
 		if (arg === "--explain") explain = true;
+		else if (arg === "--importers") importersOnly = true;
 		else if (arg === "--plan") plan = true;
 		else if (value === undefined) { process.stderr.write(USAGE); return 2; }
 		else if (arg === "--root") { root = value; i++; }
@@ -400,6 +524,10 @@ function main(argv: readonly string[]): number {
 	if (!root || !existsSync(root) || !statSync(root).isDirectory()) {
 		process.stderr.write(`affected-tests: --root is not a directory: ${root || "(missing)"}\n`);
 		return 2;
+	}
+	if (importersOnly) {
+		for (const importer of findImportersOfDeleted(root, changed.filter((path) => path !== ""))) process.stdout.write(`${importer}\n`);
+		return 0;
 	}
 	let selection: Selection;
 	try { selection = selectAffected(root, changed.filter((path) => path !== "")); }

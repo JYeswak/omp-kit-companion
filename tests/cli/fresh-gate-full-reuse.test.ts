@@ -114,7 +114,7 @@ exec '${python}' "$@"
 
 	const source = readFileSync(gate, "utf8");
 	const probe = join(fx.dir, "fulljudge-probe.sh");
-	writeFileSync(probe, `set -eu\ngate_defer_record=1\nlast_record_tests=0; last_record_files=0\n${gateFunctions(source, ["fail", "run_step", "heavy_step", "print_budget_skip", "select_affected_tests", "test_workers", "run_affected_tests", "changed_code", "apply_ci_only", "record_run", "gate_focused"])}rc=0\nrun_step focused gate_focused || rc=$?\ngate_defer_record=0\nrecord_run "$last_record_tests" "$last_record_files" "$rc"\nexit "$rc"\n`);
+	writeFileSync(probe, `set -eu\ngate_defer_record=1\nlast_record_tests=0; last_record_files=0\n${gateFunctions(source, ["fail", "run_step", "heavy_step", "print_budget_skip", "select_affected_tests", "test_workers", "run_affected_tests", "changed_code", "deleted_code", "expand_changed_with_importers", "apply_ci_only", "record_run", "gate_focused"])}rc=0\nrun_step focused gate_focused || rc=$?\ngate_defer_record=0\nrecord_run "$last_record_tests" "$last_record_files" "$rc"\nexit "$rc"\n`);
 	const gateEnv = { ...process.env, ...fx.env, ROOT: repo, TMPDIR: callerTmp, WORK: fx.dir, FRESH_GATE_LEDGER: "", FRESH_GATE_REPO: repo, COMMIT: commit, ARCHIVE_DIR: archive, SCRIPT_DIR: join(root, "scripts"), CHANGED: "scripts/pysafe.py", FULL_SUITE_VERDICT_CACHE_DIR: cache };
 	const runGate = () => {
 		const result = runSync(["sh", probe], { env: gateEnv, deadline_s: fixtureDeadlineS(120) });

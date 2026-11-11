@@ -133,7 +133,7 @@ test("scratch skip prints NOT JUDGED while other skips keep SKIPPED", () => {
 	}
 });
 
-test("focused selection skips suites and shell files the range deleted, and still runs modified ones", () => {
+test("focused selection skips deleted suites, fails a closed deleted shell entry point, and still runs modified ones", () => {
 	const script = readFileSync(gate, "utf8");
 	const dir = fixture();
 	try {
@@ -149,17 +149,20 @@ test("focused selection skips suites and shell files the range deleted, and stil
 	chmodSync(join(fakeBin, "docker"), 0o755);
 		const probe = join(dir, "focused-probe.sh");
 		// The real selector and gate_focused; only the bun test run is a stand-in that checks its argv exists.
-		writeFileSync(probe, `run_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "test_workers", "changed_code", "apply_ci_only", "record_run", "gate_focused"])}gate_focused\n`);
+		writeFileSync(probe, `run_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "test_workers", "changed_code", "deleted_code", "expand_changed_with_importers", "apply_ci_only", "record_run", "gate_focused"])}gate_focused\n`);
 		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
 			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "", WORK: dir },
 			stdout: "pipe", stderr: "pipe",
 		});
 		const deleted = focused("tests/cli/gone.test.ts\nscripts/gone.sh");
 		const deletedOut = deleted.stdout.toString() + deleted.stderr.toString();
-		expect(deleted.exitCode).toBe(0);
+		// ompkit-1ra0d.66: a deleted shell entry point with no tip importer and
+		// no covering rule fails closed instead of passing untested.
+		expect(deleted.exitCode).toBe(1);
 		expect(deletedOut).not.toContain("missing");
 		expect(deletedOut).toContain("focused: tests/cli/gone.test.ts deleted in range; not run");
 		expect(deletedOut).toContain("focused suites: none selected for changed paths");
+		expect(deletedOut).toContain("FRESH-GATE: REFUSED reason=NO_AFFECTED_TESTS code=scripts/gone.sh:");
 		const mixed = focused("tests/cli/gone.test.ts\ntests/cli/kept.test.ts\nscripts/gone.sh\nscripts/kept.sh");
 		const mixedOut = mixed.stdout.toString() + mixed.stderr.toString();
 		expect(mixed.exitCode).toBe(0);
@@ -189,7 +192,7 @@ test("focused shellcheck refuses an A && B || C guard through the pinned runner"
 		writeFileSync(join(fakeBin, "docker"), "#!/bin/sh\n# fake docker: emulate pinned v0.9.0, which refuses A && B || C (SC2015) where newer builds stay silent.\nif [ \"$1\" = \"image\" ]; then echo \"fake image present\"; exit 0; fi\nif [ \"$1\" = \"pull\" ]; then echo \"fake pull ok\"; exit 0; fi\nif [ \"$1\" = \"run\" ]; then\n  file=\"\"\n  for arg in \"$@\"; do case \"$arg\" in /archive/*) file=\"$arg\" ;; esac; done\n  real=\"$FAKE_ARCHIVE${file#/archive}\"\n  if grep -q '|| {' \"$real\" 2>/dev/null; then echo \"DOCKER-SHELLCHECK $file: SC2015 (info): A && B || C is not if-then-else\" >&2; exit 1; fi\n  echo \"DOCKER-SHELLCHECK $file: clean\"\n  exit 0\nfi\necho \"fake docker: unexpected $*\" >&2; exit 2\n");
 		chmodSync(join(fakeBin, "docker"), 0o755);
 		const probe = join(dir, "focused-probe.sh");
-		writeFileSync(probe, `set -e\nprint_budget_skip() { echo "BUDGET-SKIP"; }\nrun_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "test_workers", "changed_code", "apply_ci_only", "record_run", "gate_focused"])}gate_focused\n`);
+		writeFileSync(probe, `set -e\nprint_budget_skip() { echo "BUDGET-SKIP"; }\nrun_affected_tests() { for f in "$@"; do [ -e "$ARCHIVE_DIR/$f" ] || { echo "bun test: missing $f" >&2; return 1; }; echo "RAN $f"; done; }\n${gateFunctions(script, ["select_affected_tests", "test_workers", "changed_code", "deleted_code", "expand_changed_with_importers", "apply_ci_only", "record_run", "gate_focused"])}gate_focused\n`);
 		const focused = (changed: string) => Bun.spawnSync(["sh", probe], {
 			env: { ...process.env, ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, ARCHIVE_DIR: dir, FAKE_ARCHIVE: dir, SCRIPT_DIR: join(root, "scripts"), CHANGED: changed, FRESH_GATE_LEDGER: "", WORK: dir },
 			stdout: "pipe", stderr: "pipe",

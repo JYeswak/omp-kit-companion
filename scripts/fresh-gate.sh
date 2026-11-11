@@ -41,7 +41,7 @@ fail() {
 }
 
 require_gate_functions() {
-	for name in gate_manifest gate_cli_compile gate_cli_boot gate_harness gate_notes gate_readme gate_focused select_affected_tests run_affected_tests; do
+	for name in gate_manifest gate_cli_compile gate_cli_boot gate_harness gate_notes gate_readme gate_focused select_affected_tests run_affected_tests expand_changed_with_importers; do
 		command -v "$name" >/dev/null 2>&1 || fail "required gate function is missing: $name"
 	done
 }
@@ -564,7 +564,64 @@ changed_code() {
 				[ -e "$ARCHIVE_DIR/$file" ] && printf '%s\n' "$file" ;;
 		esac
 	done
+	# A deleted shell entry point with no tip importer fails closed: nothing at
+	# the tip proves its removal, so it stays in the code set (NO_AFFECTED_TESTS).
+	for file in ${UNCOVERED_DELETED_SH:-}; do
+		[ -n "$file" ] && printf '%s\n' "$file"
+	done
 	return 0
+}
+
+# Product code the pushed range deleted: the changed_code set absent at the tip.
+# A deleted file cannot have a covering test, so the gate never demands one for
+# it; the expansion below adds tip files that import it back to the changed set.
+deleted_code() {
+	for file in $CHANGED; do
+		case "$file" in
+			tests/*) ;;
+			*.ts|*.tsx|*.mts|*.cts|*.js|*.mjs|*.cjs|*.sh|*.py)
+				[ -e "$ARCHIVE_DIR/$file" ] || printf '%s\n' "$file" ;;
+		esac
+	done
+	return 0
+}
+
+# expand_changed_with_importers: a deleted module's tip importers join the changed
+# set before selection, so their suites run even when the importers themselves are
+# unchanged (or NO_AFFECTED_TESTS fires when no suite reaches them). Closed on
+# selector failure: no silent pass on an unjudged tree.
+expand_changed_with_importers() {
+	gone=$(deleted_code)
+	[ -n "$gone" ] || return 0
+	set --
+	for file in $gone; do
+		[ -n "$file" ] && set -- "$@" --changed-file "$file"
+	done
+	if ! importers=$(bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/affected-tests.ts" --root "$ARCHIVE_DIR" --importers "$@"); then
+		echo "focused: importer expansion failed; the push is refused" >&2
+		return 1
+	fi
+	[ -n "$importers" ] || true
+	# Intentional word splitting turns newline-separated changed paths into argv entries.
+	# shellcheck disable=SC2086
+	CHANGED=$(printf '%s\n' $CHANGED $importers | awk 'NF && !seen[$0]++') || return $?
+	# A deleted shell entry point with no tip importer fails closed: it stays in
+	# the code set below, so with no covering suite the push is refused
+	# (NO_AFFECTED_TESTS). A kept importer in CHANGED already carries it.
+	UNCOVERED_DELETED_SH=
+	for file in $gone; do
+		case "$file" in
+			*.sh)
+				if ! one=$(bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/affected-tests.ts" --root "$ARCHIVE_DIR" --importers --changed-file "$file"); then
+					echo "focused: importer expansion failed; the push is refused" >&2
+					return 1
+				fi
+				if [ -z "$one" ]; then
+					UNCOVERED_DELETED_SH="$UNCOVERED_DELETED_SH
+$file"
+				fi ;;
+		esac
+	done
 }
 
 # CI-only manifest (scripts/gate-ci-only.tsv, read from the gate's own tree like every gate script):
@@ -635,6 +692,7 @@ gate_readme() {
 }
 
 gate_focused() {
+	expand_changed_with_importers || return $?
 	focus_tests=
 	needs_shell=0
 	needs_actionlint=0
@@ -917,6 +975,10 @@ fi
 				echo "FRESH-GATE: REFUSED reason=NO_AFFECTED_TESTS code=$(printf '%s\n' $code | paste -sd , -): the push changes product code and no test reaches it; add or name a test that exercises it" >&2
 			fi
 			return 1
+		fi
+		gone=$(deleted_code | awk 'NF { n++ } END { print n+0 }')
+		if [ "$gone" -gt 0 ]; then
+			echo "deleted-only: $gone paths"
 		fi
 		record_run 0 0 0
 		if [ -s "$WORK/excluded" ]; then

@@ -31,6 +31,13 @@ assert Path(".git").is_dir()
 assert os.getpriority(os.PRIO_PROCESS, 0) >= 10
 print("cc selftest: 5 pass")
 '''
+DEPENDENT_SELFTEST = '''import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import dep
+assert dep.answer == 42
+print("dep selftest: 1 pass")
+'''
 
 
 def command(argv: list[str], cwd: Path, *, good: bool = True) -> str:
@@ -125,7 +132,164 @@ def main() -> None:
         refusal = command(["git", "push", "origin", uncovered + ":main"], repo, good=False)
         assert "NO_AFFECTED_TESTS" in refusal and len(ledger.read_text().splitlines()) == 2
         print("PASS uncovered code is refused without GREEN")
-        print("affected gate: 7 pass, 0 fail")
+        # ompkit-1ra0d.66: deleting code and its suite needs no covering test.
+        # The cc restoration above left the tree dirty against HEAD, so drop it;
+        # uncovered.py never reached the remote, so drop it too: the pushed
+        # range is deletions only.
+        command(["git", "checkout", "--", "scripts/cc/cc_selftest.py"], repo)
+        command(["git", "rm", "-q", "scripts/sibling.py", "scripts/sibling_selftest.py", "scripts/uncovered.py"], repo)
+        deleted = commit(repo, "delete sibling and its selftest")
+        deletion_output = command(["git", "push", "origin", deleted + ":main"], repo)
+        assert "deleted-only: 2 paths" in deletion_output and "DOCS_ONLY" in deletion_output
+        assert len(ledger.read_text().splitlines()) == 2
+        print("PASS deletion-only push passes with a deleted-only note and records nothing")
+        # Deleting one file does not excuse an uncovered file the same push changes.
+        command(["git", "rm", "-q", "scripts/cc/value.py"], repo)
+        put(repo, "scripts/uncovered.py", "answer = 1\n")
+        mixed = commit(repo, "delete value, change uncovered")
+        mixed_refusal = command(["git", "push", "origin", mixed + ":main"], repo, good=False)
+        assert "NO_AFFECTED_TESTS" in mixed_refusal and "scripts/uncovered.py" in mixed_refusal
+        assert "scripts/cc/value.py" not in mixed_refusal
+        assert len(ledger.read_text().splitlines()) == 2
+        print("PASS delete-plus-uncovered still refuses naming only the kept file")
+        # ompkit-1ra0d.66 follow-up: a deleted module's tip importers join the
+        # changed set, so the importing suite runs even though it is unchanged.
+        # Outside the scripts/cc/ rule prefix, so the sibling link alone selects it.
+        put(repo, "scripts/dep/dep.py", "answer = 42\n")
+        put(repo, "scripts/dep/dep_selftest.py", DEPENDENT_SELFTEST)
+        # uncovered.py never reached the remote; drop it so the tip does not add it.
+        # value.py left with the refused mixed commit rides along silently: nothing
+        # in the tree imports it, and the sibling link alone selects the new suite.
+        command(["git", "rm", "-q", "scripts/uncovered.py"], repo)
+        dep_green = commit(repo, "add dep and its importing suite")
+        command(["git", "push", "origin", dep_green + ":main"], repo)
+        rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+        assert len(rows) == 3
+        assert rows[-1]["evidence"]["declared_files"] == ["scripts/dep/dep_selftest.py"]
+        print("PASS importing suite selected for its module")
+        command(["git", "rm", "-q", "scripts/dep/dep.py"], repo)
+        dep_gone = commit(repo, "delete dep, suite still imports it")
+        dep_refusal = command(["git", "push", "origin", dep_gone + ":main"], repo, good=False)
+        assert "RED" in dep_refusal and "affected selftest: scripts/dep/dep_selftest.py" in dep_refusal
+        assert "ModuleNotFoundError" in dep_refusal
+        assert len(ledger.read_text().splitlines()) == 3
+        print("PASS deleting a still-imported module runs its suite and refuses RED")
+        # Planted negative: the pre-fix selection demanded a covering test for
+        # every code-suffixed changed path, deleted or not, so it refused the
+        # deletion-only push the fixed gate passes above.
+        gate_source = (ROOT / "scripts/declared-affected-gate.py").read_text()
+        anchor = ("        if not (archive / path).exists():\n"
+                  "            if PurePosixPath(path).suffix in FAIL_CLOSED_SUFFIXES:\n"
+                  "                # A deleted shell entry point or Rust module fails closed: a\n"
+                  "                # covering rule still selects its suites, but with no importer\n"
+                  "                # and no rule the removal itself is uncovered.\n"
+                  "                matched = False\n"
+                  "                for prefix, tests in rules:\n"
+                  "                    if path.startswith(prefix):\n"
+                  "                        selected.update(tests)\n"
+                  "                        matched = True\n"
+                  "                if not matched and path not in covered_deleted:\n"
+                  "                    uncovered.append(path)\n"
+                  "            # Otherwise there is nothing at the tip to cover. Tip files importing\n"
+                  "            # it joined the changed set above, so their suites still run.\n"
+                  "            continue\n")
+        assert anchor in gate_source
+        expansion_anchor = ("    by_deleted = _importers_by_deleted(archive, changed)\n"
+                            "    for extra in sorted({importer for importers in by_deleted.values() for importer in importers}):\n"
+                            "        if extra not in changed:\n"
+                            "            changed.append(extra)\n"
+                            "    covered_deleted = {path for path, importers in by_deleted.items() if importers}\n")
+        assert expansion_anchor in gate_source
+        with owned_tmp("affected-gate-mutant") as mdir:
+            # main() resolves the repo before judging, so the archive under test
+            # is resolve()-clean too; otherwise suite validation trips on the
+            # host's symlinked temp root (/var, /tmp on macOS).
+            base = Path(mdir).resolve()
+            fake = base / "archive"
+            (fake / ".omp-kit").mkdir(parents=True)
+            (fake / ".omp-kit/affected-tests.json").write_text(json.dumps(CONFIG))
+            gate_ns = runpy.run_path(str(ROOT / "scripts/declared-affected-gate.py"))
+            assert gate_ns["selection"](fake, ["scripts/gone.py", "scripts/cc/gone.py"]) == []
+            assert gate_ns["deleted_code"](fake, ["scripts/gone.py", "scripts/cc/gone.py"]) == ["scripts/cc/gone.py", "scripts/gone.py"]
+            (Path(mdir) / "mutant-gate.py").write_text(gate_source.replace(anchor, ""))
+            mutant_ns = runpy.run_path(str(Path(mdir) / "mutant-gate.py"))
+            try:
+                mutant_ns["selection"](fake, ["scripts/gone.py", "scripts/cc/gone.py"])
+            except ValueError as error:
+                assert "NO_AFFECTED_TESTS" in str(error) and "scripts/gone.py" in str(error)
+            else:
+                raise AssertionError("planted negative: pre-fix selection passed a deletion-only push")
+            # Planted negative for importer expansion: without it, deleting a
+            # still-imported module selects nothing and would pass untested.
+            fake2 = base / "archive2"
+            (fake2 / ".omp-kit").mkdir(parents=True)
+            (fake2 / ".omp-kit/affected-tests.json").write_text(json.dumps(CONFIG))
+            (fake2 / "scripts" / "dep").mkdir(parents=True)
+            (fake2 / "scripts" / "dep" / "dep_selftest.py").write_text(DEPENDENT_SELFTEST)
+            assert gate_ns["importers_of_deleted"](fake2, ["scripts/dep/dep.py"]) == ["scripts/dep/dep_selftest.py"]
+            assert gate_ns["selection"](fake2, ["scripts/dep/dep.py"]) == ["scripts/dep/dep_selftest.py"]
+            (Path(mdir) / "mutant-gate2.py").write_text(gate_source.replace(expansion_anchor, "    covered_deleted = set()\n"))
+            mutant2_ns = runpy.run_path(str(Path(mdir) / "mutant-gate2.py"))
+            assert mutant2_ns["selection"](fake2, ["scripts/dep/dep.py"]) == []
+            # scripts/ fallback: any tip importer of a directly-under-scripts
+            # module counts, and with no covering suite the importer itself is
+            # uncovered and refuses.
+            fake3 = base / "archive3"
+            (fake3 / ".omp-kit").mkdir(parents=True)
+            (fake3 / ".omp-kit/affected-tests.json").write_text(json.dumps(CONFIG))
+            (fake3 / "scripts" / "sub").mkdir(parents=True)
+            (fake3 / "scripts" / "sub" / "user.py").write_text("import shared\nprint(shared.answer)\n")
+            assert gate_ns["importers_of_deleted"](fake3, ["scripts/shared.py"]) == ["scripts/sub/user.py"]
+            try:
+                gate_ns["selection"](fake3, ["scripts/shared.py"])
+            except ValueError as error:
+                assert "NO_AFFECTED_TESTS" in str(error) and "scripts/sub/user.py" in str(error)
+                assert "scripts/shared.py" not in str(error)
+            else:
+                raise AssertionError("expected NO_AFFECTED_TESTS naming the uncovered importer")
+            # Fail closed: a deleted .rs or .sh with no importer and no covering
+            # rule is itself uncovered and refuses.
+            fake4 = base / "archive4"
+            (fake4 / ".omp-kit").mkdir(parents=True)
+            (fake4 / ".omp-kit/affected-tests.json").write_text(json.dumps(CONFIG))
+            for gone in ("lib/x.rs", "scripts/tool.sh"):
+                try:
+                    gate_ns["selection"](fake4, [gone])
+                except ValueError as error:
+                    assert "NO_AFFECTED_TESTS" in str(error) and gone in str(error)
+                else:
+                    raise AssertionError("expected NO_AFFECTED_TESTS for bare deleted " + gone)
+            # A covering rule still selects its suites for a deleted .sh.
+            (fake4 / "scripts" / "cc").mkdir(parents=True)
+            (fake4 / "scripts" / "cc" / "cc_selftest.py").write_text("print('cc selftest: 1 pass')\n")
+            assert gate_ns["selection"](fake4, ["scripts/cc/tool.sh"]) == ["scripts/cc/cc_selftest.py"]
+            # Unreadable tip files fail the importer scan closed, never skipped.
+            fake5 = base / "archive5"
+            (fake5 / ".omp-kit").mkdir(parents=True)
+            (fake5 / ".omp-kit/affected-tests.json").write_text(json.dumps(CONFIG))
+            (fake5 / "scripts" / "cc").mkdir(parents=True)
+            (fake5 / "scripts" / "cc" / "cc_selftest.py").write_text("print('cc selftest: 1 pass')\n")
+            # victim.py is absent (deleted); broken.py is present but unreadable.
+            (fake5 / "scripts" / "cc" / "broken.py").write_bytes(b"\xff\xfe not utf-8\n")
+            # Any importer scan over this tree refuses on the unreadable file.
+            try:
+                gate_ns["selection"](fake5, ["scripts/cc/victim.py", "scripts/cc/broken.py"])
+            except ValueError as error:
+                assert "importer scan cannot read tip file" in str(error) and "broken.py" in str(error)
+            else:
+                raise AssertionError("expected the unreadable tip file to refuse")
+            (Path(mdir) / "mutant-gate3.py").write_text(gate_source.replace(
+                "        except (OSError, UnicodeError):\n"
+                "            raise ValueError(\"importer scan cannot read tip file: \" + rel)\n",
+                "        except (OSError, UnicodeError):\n"
+                "            continue\n"))
+            mutant3_ns = runpy.run_path(str(Path(mdir) / "mutant-gate3.py"))
+            assert mutant3_ns["selection"](fake5, ["scripts/cc/victim.py", "scripts/cc/broken.py"]) == ["scripts/cc/cc_selftest.py"]
+        print("PASS planted negative: the old rule refuses the deletion-only push")
+        print("PASS planted negative: no expansion selects nothing for a deleted import")
+        print("PASS scripts/ fallback names the uncovered importer; bare .sh/.rs fail closed")
+        print("PASS unreadable tip files refuse the importer scan")
+        print("affected gate: 14 pass, 0 fail")
 
 
 if __name__ == "__main__":

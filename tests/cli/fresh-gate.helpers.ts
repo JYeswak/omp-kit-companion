@@ -92,7 +92,7 @@ export function copyJudgingFiles(destination: string, exclude: string[] = []): v
 	}
 }
 export const SKIP_BUDGET = { FRESH_GATE_SKIP_REGEX: "manifest fixture does not assess regex cost" };
-const FOCUSED_FUNCTIONS = ["fail", "run_step", "heavy_step", "print_budget_skip", "select_affected_tests", "test_workers", "run_affected_tests", "changed_code", "apply_ci_only", "record_run", "gate_focused"];
+const FOCUSED_FUNCTIONS = ["fail", "run_step", "heavy_step", "print_budget_skip", "select_affected_tests", "test_workers", "run_affected_tests", "changed_code", "deleted_code", "expand_changed_with_importers", "apply_ci_only", "record_run", "gate_focused"];
 export function affectedArchive(fx: SaveFixture, answer: number, expected: number, base = fx.dir): string {
 	const dir = ownedTmp("archive", { root: base }).path;
 	symlinkSync(join(root, "src"), join(dir, "src"));

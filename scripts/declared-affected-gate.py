@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
+import shlex
 import runpy
 import sys
 import time
@@ -41,6 +43,232 @@ def relative(value: object) -> str:
     return value
 
 
+def deleted_code(archive: Path, changed: list[str]) -> list[str]:
+    """Product-code paths the pushed range deleted: code-suffixed, outside
+    tests/, and absent at the tip. Mirrors the fresh-gate.sh changed_code set
+    minus the existence check, inverted."""
+    gone = []
+    for path in changed:
+        if path.startswith("tests/"):
+            continue
+        if PurePosixPath(path).suffix in CODE_SUFFIXES and not (archive / path).exists():
+            gone.append(path)
+    return sorted(set(gone))
+
+
+TS_CODE_SUFFIXES = {".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs"}
+
+FAIL_CLOSED_SUFFIXES = {".sh", ".rs"}
+
+# Anchored, linear-time statement matchers (regex-engineering: every repeat is
+# fenced by a required literal or an exclusive class, so no nested quantifiers).
+# The shell command matcher finds only the command position; its operand is read
+# by the native shlex tokenizer, which understands quotes and nesting a flat
+# pattern cannot (notably `"$(dirname "$0")/..."`). Heredoc bodies and other
+# inert text are read as code: a conservative over-selection that can only add
+# suites, never silently drop a real importer.
+_TS_FROM_RE = re.compile(r"^[ \t]*(?:import|export)\b[^'\"\n;]*\bfrom[ \t]*[\"'](\.[^\"']+)[\"']")
+_TS_SIDE_RE = re.compile(r"^[ \t]*import[ \t]*[\"'](\.[^\"']+)[\"']")
+_TS_CALL_RE = re.compile(r"(?:require|import)\([ \t]*[\"'](\.[^\"']+)[\"'][ \t]*\)")
+_SH_CMD_RE = re.compile(r"(?:^|[;|&]|\bthen\b|\bdo\b)[ \t]*(?:source|\.)(?=[ \t])")
+_PY_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+([A-Za-z_][A-Za-z0-9_]*(?:[ \t]+as[ \t]+[A-Za-z_][A-Za-z0-9_]*)?(?:[ \t]*,[ \t]*[A-Za-z_][A-Za-z0-9_]*(?:[ \t]+as[ \t]+[A-Za-z_][A-Za-z0-9_]*)?)*)")
+_PY_FROM_RE = re.compile(r"^[ \t]*from[ \t]+(\.*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)[ \t]+import[ \t]")
+_PY_DOT_IMPORT_RE = re.compile(r"^[ \t]*from[ \t]+\.[ \t]+import[ \t]+([A-Za-z_][A-Za-z0-9_]*(?:[ \t]+as[ \t]+[A-Za-z_][A-Za-z0-9_]*)?(?:[ \t]*,[ \t]*[A-Za-z_][A-Za-z0-9_]*(?:[ \t]+as[ \t]+[A-Za-z_][A-Za-z0-9_]*)?)*)")
+
+def _strip_code_ext(path: str) -> str:
+    stem, dot, ext = path.rpartition(".")
+    if dot and ("." + ext.lower()) in TS_CODE_SUFFIXES:
+        return stem
+    return path
+
+def _strip_sh_ext(path: str) -> str:
+    return path[:-len(".sh")] if path.endswith(".sh") else path
+
+
+def _tip_py_imports_deleted(text: str) -> set[str]:
+    """Module stems the source imports: first dotted components of plain imports
+    (plus the stem of `scripts.S` forms and the names of `from . import`). The
+    caller maps each stem to same-dir and scripts/ candidates, mirroring the
+    TS fallback where any importer of scripts/<stem> counts."""
+    found = set()
+    for line in text.splitlines():
+        match = _PY_IMPORT_RE.match(line)
+        if match is not None:
+            for token in match.group(1).split(","):
+                if not token.strip():
+                    continue
+                parts = token.strip().split()[0].split(".")
+                found.add(parts[0])
+                if len(parts) > 1 and parts[0] == "scripts":
+                    found.add(parts[1])
+            continue
+        match = _PY_FROM_RE.match(line)
+        if match is not None:
+            dots, parts = _split_from_module(match.group(1))
+            if dots == 0 and parts:
+                found.add(parts[0])
+                if parts[0] == "scripts" and len(parts) > 1:
+                    found.add(parts[1])
+            elif dots == 1 and len(parts) == 1:
+                found.add(parts[0])
+            continue
+        match = _PY_DOT_IMPORT_RE.match(line)
+        if match is not None:
+            for token in match.group(1).split(","):
+                if token.strip():
+                    found.add(token.strip())
+    return found
+
+
+def _tip_ts_imports_deleted(text: str, parent: str) -> set[str]:
+    """Extension-stripped import targets the source names: the caller maps them to
+    deleted paths, so one scan serves every deletion in the push."""
+    found = set()
+    for line in text.splitlines():
+        specs: list[str] = []
+        match = _TS_FROM_RE.match(line) or _TS_SIDE_RE.match(line)
+        if match is not None:
+            specs.append(match.group(1))
+        else:
+            specs.extend(m.group(1) for m in _TS_CALL_RE.finditer(line))
+        for spec in specs:
+            candidate = PurePosixPath(os.path.normpath(os.path.join(parent, spec))).as_posix()
+            found.add(_strip_code_ext(candidate))
+    return found
+
+
+def _resolve_sh_operand(operand: str, parent: str) -> str | None:
+    """A shell `source`/`. ` operand resolved against its file: relative,
+    repo-relative, or `$(dirname "$0")`-anchored. Env-absolute, bare PATH names,
+    and `..` escapes do not resolve."""
+    bare = operand.strip()
+    if len(bare) >= 2 and ((bare[0] == '"' and bare[-1] == '"') or (bare[0] == "'" and bare[-1] == "'")):
+        bare = bare[1:-1].strip()
+    anchored = None
+    for prefix in ('$(dirname "$0")/', "$(dirname $0)/", "${0%/*}/"):
+        if bare.startswith(prefix):
+            anchored = prefix
+            break
+    if anchored is not None:
+        candidate = PurePosixPath(os.path.normpath(os.path.join(parent, bare[len(anchored):]))).as_posix()
+    elif bare.startswith(("./", "../")):
+        candidate = PurePosixPath(os.path.normpath(os.path.join(parent, bare))).as_posix()
+    elif bare.startswith(("/", "$")) or "/" not in bare:
+        return None
+    else:
+        candidate = bare
+    if candidate.startswith(".."):
+        return None
+    return _strip_sh_ext(candidate)
+
+
+def _first_shell_word(rest: str) -> str | None:
+    """First shell word after a command, read by the native shlex tokenizer:
+    quotes pair, backslash escapes outside single quotes, and `;`/`#`/blanks end
+    the word only when unquoted. Unbalanced quotes fail visibly with None: the
+    line contributes no importer. The caller resolves the raw word (quotes kept)."""
+    lex = shlex.shlex(rest, posix=True)
+    lex.whitespace_split = True
+    lex.commenters = "#"
+    try:
+        token = lex.get_token()
+    except ValueError:
+        return None
+    return token or None
+
+
+def _tip_sh_imports_deleted(text: str, parent: str) -> set[str]:
+    """Extension-stripped `source`/`. ` targets the shell source names."""
+    found = set()
+    for line in text.splitlines():
+        for match in _SH_CMD_RE.finditer(line):
+            word = _first_shell_word(line[match.end():])
+            if word is None:
+                continue
+            candidate = _resolve_sh_operand(word, parent)
+            if candidate is not None:
+                found.add(candidate)
+    return found
+
+
+def _split_from_module(raw: str) -> tuple[int, list[str]]:
+    dots = len(raw) - len(raw.lstrip("."))
+    return dots, [part for part in raw.split(".") if part]
+
+
+def _importers_by_deleted(archive: Path, changed: list[str]) -> dict[str, list[str]]:
+    """Map each deleted code path to the tip files importing it: TS/JS relative
+    specifiers (with or without an extension), same-package-dir Python stem
+    imports plus `scripts/<stem>` users, and shell `source`/`. ` operands."""
+    gone_ts = {path for path in changed
+               if PurePosixPath(path).suffix in TS_CODE_SUFFIXES and not (archive / path).exists()}
+    gone_py = {path for path in changed
+               if PurePosixPath(path).suffix == ".py" and not (archive / path).exists()}
+    gone_sh = {path for path in changed
+               if PurePosixPath(path).suffix == ".sh" and not (archive / path).exists()}
+    if not gone_ts and not gone_py and not gone_sh:
+        return {}
+    stripped_ts: dict[str, list[str]] = {}
+    for path in gone_ts:
+        stripped_ts.setdefault(_strip_code_ext(path), []).append(path)
+    stripped_sh: dict[str, list[str]] = {}
+    for path in gone_sh:
+        stripped_sh.setdefault(_strip_sh_ext(path), []).append(path)
+    found: dict[str, set[str]] = {}
+
+    def note(deleted: str, rel: str) -> None:
+        found.setdefault(deleted, set()).add(rel)
+
+    for file in sorted(archive.rglob("*")):
+        if not file.is_file() or file.is_symlink():
+            continue
+        try:
+            rel = file.relative_to(archive).as_posix()
+        except ValueError:
+            continue
+        suffix = PurePosixPath(rel).suffix
+        if suffix not in TS_CODE_SUFFIXES and suffix not in (".py", ".sh"):
+            continue
+        if suffix in TS_CODE_SUFFIXES and not gone_ts:
+            continue
+        if suffix == ".py" and not gone_py:
+            continue
+        if suffix == ".sh" and not gone_sh:
+            continue
+        try:
+            text = file.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            raise ValueError("importer scan cannot read tip file: " + rel)
+        parent = PurePosixPath(rel).parent.as_posix()
+        if suffix in TS_CODE_SUFFIXES:
+            for target in _tip_ts_imports_deleted(text, parent):
+                for path in stripped_ts.get(target, []):
+                    note(path, rel)
+        elif suffix == ".py":
+            for stem in _tip_py_imports_deleted(text):
+                for candidate in (parent + "/" + stem + ".py", "scripts/" + stem + ".py"):
+                    if candidate in gone_py:
+                        note(candidate, rel)
+        elif suffix == ".sh":
+            for target in _tip_sh_imports_deleted(text, parent):
+                for path in stripped_sh.get(target, []):
+                    note(path, rel)
+    return {path: sorted(importers) for path, importers in found.items()}
+
+
+def importers_of_deleted(archive: Path, changed: list[str]) -> list[str]:
+    """Tip code files importing a deleted path. The matches join the changed set
+    before selection, so the importers' suites run (or NO_AFFECTED_TESTS fires
+    when none reaches them).
+
+    Out of scope: dynamic/computed imports of a deleted path (variable
+    specifiers, eval, generated `source` lines). Such an importer's own suite
+    must be selected some other way: its own change entry, a rule, or a naming
+    edge."""
+    by_deleted = _importers_by_deleted(archive, changed)
+    return sorted({importer for importers in by_deleted.values() for importer in importers})
+
+
 def selection(archive: Path, changed: list[str]) -> list[str]:
     declaration = json.loads((archive / MAP).read_text())
     if (not isinstance(declaration, dict) or set(declaration) != {"version", "rules", "sibling_selftests"}
@@ -61,8 +289,29 @@ def selection(archive: Path, changed: list[str]) -> list[str]:
         rules.append((prefix, tests))
     selected: set[str] = set()
     uncovered = []
+    changed = list(changed)
+    by_deleted = _importers_by_deleted(archive, changed)
+    for extra in sorted({importer for importers in by_deleted.values() for importer in importers}):
+        if extra not in changed:
+            changed.append(extra)
+    covered_deleted = {path for path, importers in by_deleted.items() if importers}
     for path in changed:
         if PurePosixPath(path).suffix.lower() in {".md", ".rst", ".txt"}:
+            continue
+        if not (archive / path).exists():
+            if PurePosixPath(path).suffix in FAIL_CLOSED_SUFFIXES:
+                # A deleted shell entry point or Rust module fails closed: a
+                # covering rule still selects its suites, but with no importer
+                # and no rule the removal itself is uncovered.
+                matched = False
+                for prefix, tests in rules:
+                    if path.startswith(prefix):
+                        selected.update(tests)
+                        matched = True
+                if not matched and path not in covered_deleted:
+                    uncovered.append(path)
+            # Otherwise there is nothing at the tip to cover. Tip files importing
+            # it joined the changed set above, so their suites still run.
             continue
         matched = False
         for prefix, tests in rules:
@@ -83,11 +332,18 @@ def selection(archive: Path, changed: list[str]) -> list[str]:
             uncovered.append(path)
     if uncovered:
         raise ValueError("NO_AFFECTED_TESTS: " + ", ".join(uncovered))
+    changed_set = set(changed)
+    kept = []
     for path in selected:
         suite = archive / path
         if not suite.is_file() or suite.is_symlink() or not suite.resolve().is_relative_to(archive):
+            if path in changed_set and not suite.exists():
+                # A range that deletes a suite has nothing to run for it; a kept
+                # suite selected by another change still runs below.
+                continue
             raise ValueError("declared selftest missing or outside export: " + path)
-    return sorted(selected)
+        kept.append(path)
+    return sorted(kept)
 
 
 def judge(repo: Path, tip: str, base: str | None) -> None:
@@ -112,6 +368,9 @@ def judge(repo: Path, tip: str, base: str | None) -> None:
         checked(["tar", "-xf", str(work / "source.tar"), "-C", str(archive)], cwd=repo)
         tests = selection(archive, changed)
         if not tests:
+            gone = deleted_code(archive, changed)
+            if gone:
+                print(f"deleted-only: {len(gone)} paths", flush=True)
             print("FRESH-GATE: DOCS_ONLY: no affected selftests; no observation recorded", flush=True)
             return
         # A fixture must never discover the source checkout's Git/tracker authority.
