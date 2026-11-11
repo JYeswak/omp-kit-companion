@@ -117,7 +117,7 @@ import { runMilestone } from "./milestone.ts";
 import { ccSpool, type CcSpool } from "./cc-spool.ts";
 import { custodyCheckCommand } from "./custody.ts";
 import { intakeCommand } from "./intake-verb.ts";
-import { findImsgBin, notifyBlocked, pollBridge, readBridgeConfig, runBrief, sendReply, type BridgeConfig } from "./imessage-bridge.ts";
+import { createImsgRunner, findImsgBin, notifyBlocked, pollBridge, probeSelfChatMode, readBridgeConfig, runBrief, sendReply, type BridgeConfig } from "./imessage-bridge.ts";
 import { looksSecret } from "./mcp-sources.ts";
 import { formatNext, next } from "./next.ts";
 import { agentMailRetentionRoot, retainAgentMailRotations } from "./am-retain.ts";
@@ -4160,7 +4160,9 @@ async function imessageSendCommand(request: ParsedCommand): Promise<CliResult> {
 	const base = imessageBase(request);
 	if (!("config" in base)) return base;
 	const text = request.argument ?? "";
-	const reply = sendReply({ home: base.home, config: base.config, imsgBin: base.imsgBin, text });
+	const runImsg = createImsgRunner(process.env, base.home, 20);
+	const probe = probeSelfChatMode({ config: base.config, imsgBin: base.imsgBin, runImsg, home: base.home });
+	const reply = sendReply({ home: base.home, config: base.config, imsgBin: base.imsgBin, runImsg, text, selfChat: probe.selfChat });
 	if (!reply.sent) {
 		return { code: 1, data: { overall: "FINDINGS", command: "imessage send", ...reply.receipt },
 			errors: [{ code: String(reply.receipt.status), message: "The reply was not sent", remediation: "Read the receipt; the lead text is unchanged and nothing was recorded." }], verification: "UNVERIFIED" };
@@ -4176,7 +4178,9 @@ async function imessageNotifyCommand(request: ParsedCommand): Promise<CliResult>
 	if (typeof key !== "string" || typeof text !== "string") {
 		return refusal("MISSING_ARGUMENT", "notify-blocked needs --key KEY and --text TEXT", "Run omp-kit imessage notify-blocked --key KEY --text TEXT --json; nothing was pushed.");
 	}
-	const pushed = notifyBlocked({ home: base.home, config: base.config, imsgBin: base.imsgBin, key, text });
+	const runImsg = createImsgRunner(process.env, base.home, 20);
+	const probe = probeSelfChatMode({ config: base.config, imsgBin: base.imsgBin, runImsg, home: base.home });
+	const pushed = notifyBlocked({ home: base.home, config: base.config, imsgBin: base.imsgBin, runImsg, key, text, selfChat: probe.selfChat });
 	if (!pushed.sent && !pushed.deduped) {
 		return { code: 1, data: { overall: "FINDINGS", command: "imessage notify-blocked", ...pushed.receipt },
 			errors: [{ code: String(pushed.receipt.status), message: "The blocked push was not sent", remediation: "Read the receipt; the key is undeduped so the next tick retries." }], verification: "UNVERIFIED" };
@@ -4187,7 +4191,9 @@ async function imessageNotifyCommand(request: ParsedCommand): Promise<CliResult>
 async function imessageBriefCommand(request: ParsedCommand): Promise<CliResult> {
 	const base = imessageBase(request);
 	if (!("config" in base)) return base;
-	const brief = runBrief({ home: base.home, config: base.config, imsgBin: base.imsgBin });
+	const runImsg = createImsgRunner(process.env, base.home, 20);
+	const probe = probeSelfChatMode({ config: base.config, imsgBin: base.imsgBin, runImsg, home: base.home });
+	const brief = runBrief({ home: base.home, config: base.config, imsgBin: base.imsgBin, runImsg, selfChat: probe.selfChat });
 	if (!brief.sent) {
 		return { code: 1, data: { overall: "FINDINGS", command: "imessage brief", ...brief.receipt, counts: brief.counts },
 			errors: [{ code: String(brief.receipt.status), message: "The daily brief was not sent", remediation: "Read the receipt; nothing was recorded." }], verification: "UNVERIFIED" };

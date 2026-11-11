@@ -9,6 +9,17 @@
  * - notify-blocked: one deduplicated push per blocking key. The daily brief
  *   (`imessage-brief` job) sends one summary message.
  *
+ * Self-chat mode (IMSGSELF1): when this Mac is signed into Joshua's own Apple
+ * ID, the configured handle is the Mac's own account and the 1:1 chat whose
+ * identifier equals the handle is the note-to-self chat (`account_login` /
+ * `destination_caller_id` corroborate the Mac's own account). Inbound then
+ * includes Joshua's own typed rows (`is_from_me`), minus the bridge's own
+ * sent replies (recorded guids) and minus any row starting with the reply
+ * prefix. Outbound replies carry the reply prefix so the next poll never
+ * replays them as prompts. Ordinary 1:1 mode for a separate account is
+ * unchanged. Limit: in self-chat mode Apple does not push-notify replies
+ * to the phone.
+ *
  * Inbound text is untrusted prompt content: it is prefixed so the seat knows
  * it is an iMessage from Joshua's handle, capped in length, and stripped of
  * control characters. Bodies from other senders are never printed or logged.
@@ -30,6 +41,8 @@ export const INBOUND_MAX_CHARS = 4000;
 export const POLL_MAX_DELIVERIES = 10;
 /** History window per poll; the cursor makes restarts redeliver nothing. */
 export const HISTORY_LIMIT = 50;
+/** Prefix marking bridge-authored outbound texts in self-chat mode; the poll skips rows starting with it. */
+export const REPLY_PREFIX = "[chief] ";
 
 /** Handle shape: a phone number, email, or Apple ID; single line, no control characters. */
 const HANDLE_PATTERN = /^[A-Za-z0-9+][A-Za-z0-9+@._() -]*$/;
@@ -132,7 +145,8 @@ export function findImsgBin(env: NodeJS.ProcessEnv = process.env, which: (name: 
 export interface ImsgCall { code: number; out: string }
 export type ImsgRunner = (argv: readonly string[]) => ImsgCall;
 
-function defaultRunner(env: NodeJS.ProcessEnv, cwd: string, deadlineS: number): ImsgRunner {
+/** imsg runner over kitlib runSync: bounded time and output, never throws. Exported for the CLI self-chat probe. */
+export function createImsgRunner(env: NodeJS.ProcessEnv, cwd: string, deadlineS: number): ImsgRunner {
 	return argv => {
 		try {
 			const child = runSync(argv, { cwd, env: env as Record<string, string>, deadline_s: deadlineS, max_output_bytes: 4 * 1024 * 1024 });
@@ -144,7 +158,11 @@ function defaultRunner(env: NodeJS.ProcessEnv, cwd: string, deadlineS: number): 
 	};
 }
 
-export interface InboundMessage { key: string; sender: string; text: string; fromMe: boolean; group: boolean }
+function defaultRunner(env: NodeJS.ProcessEnv, cwd: string, deadlineS: number): ImsgRunner {
+	return createImsgRunner(env, cwd, deadlineS);
+}
+
+export interface InboundMessage { key: string; sender: string; text: string; fromMe: boolean; group: boolean; destinationCallerId: string | null }
 
 function stringField(row: Record<string, unknown>, names: readonly string[]): string | null {
 	for (const name of names) {
@@ -211,18 +229,25 @@ export function parseHistoryPayload(text: string): InboundMessage[] {
 		const body = stringField(row, ["text", "body", "message"]);
 		if (key === null || sender === null || body === null) continue;
 		messages.push({ key, sender, text: body, fromMe: row.is_from_me === true || row.from_me === true || row.isFromMe === true,
-			group: row.is_group === true });
+			group: row.is_group === true,
+			destinationCallerId: stringField(row, ["destination_caller_id", "destinationCallerId", "destination"]) });
 	}
 	return messages;
 }
 
 /**
- * Tolerant parse of `imsg chats --json` JSONL (or one document): the id of the
- * 1:1 chat whose single participant matches `handle` after normalization.
- * Group chats (`is_group`, or any participant count but one) never match, so a
- * group containing the handle cannot open the relay.
+ * A matched 1:1 chat: row id plus the identifier and account login the
+ * self-chat check needs. Either may be absent on older imsg output.
  */
-export function pickChatForHandle(text: string, handle: string): string | null {
+export interface ChatRow { id: string; identifier: string | null; accountLogin: string | null }
+
+/**
+ * Tolerant parse of `imsg chats --json` JSONL (or one document): the 1:1 chat
+ * whose single participant matches `handle` after normalization. Group chats
+ * (`is_group`, or any participant count but one) never match, so a group
+ * containing the handle cannot open the relay.
+ */
+export function pickChatRowForHandle(text: string, handle: string): ChatRow | null {
 	const want = normalizeHandle(handle);
 	for (const row of parseJsonRecords(text, ["chats", "results", "conversations"])) {
 		if (!isRecord(row)) continue;
@@ -231,9 +256,37 @@ export function pickChatForHandle(text: string, handle: string): string | null {
 		if (id === null) continue;
 		const members = participantList(row).map(candidateHandle).filter((entry): entry is string => entry !== null);
 		if (members.length !== 1) continue;
-		if (normalizeHandle(members[0] as string) === want) return id;
+		if (normalizeHandle(members[0] as string) !== want) continue;
+		return { id, identifier: stringField(row, ["identifier", "chat_identifier", "chatIdentifier"]),
+			accountLogin: stringField(row, ["account_login", "accountLogin", "account"]) };
 	}
 	return null;
+}
+
+/**
+ * The id of the 1:1 chat whose single participant matches `handle` after
+ * normalization. Group chats never match, so a group containing the handle
+ * cannot open the relay.
+ */
+export function pickChatForHandle(text: string, handle: string): string | null {
+	return pickChatRowForHandle(text, handle)?.id ?? null;
+}
+
+/**
+ * Self-chat mode (IMSGSELF1): the matched 1:1 chat is the note-to-self chat,
+ * i.e. its identifier equals the configured handle and the Mac's own account
+ * corroborates it — either the chat's `account_login` or a history row's
+ * `destination_caller_id` normalizes to the handle. (Live: SMS chats show the
+ * phone handle as `account_login`, while the iMessage self chat shows the
+ * Apple ID there and the handle in `destination_caller_id`.) Anything else is
+ * ordinary 1:1 mode for a separate account. Fail-closed: false.
+ */
+export function isSelfChatMode(chat: Pick<ChatRow, "identifier" | "accountLogin"> | null, messages: readonly InboundMessage[], handle: string): boolean {
+	if (chat === null || chat.identifier === null) return false;
+	const want = normalizeHandle(handle);
+	if (normalizeHandle(chat.identifier) !== want) return false;
+	if (chat.accountLogin !== null && normalizeHandle(chat.accountLogin) === want) return true;
+	return messages.some(message => message.destinationCallerId !== null && normalizeHandle(message.destinationCallerId) === want);
 }
 
 /** Strip control characters and cap length; untrusted inbound text stays data, never instructions. */
@@ -313,6 +366,53 @@ function readCursor(home: string): string | null {
 	return isRecord(cursor) && typeof cursor.last_key === "string" ? cursor.last_key : null;
 }
 
+/** Guids of the bridge's own sent replies (IMSGSELF1 loop guard); receipts carry guids, never bodies. */
+export function readReplyGuids(home: string): string[] {
+	return readLogRows(home, "imessage-bridge.replies.jsonl")
+		.map(row => row.guid)
+		.filter((entry): entry is string => typeof entry === "string");
+}
+
+export interface ProbeOptions {
+	config: BridgeConfig;
+	imsgBin: string;
+	runImsg?: ImsgRunner;
+	env?: NodeJS.ProcessEnv;
+	home: string;
+	deadlineS?: number;
+	historyLimit?: number;
+}
+
+/**
+ * Read-only self-chat probe for the outbound path (`imessage send` /
+ * `notify-blocked` / `brief`): true when the matched 1:1 chat is the
+ * note-to-self chat. Never throws: any failure reports ordinary mode, so a
+ * confused probe sends unprefixed rather than mislabeling another account's
+ * chat as self-chat.
+ */
+export function probeSelfChatMode(options: ProbeOptions): { selfChat: boolean; chatId: string | null } {
+	const closed = { selfChat: false, chatId: null as string | null };
+	try {
+		const runImsg = options.runImsg ?? defaultRunner(options.env ?? process.env, options.home, options.deadlineS ?? 20);
+		const chats = runImsg([options.imsgBin, "chats", "--limit", String(HISTORY_LIMIT), "--json"]);
+		if (chats.code !== 0) return closed;
+		const chat = pickChatRowForHandle(chats.out, options.config.handle);
+		if (chat === null) return closed;
+		if (isSelfChatMode(chat, [], options.config.handle)) return { selfChat: true, chatId: chat.id };
+		// The iMessage self chat names the Apple ID as account_login, not
+		// the phone handle: confirm through destination_caller_id before
+		// calling an identifier match ordinary mode.
+		if (chat.identifier === null || normalizeHandle(chat.identifier) !== normalizeHandle(options.config.handle)) {
+			return { selfChat: false, chatId: chat.id };
+		}
+		const history = runImsg([options.imsgBin, "history", "--chat-id", chat.id, "--limit", String(options.historyLimit ?? HISTORY_LIMIT), "--json"]);
+		if (history.code !== 0) return { selfChat: false, chatId: chat.id };
+		return { selfChat: isSelfChatMode(chat, parseHistoryPayload(history.out), options.config.handle), chatId: chat.id };
+	} catch {
+		return closed;
+	}
+}
+
 export type Deliver = (text: string) => Promise<{ ok: boolean; marker: string; code: string }>;
 
 export interface PollOptions {
@@ -328,6 +428,13 @@ export interface PollOptions {
 	 * check is what blocks them. Production and CLI paths never set false.
 	 */
 	enforceHandleCheck?: boolean;
+	/**
+	 * Planted-negative seam for the self-chat conformance test only: with
+	 * false, the reply-receipt loop guard (recorded guids plus reply prefix)
+	 * is skipped so the bridge's own reply loops back as a prompt, proving
+	 * the guard is what blocks it. Production and CLI paths never set false.
+	 */
+	enforceLoopGuard?: boolean;
 	deadlineS?: number;
 	now?: () => Date;
 }
@@ -340,9 +447,9 @@ export interface PollResult {
 	skipped: number;
 	lastKey: string | null;
 	markers: string[];
+	selfChat: boolean;
 	receipt: Record<string, unknown>;
 }
-
 export async function pollBridge(options: PollOptions): Promise<PollResult> {
 	const { home, config, imsgBin, deliver } = options;
 	const env = options.env ?? process.env;
@@ -354,28 +461,33 @@ export async function pollBridge(options: PollOptions): Promise<PollResult> {
 
 	const chats = runImsg([imsgBin, "chats", "--limit", String(HISTORY_LIMIT), "--json"]);
 	if (chats.code !== 0) {
-		return { status: "IMSG_CHATS_FAILED", chatId: null, delivered: 0, dropped: 0, skipped: 0, lastKey: readCursor(home), markers: [],
-			receipt: { ...base, status: "IMSG_CHATS_FAILED", exit: chats.code } };
+		return { status: "IMSG_CHATS_FAILED", chatId: null, delivered: 0, dropped: 0, skipped: 0, lastKey: readCursor(home), markers: [], selfChat: false,
+			receipt: { ...base, status: "IMSG_CHATS_FAILED", exit: chats.code, self_chat: false } };
 	}
-	const chatId = pickChatForHandle(chats.out, config.handle);
-	if (chatId === null) {
-		return { status: "NO_CHAT", chatId: null, delivered: 0, dropped: 0, skipped: 0, lastKey: readCursor(home), markers: [],
-			receipt: { ...base, status: "NO_CHAT", exit: 0 } };
+	const chat = pickChatRowForHandle(chats.out, config.handle);
+	if (chat === null) {
+		return { status: "NO_CHAT", chatId: null, delivered: 0, dropped: 0, skipped: 0, lastKey: readCursor(home), markers: [], selfChat: false,
+			receipt: { ...base, status: "NO_CHAT", exit: 0, self_chat: false } };
 	}
+	const chatId = chat.id;
 	const history = runImsg([imsgBin, "history", "--chat-id", chatId, "--limit", String(HISTORY_LIMIT), "--json"]);
 	if (history.code !== 0) {
-		return { status: "IMSG_HISTORY_FAILED", chatId, delivered: 0, dropped: 0, skipped: 0, lastKey: readCursor(home), markers: [],
-			receipt: { ...base, chat_id: chatId, status: "IMSG_HISTORY_FAILED", exit: history.code } };
+		return { status: "IMSG_HISTORY_FAILED", chatId, delivered: 0, dropped: 0, skipped: 0, lastKey: readCursor(home), markers: [], selfChat: false,
+			receipt: { ...base, chat_id: chatId, status: "IMSG_HISTORY_FAILED", exit: history.code, self_chat: false } };
 	}
 	const messages = parseHistoryPayload(history.out);
+	const selfChat = isSelfChatMode(chat, messages, config.handle);
+	const guard = options.enforceLoopGuard ?? true;
+	const replyGuids = selfChat && guard ? new Set(readReplyGuids(home)) : new Set<string>();
+	const baseChat = { ...base, chat_id: chatId, self_chat: selfChat };
 	const lastSeen = readCursor(home);
 	const at = lastSeen === null ? 0 : messages.findIndex(message => message.key === lastSeen) + 1;
 	if (lastSeen !== null && at === 0) {
 		const lastKey = messages.at(-1)?.key ?? lastSeen;
 		writeJsonFile(statePath(home, "imessage-bridge.cursor.json"), { last_key: lastKey, reset_at: now });
-		appendJsonLine(statePath(home, "imessage-bridge.deliveries.jsonl"), { ...base, chat_id: chatId, status: "CURSOR_RESET", skipped: messages.length });
-		return { status: "CURSOR_RESET", chatId, delivered: 0, dropped: 0, skipped: messages.length, lastKey, markers: [],
-			receipt: { ...base, chat_id: chatId, status: "CURSOR_RESET", skipped: messages.length } };
+		appendJsonLine(statePath(home, "imessage-bridge.deliveries.jsonl"), { ...baseChat, status: "CURSOR_RESET", skipped: messages.length });
+		return { status: "CURSOR_RESET", chatId, delivered: 0, dropped: 0, skipped: messages.length, lastKey, markers: [], selfChat,
+			receipt: { ...baseChat, status: "CURSOR_RESET", skipped: messages.length } };
 	}
 	let delivered = 0, dropped = 0, skipped = 0;
 	let lastKey: string | null = lastSeen;
@@ -384,12 +496,22 @@ export async function pollBridge(options: PollOptions): Promise<PollResult> {
 	for (const message of messages.slice(at)) {
 		if (delivered >= POLL_MAX_DELIVERIES) break;
 		lastKey = message.key;
-		if (message.fromMe) { skipped += 1; continue; }
+		// Self-chat mode delivers Joshua's own typed rows, so no fromMe skip;
+		// ordinary mode keeps skipping them exactly as before.
+		if (!selfChat && message.fromMe) { skipped += 1; continue; }
 		if (message.group) { skipped += 1; continue; }
 		if (enforce && normalizeHandle(message.sender) !== want) {
 			dropped += 1;
 			appendJsonLine(statePath(home, "imessage-bridge.drops.jsonl"),
 				{ at: now, chat_id: chatId, key: message.key, sender_sha256: senderHash(message.sender) });
+			continue;
+		}
+		// Reply-receipt loop guard: the bridge's own sent replies (recorded
+		// guids) and any row wearing the reply prefix never become prompts.
+		if (selfChat && guard && (replyGuids.has(message.key) || sanitizeInbound(message.text).startsWith(REPLY_PREFIX))) {
+			skipped += 1;
+			appendJsonLine(statePath(home, "imessage-bridge.deliveries.jsonl"),
+				{ at: now, chat_id: chatId, key: message.key, status: "LOOP_GUARD", via: replyGuids.has(message.key) ? "guid" : "prefix" });
 			continue;
 		}
 		const clean = sanitizeInbound(message.text);
@@ -400,10 +522,10 @@ export async function pollBridge(options: PollOptions): Promise<PollResult> {
 			// processed key, so the next tick replays this message. The
 			// receipt carries the marker and delivery code only; never
 			// detail text, which could quote the untrusted body.
-			const receipt = { ...base, chat_id: chatId, status: "DELIVERY_FAILED", delivered, dropped, skipped, last_key: lastKey,
+			const receipt = { ...baseChat, status: "DELIVERY_FAILED", delivered, dropped, skipped, last_key: lastKey,
 				marker: proof.marker, delivery_code: proof.code };
 			appendJsonLine(statePath(home, "imessage-bridge.deliveries.jsonl"), receipt);
-			return { status: "DELIVERY_FAILED", chatId, delivered, dropped, skipped, lastKey, markers, receipt };
+			return { status: "DELIVERY_FAILED", chatId, delivered, dropped, skipped, lastKey, markers, selfChat, receipt };
 		}
 		delivered += 1;
 		if (proof.marker !== "") markers.push(proof.marker);
@@ -411,8 +533,8 @@ export async function pollBridge(options: PollOptions): Promise<PollResult> {
 			{ at: now, chat_id: chatId, key: message.key, marker: proof.marker, chars: clean.length });
 	}
 	writeJsonFile(statePath(home, "imessage-bridge.cursor.json"), { last_key: lastKey });
-	const receipt = { ...base, chat_id: chatId, status: "OK", delivered, dropped, skipped, last_key: lastKey };
-	return { status: "OK", chatId, delivered, dropped, skipped, lastKey, markers, receipt };
+	const receipt = { ...baseChat, status: "OK", delivered, dropped, skipped, last_key: lastKey };
+	return { status: "OK", chatId, delivered, dropped, skipped, lastKey, markers, selfChat, receipt };
 }
 
 export interface ReplyOptions {
@@ -422,6 +544,12 @@ export interface ReplyOptions {
 	imsgBin: string;
 	runImsg?: ImsgRunner;
 	text: string;
+	/**
+	 * IMSGSELF1: prefix the outbound text with REPLY_PREFIX and record its
+	 * guid, so the next self-chat poll never replays it as a prompt.
+	 * Ordinary mode sends the text unchanged.
+	 */
+	selfChat?: boolean;
 	deadlineS?: number;
 	now?: () => Date;
 }
@@ -432,15 +560,32 @@ export function sendReply(options: ReplyOptions): ReplyResult {
 	const { home, config, imsgBin } = options;
 	const env = options.env ?? process.env;
 	const now = (options.now ?? (() => new Date()))().toISOString();
+	const selfChat = options.selfChat ?? false;
 	const clean = sanitizeInbound(options.text);
 	if (clean.trim() === "") {
-		return { sent: false, chars: 0, receipt: { at: now, to: config.handle, status: "EMPTY", exit: 2 } };
+		return { sent: false, chars: 0, receipt: { at: now, to: config.handle, status: "EMPTY", exit: 2, self_chat: selfChat } };
 	}
+	const body = selfChat ? `${REPLY_PREFIX}${clean}` : clean;
 	const runImsg = options.runImsg ?? defaultRunner(env, home, options.deadlineS ?? 20);
-	const call = runImsg([imsgBin, "send", "--to", config.handle, "--text", clean, "--json"]);
-	const receipt = { at: now, to: config.handle, chars: clean.length, status: call.code === 0 ? "SENT" : "SEND_FAILED", exit: call.code };
+	const call = runImsg([imsgBin, "send", "--to", config.handle, "--text", body, "--json"]);
+	const guid = sendGuid(call.out);
+	const receipt: Record<string, unknown> = { at: now, to: config.handle, chars: body.length,
+		status: call.code === 0 ? "SENT" : "SEND_FAILED", exit: call.code, self_chat: selfChat, prefixed: selfChat,
+		...(guid === null ? {} : { guid }) };
 	if (call.code === 0) appendJsonLine(statePath(home, "imessage-bridge.replies.jsonl"), receipt);
-	return { sent: call.code === 0, chars: clean.length, receipt };
+	return { sent: call.code === 0, chars: body.length, receipt };
+}
+
+/** Guid of a sent message parsed from `imsg send --json` stdout; null when the output names none. */
+function sendGuid(out: string): string | null {
+	try {
+		for (const row of parseJsonRecords(out, ["result", "message", "data", "sent"])) {
+			if (!isRecord(row)) continue;
+			const guid = stringField(row, ["guid", "message_guid", "message_id", "rowid", "id"]);
+			if (guid !== null) return guid;
+		}
+	} catch { /* unparseable send output still counts as sent; the prefix guards the loop */ }
+	return null;
 }
 
 export interface NotifyOptions extends ReplyOptions {
@@ -472,6 +617,8 @@ export interface BriefOptions {
 	config: BridgeConfig;
 	imsgBin: string;
 	runImsg?: ImsgRunner;
+	/** IMSGSELF1: prefix the brief like any other self-chat outbound text. */
+	selfChat?: boolean;
 	deadlineS?: number;
 	now?: () => Date;
 }

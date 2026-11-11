@@ -1,11 +1,13 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { runFixtureAsync } from "./fixture-process.ts";
 import {
+	REPLY_PREFIX,
 	inboundPrompt,
+	isSelfChatMode,
 	normalizeHandle,
 	notifyBlocked,
 	parseHistoryPayload,
@@ -48,8 +50,11 @@ case "$mode" in
 				*) shift;;
 			esac
 		done
+		n=1
+		if [ -f "$state/send-count" ]; then n=$(( $(cat "$state/send-count") + 1 )); fi
+		printf '%s' "$n" > "$state/send-count"
 		TO="$to" TEXT="$text" OUT="$state/outbox.jsonl" python3 -c 'import json,os; open(os.environ["OUT"],"a").write(json.dumps({"to":os.environ["TO"],"text":os.environ["TEXT"]})+"\\n")'
-		printf '{"status":"sent"}\\n'
+		printf '{"status":"sent","guid":"stub-reply-%s"}\\n' "$n"
 		;;
 	*) printf '{"error":"unknown mode"}\\n'; exit 1;;
 esac
@@ -343,4 +348,164 @@ test("IMSGCHIEF1 notify dedupe and brief counts are receipts", () => {
 	expect(sent.join(" ")).toContain("daily brief");
 	const reply = sendReply({ home, config: unitConfig, imsgBin: "imsg", runImsg, text: "   ", now: () => at });
 	expect(reply.sent).toBe(false);
+});
+
+const SELF_CHATS = [{ id: 1, is_group: false, identifier: HANDLE, account_login: OTHER, participants: [HANDLE], service: "iMessage" }];
+const selfUserRows = [{ guid: "self-1", sender: HANDLE, destination_caller_id: HANDLE, text: "note to self", is_from_me: true, is_group: false }];
+const selfReplyRow = (guid: string, text: string) => ({ guid, sender: HANDLE, destination_caller_id: HANDLE, text, is_from_me: true, is_group: false });
+
+async function runSelfPoll(tag: string, deliver: Deliver, guard?: boolean, chats?: string, history?: string) {
+	const prev = process.env.XDG_STATE_HOME;
+	process.env.XDG_STATE_HOME = join(unitHome, tag);
+	const chatDoc = chats ?? toJsonLines(SELF_CHATS);
+	const histDoc = history ?? toJsonLines(selfUserRows);
+	try {
+		return await pollBridge({ home: join(unitHome, tag), config: unitConfig, imsgBin: "imsg",
+			runImsg: argv => argv[1] === "chats" ? { code: 0, out: chatDoc } : { code: 0, out: histDoc },
+			deliver, ...(guard === undefined ? {} : { enforceLoopGuard: guard }),
+			now: () => new Date("2026-11-11T10:00:00Z") });
+	} finally {
+		if (prev === undefined) delete process.env.XDG_STATE_HOME;
+		else process.env.XDG_STATE_HOME = prev;
+	}
+}
+
+test("IMSGSELF1 self-chat row typed by Joshua is delivered once", async () => {
+	const seen: string[] = [];
+	const deliver: Deliver = async text => { seen.push(text); return { ok: true, marker: "mself", code: "OK" }; };
+	const first = await runSelfPoll("selfonce", deliver);
+	expect(first.selfChat).toBe(true);
+	expect(first.status).toBe("OK");
+	expect(first.delivered).toBe(1);
+	expect(seen.length).toBe(1);
+	expect(seen[0]).toContain("note to self");
+	const second = await runSelfPoll("selfonce", deliver);
+	expect(second.delivered).toBe(0);
+	expect(seen.length).toBe(1);
+});
+
+test("IMSGSELF1 bridge reply with recorded guid and prefix is never delivered", async () => {
+	const tag = "selfreply";
+	const prev = process.env.XDG_STATE_HOME;
+	process.env.XDG_STATE_HOME = join(unitHome, tag);
+	const home = join(unitHome, tag);
+	let histDoc = toJsonLines(selfUserRows);
+	const sent: string[][] = [];
+	const at = () => new Date("2026-11-11T10:00:00Z");
+	const runImsg = (argv: readonly string[]) => {
+		if (argv[1] === "chats") return { code: 0, out: toJsonLines(SELF_CHATS) };
+		if (argv[1] === "send") { sent.push([...argv]); return { code: 0, out: '{"status":"sent","guid":"reply-1"}' }; }
+		return { code: 0, out: histDoc };
+	};
+	try {
+		const seen: string[] = [];
+		const deliver: Deliver = async text => { seen.push(text); return { ok: true, marker: "mself", code: "OK" }; };
+		const first = await pollBridge({ home, config: unitConfig, imsgBin: "imsg", runImsg, deliver, now: at });
+		expect(first.selfChat).toBe(true);
+		expect(first.delivered).toBe(1);
+		const reply = sendReply({ home, config: unitConfig, imsgBin: "imsg", runImsg, text: "got it", selfChat: true, now: at });
+		expect(reply.sent).toBe(true);
+		expect(reply.receipt.guid).toBe("reply-1");
+		expect(reply.receipt.prefixed).toBe(true);
+		expect(sent.at(-1) ?? []).toContain(`${REPLY_PREFIX}got it`);
+		histDoc = toJsonLines([...selfUserRows, selfReplyRow("reply-1", `${REPLY_PREFIX}got it`)]);
+		const second = await pollBridge({ home, config: unitConfig, imsgBin: "imsg", runImsg, deliver, now: at });
+		expect(second.delivered).toBe(0);
+		expect(seen.length).toBe(1);
+		expect(JSON.stringify(seen)).not.toContain("got it");
+		// A prefixed echo with no recorded guid is still caught by the prefix.
+		histDoc = toJsonLines([...selfUserRows, selfReplyRow("reply-1", `${REPLY_PREFIX}got it`), selfReplyRow("mystery", `${REPLY_PREFIX}typed echo`)]);
+		const third = await pollBridge({ home, config: unitConfig, imsgBin: "imsg", runImsg, deliver, now: at });
+		expect(third.delivered).toBe(0);
+		expect(seen.length).toBe(1);
+	} finally {
+		if (prev === undefined) delete process.env.XDG_STATE_HOME;
+		else process.env.XDG_STATE_HOME = prev;
+	}
+});
+
+test("IMSGSELF1 planted negative: without the receipt check the reply loops back as a prompt", async () => {
+	const seen: string[] = [];
+	const deliver: Deliver = async text => { seen.push(text); return { ok: true, marker: "mneg", code: "OK" }; };
+	const recordGuid = (home: string, guid: string) => sendReply({ home, config: unitConfig, imsgBin: "imsg",
+		runImsg: () => ({ code: 0, out: `{"status":"sent","guid":"${guid}"}` }),
+		text: "bare echo", selfChat: false, now: () => new Date("2026-11-11T10:00:00Z") });
+	// An unprefixed row whose guid the bridge recorded: only the receipt check can block it.
+	const history = toJsonLines([selfReplyRow("reply-9", "bare echo")]);
+	const guardedTag = "selfneg-guarded";
+	const openTag = "selfneg-open";
+	for (const tag of [guardedTag, openTag]) {
+		const prev = process.env.XDG_STATE_HOME;
+		process.env.XDG_STATE_HOME = join(unitHome, tag);
+		try {
+			expect(recordGuid(join(unitHome, tag), "reply-9").sent).toBe(true);
+		} finally {
+			if (prev === undefined) delete process.env.XDG_STATE_HOME;
+			else process.env.XDG_STATE_HOME = prev;
+		}
+	}
+	const guarded = await runSelfPoll(guardedTag, deliver, true, undefined, history);
+	expect(guarded.selfChat).toBe(true);
+	expect(guarded.delivered).toBe(0);
+	const open = await runSelfPoll(openTag, deliver, false, undefined, history);
+	expect(open.delivered).toBe(1);
+	expect(seen.length).toBe(1);
+	expect(seen[0]).toContain("bare echo");
+});
+
+test("IMSGSELF1 ordinary mode keeps skipping is_from_me", async () => {
+	const seen: string[] = [];
+	const deliver: Deliver = async text => { seen.push(text); return { ok: true, marker: "mord", code: "OK" }; };
+	const chats = toJsonLines([{ id: 7, is_group: false, participants: [HANDLE] }]);
+	const history = toJsonLines([{ guid: "o1", sender: HANDLE, text: "typed on the mac", is_from_me: true, is_group: false }]);
+	const poll = await runSelfPoll("selfordinary", deliver, undefined, chats, history);
+	expect(poll.selfChat).toBe(false);
+	expect(poll.delivered).toBe(0);
+	expect(poll.skipped).toBe(1);
+	expect(seen.length).toBe(0);
+});
+
+test("IMSGSELF1 self-chat detection needs the own-account signal", () => {
+	const dest = toJsonLines([{ guid: "d1", sender: HANDLE, destination_caller_id: HANDLE, text: "x", is_from_me: true }]);
+	const nodest = toJsonLines([{ guid: "d2", sender: HANDLE, text: "x", is_from_me: true }]);
+	expect(isSelfChatMode({ identifier: HANDLE, accountLogin: OTHER }, parseHistoryPayload(dest), HANDLE)).toBe(true);
+	expect(isSelfChatMode({ identifier: HANDLE, accountLogin: OTHER }, parseHistoryPayload(nodest), HANDLE)).toBe(false);
+	expect(isSelfChatMode({ identifier: HANDLE, accountLogin: HANDLE }, parseHistoryPayload(nodest), HANDLE)).toBe(true);
+	expect(isSelfChatMode({ identifier: OTHER, accountLogin: HANDLE }, parseHistoryPayload(dest), HANDLE)).toBe(false);
+	expect(isSelfChatMode(null, parseHistoryPayload(dest), HANDLE)).toBe(false);
+});
+
+test("IMSGSELF1 cli send prefixes in self-chat mode and poll never replays it", async () => {
+	const selfChats = [{ id: 1, is_group: false, identifier: HANDLE, account_login: OTHER, participants: [HANDLE], service: "iMessage" }];
+	const selfHist = [{ guid: "c1", sender: HANDLE, destination_caller_id: HANDLE, text: "cli note", is_from_me: true, is_group: false }];
+	const { home, state, env } = makeHome("cli-self", selfHist, selfChats);
+	const poll = await runCli(env, "imessage", "poll");
+	expect(`${poll.result.rc} ${poll.out} ${poll.err}`).toContain('"overall":"OK"');
+	expect(poll.json?.data).toMatchObject({ delivered: 1, self_chat: true });
+	const sent = await runCli(env, "imessage", "send", "on it");
+	expect(`${sent.result.rc} ${sent.out} ${sent.err}`).toContain('"overall":"OK"');
+	expect(sent.json?.data).toMatchObject({ self_chat: true, prefixed: true });
+	const outboxLast: unknown = JSON.parse(lines(join(state, "outbox.jsonl")).at(-1) ?? "{}");
+	const outboxText = typeof outboxLast === "object" && outboxLast !== null && "text" in outboxLast && typeof outboxLast.text === "string"
+		? outboxLast.text
+		: null;
+	expect(outboxText).toBe(`${REPLY_PREFIX}on it`);
+	const receipts = lines(join(home, ".local", "state", "omp-kit", "jobs", "imessage-bridge.replies.jsonl"));
+	const lastReceipt: unknown = JSON.parse(receipts.at(-1) ?? "{}");
+	const guid = typeof lastReceipt === "object" && lastReceipt !== null && "guid" in lastReceipt && typeof lastReceipt.guid === "string"
+		? lastReceipt.guid
+		: null;
+	expect(typeof guid).toBe("string");
+	appendFileSync(join(state, "history.json"),
+		`${JSON.stringify({ guid, sender: HANDLE, destination_caller_id: HANDLE, text: `${REPLY_PREFIX}on it`, is_from_me: true, is_group: false })}\n`);
+	const repoll = await runCli(env, "imessage", "poll");
+	expect(`${repoll.result.rc} ${repoll.out} ${repoll.err}`).toContain('"overall":"OK"');
+	expect(repoll.json?.data).toMatchObject({ delivered: 0 });
+	const pushed = await runCli(env, "imessage", "notify-blocked", "--key", "bead-9", "--text", "blocked on you");
+	expect(`${pushed.result.rc} ${pushed.out} ${pushed.err}`).toContain('"overall":"OK"');
+	const pushLast: unknown = JSON.parse(lines(join(state, "outbox.jsonl")).at(-1) ?? "{}");
+	const pushText = typeof pushLast === "object" && pushLast !== null && "text" in pushLast && typeof pushLast.text === "string"
+		? pushLast.text
+		: null;
+	expect(pushText).toBe(`${REPLY_PREFIX}blocked on you`);
 });
