@@ -1,8 +1,10 @@
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
-import { check as durabilityCheck, gitDeadlineMs } from "../../src/fleet-guard/durability.ts";
+import { addedFromHashline, check as durabilityCheck, gitDeadlineMs } from "../../src/fleet-guard/durability.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
@@ -256,3 +258,109 @@ test("GUARDGITLOAD1: pinned-high load judges a read delayed past 2 s but inside 
 		fixture.cleanup();
 	}
 }, fixtureDeadlineS(30) * 1000);
+
+async function editPayloadFixture(label: string) {
+	const base = join(import.meta.dir, "../../var/agent-tmp");
+	mkdirSync(base, { recursive: true });
+	const repo = ownedTmp(label, { root: base }).path;
+	roots.push(repo);
+	const env = { ...process.env };
+	for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+	Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" });
+	const git = async (args: string[], input?: string) => {
+		const result = await runFixtureAsync(["git", "-C", repo, ...args],
+			{ cwd: repo, env, ...(input === undefined ? {} : { stdin: input }) });
+		if (result.rc !== 0) throw new Error(new TextDecoder().decode(result.stderr));
+		return new TextDecoder().decode(result.stdout).trim();
+	};
+	await git(["init", "--quiet"]);
+	const scratch = join(repo, "var", "agent-tmp", `payload.${process.pid}`);
+	mkdirSync(scratch, { recursive: true });
+	writeFileSync(join(scratch, ".owner"),
+		`pid=${process.pid}\nlabel=payload\nrepo=${repo}\ncreated=${new Date().toISOString()}\n`);
+	const index = async (path: string, content: string) => {
+		const hash = await git(["hash-object", "-w", "--stdin"], content);
+		await git(["update-index", "--add", "--cacheinfo", `100644,${hash},${path}`]);
+	};
+	return { repo, scratch, index, context: { cwd: repo } };
+}
+
+test("EDITPAYLOAD1: hashline sections parse to per-file added lines", () => {
+	const patch = "*** Begin Patch\n[a.txt#0000]\nPUT 1.=1:\n+hello\n+world\n*** End Patch\n[b.txt#1234]\nREM\n*** End Patch";
+	expect(addedFromHashline(patch, "/repo", ["/repo/a.txt"])).toBe("hello\nworld\n");
+	// A section with no added rows (delete) and a non-patch text establish nothing.
+	expect(addedFromHashline(patch, "/repo", ["/repo/b.txt"])).toBeUndefined();
+	expect(addedFromHashline(patch, "/repo", ["/repo/missing.txt"])).toBeUndefined();
+	expect(addedFromHashline("not a patch", "/repo", ["/repo/a.txt"])).toBeUndefined();
+});
+
+test("EDITPAYLOAD1: a hashline delete or move with no readable bytes is admitted with a one-line notice", async () => {
+	const f = await editPayloadFixture("durability-editpayload");
+	const abs = join(f.scratch, "notes.txt");
+	writeFileSync(abs, "hello\n");
+	// Runtime-selected like the guard itself: the owning OMP installation provides this module, so no static import can name it.
+	const native = await import(pathToFileURL(join(resolveOmpIdentity().nativeRoot!, "native", "index.js")).href);
+	const currentTag = new native.EditStore().recordSnapshotFile(abs);
+	const notices: string[] = [];
+	const context = { ...f.context, warn: (message: string) => { notices.push(message); } };
+	const del = { toolName: "edit", input: { input: `*** Begin Patch\n[${abs}#${currentTag}]\nREM\n*** End Patch` } };
+	expect(await durabilityCheck(del, context)).toBeUndefined();
+	expect(notices).toHaveLength(1);
+	expect(notices[0]).not.toContain("\n");
+	const moved = join(f.scratch, "moved.txt");
+	const mv = { toolName: "edit", input: { input: `*** Begin Patch\n[${abs}#${currentTag}]\nMV ${moved}\n*** End Patch` } };
+	expect(await durabilityCheck(mv, context)).toBeUndefined();
+	expect(notices).toHaveLength(2);
+	expect(notices[1]).not.toContain("\n");
+	// EDITREJECT1 still holds: a stale-tag patch writes nothing, so the guard stays silent
+	// and the real tool reports its own re-read error.
+	const stale = { toolName: "edit", input: `*** Begin Patch\n[${abs}#ABCD]\nPUT 1.=1:\n+stale\n*** End Patch` };
+	expect(await durabilityCheck(stale, context)).toBeUndefined();
+	expect(notices).toHaveLength(2);
+	// The judgment never writes: the file on disk is untouched.
+	expect(readFileSync(abs, "utf8")).toBe("hello\n");
+}, fixtureDeadlineS() * 1000);
+
+test("EDITPAYLOAD1: readable added lines are judged durable: disposable admitted, tracked source refused", async () => {
+	const f = await editPayloadFixture("durability-editpayload-added");
+	const abs = join(f.scratch, "notes.txt");
+	writeFileSync(abs, "hello\n");
+	// OMP patch-mode edits carry unified diffs: the guard judges their added lines.
+	const diff = { toolName: "edit", input: { path: abs, edits: [{ op: "update", diff: "@@\n-hello\n+disposable line\n" }] } };
+	expect(await durabilityCheck(diff, f.context)).toBeUndefined();
+	await f.index("src/canonical.ts", "disposable line\n");
+	expect((await durabilityCheck(diff, f.context))?.reason).toContain("tracked-source-copy content");
+	// The current omp replace schema names its strings old_string/new_string.
+	const replace = { toolName: "edit", input: { path: abs, old_string: "hello\n", new_string: "more disposable\n" } };
+	expect(await durabilityCheck(replace, f.context)).toBeUndefined();
+	await f.index("src/other.ts", "more disposable\n");
+	expect((await durabilityCheck(replace, f.context))?.reason).toContain("tracked-source-copy content");
+}, fixtureDeadlineS() * 1000);
+
+test("EDITPAYLOAD1: a patch-mode rename into owned scratch is judged on the move source", async () => {
+	const f = await editPayloadFixture("durability-editpayload-rename");
+	const home = join(f.repo, "home-source.txt");
+	writeFileSync(home, "canonical bytes\n");
+	const rename = { toolName: "edit", input: { path: home, edits: [{ rename: join(f.scratch, "arrived.txt") }] } };
+	expect(await durabilityCheck(rename, f.context)).toBeUndefined();
+	await f.index("src/canonical.ts", "canonical bytes\n");
+	expect((await durabilityCheck(rename, f.context))?.reason).toContain("tracked-source-copy");
+}, fixtureDeadlineS() * 1000);
+
+test("EDITPAYLOAD1: a moved-from scratch file is judged on its added lines", async () => {
+	const f = await editPayloadFixture("durability-editpayload-movedfrom");
+	const abs = join(f.scratch, "notes.txt");
+	writeFileSync(abs, "hello\n");
+	// Runtime-selected like the guard itself: the owning OMP installation provides this module, so no static import can name it.
+	const native = await import(pathToFileURL(join(resolveOmpIdentity().nativeRoot!, "native", "index.js")).href);
+	const currentTag = new native.EditStore().recordSnapshotFile(abs);
+	const notices: string[] = [];
+	const context = { ...f.context, warn: (message: string) => { notices.push(message); } };
+	// PUT-then-MV: the engine moves the edited bytes to the destination, so the simulator
+	// yields nothing for the source while its section still names the added lines.
+	const move = { toolName: "edit", input: { input: `*** Begin Patch\n[${abs}#${currentTag}]\nPUT 1.=1:\n+disposable line\nMV renamed-outside.txt\n*** End Patch` } };
+	expect(await durabilityCheck(move, context)).toBeUndefined();
+	expect(notices).toHaveLength(0);
+	await f.index("src/canonical.ts", "disposable line\n");
+	expect((await durabilityCheck(move, context))?.reason).toContain("tracked-source-copy content");
+}, fixtureDeadlineS() * 1000);

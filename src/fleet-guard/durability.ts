@@ -22,6 +22,11 @@ const refuse = (detail: string): FleetGuardBlock => ({ block: true,
 	reason: `fleet-guard scratch-is-not-a-home: ${detail}. Keep canonical source, reusable scripts, prompts and packets in their repository home; scratch is for disposable synthetic inputs.${detail.startsWith("tracked-source-copy") ? SEPARATE_CHECKOUT : ""}` });
 const inside = (root: string, path: string): boolean => path === root || path.startsWith(`${root}/`);
 
+/** One-line admission notice for an owned-scratch path whose written bytes cannot be read. */
+function unreadableScratchNotice(scratch: string, physical: string): string {
+	return `fleet-guard scratch-is-not-a-home: admitted a scratch edit with no readable written bytes for ${relative(scratch, physical).replaceAll("\n", " ")}; nothing durable was judged.`;
+}
+
 /** Missing live facts block the write, but do not establish a policy match. */
 export type DurabilityBlock = FleetGuardBlock & (
 	{ status: "UNKNOWN"; read: string } | { status?: never; read?: never }
@@ -132,7 +137,7 @@ async function workingCopyMatches(repo: string, content: string, hash: string): 
 }
 
 
-export interface Target { path: string; content?: string; replacement?: { old: string; next: string; all: boolean } }
+export interface Target { path: string; content?: string; replacement?: { old: string; next: string; all: boolean }; added?: string; movedFrom?: string }
 /** Every filesystem target a write/edit payload names, through OMP's native edit inspection for patch payloads. */
 export async function targets(event: FleetGuardEvent): Promise<Target[]> {
 	const input = event.input;
@@ -141,8 +146,24 @@ export async function targets(event: FleetGuardEvent): Promise<Target[]> {
 		const path = record.path ?? record.file ?? record.file_path;
 		if (typeof path === "string") {
 			if (event.toolName === "write") return [{ path, content: typeof record.content === "string" ? record.content : undefined }];
-			if (typeof record.oldText === "string" && typeof record.newText === "string")
-				return [{ path, replacement: { old: record.oldText, next: record.newText, all: record.replace_all === true } }];
+			// The current omp replace schema names its strings old_string/new_string (older seats sent oldText/newText).
+			const oldText = record.oldText ?? record.old_string;
+			const newText = record.newText ?? record.new_string;
+			if (typeof oldText === "string" && typeof newText === "string")
+				return [{ path, replacement: { old: oldText, next: newText, all: record.replace_all === true } }];
+			// OMP patch-mode edits carry unified diffs: judge the lines they add.
+			if (Array.isArray(record.edits)) {
+				const targets: Target[] = [];
+				const added = addedFromDiffs(record.edits);
+				if (added !== undefined) targets.push({ path, added });
+				// A patch-mode rename writes the move source's bytes to its destination,
+				// so each destination is its own target carrying its source.
+				for (const edit of record.edits) {
+					const rename = (edit as { rename?: unknown } | null | undefined)?.rename;
+					if (typeof rename === "string" && rename !== "") targets.push({ path: rename, movedFrom: path });
+				}
+				if (targets.length > 0) return targets;
+			}
 			return [{ path }];
 		}
 		const patch = record.patch ?? record.input ?? record._input;
@@ -173,6 +194,52 @@ async function patchTargets(patch: string): Promise<Target[]> {
 		return [...new Set<string>(paths)].map(path => ({ path }));
 	}
 	throw new Error("native edit targets are unavailable");
+}
+
+/** Added lines of unified diffs in an omp patch-mode `edits` array, or undefined when
+ * the edits add nothing (a pure removal writes no durable bytes to the path). */
+function addedFromDiffs(edits: unknown[]): string | undefined {
+	const rows: string[] = [];
+	for (const edit of edits) {
+		const diff = (edit as { diff?: unknown } | null | undefined)?.diff;
+		if (typeof diff !== "string") continue;
+		for (const line of diff.split("\n")) {
+			if (line.startsWith("+") && !line.startsWith("+++")) rows.push(line.slice(1));
+		}
+	}
+	return rows.length > 0 ? `${rows.join("\n")}\n` : undefined;
+}
+
+// EDITPAYLOAD1: omp's current edit payload is one hashline `input` string (`[PATH#TAG]`
+// headers, `PUT`/`CUT` ops, `+` body rows; see the installed omp edit schemas). A section's
+// `+` rows are its readable added lines even when the engine simulation below yields no
+// bytes for the path; a section with none (delete, move source) writes nothing durable.
+// Tags are engine-hex like the reader shows (HASHLINE_FILE_TAG_RE in omp's tool-event-input).
+const HASHLINE_HEADER = /^\[([^[\]]+)#([0-9A-Fa-f]{4})\]$/;
+export function addedFromHashline(patch: string, cwd: string, candidates: readonly string[]): string | undefined {
+	if (!patch.startsWith("*** Begin Patch")) return undefined;
+	const sections: Array<{ raw: string; rows: string[] }> = [];
+	let current: string[] | undefined;
+	for (const line of patch.split("\n")) {
+		const header = HASHLINE_HEADER.exec(line);
+		if (header) { current = []; sections.push({ raw: header[1]!, rows: current }); continue; }
+		if (line === "*** End Patch" || line === "*** Begin Patch") { current = undefined; continue; }
+		// Body rows start with `+` and are otherwise verbatim; op lines (`PUT`/`CUT`/`MV`/`REM`,
+		// including the `PUT N*:` / `PUT >N*:` block forms and `@name` pastes) never do.
+		if (current !== undefined && line.startsWith("+")) current.push(line.slice(1));
+	}
+	const matched: string[] = [];
+	for (const { raw, rows } of sections) {
+		if (rows.length === 0) continue;
+		let resolved: string;
+		try { resolved = resolve(cwd, raw); } catch { continue; }
+		// Several spellings can name one file (relative and absolute headers side by side);
+		// every matching section's rows are added lines of that file.
+		if (candidates.includes(resolved)) matched.push(...rows);
+	}
+	// The trailing newline is fallback-only: exact simulated bytes win whenever they exist,
+	// and this approximation only feeds the judgment when they do not.
+	return matched.length > 0 ? `${matched.join("\n")}\n` : undefined;
 }
 
 /** The patch text of an edit payload, when it is one (string or input/patch field). */
@@ -332,7 +399,33 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 				if (!old || !before.includes(old) || (!all && before.indexOf(old) !== before.lastIndexOf(old))) return refuse("edit replacement facts are ambiguous");
 				content = all ? before.split(old).join(next) : before.replace(old, () => next);
 			}
-			if (content === undefined) return refuse("scratch edit/write content cannot be established from this payload variant");
+			if (content === undefined) {
+				// EDITPAYLOAD1: a hashline section's added rows (or a patch-mode diff's) are readable even
+				// when the engine simulation yields no bytes for the path, so the durable-content judgment
+				// below still runs on them. A path with no readable added lines (delete, move source) writes
+				// nothing durable to that path; scratch is disposable, so an edit is admitted with a one-line
+				// notice while content the guard can read is still judged below. A content-less write stays
+				// refused (DONEGUARD1 pins the fail-closed write): it names no edit payload variant.
+				const added = entry.added ?? (event.toolName === "edit" && patch !== undefined ? addedFromHashline(patch, cwd, [path, physical]) : undefined);
+				if (added !== undefined) {
+					content = added;
+				} else if (entry.movedFrom !== undefined) {
+					// A patch-mode rename writes the move source's bytes to this path; judge them
+					// the way the simulator judges a hashline move destination. A missing source
+					// moves nothing, so like other unreadable scratch edits it is admitted with notice.
+					read = "scratch move source read";
+					try {
+						content = await readBounded(resolve(cwd, entry.movedFrom));
+					} catch (error) {
+						if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+					}
+				}
+				if (content === undefined) {
+					if (event.toolName !== "edit") return refuse("scratch edit/write content cannot be established from this payload variant");
+					context.warn?.(unreadableScratchNotice(scratch, physical));
+					continue;
+				}
+			}
 			if (Buffer.byteLength(content) > LIMIT) return refuse("scratch content exceeds admission limit");
 			if (/^#!/.test(content) || /\.sh$/i.test(physical)) return refuse("rerunnable script belongs in a repository home");
 			const segments = canonical.split("/");

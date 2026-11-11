@@ -1,0 +1,1 @@
+- Scratch `edit` calls no longer bounce with "content cannot be established from this payload variant": deletes and moves inside owned scratch are admitted with a notice, and edits the guard cannot fully simulate are judged on the lines they add, so only content that matches tracked source is still refused.
