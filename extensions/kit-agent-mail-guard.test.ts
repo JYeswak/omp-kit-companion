@@ -1486,3 +1486,69 @@ test("MAILGUARDSLIM1-kept [c] every kept hazard refusal still refuses under its 
 	expect(code(await anonymous.mail(cwd, "send_message", send({ sender_name: "RedCat" })))).toBe("IDENTITY_UNBOUND");
 	expect(code(await h.mail(fleetRepo(), "send_message", send({ sender_name: undefined })))).toBe("AM_IDENTITY_MISMATCH");
 });
+
+/**
+ * SESSIONREBIND1 (ompkit-1ra0d.156): after an in-pane session change Tern still reports the old
+ * omp_session_file for the lead's pane, so exact-match binding misses the caller's own live pane
+ * and every send and register_agent is refused IDENTITY_UNBOUND. The caller rebinds to its own
+ * pane only: TERN_PANE names the live block and that block's recorded file sits in the same profile
+ * directory as the process's session file. Another pane claiming the new session stays refused.
+ */
+function rebindSeat(ternPane: string | null) {
+	const recipient = fleetRepo();
+	const home = freshDir(base, "rebind-");
+	const sessionCwd = freshDir(base, "rebind-cwd-");
+	const profileDir = join(home, "sessions", "-Developer");
+	mkdirSync(profileDir, { recursive: true });
+	const oldFile = join(profileDir, "2026-10-30T12-31-48-640Z_01a18ccb-7da0-7214-b51b-de1a4b4bf039.jsonl");
+	const newFile = join(profileDir, "2026-11-11T13-20-39-903Z_01a1cac4-87df-71e9-b05a-92d9582e1fb2.jsonl");
+	writeFileSync(oldFile, "");
+	writeFileSync(newFile, "");
+	const identityDir = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(recipient).digest("hex").slice(0, 12));
+	mkdirSync(identityDir, { recursive: true });
+	writeFileSync(join(identityDir, "tern-91"), JSON.stringify({ name: "PlumRaven" }));
+	// Block 92 is a live seat in the recipient repo bound to PlumRaven too, so test [b] pins the
+	// profile-directory check: without it, pane 92 claiming the new session would rebind and send.
+	writeFileSync(join(identityDir, "tern-92"), JSON.stringify({ name: "PlumRaven" }));
+	const otherDir = freshDir(base, "rebind-other-");
+	const otherFile = join(otherDir, "other.jsonl");
+	writeFileSync(otherFile, "");
+	const respond = fleetRespond({ [recipient]: [mailRow("PlumRaven"), mailRow("BlueLake"), mailRow("RedCat")] });
+	const tern = JSON.stringify({
+		sessions: [{ tabs: [{ name: "fixture", blocks: [{ id: 91, cwd: sessionCwd, live: true }, { id: 92, cwd: recipient, live: true }] }] }],
+		panes: [
+			{ pane: 91, cwd: sessionCwd, omp_session_file: oldFile },
+			{ pane: 92, cwd: recipient, omp_session_file: otherFile },
+		],
+	});
+	const env: Record<string, string | undefined> = ternPane === null
+		? { AGENT_NAME: "PlumRaven" }
+		: { AGENT_NAME: "PlumRaven", TERN_PANE: ternPane };
+	const host = () => createHost({ home, env, sessionFile: newFile, mailWake: undefined },
+		call => call.command === "tern" ? { code: 0, stdout: tern, stderr: "" } : respond(call));
+	return { recipient, sessionCwd, host };
+}
+
+test("SESSIONREBIND1 [a] a caller whose pane record names the previous session file still sends and registers", async () => {
+	const seat = rebindSeat("91");
+	const h = await seat.host();
+	expect(await h.mail(seat.sessionCwd, "send_message", send({ project_key: seat.recipient, to: ["BlueLake"], cc: [] }), "rebind-send")).toBeUndefined();
+	const registered = await h.mail(seat.sessionCwd, "register_agent",
+		{ project_key: seat.recipient, program: "omp", model: "test", name: "PlumRaven", task_description: "rebind", pane_id: "tern:91" });
+	expect(code(registered)).toBeUndefined();
+});
+
+test("SESSIONREBIND1 [b] a different pane claiming the new session stays IDENTITY_UNBOUND", async () => {
+	const seat = rebindSeat("92");
+	const h = await seat.host();
+	const refused = await h.mail(seat.sessionCwd, "send_message",
+		send({ project_key: seat.recipient, sender_name: "PlumRaven", to: ["BlueLake"], cc: [] }), "rebind-spoof");
+	expect(code(refused)).toBe("IDENTITY_UNBOUND");
+});
+
+test("SESSIONREBIND1 planted: exact-match-only binding refuses the rebound caller", async () => {
+	const seat = rebindSeat(null);
+	const h = await seat.host();
+	expect(code(await h.mail(seat.sessionCwd, "send_message",
+		send({ project_key: seat.recipient, to: ["BlueLake"], cc: [] }), "rebind-planted"))).toBe("IDENTITY_UNBOUND");
+});

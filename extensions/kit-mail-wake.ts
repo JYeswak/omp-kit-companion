@@ -287,10 +287,28 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 			if (found !== null) return null;
 			found = block;
 		}
-		return found ? {
+		if (found) return {
 			session: found.session, block: found.block, repo: found.cwd,
 			name: identityFor(found), projectName: projectIdentity(found, projectKey),
-		} : null;
+		};
+		// SESSIONREBIND1: Tern's pane record still names the previous session file after an in-pane
+		// session change (/new, compaction into a new file, restart), so the exact match above misses
+		// the caller's own live pane. Only when no exact match exists, rebind to the TERN_PANE-named
+		// block, and only when its recorded file is in the same profile directory (same parent dir)
+		// as this process's session file, which stops cross-profile rebinding. A same-directory
+		// TERN_PANE forgery from an unbound seat can still bind another pane's block; after that,
+		// send-as safety rests on pane identity files and Agent Mail registration as before.
+		const pane = (env.TERN_PANE ?? "").trim();
+		if (!/^[0-9]{1,20}$/.test(pane)) return null;
+		const own = blocks.filter(block => block.block === pane);
+		if (own.length !== 1) return null;
+		const rebound = own[0]!;
+		if (typeof rebound.sessionFile !== "string" || rebound.sessionFile === "" || rebound.sessionFile === sessionFile) return null;
+		if (dirname(rebound.sessionFile) !== dirname(sessionFile)) return null;
+		return {
+			session: rebound.session, block: rebound.block, repo: rebound.cwd,
+			name: identityFor(rebound), projectName: projectIdentity(rebound, projectKey),
+		};
 	}
 
 	/** One recipient to its live seat, or why there is none plus the parent to re-address to. */

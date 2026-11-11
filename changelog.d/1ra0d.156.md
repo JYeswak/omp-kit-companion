@@ -1,0 +1,1 @@
+- After an in-pane session change, the lead's mail no longer fails with IDENTITY_UNBOUND while Tern still reports the previous session file: the caller rebinds to its own Tern pane when the recorded file sits in the same profile directory, instead of refusing every send and registration.
