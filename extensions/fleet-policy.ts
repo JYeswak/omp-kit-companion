@@ -25,6 +25,20 @@ const staleWarned = new Set<string>();
 /** Bounded delay before the single verification retry. */
 const VERIFY_RETRY_DELAY_MS = 100;
 
+/**
+ * Why a git probe failed, for the `unavailable` reason only: the numeric exit status, the
+ * errno name (e.g. ENOENT when git is missing), `killed` for a timeout, or `unknown`.
+ * No paths, no output bytes.
+ */
+function probeCause(error: unknown): string {
+	if (typeof error === "object" && error !== null && "code" in error) {
+		if (typeof error.code === "number") return `exit ${error.code}`;
+		if (typeof error.code === "string") return error.code;
+	}
+	if (typeof error === "object" && error !== null && "killed" in error && error.killed === true) return "killed";
+	return "unknown";
+}
+
 /** Repository-local opt-in only. Stock roots require no executable or filesystem mutation. */
 export async function fleetPolicyState(cwd: string, seen: readonly string[] = []): Promise<FleetPolicyState> {
 	let root = resolve(cwd);
@@ -96,15 +110,20 @@ export async function fleetPolicyState(cwd: string, seen: readonly string[] = []
 			GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0",
 			GIT_NO_LAZY_FETCH: "1", GIT_OPTIONAL_LOCKS: "0",
 		});
+		let lastCause = "unknown";
 		const probe = async (): Promise<string | null> => {
 			try {
 				const { stdout } = await runFile("git", ["--no-pager", "-c", "core.fsmonitor=false",
 					"-c", "core.hooksPath=/dev/null", "-C", physicalCwd, "rev-parse", "--show-toplevel"],
 					{ env, timeout: 1000, maxBuffer: POLICY_LIMIT, encoding: "utf8" });
 				const reported = stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout;
-				if (!isAbsolute(reported)) return null;
-				return await realpath(reported);
-			} catch { return null; }
+				if (!isAbsolute(reported)) { lastCause = "non-absolute top level"; return null; }
+				try { return await realpath(reported); }
+				catch { lastCause = "unreadable top level"; return null; }
+			} catch (error) {
+				lastCause = probeCause(error);
+				return null;
+			}
 		};
 		let real = await probe();
 		if (real === null) {
@@ -122,7 +141,7 @@ export async function fleetPolicyState(cwd: string, seen: readonly string[] = []
 				}
 				return { ...cached.state, notice: `fleet-guard: git verification failed; enforcing last verified policy for ${root}.` };
 			}
-			return { kind: "unavailable", root, reason };
+			return { kind: "unavailable", root, reason: `${reason} (probe ${lastCause})` };
 		}
 		if (real === root) {
 			const state = { kind: "on", root } as const;

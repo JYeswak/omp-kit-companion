@@ -109,7 +109,7 @@ test("a transient git failure retries once and succeeds", async () => {
 	const bin = freshDir(base, "failonce-bin-");
 	const failOnce = join(bin, "gitfailed");
 	const git = process.env.PATH !== undefined && existsSync("/usr/bin/git") ? "/usr/bin/git" : "git";
-	writeFileSync(join(bin, "git"), `#!/bin/sh\nif [ ! -f "${failOnce}" ]; then touch "${failOnce}"; exit 128; fi\nexec ${git} "$@"\n`, { mode: 0o755 });
+	writeFileSync(join(bin, "git"), `#!/bin/sh\nif [ ! -f "${failOnce}" ]; then : > "${failOnce}"; exit 128; fi\nexec "${git}" "$@"\n`, { mode: 0o755 });
 	const savedPath = process.env.PATH;
 	process.env.PATH = `${bin}${process.platform === "win32" ? ";" : ":"}${savedPath ?? ""}`;
 	try {
