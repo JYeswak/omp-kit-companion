@@ -1339,6 +1339,7 @@ async function commitOwnedPathsAndPublish(
 		: pushCheckResult("UNRUN", "not_run", checkPreflight.result.sha256);
 	let fullSuiteVerdict: FullSuiteVerdict | undefined;
 	let checkedCandidateSha: string | null = null;
+	let scratchNotice: string | null = null;
 	try {
 		convergenceStarted = true;
 		const convergence = await convergeRepository({
@@ -1351,14 +1352,16 @@ async function commitOwnedPathsAndPublish(
 				fullSuiteVerdict = await runFullSuiteVerdict(repo, baseSha, candidateSha);
 				if (fullSuiteVerdict !== "PASS")
 					return { allow: false, reason: fullSuiteVerdict === "FAIL" ? "CHECK_FAILED" : "CHECK_UNRUN" };
-				// SCRATCHBIN1 (ompkit-774u.15, Joshua scope 2026-10-20): refuse the push while the session holds an
-				// undisposed scratch dir. Refuse on positive evidence only; an unlistable census is fail-open, never
-				// a block, so a broken measuring tool cannot strand a landing.
+				// SCRATCHBIN1 (ompkit-774u.15, Joshua scope 2026-10-20): note undisposed scratch at the push
+				// instead of refusing it. Handing the push off with unbinned dirs is reversible (the dirs stay
+				// listed by `omp-kit scratch mine`), so the push proceeds with a one-line notice (GATEDEMOTE1).
+				// Refuse on positive evidence only; an unlistable census is fail-open, never a
+				// block, so a broken measuring tool cannot strand a landing.
 				try {
 					const gate = disposalGate(homedir(), "push", { liveness: defaultLiveness(), run: defaultRunner });
 					if (!gate.unproven && gate.decision === "refuse") {
 						const first = gate.owed.slice(0, 3).map(row => `${row.dir} (${row.state}, bin ${row.bin})`).join("; ");
-						return { allow: false, reason: `SCRATCH_DISPOSAL_REFUSED: ${gate.owed.length} undisposed scratch dir(s): ${first}${gate.owed.length > 3 ? "…" : ""}. Release each with omp-kit scratch release DIR --bin throwaway|evidence|promote.` };
+						scratchNotice = `SCRATCH_DISPOSAL_NOTICE: ${gate.owed.length} undisposed scratch dir(s): ${first}${gate.owed.length > 3 ? "…" : ""}. The push proceeded; release each with omp-kit scratch release DIR --bin throwaway|evidence|promote.`;
 					}
 				} catch { /* fail-open: the push check already passed */ }
 				return admission;
@@ -1392,7 +1395,7 @@ async function commitOwnedPathsAndPublish(
 						: { code: "LAND_PUBLICATION_REFUSED", message: `The exact checked candidate was not published: ${convergence.reason ?? "publication was not verified"}`, remediation: "Preserve the candidate and resolve the typed refusal before another landing." });
 		return {
 			code: published ? 0 : overall === "UNRUN" ? 77 : 1,
-			data: { overall, commit: sha, candidate_sha: candidateSha, pushed_sha: pushedSha, owner, paths, base, localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence: convergenceData, check: checkResult, phases },
+			data: { overall, commit: sha, candidate_sha: candidateSha, pushed_sha: pushedSha, owner, paths, base, localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence: convergenceData, check: checkResult, phases, ...(scratchNotice !== null ? { scratch_disposal_notice: scratchNotice } : {}) },
 			...(failure ? { errors: [failure] } : {}),
 			verification: overall === "UNRUN" ? "UNVERIFIED" : "PERFORMED",
 		};

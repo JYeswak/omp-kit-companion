@@ -175,9 +175,10 @@ export interface FlywheelGuardDeps {
 export const FLYWHEEL_EXEC_TIMEOUT_MS = 3000;
 export const COMPACTION_REREAD = "COMPACTION_REREAD";
 export const SELF_CLOSE_REFUSED = "SELF_CLOSE_REFUSED";
-export const SCRATCH_DISPOSAL_REFUSED = "SCRATCH_DISPOSAL_REFUSED";
+export const SCRATCH_DISPOSAL_NOTICE = "SCRATCH_DISPOSAL_NOTICE";
 export const EXPORT_INDEX_REFUSED = "EXPORT_INDEX_REFUSED";
 export const GOAL_SEND_REFUSED = "GOAL_SEND_REFUSED";
+export const RELEASE_NOTICE = "RELEASE_NOTICE";
 
 const IDENTITY_ENV = ["BR_ACTOR", "BR_AGENT_NAME", "AGENT_NAME"] as const;
 /** br 0.7.4 global/close/update options that consume a value. */
@@ -890,7 +891,7 @@ export async function checkExportIndex(event: FlywheelToolCallEvent, deps: Track
 	return undefined;
 }
 
-export const CLONE_GUARD_REFUSED = "CLONEGUARD1";
+export const CLONE_NOTICE = "CLONE_NOTICE";
 const CLONE_GUARD_ALTERNATIVES = "For read-only work use `omp-kit scratch new --export <sha>`; for a test that needs commits build a synthetic fixture with `git init` inside scratch (a clone whose source is a fixture in the same scratch is allowed); otherwise report UNVERIFIED and name the command that would verify.";
 /** `git clone` options that take the next word as their value. */
 const CLONE_VALUE_FLAGS: Record<string, true> = {
@@ -1008,13 +1009,13 @@ function fleetOrigins(from: string, scratchRoot: string): Set<string> {
 }
 
 /**
- * CLONEGUARD1 (ompkit-fp72.120.16.232): a repository copied into scratch is a second history, the
- * worktree the fleet forbids. Refuse `git clone` (any flags: --shared, --reference, --local,
- * --mirror...) and `git fetch`/`pull` of a literal local path when the destination resolves inside a
- * `<repo>/var/agent-tmp/<dir>` scratch and the source is not inside that same scratch. A network
- * clone of external code (R45 prior-art reading) is admitted unless its URL normalizes to a fleet
- * checkout's origin. `git init` fixtures and clones of a fixture made in the same scratch stay
- * admitted. Wrapped forms (cd, env, sh -c) are followed the way EXPORTINDEX1 follows them; nothing runs.
+ * CLONE_NOTICE (ompkit-fp72.120.16.232, demoted GATEDEMOTE1): a repository copied into scratch is a second history,
+ * which the fleet discourages like a worktree, but the copy is reversible (delete it) so the guard warns instead
+ * of refusing. Note `git clone` (any flags: --shared, --reference, --local, --mirror...) and `git fetch`/`pull` of
+ * a literal local path when the destination resolves inside a `<repo>/var/agent-tmp/<dir>` scratch and the source
+ * is not inside that same scratch. A network clone of external code (R45 prior-art reading) is admitted unless its
+ * URL normalizes to a fleet checkout's origin. `git init` fixtures and clones of a fixture made in the same scratch
+ * stay admitted. Wrapped forms (cd, env, sh -c) are followed the way EXPORTINDEX1 follows them; nothing runs here.
  */
 export function checkCloneScratch(event: FlywheelToolCallEvent, deps: { env: Record<string, string | undefined>; home: string; sessionCwd: string }): FlywheelToolCallResult | undefined {
 	if (event.toolName !== "bash") return undefined;
@@ -1071,8 +1072,7 @@ export function checkCloneScratch(event: FlywheelToolCallEvent, deps: { env: Rec
 			const mentionsScratch = [sourceWord, destinationWord ?? ""].some(word => word.includes("agent-tmp") || word.includes("TMPDIR"));
 			if (root === undefined && !mentionsScratch && scratchBoundary(canonicalPath(prefix)) === undefined) continue;
 			return {
-				block: true,
-				reason: `kit-flywheel-guard ${CLONE_GUARD_REFUSED}: git clone has a shell-expanded source or destination that cannot be resolved before execution, and it may copy a repository into scratch. No command ran. Use literal paths, or: ${CLONE_GUARD_ALTERNATIVES}`,
+				additionalContext: `kit-flywheel-guard ${CLONE_NOTICE}: git clone has a shell-expanded source or destination that cannot be resolved before execution, and it may copy a repository into scratch. The command proceeded; use literal paths, or: ${CLONE_GUARD_ALTERNATIVES}`,
 			};
 		}
 		if (root === undefined) continue;
@@ -1083,13 +1083,11 @@ export function checkCloneScratch(event: FlywheelToolCallEvent, deps: { env: Rec
 			const remote = normalizeRemoteUrl(source!);
 			if (remote === undefined || !fleetOrigins(gitCwd, root).has(remote)) continue;
 			return {
-				block: true,
-				reason: `kit-flywheel-guard ${CLONE_GUARD_REFUSED}: git clone of ${source} into ${destination} copies a fleet repository (its remote matches a fleet checkout's origin) into scratch (${root}): a second history, which the fleet forbids like a worktree. No command ran. ${CLONE_GUARD_ALTERNATIVES}`,
+				additionalContext: `kit-flywheel-guard ${CLONE_NOTICE}: git clone of ${source} into ${destination} copies a fleet repository (its remote matches a fleet checkout's origin) into scratch (${root}): a second history, which the fleet discourages like a worktree. The command proceeded; ${CLONE_GUARD_ALTERNATIVES}`,
 			};
 		}
 		return {
-			block: true,
-			reason: `kit-flywheel-guard ${CLONE_GUARD_REFUSED}: git ${verb} of ${source} into ${destination} copies a repository into scratch (${root}): a second history, which the fleet forbids like a worktree. No command ran. ${CLONE_GUARD_ALTERNATIVES}`,
+			additionalContext: `kit-flywheel-guard ${CLONE_NOTICE}: git ${verb} of ${source} into ${destination} copies a repository into scratch (${root}): a second history, which the fleet discourages like a worktree. The command proceeded; ${CLONE_GUARD_ALTERNATIVES}`,
 		};
 	}
 	return undefined;
@@ -1395,8 +1393,6 @@ function orchestrationSeat(name: string, sessions: Record<string, unknown>, chie
 	});
 }
 
-
-
 const SENDERS: Record<string, true> = { tern: true, "omp-kit": true, ntm: true };
 
 /** True when a command types a `/goal` line into any pane: `tern send`, `omp-kit send` or `ntm send` with an argument
@@ -1433,7 +1429,6 @@ export function checkGoalSend(event: FlywheelToolCallEvent, owner: string | null
 			+ "(stamped prompts only). Nothing was sent.",
 	};
 }
-
 
 /** Refuse finite Bash work that explicitly disables the OMP deadline. `owner`
 is the server-side session identity; the native tool-call id attributes the
@@ -1606,12 +1601,13 @@ async function checkNativeClaim(request: TrackerRequest, deps: TrackerMutationDe
 	return undefined;
 }
 
-export const BLOCK_REFUSED = "BLOCK_REFUSED";
+export const BLOCK_NOTICE = "BLOCK_NOTICE";
 /** A human-gate comment must name the effect only Joshua can perform: `HUMAN-GATE: <effect>`, at least 16 characters. */
 const HUMAN_GATE_COMMENT = /human-gate:\s*\S[\s\S]{14,}/i;
 
-function refuseBlock(id: string, why: string, next: string): FlywheelToolCallResult {
-	return { block: true, reason: `kit-flywheel-guard ${BLOCK_REFUSED}: ${id} ${why}. ${next} Nothing was changed.` };
+/** GATEDEMOTE1: blocked/orphan findings are one reversible-act notice; the act proceeds. */
+function blockNotice(id: string, why: string, next: string): FlywheelToolCallResult {
+	return { additionalContext: `kit-flywheel-guard ${BLOCK_NOTICE}: ${id} ${why}. ${next} The act proceeded.` };
 }
 
 type TrackerRead = { ok: true; value: unknown } | { ok: false; why: string; stdout: string; spawned: boolean };
@@ -1635,7 +1631,7 @@ async function execJson(exec: FlywheelExec, request: TrackerRequest, args: strin
  * BLOCKEDADMIT1 AC5 (stock-runner parity, J-2026-10-17-16): with no br binary on the seat, or outside a
  * fleet-protocol tracker (br 0.7.4 NOT_INITIALIZED), the block check stands down and the seat sees the
  * tool's own error. A live tracker that cannot answer (timeout, unparseable output, or a bead missing
- * from it) stays fail-closed.
+ * from it) is noted, not refused: the update proceeds.
  */
 function trackerIsStock(result: Extract<TrackerRead, { ok: false }>): boolean {
 	if (!result.spawned) return true;
@@ -1647,19 +1643,25 @@ function trackerIsStock(result: Extract<TrackerRead, { ok: false }>): boolean {
 }
 
 /**
- * BLOCKEDADMIT1: status=blocked needs an open blocks edge to a bead that is not closed, or the human-gate
+ * BLOCKEDADMIT1: status=blocked wants an open blocks edge to a bead that is not closed, or the human-gate
  * label backed by a comment that names the effect only Joshua can perform. A wait on a role's decision is an
- * assigned bead, not a blocked one. Reads are native `show`/`dep list`; an unreadable bead is refused.
+ * assigned bead, not a blocked one. Reads are native `show`/`dep list`; an unreadable bead is noted, not refused.
+ * GATEDEMOTE1: every finding below is a BLOCK_NOTICE and the update proceeds.
  */
 async function checkBlockedHasFix(request: TrackerRequest, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
+	const notes: string[] = [];
 	for (const id of request.ids) {
 		const shown = await execJson(deps.exec, request, ["show", id, "--json"]);
 		if (!shown.ok) {
 			if (trackerIsStock(shown)) continue;
-			return refuseBlock(id, `cannot be checked for a blocking fix (${shown.why})`, "Restore the native lookup, then retry.");
+			notes.push(blockNotice(id, `cannot be checked for a blocking fix (${shown.why})`, "Restore the native lookup, then retry.").additionalContext!);
+			continue;
 		}
 		const edges = await execJson(deps.exec, request, ["dep", "list", id, "--json"]);
-		if (!edges.ok) return refuseBlock(id, `cannot be checked for a blocking fix (${edges.why})`, "Restore the native lookup, then retry.");
+		if (!edges.ok) {
+			notes.push(blockNotice(id, `cannot be checked for a blocking fix (${edges.why})`, "Restore the native lookup, then retry.").additionalContext!);
+			continue;
+		}
 		const rows: unknown[] = Array.isArray(edges.value) ? edges.value : [];
 		const open = rows.some(row => field(row, "type") === "blocks" && typeof field(row, "status") === "string"
 			&& field(row, "status") !== "closed" && field(row, "status") !== "tombstone");
@@ -1674,22 +1676,23 @@ async function checkBlockedHasFix(request: TrackerRequest, deps: TrackerMutation
 		});
 		if (labelled && named) continue;
 		if (labelled) {
-			return refuseBlock(id, "carries human-gate but no comment names the effect only Joshua can perform",
-				"Add a comment `HUMAN-GATE: <the credential, account, payment or legal act only Joshua can do>` first.");
+			notes.push(blockNotice(id, "carries human-gate but no comment names the effect only Joshua can perform",
+				"Add a comment `HUMAN-GATE: <the credential, account, payment or legal act only Joshua can do>` first.").additionalContext!);
+			continue;
 		}
-		return refuseBlock(id, "has no open blocks edge to a fix",
-			`Run \`br dep add ${id} <fix bead>\` (an open bead, never an epic you are under) first, or, if only Joshua can perform the effect, add a \`HUMAN-GATE: <effect>\` comment and the human-gate label. A decision owed by a director, chief or owner is an assigned bead with the decision as its next action, not a blocked one.`);
+		notes.push(blockNotice(id, "has no open blocks edge to a fix",
+			`Run \`br dep add ${id} <fix bead>\` (an open bead, never an epic you are under) first, or, if only Joshua can perform the effect, add a \`HUMAN-GATE: <effect>\` comment and the human-gate label. A decision owed by a director, chief or owner is an assigned bead with the decision as its next action, not a blocked one.`).additionalContext!);
 	}
-	return undefined;
+	return notes.length === 0 ? undefined : { additionalContext: notes.join(" ") };
 }
 
-export const BLOCK_RELEASE_REQUIRED = "BLOCK_RELEASE_REQUIRED";
 const MAX_DEPENDENTS_CHECKED = 20;
 
 /**
- * BLOCKEDADMIT1 AC4: closing a bead must not strand a blocked bead whose only open blocker it was. The same command
- * must release that bead (`br update <id> --status open`) or the bead must keep another open blocks edge. Unreadable
+ * BLOCKEDADMIT1 AC4: closing a bead should not strand a blocked bead whose only open blocker it was. The same command
+ * should release that bead (`br update <id> --status open`) or the bead should keep another open blocks edge. Unreadable
  * dependents are skipped (the close itself was already checked); at most MAX_DEPENDENTS_CHECKED are read.
+ * GATEDEMOTE1: stranding is the same reversible BLOCK_NOTICE as a missing fix edge; the close proceeds.
  */
 async function checkCloseOrphansDependents(request: TrackerRequest, id: string, released: ReadonlySet<string>, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
 	const shown = await execJson(deps.exec, request, ["show", id, "--json"]);
@@ -1711,22 +1714,19 @@ async function checkCloseOrphansDependents(request: TrackerRequest, id: string, 
 		if (!stillBlocked) orphaned.push(dependent);
 	}
 	if (orphaned.length === 0) return undefined;
-	return {
-		block: true,
-		reason: `kit-flywheel-guard ${BLOCK_RELEASE_REQUIRED}: closing ${id} would leave blocked ${orphaned.join(", ")} with no open blocker. `
-			+ `Release them in the same command first (${orphaned.map(bead => `br update ${bead} --status open`).join(" && ")} && br close ${id} ...) or add another open blocks edge. Nothing was closed.`,
-	};
+	return blockNotice(id, `closing it would leave blocked ${orphaned.join(", ")} with no open blocker`,
+		`Release them in the same command first (${orphaned.map(bead => `br update ${bead} --status open`).join(" && ")} && br close ${id} ...) or add another open blocks edge.`);
 }
 
 const SCRATCH_MINE_TIMEOUT_MS = 20_000;
 const MAX_OWED_LISTED = 5;
 
 /**
- * SCRATCHBIN1 enforcement (ompkit-774u.15, Joshua scope 2026-10-20): at the caller's `in_review` or `close`, name
+ * SCRATCHBIN1 census (ompkit-774u.15, Joshua scope 2026-10-20): at the caller's `in_review` or `close`, name
  * which scratch dirs it still owns unreleased. `omp-kit scratch mine --at <point>` lists only the caller's own dirs
  * (owner agent and held session, or its pid), excludes the live session dir, and logs one flag row for the false-flag
- * audit. Positive owed is a refusal (the caller releases first); a missing or failing omp-kit yields no note and never
- * blocks, so a broken measuring tool cannot deadlock a seat.
+ * audit. Positive owed is a notice (GATEDEMOTE1: handing off with unbinned dirs is reversible); a missing or failing
+ * omp-kit yields no note and never blocks, so a broken measuring tool cannot deadlock a seat.
  * SCRATCHSIBLING1 (ompkit-fp72.120.16.214): this runs in the seat's omp process, whose environment is not the calling
  * agent's, so the tool call's own session is handed over as `--session`: a background agent is told about its own
  * dirs only, never the lead's or a sibling's live ones. The command stays `omp-kit scratch mine`, one argv shape.
@@ -1754,7 +1754,7 @@ export async function scratchOwedNote(exec: FlywheelExec, cwd: string, point: "r
 	const listed = owed.slice(0, MAX_OWED_LISTED).map(row => `${String(field(row, "dir"))} (${String(field(row, "state"))}, bin ${String(field(row, "bin"))})`);
 	const more = owed.length > listed.length ? ` and ${owed.length - listed.length} more` : "";
 	return `kit-flywheel-guard SCRATCH_OWED: you still own ${owed.length} scratch dir(s) you have not binned: ${listed.join("; ")}${more}. `
-		+ "Release each with `omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref file:PATH|bead:ID]` before you hand the work off. Refused until each dir is released; nothing was closed.";
+		+ "Release each with `omp-kit scratch release DIR --bin throwaway|evidence|promote [--ref file:PATH|bead:ID]` before you hand the work off. The close/hand-off proceeded; the dirs stay yours until released.";
 }
 
 export const PARTIAL_RELEASE_REFUSED = "PARTIAL_RELEASE_REFUSED";
@@ -1767,12 +1767,25 @@ function refuseRelease(request: TrackerRequest, detail: string): FlywheelToolCal
 }
 
 /**
+ * GATEDEMOTE1: the holder's own proven non-atomic parking shape is a reversible act, so it is a
+ * RELEASE_NOTICE and the release proceeds. Unknown state (below) and third-party custody takes
+ * stay PARTIAL_RELEASE_REFUSED: unknown state and write-ownership conflicts.
+ */
+function releaseNotice(request: TrackerRequest, detail: string): FlywheelToolCallResult {
+	return {
+		additionalContext: `kit-flywheel-guard ${RELEASE_NOTICE}: ${detail} argv \`${request.argv.join(" ")}\`. The release proceeded.`,
+	};
+}
+
+/**
  * DRAIN1 (ompkit-kdbz.1.1) atomic parking: releasing a live held claim
- * (in_progress/rework with an assignee) must write OPEN plus a cleared
+ * (in_progress/rework with an assignee) should write OPEN plus a cleared
  * assignee under the seen revision in one call, by the holder. A bare
  * `--status open` that preserves a stale assignee, or omits the revision the
- * writer saw, is refused before mutation so status/assignee cannot split.
- * Repairs of ownerless or already-open beads pass untouched.
+ * writer saw, is noted before mutation so status/assignee cannot silently split.
+ * Unverifiable releases (no explicit id, unreadable bead) and third-party parks
+ * of a live claim stay PARTIAL_RELEASE_REFUSED: unknown state and write-ownership
+ * conflicts. Repairs of ownerless or already-open beads pass untouched.
  */
 async function checkRelease(request: TrackerRequest, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
 	if (request.ids.length === 0) return refuseRelease(request, "name an explicit bead id; a last-touched release cannot be verified as atomic.");
@@ -1789,10 +1802,10 @@ async function checkRelease(request: TrackerRequest, deps: TrackerMutationDeps):
 			return refuseRelease(request, `${before}: only the holder parks a live claim; a third-party half-park is refused, route the transfer through ${found.assignee}. A third-party reclaim passes only for a dead holder: ${blocker}`);
 		}
 		if (request.assignee !== "") {
-			return refuseRelease(request, `${before}: parking must clear the assignee atomically (--assignee ""); omitting it preserves a stale owner on an open bead.`);
+			return releaseNotice(request, `${before}: parking should clear the assignee atomically (--assignee ""); omitting it preserves a stale owner on an open bead.`);
 		}
 		if (request.ifUnchanged === null) {
-			return refuseRelease(request, `${before}: parking must name the seen revision (--if-unchanged ${found.updatedAt ?? "<updated_at>"}); an unguarded write can discard the other writer's revision.`);
+			return releaseNotice(request, `${before}: parking should name the seen revision (--if-unchanged ${found.updatedAt ?? "<updated_at>"}); an unguarded write can discard the other writer's revision.`);
 		}
 	}
 	return undefined;
@@ -1819,11 +1832,14 @@ async function deadHolderReclaimBlocker(request: TrackerRequest, holder: string,
 /**
  * DRAIN1 follow-up (ompkit-kdbz.1.1 AC2): a bare custody write (`br update
  * <id> --assignee ...` with no classified status) on a live held claim is
- * refused before mutation. Clearing the assignee without parking the status
+ * checked before mutation. Clearing the assignee without parking the status
  * leaves an ownerless in_progress bead -- the genuine BuildNext3
  * ompkit-fp72.95 shape (assignee_changed BuildNext3 -> None, status
  * untouched) -- and reassigning outside claim/park splits custody from the
- * one-active check. Repairs of ownerless or already-open beads pass.
+ * one-active check. GATEDEMOTE1: the holder's own shapes are a RELEASE_NOTICE
+ * and proceed; unverifiable writes (no explicit id, unreadable bead) and a
+ * third-party custody write of a live claim stay refused (unknown state and
+ * write-ownership conflicts). Repairs of ownerless or already-open beads pass.
  */
 async function checkCustody(request: TrackerRequest, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
 	if (request.ids.length === 0) return refuseRelease(request, "name an explicit bead id; an id-less custody write cannot be verified as atomic.");
@@ -1838,9 +1854,9 @@ async function checkCustody(request: TrackerRequest, deps: TrackerMutationDeps):
 			return refuseRelease(request, `${before}: only the holder changes custody of a live claim; a third-party custody write is refused, route the transfer through ${found.assignee}.`);
 		}
 		if (request.assignee === "") {
-			return refuseRelease(request, `${before}: clearing the assignee without parking the status leaves an ownerless ${found.status} bead; park atomically (br update ${found.id} --status open --assignee "" --if-unchanged ${found.updatedAt ?? "<updated_at>"}) instead.`);
+			return releaseNotice(request, `${before}: clearing the assignee without parking the status leaves an ownerless ${found.status} bead; park atomically (br update ${found.id} --status open --assignee "" --if-unchanged ${found.updatedAt ?? "<updated_at>"}) instead.`);
 		}
-		return refuseRelease(request, `${before}: reassigning a live claim outside claim/park splits custody from the one-active check; the holder parks atomically (br update ${found.id} --status open --assignee "" --if-unchanged ${found.updatedAt ?? "<updated_at>"}) and the next worker claims with --claim instead.`);
+		return releaseNotice(request, `${before}: reassigning a live claim outside claim/park splits custody from the one-active check; the holder parks atomically (br update ${found.id} --status open --assignee "" --if-unchanged ${found.updatedAt ?? "<updated_at>"}) and the next worker claims with --claim instead.`);
 	}
 	return undefined;
 }
@@ -2562,8 +2578,7 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 		const owed = await scratchOwedNote(deps.exec, deps.sessionCwd, hasClose ? "close" : "review", deps.callerSession);
 		if (owed !== null) {
 			const prefix = parts.length > 0 ? `${parts.join(" ")} ` : "";
-			return { block: true,
-				reason: `${prefix}kit-flywheel-guard ${SCRATCH_DISPOSAL_REFUSED}: bead close/hand-off refused while undisposed scratch is owed. ${owed}` };
+			return { additionalContext: `${prefix}kit-flywheel-guard ${SCRATCH_DISPOSAL_NOTICE}: bead close/hand-off with undisposed scratch owed. ${owed}` };
 		}
 	}
 	return parts.length === 0 ? undefined : { additionalContext: parts.join(" ") };
@@ -2788,41 +2803,62 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 				const cwd = typeof toolCwd === "string" && toolCwd.trim() !== "" ? resolve(ctx.cwd, expandHome(toolCwd.trim(), home)) : ctx.cwd;
 				pendingCalls.set(event.toolCallId, { toolName: event.toolName, input: event.input, cwd });
 			}
-			// COMPACTION_REREAD never blocks: a compaction delivers one summary
-			// message and every call stays allowed (ompkit-j27dd).
-			const goalSend = checkGoalSend(event, admissionOwner(env));
-			if (goalSend !== undefined) return goalSend;
-			const admission = checkBashAdmission(event, admissionOwner(env));
-			if (admission !== undefined) return admission;
-			const clone = checkCloneScratch(event, { env, home, sessionCwd: ctx.cwd });
-			if (clone !== undefined) return clone;
-			const exportIndex = await checkExportIndex(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd });
-			if (exportIndex !== undefined) return exportIndex;
-			const dbLiteral = checkTrackerDbLiteral(event);
-			if (dbLiteral !== undefined) return dbLiteral;
-			const lint = await checkBeadLint(event, { exec: pi.exec, home, sessionCwd: ctx.cwd, scriptsDir: deps.lintScriptsDir });
-			if (lint?.block === true) return lint;
-			if (lint?.additionalContext) ctx.ui?.notify(lint.additionalContext, "warning");
-			const started = Date.now();
-			const attempts: CloseAttempt[] = [];
-			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd, holderLiveness: execHolderLiveness(pi.exec, env, home),
-				callerSession: ctx.sessionManager?.getSessionId?.() || undefined, nativeContext: ctx }, attempts);
-			if (typeof event.toolCallId === "string" && attempts.length > 0) {
-				if (result?.block === true) {
-					if (typeof result.reason === "string" && result.reason.includes(SELF_CLOSE_REFUSED)) {
-						try {
-							await emitRefusedCloseRecords({ exec: pi.exec, notify: (message) => ctx.ui?.notify(message, "warning") },
-								attempts, event.toolCallId, Date.now() - started);
-						} catch (error) {
-							ctx.ui?.notify(`kit-flywheel-guard ${SPOOL_WRITE_FAILED}: refused-close recording failed (${error instanceof Error ? error.message : String(error)}); the refusal stands.`, "warning");
-						}
-					}
-				} else {
-					closeIntents.set(event.toolCallId, attempts);
-				}
+		// COMPACTION_REREAD never blocks: a compaction delivers one summary
+		// message and every call stays allowed (ompkit-j27dd).
+		// GATEDEMOTE1 (lead 2026-11-11): a notice never ends evaluation. Notices accumulate
+		// below and every later check still runs, so one bash call cannot skip a kept refusal
+		// (e.g. a scratch clone followed by a self-close). A later refusal wins and still
+		// carries the notices. Each notice is notified exactly once, when collected.
+		const notices: string[] = [];
+		const collect = (verdict: FlywheelToolCallResult | undefined): FlywheelToolCallResult | undefined => {
+			if (verdict?.additionalContext) {
+				ctx.ui?.notify(verdict.additionalContext, "warning");
+				notices.push(verdict.additionalContext);
 			}
-			if (result?.additionalContext) ctx.ui?.notify(result.additionalContext, "warning");
-			return result;
+			return verdict;
+		};
+		const refuseWithNotices = (verdict: FlywheelToolCallResult): FlywheelToolCallResult => (
+			notices.length === 0 ? verdict
+				: { ...verdict, additionalContext: [...notices, verdict.additionalContext].filter((part): part is string => typeof part === "string").join(" ") }
+		);
+		const goalSend = checkGoalSend(event, admissionOwner(env));
+		if (goalSend !== undefined) return refuseWithNotices(goalSend);
+		const admission = checkBashAdmission(event, admissionOwner(env));
+		if (admission !== undefined) return refuseWithNotices(admission);
+		const clone = collect(checkCloneScratch(event, { env, home, sessionCwd: ctx.cwd }));
+		if (clone?.block === true) return refuseWithNotices(clone);
+		const exportIndex = collect(await checkExportIndex(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd }));
+		if (exportIndex?.block === true) return refuseWithNotices(exportIndex);
+		const dbLiteral = checkTrackerDbLiteral(event);
+		if (dbLiteral !== undefined) return refuseWithNotices(dbLiteral);
+		const lint = await checkBeadLint(event, { exec: pi.exec, home, sessionCwd: ctx.cwd, scriptsDir: deps.lintScriptsDir });
+		if (lint?.block === true) return refuseWithNotices(lint);
+		if (lint?.additionalContext) ctx.ui?.notify(lint.additionalContext, "warning");
+		const started = Date.now();
+		const attempts: CloseAttempt[] = [];
+		const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd, holderLiveness: execHolderLiveness(pi.exec, env, home),
+			callerSession: ctx.sessionManager?.getSessionId?.() || undefined, nativeContext: ctx }, attempts);
+		if (result?.additionalContext) ctx.ui?.notify(result.additionalContext, "warning");
+		if (typeof event.toolCallId === "string" && attempts.length > 0) {
+			if (result?.block === true) {
+				if (typeof result.reason === "string" && result.reason.includes(SELF_CLOSE_REFUSED)) {
+					try {
+						await emitRefusedCloseRecords({ exec: pi.exec, notify: (message) => ctx.ui?.notify(message, "warning") },
+							attempts, event.toolCallId, Date.now() - started);
+					} catch (error) {
+						ctx.ui?.notify(`kit-flywheel-guard ${SPOOL_WRITE_FAILED}: refused-close recording failed (${error instanceof Error ? error.message : String(error)}); the refusal stands.`, "warning");
+					}
+				}
+			} else {
+				closeIntents.set(event.toolCallId, attempts);
+			}
+		}
+		if (result?.block === true) return refuseWithNotices(result);
+		if (result !== undefined) {
+			return notices.length === 0 ? result
+				: { ...result, additionalContext: [...notices, result.additionalContext].filter((part): part is string => typeof part === "string").join(" ") };
+		}
+		return notices.length === 0 ? undefined : { additionalContext: notices.join(" ") };
 		} catch (error) {
 			const warning = `kit-flywheel-guard LOOKUP_REFUSED: lifecycle check failed (${error instanceof Error ? error.message : String(error)}); mutation blocked, nothing was executed.`;
 			ctx.ui?.notify(warning, "warning");
@@ -2840,10 +2876,16 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		// BRIEFSCOPE1 (ompkit-1ra0d.59): a build task missing its gate contract gets it appended to its context
 		// (AUTO_COMPLETED), instead of a BRIEF_CONTRACT_REFUSED the lead answers by pasting the same text.
 		let briefed: Record<string, unknown> | undefined;
+		let briefNotice: string | undefined;
 		if (event.toolName === "task") {
 			let completion: BriefCompletion;
 			try { completion = await completeTaskBrief(event.input, ctx.cwd, pi.exec); }
-			catch (error) { completion = { repos: [], refusal: `kit-flywheel-guard LOOKUP_REFUSED: brief check failed (${error instanceof Error ? error.message : String(error)}); nothing was spawned.` }; }
+			catch (error) {
+				// GATEDEMOTE1: a failed brief lookup no longer blocks the spawn (the act is reversible); the task
+				// proceeds with a one-line notice naming the failure.
+				completion = { repos: [] };
+				briefNotice = `kit-flywheel-guard LOOKUP_NOTICE: brief check failed (${error instanceof Error ? error.message : String(error)}); the task spawned without the appended gate contract.`;
+			}
 			if (completion.refusal) {
 				await recordGateEvent({ ...timing(), seat: admissionOwner(env) ?? selfDeclared, act: "task", target: null, gate: gateFromReason(completion.refusal), kind: "refuse", replay, detail: completion.refusal,
 					...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId, event_id: event.toolCallId } : {}) }, { env, home });
@@ -2860,6 +2902,12 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			}
 		}
 		const verdict = await guardVerdict(briefed ? { ...event, input: briefed } : event, ctx);
+		if (briefNotice !== undefined && verdict?.block !== true) {
+			ctx.ui?.notify(briefNotice, "warning");
+			const additionalContext = briefNotice + (verdict?.additionalContext ? ` ${verdict.additionalContext}` : "");
+			if (briefed !== undefined) return { ...(verdict ?? {}), additionalContext, input: briefed };
+			return { ...(verdict ?? {}), additionalContext };
+		}
 		if (briefed && verdict?.block !== true) return { ...(verdict ?? {}), input: briefed };
 		const command = typeof event.toolName === "string" && event.toolName.toLowerCase() === "bash" ? field(event.input, "command") : undefined;
 		const act = typeof command === "string" ? trackerAct(command) : null;

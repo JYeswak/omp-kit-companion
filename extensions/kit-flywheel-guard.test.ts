@@ -288,7 +288,7 @@ async function cloneGuardFixture() {
 	return { project, scratch, h };
 }
 
-test("CLONEGUARD1 planted: a clone or fetch of an outside repository into scratch is refused, naming the alternatives", async () => {
+test("CLONEGUARD1 planted: a clone of an outside repository into scratch proceeds with a notice naming the alternatives", async () => {
 	const f = await cloneGuardFixture();
 	for (const command of [
 		"git clone --shared /Users/x/repo var/agent-tmp/a.1/c",
@@ -304,15 +304,27 @@ test("CLONEGUARD1 planted: a clone or fetch of an outside repository into scratc
 		"git clone https://github.com/JYeswak/omp-kit-companion.git var/agent-tmp/a.1/x",
 		"git clone --depth 1 ssh://git@GitHub.com:22/JYeswak/omp-kit-companion/ var/agent-tmp/a.1/x2",
 		"cd var/agent-tmp/a.1/f && git clone git@github.com:JYeswak/omp-kit var/agent-tmp/a.1/own",
+	]) {
+		const result = await toolCall(f.h, f.project, command);
+		expect(result?.block, command).not.toBe(true);
+		expect(result?.additionalContext, command).toContain("CLONE_NOTICE");
+		expect(result?.additionalContext, command).toContain("omp-kit scratch new --export <sha>");
+		expect(result?.additionalContext, command).toContain("git init");
+		expect(result?.additionalContext, command).toContain("UNVERIFIED");
+		expect(result?.reason ?? "", command).not.toContain("CLONEGUARD1");
+	}
+});
+
+test("CLONEGUARD1 planted: a fetch or pull of an outside repository into scratch still refuses the export-index write and carries the clone notice", async () => {
+	const f = await cloneGuardFixture();
+	for (const command of [
 		"cd var/agent-tmp/a.1/f && git fetch /Users/x/repo main",
 		"cd var/agent-tmp/a.1/f && git pull ../../../../outside main",
 	]) {
 		const result = await toolCall(f.h, f.project, command);
 		expect(result?.block, command).toBe(true);
-		expect(result?.reason, command).toContain("CLONEGUARD1");
-		expect(result?.reason, command).toContain("omp-kit scratch new --export <sha>");
-		expect(result?.reason, command).toContain("git init");
-		expect(result?.reason, command).toContain("UNVERIFIED");
+		expect(result?.reason, command).toContain("EXPORT_INDEX_REFUSED");
+		expect(result?.additionalContext, command).toContain("CLONE_NOTICE");
 	}
 });
 
@@ -850,7 +862,6 @@ test("GOAL_SEND_REFUSED negatives: arm_seat, ordinary sends, mentions and identi
 	expect(await callAs(person, cwd, "s", "bash", { command: "tern send 5 paste '/goal set x'" })).toEqual([undefined]);
 });
 
-
 test("shell -c flag pattern: matches -c and -lc, rejects --c and -cx, and stays linear on a long near-miss", () => {
 	const flag = /^-[A-Za-z]*c$/;
 	expect(["-c", "-lc", "-ec"].every(word => flag.test(word))).toBe(true);
@@ -1015,47 +1026,57 @@ async function blockCall(fixture: BlockFixture, command: string, fail: "show" | 
 
 const SET_BLOCKED = "br --actor BlueFox update kit-9 --status blocked";
 
-test("BLOCK_REFUSED: blocked with no blocks edge is refused, with an open blocks edge it is allowed", async () => {
-	const refused = await blockCall({}, SET_BLOCKED);
-	expect(refused?.block).toBe(true);
-	expect(refused?.reason).toContain("BLOCK_REFUSED");
-	expect(refused?.reason).toContain("kit-9 has no open blocks edge to a fix");
-	expect(refused?.reason).toContain("A decision owed by a director, chief or owner is an assigned bead with the decision as its next action");
+test("BLOCK_REFUSED: blocked with no blocks edge proceeds with a notice, with an open blocks edge it is silent", async () => {
+	const noticed = await blockCall({}, SET_BLOCKED);
+	expect(noticed?.block).not.toBe(true);
+	expect(noticed?.additionalContext).toContain("BLOCK_NOTICE");
+	expect(noticed?.additionalContext).toContain("kit-9 has no open blocks edge to a fix");
+	expect(noticed?.additionalContext).toContain("A decision owed by a director, chief or owner is an assigned bead with the decision as its next action");
+	expect(noticed?.reason ?? "").not.toContain("BLOCK_REFUSED");
 	expect(await blockCall({ edges: [{ type: "blocks", status: "open" }] }, SET_BLOCKED)).toBeUndefined();
 	expect(await blockCall({ edges: [{ type: "blocks", status: "in_progress" }] }, "br update kit-9 -s blocked")).toBeUndefined();
 });
 
-test("BLOCK_REFUSED: a closed blocker, a parent-child edge or a related edge is not a fix", async () => {
-	expect((await blockCall({ edges: [{ type: "blocks", status: "closed" }] }, SET_BLOCKED))?.block).toBe(true);
-	expect((await blockCall({ edges: [{ type: "blocks", status: "tombstone" }] }, SET_BLOCKED))?.block).toBe(true);
-	expect((await blockCall({ edges: [{ type: "parent-child", status: "open" }] }, SET_BLOCKED))?.block).toBe(true);
-	expect((await blockCall({ edges: [{ type: "related", status: "open" }] }, SET_BLOCKED))?.block).toBe(true);
+test("BLOCK_REFUSED: a closed blocker, a parent-child edge or a related edge is noted, not a fix", async () => {
+	for (const edges of [[{ type: "blocks", status: "closed" }], [{ type: "blocks", status: "tombstone" }],
+		[{ type: "parent-child", status: "open" }], [{ type: "related", status: "open" }]]) {
+		const result = await blockCall({ edges }, SET_BLOCKED);
+		expect(result?.block).not.toBe(true);
+		expect(result?.additionalContext).toContain("BLOCK_NOTICE");
+	}
 	expect(await blockCall({ edges: [{ type: "blocks", status: "closed" }, { type: "blocks", status: "open" }] }, SET_BLOCKED)).toBeUndefined();
 });
 
-test("BLOCK_REFUSED: human-gate needs a comment naming the effect only Joshua can perform", async () => {
+test("BLOCK_REFUSED: human-gate needs a comment naming the effect only Joshua can perform, noted when missing", async () => {
 	const label = await blockCall({ labels: ["human-gate"] }, SET_BLOCKED);
-	expect(label?.block).toBe(true);
-	expect(label?.reason).toContain("no comment names the effect only Joshua can perform");
+	expect(label?.block).not.toBe(true);
+	expect(label?.additionalContext).toContain("BLOCK_NOTICE");
+	expect(label?.additionalContext).toContain("no comment names the effect only Joshua can perform");
 	const vague = await blockCall({ labels: ["human-gate"], comments: ["HUMAN-GATE: later"] }, SET_BLOCKED);
-	expect(vague?.block).toBe(true);
+	expect(vague?.block).not.toBe(true);
+	expect(vague?.additionalContext).toContain("BLOCK_NOTICE");
 	const named = { labels: ["human-gate"], comments: ["HUMAN-GATE: rotate the Infisical machine token in the vault UI"] };
 	expect(await blockCall(named, SET_BLOCKED)).toBeUndefined();
 	expect(await blockCall({ comments: named.comments }, `${SET_BLOCKED} --add-label human-gate`)).toBeUndefined();
-	expect((await blockCall({}, `${SET_BLOCKED} --add-label human-gate`))?.block).toBe(true);
+	const added = await blockCall({}, `${SET_BLOCKED} --add-label human-gate`);
+	expect(added?.block).not.toBe(true);
+	expect(added?.additionalContext).toContain("BLOCK_NOTICE");
 });
 
-test("BLOCK_REFUSED: other status updates, other verbs and unreadable beads", async () => {
+test("BLOCK_REFUSED: other status updates, other verbs pass; unreadable beads are noted", async () => {
 	expect(await blockCall({}, "br update kit-9 --status open")).toBeUndefined();
 	expect(await blockCall({}, "br update kit-9 --priority 1")).toBeUndefined();
 	expect(await blockCall({}, "br show kit-9 --json")).toBeUndefined();
 	const showDown = await blockCall({ edges: [{ type: "blocks", status: "open" }] }, SET_BLOCKED, "show");
-	expect(showDown?.block).toBe(true);
-	expect(showDown?.reason).toContain("cannot be checked");
-	expect((await blockCall({ edges: [{ type: "blocks", status: "open" }] }, SET_BLOCKED, "dep"))?.block).toBe(true);
+	expect(showDown?.block).not.toBe(true);
+	expect(showDown?.additionalContext).toContain("BLOCK_NOTICE");
+	expect(showDown?.additionalContext).toContain("cannot be checked");
+	const depDown = await blockCall({ edges: [{ type: "blocks", status: "open" }] }, SET_BLOCKED, "dep");
+	expect(depDown?.block).not.toBe(true);
+	expect(depDown?.additionalContext).toContain("BLOCK_NOTICE");
 });
 
-test("BLOCK_REFUSED AC5: no br binary or no tracker stands the check down; a live tracker that cannot answer stays refused", async () => {
+test("BLOCK_REFUSED AC5: no br binary or no tracker stands the check down; a live tracker that cannot answer is noted", async () => {
 	const project = freshDir(base, "proj-");
 	const stock = async (respond: Responder) => toolCall(await createFlywheelHost(base, { respond }), project, SET_BLOCKED);
 	const tmux = { stdout: "", stderr: "no server", code: 1 };
@@ -1073,10 +1094,10 @@ test("BLOCK_REFUSED AC5: no br binary or no tracker stands the check down; a liv
 		if (call.command === "tmux") return tmux;
 		return { stdout: JSON.stringify({ error: { code: "ISSUE_NOT_FOUND", message: "Issue not found: kit-9" } }), stderr: "", code: 3 };
 	};
-	const refused = await stock(lostBead);
-	expect(refused?.block).toBe(true);
-	expect(refused?.reason).toContain("BLOCK_REFUSED");
-	expect(refused?.reason).toContain("cannot be checked");
+	const noticed = await stock(lostBead);
+	expect(noticed?.block).not.toBe(true);
+	expect(noticed?.additionalContext).toContain("BLOCK_NOTICE");
+	expect(noticed?.additionalContext).toContain("cannot be checked");
 });
 
 test("BLOCK_REFUSED: a br update wrapped in sh -c, bash -lc or nested shells is checked like the bare command", async () => {
@@ -1088,9 +1109,9 @@ test("BLOCK_REFUSED: a br update wrapped in sh -c, bash -lc or nested shells is 
 		`BR_ACTOR=BlueFox sh -c "br update kit-9 --status blocked"`,
 		`cd /tmp && sh -c "${SET_BLOCKED}"`,
 	]) {
-		const refused = await blockCall({}, wrapped);
-		expect(refused?.block).toBe(true);
-		expect(refused?.reason).toContain("BLOCK_REFUSED");
+		const noticed = await blockCall({}, wrapped);
+		expect(noticed?.block, wrapped).not.toBe(true);
+		expect(noticed?.additionalContext, wrapped).toContain("BLOCK_NOTICE");
 		expect(await blockCall(open, wrapped)).toBeUndefined();
 	}
 });
@@ -1140,40 +1161,46 @@ async function closeCall(fixture: ReleaseFixture, command: string): Promise<Flyw
 const ONLY_X = { edges: { "kit-d1": [{ type: "blocks", depends_on_id: "kit-x", status: "open" }] } };
 const D1_BLOCKED = [{ id: "kit-d1", status: "blocked", dependency_type: "blocks" }];
 
-test("BLOCK_RELEASE_REQUIRED: closing the only open blocker of a blocked bead is refused until it is released", async () => {
-	const refused = await closeCall({ dependents: D1_BLOCKED, ...ONLY_X }, "br close kit-x --reason done");
-	expect(refused?.block).toBe(true);
-	expect(refused?.reason).toContain("BLOCK_RELEASE_REQUIRED");
-	expect(refused?.reason).toContain("kit-d1");
+test("BLOCK_RELEASE_REQUIRED: closing the only open blocker of a blocked bead proceeds with a notice", async () => {
+	const noticed = await closeCall({ dependents: D1_BLOCKED, ...ONLY_X }, "br close kit-x --reason done");
+	expect(noticed?.block).not.toBe(true);
+	expect(noticed?.additionalContext).toContain("BLOCK_NOTICE");
+	expect(noticed?.additionalContext).toContain("kit-d1");
+	expect(noticed?.reason ?? "").not.toContain("BLOCK_RELEASE_REQUIRED");
 	const released = await closeCall({ dependents: D1_BLOCKED, ...ONLY_X }, "br update kit-d1 --status open && br close kit-x --reason done");
 	expect(released?.block).toBeUndefined();
-	expect((await closeCall({ dependents: D1_BLOCKED, ...ONLY_X }, `sh -c "br close kit-x"`))?.block).toBe(true);
+	const wrapped = await closeCall({ dependents: D1_BLOCKED, ...ONLY_X }, `sh -c "br close kit-x"`);
+	expect(wrapped?.block).not.toBe(true);
+	expect(wrapped?.additionalContext).toContain("BLOCK_NOTICE");
 });
 
-test("BLOCK_RELEASE_REQUIRED: another open blocker, a non-blocked dependent or a non-blocks edge allow the close", async () => {
+test("BLOCK_RELEASE_REQUIRED: another open blocker, a non-blocked dependent or a non-blocks edge stays silent", async () => {
 	const other = { dependents: D1_BLOCKED, edges: { "kit-d1": [
 		{ type: "blocks", depends_on_id: "kit-x", status: "open" },
 		{ type: "blocks", depends_on_id: "kit-y", status: "open" },
 	] } };
-	expect((await closeCall(other, "br close kit-x"))?.block).toBeUndefined();
+	expect((await closeCall(other, "br close kit-x"))?.additionalContext ?? "").not.toContain("BLOCK_NOTICE");
 	const closedOther = { dependents: D1_BLOCKED, edges: { "kit-d1": [
 		{ type: "blocks", depends_on_id: "kit-x", status: "open" },
 		{ type: "blocks", depends_on_id: "kit-y", status: "closed" },
 	] } };
-	expect((await closeCall(closedOther, "br close kit-x"))?.block).toBe(true);
-	expect((await closeCall({ dependents: [{ id: "kit-d1", status: "open", dependency_type: "blocks" }], ...ONLY_X }, "br close kit-x"))?.block).toBeUndefined();
-	expect((await closeCall({ dependents: [{ id: "kit-d1", status: "blocked", dependency_type: "parent-child" }], ...ONLY_X }, "br close kit-x"))?.block).toBeUndefined();
-	expect((await closeCall({}, "br close kit-x"))?.block).toBeUndefined();
+	const stranded = await closeCall(closedOther, "br close kit-x");
+	expect(stranded?.block).not.toBe(true);
+	expect(stranded?.additionalContext).toContain("BLOCK_NOTICE");
+	expect((await closeCall({ dependents: [{ id: "kit-d1", status: "open", dependency_type: "blocks" }], ...ONLY_X }, "br close kit-x"))?.additionalContext ?? "").not.toContain("BLOCK_NOTICE");
+	expect((await closeCall({ dependents: [{ id: "kit-d1", status: "blocked", dependency_type: "parent-child" }], ...ONLY_X }, "br close kit-x"))?.additionalContext ?? "").not.toContain("BLOCK_NOTICE");
+	expect((await closeCall({}, "br close kit-x"))?.additionalContext ?? "").not.toContain("BLOCK_NOTICE");
 });
 
-test("BLOCK_RELEASE_REQUIRED AC5: outside a tracker a close is never a stranding refusal", async () => {
+test("BLOCK_RELEASE_REQUIRED AC5: outside a tracker a close carries no stranding notice", async () => {
 	const project = freshDir(base, "proj-");
 	const h = await createFlywheelHost(base, { respond: call => {
 		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
 		return { stdout: JSON.stringify({ error: { code: "NOT_INITIALIZED", message: "Beads not initialized" } }), stderr: "", code: 2 };
 	} });
 	const result = await toolCall(h, project, "br close kit-x --reason done");
-	if (result?.block === true) expect(result.reason).not.toContain("BLOCK_RELEASE_REQUIRED");
+	if (result?.block === true) expect(result.reason ?? "").not.toContain("BLOCK");
+	expect(result?.additionalContext ?? "").not.toContain("BLOCK_NOTICE");
 });
 
 // --- SCRATCH_DISPOSAL_REFUSED (ompkit-774u.15 enforcement, Joshua scope 2026-10-20): refuse at in_review and close ---
@@ -1189,27 +1216,30 @@ function scratchResponder(mine: FlywheelExecResult, beads: Record<string, Flywhe
 
 const OWED = [{ dir: "/r/var/agent-tmp/probe.1", state: "unreleased", bin: "unbinned" }, { dir: "/r/var/agent-tmp/hold.2", state: "hold-expired", bin: "hold" }];
 
-test("SCRATCH_DISPOSAL_REFUSED: moving a bead to in_review with unreleased dirs is refused, naming each dir", async () => {
+test("SCRATCH_DISPOSAL_REFUSED: moving a bead to in_review with unreleased dirs proceeds with a notice naming each dir", async () => {
 	const project = freshDir(base, "proj-");
 	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(mineAnswer(OWED)) });
 	const result = await toolCall(h, project, "br update kit-1 --status in_review --actor BlueFox");
-	expect(result?.block).toBe(true);
-	expect(result?.reason).toContain("SCRATCH_DISPOSAL_REFUSED");
-	expect(result?.reason).toContain("/r/var/agent-tmp/probe.1 (unreleased, bin unbinned)");
-	expect(result?.reason).toContain("/r/var/agent-tmp/hold.2 (hold-expired, bin hold)");
-	expect(result?.reason).toContain("omp-kit scratch release DIR --bin throwaway|evidence|promote");
+	expect(result?.block).not.toBe(true);
+	expect(result?.additionalContext).toContain("SCRATCH_DISPOSAL_NOTICE");
+	expect(result?.additionalContext).toContain("/r/var/agent-tmp/probe.1 (unreleased, bin unbinned)");
+	expect(result?.additionalContext).toContain("/r/var/agent-tmp/hold.2 (hold-expired, bin hold)");
+	expect(result?.additionalContext).toContain("omp-kit scratch release DIR --bin throwaway|evidence|promote");
+	expect(result?.reason ?? "").not.toContain("SCRATCH_DISPOSAL_REFUSED");
+	expect(h.notices.some(message => message.includes("SCRATCH_DISPOSAL_NOTICE"))).toBe(true);
 	const mine = h.execs.filter(call => call.command === "omp-kit");
 	expect(mine.map(call => call.args)).toEqual([["scratch", "mine", "--at", "review", "--json"]]);
 	expect(mine[0]?.options?.cwd).toBe(project);
 });
 
-test("SCRATCH_DISPOSAL_REFUSED: a verifier's close of another seat's bead is refused while the verifier owes dirs, logged as close", async () => {
+test("SCRATCH_DISPOSAL_REFUSED: a verifier's close of another seat's bead proceeds with a notice while the verifier owes dirs, logged as close", async () => {
 	const project = freshDir(base, "proj-");
 	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "Verifier" },
 		respond: scratchResponder(mineAnswer(OWED.slice(0, 1)), { "kit-2": bead("kit-2", "BlueFox") }) });
 	const result = await toolCall(h, project, "br close kit-2 --reason \"replayed\"");
-	expect(result?.block).toBe(true);
-	expect(result?.reason).toContain("you still own 1 scratch dir(s)");
+	expect(result?.block).not.toBe(true);
+	expect(result?.additionalContext).toContain("SCRATCH_DISPOSAL_NOTICE");
+	expect(result?.additionalContext).toContain("you still own 1 scratch dir(s)");
 	expect(h.execs.find(call => call.command === "omp-kit")?.args).toEqual(["scratch", "mine", "--at", "close", "--json"]);
 });
 
@@ -1231,9 +1261,10 @@ test("SCRATCHSIBLING1: SCRATCH_OWED for background agent B asks omp-kit as B's o
 	} });
 	const [result] = await h.emit("tool_call", { toolCallId: "c1", toolName: "bash", input: { command: "br update kit-1 --status in_review --actor BlueFox" } },
 		{ ...h.ctx(project), sessionManager: { getSessionId: () => B } }) as (FlywheelToolCallResult | undefined)[];
-	expect(result?.block).toBe(true);
-	expect(result?.reason).toContain(`${bDir} (unreleased, bin unbinned)`);
-	expect(result?.reason).not.toContain(aDir);
+	expect(result?.block).not.toBe(true);
+	expect(result?.additionalContext).toContain("SCRATCH_DISPOSAL_NOTICE");
+	expect(result?.additionalContext).toContain(`${bDir} (unreleased, bin unbinned)`);
+	expect(result?.additionalContext).not.toContain(aDir);
 	const census = h.execs.filter(call => call.command === "omp-kit");
 	expect(census.map(call => call.args)).toEqual([["scratch", "mine", "--at", "review", "--session", B, "--json"]]);
 	expect(census[0]?.options?.cwd).toBe(project);
@@ -1258,18 +1289,18 @@ test("SCRATCH_OWED negatives: nothing owed, only the live session dir, or an unu
 	}
 });
 
-test("SCRATCH_DISPOSAL_REFUSED: a thrown exec never blocks (fail-open) and a long list is refused with a count", async () => {
+test("SCRATCH_DISPOSAL_REFUSED: a thrown exec never blocks (fail-open) and a long list proceeds with a counted notice", async () => {
 	const project = freshDir(base, "proj-");
 	const throwing = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: call => { if (call.command === "omp-kit") throw new Error("spawn failed"); return { stdout: "", code: 127 }; } });
 	expect(await toolCall(throwing, project, "br update kit-1 --status in_review --actor BlueFox")).toBeUndefined();
 	const many = Array.from({ length: 8 }, (_, index) => ({ dir: `/r/var/agent-tmp/d.${index}`, state: "unreleased", bin: "unbinned" }));
 	const long = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(mineAnswer(many)) });
 	const result = await toolCall(long, project, "br update kit-1 --status in_review --actor BlueFox");
-	expect(result?.block).toBe(true);
-	expect(result?.reason).toContain("SCRATCH_DISPOSAL_REFUSED");
-	expect(result?.reason).toContain("you still own 8 scratch dir(s)");
-	expect(result?.reason).toContain("and 3 more");
-	expect(result?.reason).not.toContain("d.5");
+	expect(result?.block).not.toBe(true);
+	expect(result?.additionalContext).toContain("SCRATCH_DISPOSAL_NOTICE");
+	expect(result?.additionalContext).toContain("you still own 8 scratch dir(s)");
+	expect(result?.additionalContext).toContain("and 3 more");
+	expect(result?.additionalContext).not.toContain("d.5");
 });
 
 test("SCRATCH_OWED: other tracker commands and refused closes never ask omp-kit", async () => {
@@ -1323,22 +1354,26 @@ async function drainCall(shows: Record<string, DrainRow>, lists: Record<string, 
 const LIVE = { "k-1": { status: "in_progress", assignee: "Holder" } };
 const ATOMIC = 'br update k-1 --status open --assignee "" --if-unchanged 2026-10-19T19:00:00Z';
 
-test("DRAIN1: bare release of a live held claim is refused until it clears assignee under revision", async () => {
-	const refused = await drainCall(LIVE, {}, "br update k-1 --status open");
-	expect(refused?.block).toBe(true);
-	expect(refused?.reason).toContain("PARTIAL_RELEASE_REFUSED");
-	expect(refused?.reason).toContain("k-1 is in_progress/Holder at revision 2026-10-19T19:00:00Z");
+test("DRAIN1: bare release of a live held claim proceeds with a notice until it clears assignee under revision", async () => {
+	const noticed = await drainCall(LIVE, {}, "br update k-1 --status open");
+	expect(noticed?.block).not.toBe(true);
+	expect(noticed?.additionalContext).toContain("RELEASE_NOTICE");
+	expect(noticed?.additionalContext).toContain("k-1 is in_progress/Holder at revision 2026-10-19T19:00:00Z");
+	expect(noticed?.reason ?? "").not.toContain("PARTIAL_RELEASE_REFUSED");
 	const noClear = await drainCall(LIVE, {}, "br update k-1 --status open --if-unchanged 2026-10-19T19:00:00Z");
-	expect(noClear?.block).toBe(true);
-	expect(noClear?.reason).toContain('--assignee ""');
+	expect(noClear?.block).not.toBe(true);
+	expect(noClear?.additionalContext).toContain("RELEASE_NOTICE");
+	expect(noClear?.additionalContext).toContain('--assignee ""');
 	const noRev = await drainCall(LIVE, {}, 'br update k-1 --status open --assignee ""');
-	expect(noRev?.block).toBe(true);
-	expect(noRev?.reason).toContain("--if-unchanged");
+	expect(noRev?.block).not.toBe(true);
+	expect(noRev?.additionalContext).toContain("RELEASE_NOTICE");
+	expect(noRev?.additionalContext).toContain("--if-unchanged");
 });
 
 test("DRAIN1: third-party park of a live claim is refused; holder atomic release passes", async () => {
 	const foreign = await drainCall(LIVE, {}, ATOMIC, "Intruder");
 	expect(foreign?.block).toBe(true);
+	expect(foreign?.reason).toContain("PARTIAL_RELEASE_REFUSED");
 	expect(foreign?.reason).toContain("only the holder parks a live claim");
 	expect(await drainCall(LIVE, {}, ATOMIC)).toBeUndefined();
 });
@@ -1373,19 +1408,22 @@ test("DRAIN1: ownerless start still refuses with the atomic claim route", async 
 	expect(JSON.parse(refused?.reason ?? "{}").refusal.next).toContain("--claim");
 });
 
-test("DRAIN1 custody: bare assignee clear on a live held claim is refused (fp72.95 shape)", async () => {
+test("DRAIN1 custody: bare assignee clear on a live held claim proceeds with a notice (fp72.95 shape)", async () => {
 	const parsed = trackerRequests('br update k-1 --assignee ""', "/r", "/h").map(request => [request.operation, request.ids]);
 	expect(parsed).toEqual([["custody", ["k-1"]]]);
 	const holder = await drainCall(LIVE, {}, 'br update k-1 --assignee ""');
-	expect(holder?.block).toBe(true);
-	expect(holder?.reason).toContain("PARTIAL_RELEASE_REFUSED");
-	expect(holder?.reason).toContain("leaves an ownerless in_progress bead");
+	expect(holder?.block).not.toBe(true);
+	expect(holder?.additionalContext).toContain("RELEASE_NOTICE");
+	expect(holder?.additionalContext).toContain("leaves an ownerless in_progress bead");
+	expect(holder?.reason ?? "").not.toContain("PARTIAL_RELEASE_REFUSED");
 	const foreign = await drainCall(LIVE, {}, 'br update k-1 --assignee ""', "Intruder");
 	expect(foreign?.block).toBe(true);
+	expect(foreign?.reason).toContain("PARTIAL_RELEASE_REFUSED");
 	expect(foreign?.reason).toContain("only the holder changes custody");
 	const reassign = await drainCall(LIVE, {}, "br update k-1 --assignee Next");
-	expect(reassign?.block).toBe(true);
-	expect(reassign?.reason).toContain("splits custody from the one-active check");
+	expect(reassign?.block).not.toBe(true);
+	expect(reassign?.additionalContext).toContain("RELEASE_NOTICE");
+	expect(reassign?.additionalContext).toContain("splits custody from the one-active check");
 });
 
 test("DRAIN1 custody: repairs on ownerless or open beads pass", async () => {
