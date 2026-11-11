@@ -1,3 +1,0 @@
-- `omp-kit land` removes only the named ovnfs checkout (`--checkout NAME`, or `land --patch` when the patch file lies inside that checkout) after re-checking its diff and file bytes plus modes right before removal; without a name it only reports matching checkouts with their `ovnfs rm` lines. All files inside a removed checkout, including untracked and ignored ones, are removed with it. Use `--keep-checkout` to keep even the named checkout.
-- `omp-kit scratch mine` now lists this repository's ovnfs checkouts with age, dirty flag, hours since touched and the exact `ovnfs rm <name>` line.
-- `omp-kit test --integrations` with a caller scratch root works again (a missing import from this change made it fail).

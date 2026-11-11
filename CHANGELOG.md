@@ -4,6 +4,56 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.116] - 2026-11-11
+
+### Changed
+
+- Timing-bound release tests no longer fail on a loaded machine: the commit-preflight elapsed bound, the package-release 120 s step deadlines, the runtime interruption watchdog, the long-token observer timeout, the regex control worker timeout and the fresh-gate-load deadlines scale with the host's measured load (the kit's load factor, 1-4x) instead of fixed wall-clock bounds. Every assertion they exist to prove is unchanged.
+- `project goal SESSION --set TEXT | --from-file FILE [--plan|--apply]` replaces the director seat's goal in place: `--plan` reports the current goal from the journal and what would be sent, `--apply` sends `/goal drop`, proves the goal-less mode_change, sends `/goal set`, and proves the new goal id, all through the gated send path (a paused or pull-disabled seat is refused with nothing sent). Reports the previous goal text and the new goal id, or a truthful partial state.
+- The stale-worktree hook now catches restorations of content up to three edits old even when the commit names a current `Authored-On` base: it walks the blamed lines back through their two previous edits (translating line numbers through each commit's own diff, so later insertions or deletions above the hunk cannot misroute it) and refuses when the added lines bring back an older value, naming every commit on the chain. Restorations that move the lines to another path are not covered.
+- `omp-kit land --patch --base SHA` now refuses a base outside fresh `origin/main` history up front as `LAND_BASE_NOT_ANCESTOR` before creating any commit, instead of building the candidate and letting the commit hook refuse it.
+- `omp-kit land` refuses a stale restore before creating any commit, so the refusal leaves no candidate on local main and no intent-to-add entries behind; a deliberate restore lands by declaring the restored commit with a `Revert: <sha>` message line (`Supersedes: <sha>` for a rewrite).
+- `omp-kit land` no longer names unreleased scratch from other checkouts of the same repository in its push notice: only scratch under the landing repo is judged.
+- Direct-commit notes refusals now say that a `[no-changelog]` subject tag is not a waiver on shipped paths: the waiver is an own-line `[no-changelog] <reason>`.
+- Background children no longer hit reservation refusals: a child's reserve, renew or release call is admitted under its parent seat's name with a one-line notice, and a child's native register or mail call gets one refusal telling it to report to the parent instead (shell `am` calls are not judged here).
+- Reversible mail-guard findings are now notices, not refusals: a non-vocabulary subject, an over-cap body up to four times the cap, ack_required the subject cannot carry (dropped), an ask whose bead id does not resolve (sent with ack kept), a second inbox fetch inside the window, and unknown registration arguments (stripped). Every notice is one line plus one gate-events row with kind notice. Hazard refusals (impersonation, secrets, phantoms, bulk reads, unpublished DONE, unreadable rosters, unparseable arguments, missing call id) are unchanged, and a secret in a noticed body is still refused.
+- A child's `am` shell reservation with flags the guard does not recognize is left unchanged and admitted with a notice naming the call and why, instead of a guessed rewrite; only the CLI's own documented flags are trusted when locating the agent name.
+- A literal simple file directly under `/tmp`, `/private/tmp` or `/var/tmp` (for example `/tmp/bead.json`) is now completed into your session scratch instead of refused, with one `AUTO_COMPLETED: /tmp/<name> -> <path>` line; a later read of the same path reads the same file. A noclobber redirect (`>|`), an ANSI-C quoted path (`$'...'`), and link or hard-link destinations keep today's refusal.
+- A hand-made directory with no owner record under your repository's `var/agent-tmp` is adopted for your seat, and the write admitted with one `AUTO_COMPLETED` line, but only when your session itself created that directory (an admitted `mkdir` or a write whose parent did not exist); anything else keeps today's refusal.
+- The scheduled kit auto-update now judges a new release against the omp your seats actually run (Tern's bundled omp when present, otherwise the first `omp` on PATH) and records which binary it judged; run records carry `targetVersion`, `ompResolvedFrom`, `ompVersion` and `ompLauncher`. After an automatically undone update, the next scheduled tick skips that version and cause without unpacking or re-running post-checks: omp-attributed failures suppress until the kit or the judged omp changes, while transient live/stage failures retry at most once every six hours. `omp-kit update --apply` always retries immediately.
+- `omp-kit land` removes only the named ovnfs checkout (`--checkout NAME`, or `land --patch` when the patch file lies inside that checkout) after re-checking its diff and file bytes plus modes right before removal; without a name it only reports matching checkouts with their `ovnfs rm` lines. All files inside a removed checkout, including untracked and ignored ones, are removed with it. Use `--keep-checkout` to keep even the named checkout.
+- `omp-kit scratch mine` now lists this repository's ovnfs checkouts with age, dirty flag, hours since touched and the exact `ovnfs rm <name>` line.
+- `omp-kit test --integrations` with a caller scratch root works again (a missing import from this change made it fail).
+- `omp-kit verify` can create a live-readback child even when another bead's live readback has a similar title; the duplicate check no longer compares readback children with each other.
+- `skill-mine` now mines Git history alongside cass sessions and the Agent Mail archive: per-repository month cursors backfill the trailing twelve calendar months, admitting sha-named fixes, revert pairs and break-word-follows chains; a candidate is emitted only for a fix shape recurring across 3+ chains in one repository or in 2+ repositories, with repo, shas, dates and paths on every chain. `skill-mine status` reports per-repository months mined, months remaining and the last error.
+- The Git-history miner's cursor file is written through a randomly named temporary file, so the ownership check in CI passes again.
+
+### Fixed
+
+- `apply policy` now writes a reversal receipt alongside its backup: the apply
+  returns the id as both `backup_id` and `receipt_id`, `omp-kit audit` lists it,
+  `omp-kit why` explains it, and `omp-kit undo RECEIPT --yes` restores the
+  recorded TTSR values through native `omp config set`, one row per key
+  (RESTORED, UNCHANGED, or REFUSED with a reason; mixed outcomes report
+  PARTIAL, and a second undo reports UNCHANGED).
+- A plugin link receipt now appears in `omp-kit audit` and is explained by
+  `omp-kit why`; `undo` of the same id restores the recorded links. The three
+  commands agree on one receipt. One unreadable sidecar receipt degrades to its
+  own UNREADABLE row instead of hiding every other receipt.
+- A bare `apply plugin --plan` on a HOME with no named profiles plans the
+  default profile instead of refusing `INVALID_PROFILES`. With named profiles
+  present, or when the profile listing fails, the bare form refuses with the
+  exact selecting flags; it never silently plans every named profile.
+- `doctor --scope mcp --profile default` now inspects the default profile
+  (`~/.omp/agent`) instead of refusing it.
+- `service list` rows carry a note when a job is loaded in the live domain but
+  not installed by this kit.
+- README: full `apply plugin` command with `--profiles all --include-default`,
+  what `--store` must point at, a seedable `--from` file example for
+  `apply mcp` on a fresh HOME, the real `rch_status_unavailable` readiness
+  condition, and policy undo in the removal path.
+- Out of scope here: the README release-line lag (badge naming the previous release at a fresh tag) is unchanged and filed as a separate bead.
+
 ## [0.2.115] - 2026-11-11
 
 ### Changed
