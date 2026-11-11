@@ -4,6 +4,18 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.118] - 2026-11-11
+
+### Changed
+
+- `omp-kit send` to a Tern seat now reads the native `carly ok` verdict after its `carly lua` turn: a turn the native side rejected (unknown agent, pane runs no agent, Lua error) is reported as a failed dispatch with the pane, session file, and native error instead of "sent via native agent API". Every post-dispatch outcome names the targeted pane, session file, and native verdict.
+- A pending send record from a previous runtime incarnation of the seat (the seat restarted since the attempt) no longer suppresses new sends: the send refuses at once naming the record path and the `send --ack-pending` command.
+- After an in-pane session change, the lead's mail no longer fails with IDENTITY_UNBOUND while Tern still reports the previous session file: the caller rebinds to its own Tern pane when the recorded file sits in the same profile directory, instead of refusing every send and registration.
+- `skill-mine` now gives each enabled source its own reserved share of `--wall-budget-s` (Git keeps at least 40%), so a long cass pass can no longer consume the whole budget and leave Git with 0 of 24 months mined; unused time flows forward to the next source, and per-source elapsed time and budget are reported in coverage.
+- `skill-mine` accepts a repeatable `--source cass|mail|git` flag (default all three), so a Git-only backfill like `--source git` skips cass and mail entirely; unknown source names are refused with the valid list.
+- `skill-mine` clamps every cass and git call to its source's remaining share (at least 1 s), so one hung `cass export` can no longer spend the whole `--wall-budget-s` and starve Git; a spent share stops the source cleanly with `wall budget reached` instead of starting another call.
+- `skill-mine --source` accepts comma-separated values (`--source cass,mail`, still case-sensitive) and refuses a valueless `--source` with the valid list instead of silently mining everything.
+
 ## [0.2.117] - 2026-11-11
 
 ### Changed
