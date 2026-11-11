@@ -1618,14 +1618,30 @@ export async function deliverToTernSeat(input: {
 			nativeResult = "carly lua threw";
 		}
 		if (!luaOk && nativeResult === "carly verdict unread") nativeResult = "carly lua exit nonzero";
+		let verdictError: string | null = null;
+		let verdictOk = false;
 		if (luaOk) {
 			try {
 				const verdict = parseCarlyVerdict(input.io.run([...ctlPrefix, "ok"]).out);
+				verdictOk = verdict.ok;
+				verdictError = verdict.error;
 				nativeResult = verdict.ok ? "carly ok:true"
 					: verdict.error === null ? "carly ok:false" : `carly ok:false: ${verdict.error}`;
 			} catch {
 				nativeResult = "carly ok threw";
 			}
+		}
+		// WAKEFAILCLEAR1: a Lua compile error of our own chunk means the turn never ran, so nothing can
+		// land later: drop the pending record and report definite non-delivery for an immediate resend.
+		// Anchored weak match (regex-engineering §2): linear `lua#[0-9]+:` on the 300-char sliced verdict;
+		// every other ok:false keeps the pending record (a runtime error after admission may still have queued).
+		if (luaOk && !verdictOk && verdictError !== null && /^syntax error: lua#[0-9]+:/.test(verdictError)) {
+			try { rmSync(pendingPath, { force: true }); } catch {}
+			return { status: "NOT_DELIVERED", marker, sends: 1, sessionFile, offset: null,
+				drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
+				detail: `native turn rejected before running (${nativeResult}); nothing typed; recovery copy written; resend at once`,
+				code: "SEND_REFUSED_NATIVE",
+				...(queued ? { queue_states: ["QUEUED", "EXPIRED"] as const } : {}) };
 		}
 		dispatched = luaOk && !nativeResult.startsWith("carly ok:false");
 		const targetNote = `pane tern:${paneId}, session file ${sessionFile}, native ${nativeResult}`;

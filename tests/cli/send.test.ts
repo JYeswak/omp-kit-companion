@@ -988,6 +988,38 @@ test("GOALSENDLAND1: a native tool error is never reported as sent; the error, p
 	expect(r.detail).not.toContain("sent via native agent API");
 });
 
+test("WAKEFAILCLEAR1: a stubbed ok:false syntax error is NOT_DELIVERED with no pending file; the next send dispatches", async () => {
+	const dir = ternDropDir();
+	const pendingDir = join(dir, "..", "tern-pending");
+	const cfg = { okOut: `{"ok":false,"error":"syntax error: lua#3:1: unexpected symbol near 'x'"}` };
+	const fake = ternFake(cfg);
+	const r = await deliverTern(fake, "hello", { dropDir: dir });
+	expect(r.status).toBe("NOT_DELIVERED");
+	expect(r.code).toBe("SEND_REFUSED_NATIVE");
+	expect(r.drop_path).not.toBeNull();
+	expect(readdirSync(pendingDir).filter((name) => name.endsWith(".json"))).toEqual([]);
+	// An immediate resend is no longer suppressed: the verdict now reads ok:true and the lua turn runs again.
+	cfg.okOut = `{"ok":true}`;
+	const again = await deliverTern(fake, "hello again", { dropDir: dir });
+	expect(carlyRuns(fake)).toBe(2);
+	expect(again.code).not.toBe("SUPPRESSED_PENDING");
+});
+
+test("WAKEFAILCLEAR1 planted: a runtime ok:false keeps the pending record and the next send stays PENDING_CONSUME", async () => {
+	const dir = ternDropDir();
+	const pendingDir = join(dir, "..", "tern-pending");
+	const cfg = { okOut: `{"ok":false,"error":"attempt to index a nil value (field 'x')"}` };
+	const fake = ternFake(cfg);
+	const r = await deliverTern(fake, "hello", { dropDir: dir });
+	expect(r.status).toBe("PENDING_CONSUME");
+	expect(r.code).toBe("SEND_AMBIGUOUS");
+	expect(readdirSync(pendingDir).filter((name) => name.endsWith(".json")).length).toBe(1);
+	const again = await deliverTern(fake, "hello again", { dropDir: dir });
+	expect(again.status).toBe("PENDING_CONSUME");
+	expect(again.code).toBe("SUPPRESSED_PENDING");
+	expect(carlyRuns(fake)).toBe(1);
+});
+
 test("GOALSENDLAND1-stale: a pending attempt from a previous runtime incarnation refuses at once with path and ack command", async () => {
 	const dir = ternDropDir();
 	const marker = "kit-send-0123456789ae";
