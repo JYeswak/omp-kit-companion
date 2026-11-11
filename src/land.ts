@@ -968,6 +968,38 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 	const patchValue = request.flags.get("--patch");
 	if (typeof patchValue !== "string" || patchValue.length === 0) return refused("LAND_PATCH_REQUIRED", "patch mode needs a --patch FILE value", "Pass the caller-produced unified diff; nothing was published.");
 	if (request.flags.get("--paths") !== undefined) return refused("LAND_PATCH_EXCLUSIVE", "land takes either --paths worktree files or one --patch file, never both", "Run patch mode without --paths, or path mode without --patch; nothing was published.");
+	const baseValue = request.flags.get("--base");
+	let authoredOn: string | null = null;
+	if (baseValue !== undefined) {
+		if (typeof baseValue !== "string" || baseValue.trim().length === 0)
+			return refused("LAND_BASE_REQUIRED", "land --patch --base needs a commit SHA", "Pass the commit the patch was produced from, or drop --base; nothing was published.");
+		// Trailer scope matches the stale-worktree hook exactly: only the
+		// message's trailer block (git interpret-trailers) counts. A
+		// subject line or a mid-body line that merely contains the words
+		// is not a trailer. Values are unfolded the way the hook reads
+		// them, so both sides agree on what counts.
+		let trailerHasAuthoredOn = false;
+		if (message.toLowerCase().includes("authored-on")) {
+			try {
+				const parsed = await kitlibRun(["git", "interpret-trailers", "--parse"], {
+					cwd: repo, env: gitEnvironment(), stdin: Buffer.from(message, "utf8"),
+					deadline_s: 30, max_output_bytes: 1024 * 1024,
+				});
+				if (parsed.timed_out || parsed.killed || parsed.truncated || parsed.rc !== 0)
+					return refused("LAND_BASE_DUPLICATE", "The message already carries an Authored-On trailer", "Land with one Authored-On trailer: the message's own, or --base, never both; nothing was published.");
+				trailerHasAuthoredOn = new TextDecoder().decode(parsed.stdout).split("\n")
+					.some((line) => /^[Aa]uthored-[Oo]n:[ \t]*[0-9a-fA-F]{7,64}[ \t]*$/.test(line));
+			} catch {
+				return refused("LAND_BASE_DUPLICATE", "The message already carries an Authored-On trailer", "Land with one Authored-On trailer: the message's own, or --base, never both; nothing was published.");
+			}
+		}
+		if (trailerHasAuthoredOn)
+			return refused("LAND_BASE_DUPLICATE", "The message already carries an Authored-On trailer", "Land with one Authored-On trailer: the message's own, or --base, never both; nothing was published.");
+		const resolved = git(repo, ["rev-parse", "--verify", `${baseValue.trim()}^{commit}`]);
+		if (resolved.code !== 0 || resolved.interrupted || resolved.out.trim().length === 0)
+			return refused("LAND_BASE_UNKNOWN", `The --base commit is unknown: ${baseValue.trim()}`, "Pass a commit SHA in this repository; nothing was published.");
+		authoredOn = resolved.out.trim();
+	}
 	const patchPath = isAbsolute(patchValue) ? patchValue : resolve(process.cwd(), patchValue);
 	let patchStat;
 	try { patchStat = lstatSync(patchPath); }
@@ -1015,6 +1047,43 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 			errors: [{ code: "LAND_CHECK_UNRUN", message: `The registered repo check is unavailable: ${checkPreflight.result.reason ?? "unknown"}`, remediation: "Restore the registered check executable and retry; no commit or publication was attempted." }],
 			verification: "UNVERIFIED",
 		};
+	}
+	// Optional --base: prove the patch was authored on that tree, then record
+	// it as the commit's Authored-On trailer so the stale-worktree hook can
+	// judge provenance instead of bytes. The base tree is checked out in a
+	// throwaway worktree and the patch must apply there cleanly; the
+	// worktree never publishes.
+	if (authoredOn !== null) {
+		const authoredBase: string = authoredOn;
+		let baseScratch = "";
+		try { baseScratch = ownedTmp("omp-kit-land-patch-base").path; }
+		catch { return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", "A base-check directory could not be created", "Restore temporary-directory access and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256); }
+		const baseWork = join(baseScratch, "work");
+		const baseAdded = git(repo, ["worktree", "add", "--detach", baseWork, authoredBase]);
+		if (baseAdded.code !== 0 || baseAdded.interrupted) {
+			try { rmSync(baseScratch, { recursive: true, force: true }); } catch { /* best-effort */ }
+			return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", "The --base tree could not be checked out for verification", "Repair the local repository and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
+		}
+		let baseCheck: RunResult;
+		try {
+			baseCheck = await kitlibRun(["git", "apply", "--check", "-"], {
+				cwd: baseWork, env: gitEnvironment(), stdin: patchBytes,
+				deadline_s: 30, max_output_bytes: 8 * 1024 * 1024,
+			});
+		} catch (error) {
+			try { git(repo, ["worktree", "remove", "--force", baseWork]); } catch { /* best-effort */ }
+			try { git(repo, ["worktree", "prune"]); } catch { /* best-effort */ }
+			try { rmSync(baseScratch, { recursive: true, force: true }); } catch { /* best-effort */ }
+			return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", `Git could not verify the patch against --base: ${error instanceof Error ? error.message : String(error)}`, "Repair Git execution and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
+		}
+		try { git(repo, ["worktree", "remove", "--force", baseWork]); } catch { /* best-effort */ }
+		try { git(repo, ["worktree", "prune"]); } catch { /* best-effort */ }
+		try { rmSync(baseScratch, { recursive: true, force: true }); } catch { /* best-effort */ }
+		if (baseCheck.rc !== 0 || baseCheck.timed_out || baseCheck.killed || baseCheck.truncated) {
+			const files = patchFailureFiles(new TextDecoder().decode(baseCheck.stderr));
+			const named = files.length > 0 ? files.join(", ") : paths.join(", ");
+			return refused("LAND_BASE_PATCH_MISMATCH", `The patch does not apply to the --base tree ${authoredBase}: ${named}`, "Regenerate the patch from that base, or drop --base and land the current bytes; nothing was committed or published.");
+		}
 	}
 	// Reconstruct the caller selection onto fresh origin/main in a detached
 	// scratch worktree. The shared worktree and index never contribute bytes.
@@ -1201,7 +1270,10 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 				return patchUnrun(repo, "LAND_CONSTRUCTION_UNVERIFIED", `The reconstructed bytes for ${path} could not be written to local main`, "Repair the worktree and index before retrying; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
 			}
 		}
-		result = await commitOwnedPathsAndPublish(repo, { paths, message, owner: owner.owner, base, pushDeadlineS: landPushDeadlineSeconds() });
+		// Path mode writes no trailer; patch mode with --base records the
+		// proven base so the stale-worktree hook judges provenance.
+		const landedMessage = authoredOn === null ? message : `${message}\n\nAuthored-On: ${authoredOn}`;
+		result = await commitOwnedPathsAndPublish(repo, { paths, message: landedMessage, owner: owner.owner, base, pushDeadlineS: landPushDeadlineSeconds() });
 		published = (result.data as { overall?: string } | null)?.overall === "PUSHED";
 		return result;
 	} finally {

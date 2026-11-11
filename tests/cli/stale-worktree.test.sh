@@ -612,5 +612,131 @@ out=$(git -C "$W" commit --only --message "[test] linked move" --message "Bead: 
 check "$?" "0" "linked-move-passes" "$out" ""
 check "$(git -C "$W" show HEAD:pkg/g.txt)" "landed line L" "linked-move-retains-line" "$out" ""
 
+# 25. STALEEXACT1 R2: an ordinary edit of a peer's line is exempt only by
+# provenance. No trailer refuses exactly as before (naming the peer, with
+# both ways out printed); a base that already contains the peer commit
+# admits it with no Supersedes; a base from before the peer commit, an
+# unknown or unparseable sha, a base off HEAD's history, or two different
+# bases refuse.
+R=$(new_repo stalexact-r2)
+cp "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh" "$TMP/kitlib-tmp.sh"
+S0=$(git -C "$R" rev-parse HEAD)
+printf 'base line\npeer wording\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer wording" --message "Bead: t-peer" --message "Supersedes: $S0"
+P=$(git -C "$R" rev-parse HEAD)
+S=$(git -C "$R" rev-parse HEAD~1)
+printf 'base line\nbrand new\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] ordinary edit" --message "Bead: t-other" 2>&1)
+check "$?" "1" "STALEEXACT1-r2-no-trailer-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P"
+check "$(git -C "$R" rev-list --count HEAD)" "2" "STALEEXACT1-r2-no-trailer-unmoved" "$out" "from bead t-peer"
+check "$(printf '%s\n' "$out" | grep -c "Authored-On: <sha of the commit your checkout was at when you made the edit>")" "1" "STALEEXACT1-r2-remedy-names-requirement" "$out" ""
+check "$(printf '%s\n' "$out" | grep -c "omp-kit land --patch FILE --base <sha> proves the base")" "1" "STALEEXACT1-r2-remedy-names-proof" "$out" ""
+out=$(git -C "$R" commit --message "Authored-On: $P do it" --message "Bead: t-other" 2>&1)
+check "$?" "1" "STALEEXACT1-r2-subject-mention-ignored" "$out" "STALE_WORKTREE pkg/f.txt reverts $P"
+check "$(printf '%s\n' "$out" | grep -c "Authored-On: <sha of the commit")" "1" "STALEEXACT1-r2-subject-still-remedies" "$out" ""
+out=$(git -C "$R" commit --message "[test] ordinary edit" --message "Mentions Authored-On: $P in passing." --message "Bead: t-other" 2>&1)
+check "$?" "1" "STALEEXACT1-r2-midbody-mention-ignored" "$out" "STALE_WORKTREE pkg/f.txt reverts $P"
+out=$(git -C "$R" commit --message "[test] ordinary edit" --message "Bead: t-other" --message "Authored-On: $S" 2>&1)
+check "$?" "1" "STALEEXACT1-r2-stale-base-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P"
+check "$(git -C "$R" rev-list --count HEAD)" "2" "STALEEXACT1-r2-stale-base-unmoved" "$out" ""
+out=$(git -C "$R" commit --message "[test] ordinary edit" --message "Bead: t-other" --message "Authored-On: deadbee1234567" 2>&1)
+check "$?" "1" "STALEEXACT1-r2-unknown-base-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P"
+out=$(git -C "$R" commit --message "[test] ordinary edit" --message "Bead: t-other" --message "Authored-On: not-a-sha-at-all" 2>&1)
+check "$?" "1" "STALEEXACT1-r2-unparseable-base-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P"
+SIDE=$(git -C "$R" commit-tree "HEAD^{tree}" -m "side base")
+out=$(git -C "$R" commit --message "[test] ordinary edit" --message "Bead: t-other" --message "Authored-On: $SIDE" 2>&1)
+check "$?" "1" "STALEEXACT1-r2-offhistory-base-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P"
+out=$(git -C "$R" commit --message "[test] ordinary edit" --message "Bead: t-other" --message "Authored-On: $P" --message "Authored-On: $S" 2>&1)
+check "$?" "1" "STALEEXACT1-r2-two-bases-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P"
+out=$(git -C "$R" commit --message "[test] ordinary edit" --message "Bead: t-other" --message "Authored-On: $P" 2>&1)
+check "$?" "0" "STALEEXACT1-r2-valid-base-passes" "$out" ""
+check "$(git -C "$R" rev-list --count HEAD)" "3" "STALEEXACT1-r2-valid-base-landed" "$out" ""
+
+# 26. STALEEXACT1 R1: a hunk that re-adds the blamed commit's pre-image is a
+# revert regardless of other added lines — even with a valid Authored-On
+# base. A plain restoration refuses without a trailer and passes with one;
+# restoration plus an adjacent new line, or trailing-whitespace drift, still
+# refuse with a valid base. Planted negative: without the R1 predicate the
+# restore-plus-new stage passes.
+R=$(new_repo stalexact-r1)
+member="$R/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree"
+S0=$(git -C "$R" rev-parse HEAD)
+printf 'base line\npeer wording\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer wording" --message "Bead: t-peer" --message "Supersedes: $S0"
+P=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nlanded line L\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] restore pre-image" --message "Bead: t-other" 2>&1)
+check "$?" "1" "STALEEXACT1-r1-restore-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P"
+check "$(git -C "$R" rev-list --count HEAD)" "2" "STALEEXACT1-r1-restore-unmoved" "$out" "from bead t-peer"
+out=$(git -C "$R" commit --message "[test] restore pre-image" --message "Bead: t-other" --message "Revert: $P" 2>&1)
+check "$?" "0" "STALEEXACT1-r1-declared-restore-passes" "$out" ""
+check "$(git -C "$R" log -1 --format=%B HEAD | grep -c "Revert: $P")" "1" "STALEEXACT1-r1-restore-logged" "$out" ""
+R=$(new_repo stalexact-r1-superset)
+member="$R/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree"
+S0=$(git -C "$R" rev-parse HEAD)
+printf 'base line\npeer wording\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer wording" --message "Bead: t-peer" --message "Supersedes: $S0"
+P=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nlanded line L\nadjacent new\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] restore plus new" --message "Bead: t-other" --message "Authored-On: $P" 2>&1)
+check "$?" "1" "STALEEXACT1-r1-superset-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P"
+nor1="$TMP/staleexact-nor1.sh"
+sed 's/r1_restores=1/r1_restores=0/' "$member" > "$nor1"
+grep -q 'r1_restores=1' "$nor1"
+check "$?" "1" "STALEEXACT1-nor1-planted" "" ""
+printf '[test] restore plus new\n\nBead: t-other\n\nAuthored-On: %s\n' "$P" > "$TMP/staleexact-superset.msg"
+out=$(cd "$R" && sh "$nor1" "$TMP/staleexact-superset.msg" 2>&1)
+check "$?" "0" "STALEEXACT1-nor1-passes-restore-plus-new" "$out" ""
+printf 'base line\nlanded line L \n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] whitespace drift" --message "Bead: t-other" --message "Authored-On: $P" 2>&1)
+check "$?" "1" "STALEEXACT1-r1-trimmed-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P"
+R=$(new_repo stalexact-r1-twohop)
+S0=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nC line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer L to C" --message "Bead: t-peer1" --message "Supersedes: $S0"
+P1=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nB line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] peer C to B" --message "Bead: t-peer2" --message "Supersedes: $P1"
+P2=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nlanded line L\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] restore L two hops back" --message "Bead: t-other" 2>&1)
+check "$?" "1" "STALEEXACT1-r1-twohop-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P2"
+check "$(printf '%s\n' "$out" | grep -c "reverts $P1")" "0" "STALEEXACT1-r1-twohop-blames-head" "$out" ""
+
+# 27. STALEEXACT1 R2 deletion: deleting lines a peer only added refuses
+# without a trailer or a declared revert, and passes with an Authored-On
+# base that already contains the peer commit — no Supersedes needed.
+R=$(new_repo stalexact-r2-delete)
+printf 'peer line\n' > "$R/pkg/g.txt"
+git -C "$R" add pkg/g.txt
+git -C "$R" commit -q --message "[test] peer adds g" --message "Bead: t-peer2"
+Q=$(git -C "$R" rev-parse HEAD)
+printf '' > "$R/pkg/g.txt"
+git -C "$R" add pkg/g.txt
+out=$(git -C "$R" commit --message "[test] drop peer g" --message "Bead: t-other" 2>&1)
+check "$?" "1" "STALEEXACT1-r2-delete-refused" "$out" "STALE_WORKTREE pkg/g.txt reverts $Q"
+check "$(git -C "$R" rev-list --count HEAD)" "2" "STALEEXACT1-r2-delete-unmoved" "$out" "from bead t-peer2"
+out=$(git -C "$R" commit --message "[test] drop peer g" --message "Bead: t-other" --message "Supersedes: $Q" 2>&1)
+check "$?" "0" "STALEEXACT1-r2-declared-delete-passes" "$out" ""
+R=$(new_repo stalexact-r2-delete-based)
+printf 'peer line\n' > "$R/pkg/g.txt"
+git -C "$R" add pkg/g.txt
+git -C "$R" commit -q --message "[test] peer adds g" --message "Bead: t-peer2"
+Q=$(git -C "$R" rev-parse HEAD)
+printf '' > "$R/pkg/g.txt"
+git -C "$R" add pkg/g.txt
+out=$(git -C "$R" commit --message "[test] drop peer g on base" --message "Bead: t-other" --message "Authored-On: $Q" 2>&1)
+check "$?" "0" "STALEEXACT1-r2-delete-based-passes" "$out" ""
+check "$(git -C "$R" rev-list --count HEAD)" "3" "STALEEXACT1-r2-delete-based-landed" "$out" ""
 printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

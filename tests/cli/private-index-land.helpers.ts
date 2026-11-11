@@ -329,12 +329,16 @@ export function hunkSetup(peer: "shift" | "conflict" | "none"): HunkSetup {
 	git(work, ["push", "origin", "HEAD:refs/heads/main"]);
 	const base = remoteHead(work);
 	const caller = join(scratch, `caller-${fixtureNumber}`);
-	git(scratch, ["clone", "--branch", "main", bare, caller]);
+	// --no-hardlinks: a local clone hardlinks object files and verifies them;
+	// that verification fails on checkouts whose filesystem does not preserve
+	// hardlink identity (ovnfs), breaking every export-tree run. Copying is
+	// slower but identical and hermetic.
+	git(scratch, ["clone", "--no-hardlinks", "--branch", "main", bare, caller]);
 	git(caller, ["config", "user.name", "caller"]);
 	git(caller, ["config", "user.email", "caller@example.invalid"]);
 	if (peer !== "none") {
 		const peerDir = join(scratch, `peer-${fixtureNumber}`);
-		git(scratch, ["clone", "--branch", "main", bare, peerDir]);
+		git(scratch, ["clone", "--no-hardlinks", "--branch", "main", bare, peerDir]);
 		git(peerDir, ["config", "user.name", "peer"]);
 		git(peerDir, ["config", "user.email", "peer@example.invalid"]);
 		writeServiceLines(peerDir, (lines) => {
@@ -382,7 +386,7 @@ export function actualParentSetup(): { work: string; fakeBin: string; seed: stri
 	const seed = remoteHead(work);
 	const origin = git(work, ["remote", "get-url", "origin"]).trim();
 	const peerDir = join(scratch, `actual-parent-peer-${fixtureNumber++}`);
-	git(scratch, ["clone", "--branch", "main", origin, peerDir]);
+	git(scratch, ["clone", "--no-hardlinks", "--branch", "main", origin, peerDir]);
 	git(peerDir, ["config", "user.name", "actual-parent peer"]);
 	git(peerDir, ["config", "user.email", "actual-parent-peer@example.invalid"]);
 	writeFileSync(join(peerDir, "owned.txt"), "actual parent bytes\n");

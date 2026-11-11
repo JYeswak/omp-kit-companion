@@ -91,7 +91,13 @@ keeps land's exit code, and adds a `save` object under `--json`. Each save appen
 selected hunks onto freshly fetched `origin/main`, rather than staging whole
 shared-worktree files. Supply a standard `a/` / `b/` unified diff whose paths
 are covered by the caller's current exclusive reservations. New files work;
-renames and copies are refused. `--patch` and `--paths` are mutually exclusive.
+`--patch` and `--paths` are mutually exclusive. Patch mode accepts an
+optional `--base SHA`: the commit the patch was produced from. Land checks
+the patch out on that tree and requires it to apply cleanly there — proof
+the patch was authored on it — then records `Authored-On: SHA` in the
+commit message itself, so the stale-worktree hook judges provenance
+instead of bytes. A patch that does not apply to the base, or an unknown
+base, lands nothing; path mode writes no trailer.
 
 The patch is limited to 4 MiB. The bytes read and parsed are the bytes applied:
 replacing the file during fetch cannot introduce an unselected hunk.

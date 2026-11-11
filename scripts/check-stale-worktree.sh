@@ -6,12 +6,28 @@
 #   (b) foreign-bead: a removed line blamed to a commit carrying a `Bead:`
 #       trailer different from this message's bead, unless the blamed sha is
 #       declared with a `Revert: <sha>` or `Supersedes: <sha>` trailer line.
+#       Judged per staged hunk in two steps (STALEEXACT1 rework,
+#       ompkit-1ra0d.132):
+#       R1, always on: a hunk that re-adds the blamed commits' pre-image is
+#       a revert regardless of what else it adds — the combined pre-image
+#       (non-empty) is a sub-multiset of the hunk's added lines, compared
+#       after trimming trailing whitespace, count-aware. Only Revert: or
+#       Supersedes: admits it; an Authored-On base never does.
+#       R2, everything else: an edit to new content, or a deletion of lines
+#       a peer only added, is exempt only by provenance, not by bytes. A
+#       blamed commit already contained in the message's single
+#       `Authored-On: <sha>` base (ancestor of or equal to it, with the base
+#       itself an ancestor of or equal to HEAD) passes; one that landed
+#       after the base, or any candidate with no (or no valid) Authored-On
+#       trailer, refuses exactly as before. An unparseable, unknown, or
+#       off-history sha, or several different Authored-On values, grant no
+#       exemption.
+# Same-bead rework passes silently. Pure additions pass. Unborn HEAD passes.
 # Not judged: lines re-added byte-identically in the same commit at least as
 # often as removed (moves, count-aware; rule (b) only — rule (a) still fires
 # on stale mtimes, so re-adding elsewhere launders nothing), and tracker
 # export regenerations that lose no issue row (every removed row's issue id
 # still present in the staged file; any lost id falls through, fail closed).
-# Same-bead rework passes silently. Pure additions pass. Unborn HEAD passes.
 # Reads the effective tree through the index (GIT_INDEX_FILE is respected, so
 # `git commit --only` temporary indexes are judged). Renames are read as
 # delete+add (no -M follow): the delete side is judged by the rules above.
@@ -133,16 +149,35 @@ fi
 # Current message bead and declared reverts (empty when absent). A
 # `Supersedes: <sha>` trailer declares an intended rewrite with the same
 # strength as `Revert: <sha>`; the trailer line itself logs it in the commit.
+# Review has no rewrite authority and no base to prove: attribute every
+# foreign-bead removal with the SAME move/export/mtime predicates as commit
+# admission below, and never exempt by provenance.
 if [ "$review" -eq 1 ]; then
-	# Review has no rewrite authority. Attribute every foreign-bead removal
-	# with the SAME move/export/mtime predicates as commit admission below.
 	bead=brief-review
 	reverts=""
+	authored_on=""
 else
 	bead=$(grep -E -m1 '^[[:space:]]*[Bb]ead:[[:space:]]*[A-Za-z0-9._-]+' "$msg" 2>/dev/null | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//')
 	reverts=$(grep -E -o '^[[:space:]]*[Rr]evert:[[:space:]]*[0-9a-fA-F]{7,64}|^[[:space:]]*[Ss]upersedes:[[:space:]]*[0-9a-fA-F]{7,64}' "$msg" 2>/dev/null | sed -e 's/^[^:]*:[[:space:]]*//')
+	# R2 (STALEEXACT1 rework, ompkit-1ra0d.132): at most ONE distinct
+	# Authored-On base, and only from the message's trailer block: a
+	# subject line or a mid-body line that merely contains the words is
+	# not a trailer. Several different values (or none) mean no
+	# provenance exemption; the rules below refuse as usual.
+	authored_on=""
+	if grep -qi 'authored-on' "$msg" 2>/dev/null; then
+		authored_on=$(git interpret-trailers --parse < "$msg" 2>/dev/null | grep -E -o '^[Aa]uthored-[Oo]n:[[:space:]]*[0-9a-fA-F]{7,64}[[:space:]]*$' | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//' | sort -u)
+		authored_first=$(printf '%s\n' "$authored_on" | sed -n '1p')
+		[ "$authored_first" = "$authored_on" ] || authored_on=""
+	fi
 	[ -f "$msg" ] || { printf 'stale-worktree: cannot read %s\n' "$msg" >&2; exit 1; }
 fi
+# The proven base for R2: resolves to a commit that is an ancestor of (or
+# equal to) HEAD. Anything else — unparseable, unknown, or off-history —
+# grants no exemption. Computed lazily on first need (only a path with
+# foreign candidates pays for it) and cached for the invocation.
+authored_base=""
+authored_state="unproven"
 
 # Check the producer before using empty output as "nothing committed".
 # Actual path data is materialized NUL-separated below; --only stays judged.
@@ -258,6 +293,82 @@ moved_lines() {
 	cut -f1 "$mvhit"
 }
 
+split_hunks() {
+	# $1 = hunk dir. Parses the staged diff for the current path from the
+	# current $metadata_dir/diff.raw — callers capture it for this same path
+	# first (removed_lines, moved_lines just above), so no extra git call is
+	# spent here — into $1/hunkmap ("HEAD-line hunk-seq" per removed line)
+	# and $1/added ("hunk-seq<TAB>added-line" per added line). Both files and
+	# $1/fsites always exist afterwards. Redirection targets are function
+	# arguments (POSIX awk `print > expr`, no parens).
+	awk -v map="$1/hunkmap" -v adds="$1/added" '
+		/^diff --git / { inat = 0; next }
+		/^@@ / { old = substr($2, 2); split(old, r, ","); old = r[1] + 0; hseq++; inat = 1; next }
+		!inat { next }
+		/^-/ { print old " " hseq > map; old++; next }
+		/^\+/ { print hseq "\t" substr($0, 2) > adds; next }' "$metadata_dir/diff.raw" || return 1
+	[ -f "$1/hunkmap" ] || : > "$1/hunkmap" || return 1
+	[ -f "$1/added" ] || : > "$1/added" || return 1
+	[ -f "$1/added.0" ] || : > "$1/added.0" || return 1
+	[ -f "$1/fsites" ] || : > "$1/fsites" || return 1
+	return 0
+}
+
+pre_lines() {
+	# $1 = blamed sha, $2 = path, $3 = hunk dir. Materializes the lines that
+	# commit $1 removed from $2 (its pre-image there) at $3/pre.$1. A root
+	# commit, or a path the commit created, removed nothing: the pre-image is
+	# empty and a pure deletion of its lines is still a revert. The
+	# has-parent probe is cached per invocation (one git call per blamed sha,
+	# not per blamed path). Fails closed on unreadable history, like every
+	# other Git observation here.
+	[ -f "$3/pre.$1" ] && return 0
+	if [ ! -f "$metadata_dir/hasparent.$1" ]; then
+		if git rev-parse --verify --quiet "$1^" > /dev/null 2>&1; then
+			printf 'P\n' > "$metadata_dir/hasparent.$1" || return 1
+		else
+			printf 'R\n' > "$metadata_dir/hasparent.$1" || return 1
+		fi
+	fi
+	if grep -q '^R$' "$metadata_dir/hasparent.$1" 2>/dev/null; then
+		: > "$3/pre.$1" 2>/dev/null || return 1
+	else
+		git diff -U0 --no-color --no-ext-diff "$1^" "$1" -- "$2" > "$metadata_dir/prediff.raw" 2>/dev/null || return 1
+		awk '/^diff --git /{inat=0;next} /^@@ /{inat=1;next} !inat{next} /^-/{print substr($0,2)}' "$metadata_dir/prediff.raw" > "$3/pre.$1" 2>/dev/null || return 1
+	fi
+}
+
+prove_authored_base() {
+	# Lazily resolves $authored_on to a commit that is an ancestor of (or
+	# equal to) HEAD, caching the verdict for the invocation. Redefines
+	# nothing on failure: no base, no exemption. Only paths with foreign
+	# candidates pay for it.
+	[ "$authored_state" = "unproven" ] || return 0
+	authored_state="proven"
+	[ -n "$authored_on" ] || return 0
+	if resolved=$(git rev-parse --verify --quiet "$authored_on^{commit}" 2>/dev/null) && [ -n "$resolved" ]; then
+		if git merge-base --is-ancestor "$resolved" "$HEAD" > /dev/null 2>&1; then
+			authored_base="$resolved"
+		fi
+	fi
+}
+
+base_contains() {
+	# $1 = blamed foreign sha. True when the proven Authored-On base already
+	# contained it (ancestor of or equal to the base): removing those lines
+	# was a choice made with them in view. Anything else — including any
+	# unreadable history — is not an exemption and refuses as usual.
+	[ -n "$authored_base" ] || return 1
+	[ -f "$metadata_dir/anc.$1" ] || {
+		if git merge-base --is-ancestor "$1" "$authored_base" > /dev/null 2>&1; then
+			printf 'Y\n' > "$metadata_dir/anc.$1" || return 1
+		else
+			printf 'N\n' > "$metadata_dir/anc.$1" || return 1
+		fi
+	}
+	grep -q '^Y$' "$metadata_dir/anc.$1" 2>/dev/null
+}
+
 HEAD=$(git rev-parse --verify 'HEAD^{commit}') || exit 1
 nl=$(printf '\nX'); nl=${nl%X}
 # Moved-text multiset over the whole staged diff: every added line's exact
@@ -276,6 +387,7 @@ capture_diff || { printf 'stale-worktree: cannot read staged diff\n' >&2; exit 1
 awk '/^diff --git /{inat=0;next} /^@@ /{inat=1;next} !inat{next} /^\+/{print substr($0,2)}' "$metadata_dir/diff.raw" > "$metadata_dir/additions.raw" || exit 1
 sort "$metadata_dir/additions.raw" > "$mvadd_sorted" || exit 1
 : > "$mvused" || exit 1
+hunk_n=0
 newest=""
 git diff --cached --name-only -z HEAD -- > "$metadata_dir/paths.raw" || exit 1
 tr '\0' '\n' < "$metadata_dir/paths.raw" > "$metadata_dir/paths.lines" || exit 1
@@ -314,6 +426,10 @@ while IFS= read -r path; do
 	moved_numbers=$(moved_lines "$path") || { printf 'stale-worktree: cannot read moved sites: %s\n' "$path" >&2; exit 1; }
 	moved=" $(printf '%s\n' "$moved_numbers" | tr '\n' ' ')"
 	mt=$(mtime_of "$root/$path")
+	hunk_n=$((hunk_n + 1))
+	hdir="$metadata_dir/h$hunk_n"
+	mkdir -p "$hdir" || exit 1
+	split_hunks "$hdir" || { printf 'stale-worktree: cannot read staged hunks: %s\n' "$path" >&2; exit 1; }
 	# No blame when no rule can refuse this path (ompkit-xa5s.30: closing an
 	# old tracker row cost one 32 s blame). Rule (b) needs a message bead and
 	# a path outside the loss-free export exemption. Rule (a) needs a blamed
@@ -345,18 +461,19 @@ while IFS= read -r path; do
 		exit 1
 	fi
 	if ! printf '%s\n' "$blamed" | awk '
-		FILENAME != "-" { order[++n] = $1; next }
+		ARGV[1] == FILENAME { order[++n] = $1; next }
+		ARGV[2] == FILENAME { hseq[$1] = $2; next }
 		!($1 in sha) { sha[$1] = $2 }
 		END {
 			for (i = 1; i <= n; i++)
-				if (order[i] in sha) print order[i], sha[order[i]]
+				if (order[i] in sha) print order[i], sha[order[i]], (order[i] in hseq ? hseq[order[i]] : 0)
 				else missing = 1
 			exit missing
-		}' "$mvrm" - > "$mvhit"; then
+		}' "$mvrm" "$hdir/hunkmap" - > "$mvhit"; then
 		printf 'stale-worktree: cannot join removed sites: %s\n' "$path" >&2
 		exit 1
 	fi
-	while IFS=' ' read -r ln sha; do
+	while IFS=' ' read -r ln sha hseq; do
 		[ -n "$sha" ] || continue
 		if ! commit_facts "$sha"; then
 			printf 'UNREADABLE_COMMIT_FACTS %s %s\n' "$path" "$sha" >&2
@@ -374,32 +491,91 @@ while IFS= read -r path; do
 			printf '1\n' >> "$metadata_dir/refused" || exit 1
 			continue
 		fi
-		# Rule (b): foreign bead reverted without declaration. Skipped for
-		# loss-free export regenerations and for moved lines (re-added in
-		# this same commit, count-aware); rule (a) above already judged
-		# those lines. Each removed line is evaluated (multiset); the
-		# report names each sha once.
+		# Rule (b): foreign-bead restoration without declaration (STALEEXACT1).
+		# Skipped for loss-free export regenerations and for moved lines
+		# (re-added in this same commit, count-aware); rule (a) above already
+		# judged those lines. Candidate removals are collected per staged
+		# hunk ("line sha hunk") and judged after the loop: only a hunk that
+		# restores the blamed commits' pre-image refuses. Each removed line
+		# is evaluated (multiset); the report names each sha once.
 		skip_b=0
 		[ "$export_ok" -eq 1 ] && skip_b=1
 		case "$moved" in *" $ln "*) skip_b=1 ;; esac
 		if [ "$skip_b" -eq 0 ] && [ -n "$cbead" ] && [ -n "$bead" ] && [ "$cbead" != "$bead" ] && [ "$declared" -eq 0 ]; then
-			[ "$review" -eq 0 ] || printf 'REVIEW_CANDIDATE\t%s\t%s\t%s\t%s\n' "$path" "$sha" "$cbead" "$ln"
-			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s) from bead %s\n' "$path" "$sha" "$subject" "$cbead" >> "$metadata_dir/report" || exit 1; printf '%s\n' "$sha" >> "$metadata_dir/shas" || exit 1 ;; esac
-			seen="$seen $sha"
-			printf '1\n' >> "$metadata_dir/refused" || exit 1
+			printf '%s %s %s\n' "$ln" "$sha" "$hseq" >> "$hdir/fsites" || exit 1
 		fi
 	done < "$mvhit" || exit 1
+	# Rule (b) hunk judgement (STALEEXACT1 rework): each staged hunk holding
+	# foreign candidate removals is judged in two steps.
+	# R1, always on: a hunk that re-adds the blamed commits' pre-image is a
+	# revert regardless of what else it adds — the combined pre-image
+	# (non-empty) is a sub-multiset of the hunk's added lines, compared
+	# after trimming trailing whitespace, count-aware. Only Revert: or
+	# Supersedes: admits it; an Authored-On base never does.
+	# R2, everything else: an edit to new content or a deletion of
+	# peer-added lines is exempt only by provenance, not by bytes. Each
+	# blamed commit already contained in the proven Authored-On base passes;
+	# one that landed after the base (the stale case), or any candidate
+	# with no (or no valid) Authored-On trailer, refuses exactly as before.
+	# Pre-images are cached per (sha, path); unreadable history fails
+	# closed like every other observation.
+	if [ -s "$hdir/fsites" ]; then
+		awk '{ print $3 }' "$hdir/fsites" > "$hdir/seqs.raw" || exit 1
+		sort -u "$hdir/seqs.raw" > "$hdir/seqs" || exit 1
+		hunk_seqs=$(cat "$hdir/seqs") || exit 1
+		for hseq in $hunk_seqs; do
+			[ -n "$hseq" ] || continue
+			awk -v s="$hseq" '$3 == s { print $2 }' "$hdir/fsites" > "$hdir/hshas.raw" || exit 1
+			sort -u "$hdir/hshas.raw" > "$hdir/hshas" || exit 1
+			hunk_shas=$(cat "$hdir/hshas") || exit 1
+			[ -n "$hunk_shas" ] || continue
+			: > "$hdir/preall.$hseq" || exit 1
+			for hsha in $hunk_shas; do
+				pre_lines "$hsha" "$path" "$hdir" || { printf 'stale-worktree: unreadable landed history: %s %s\n' "$path" "$hsha" >&2; exit 1; }
+				cat "$hdir/pre.$hsha" >> "$hdir/preall.$hseq" || exit 1
+			done
+			awk -v s="$hseq" '{ p = index($0, "\t"); if (p > 0 && substr($0, 1, p - 1) == s) print substr($0, p + 1) }' "$hdir/added" > "$hdir/hadd.$hseq" || exit 1
+			r1_restores=0
+			if [ -s "$hdir/preall.$hseq" ] && awk 'function trim(s) { sub(/[ \t\r]+$/, "", s); return s } FILENAME == ARGV[1] { add[trim($0)]++; next } { line = trim($0); if (++used[line] > add[line]) { missing = 1; exit 1 } } END { exit (missing ? 1 : 0) }' "$hdir/hadd.$hseq" "$hdir/preall.$hseq"; then
+				r1_restores=1
+			fi
+			if [ "$r1_restores" -eq 0 ]; then
+				prove_authored_base || { printf 'stale-worktree: unreadable authoring base: %s\n' "$path" >&2; exit 1; }
+			fi
+			for hsha in $hunk_shas; do
+				if [ "$r1_restores" -eq 0 ] && base_contains "$hsha"; then
+					continue
+				fi
+				if ! commit_facts "$hsha"; then
+					printf 'UNREADABLE_COMMIT_FACTS %s %s\n' "$path" "$hsha" >&2
+					exit 1
+				fi
+				[ "$review" -eq 0 ] || printf 'REVIEW_CANDIDATE\t%s\t%s\t%s\t%s\n' "$path" "$hsha" "$cbead" "$(awk -v s="$hseq" -v h="$hsha" '$3 == s && $2 == h { print $1; exit }' "$hdir/fsites")"
+				case "$seen" in *"$hsha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s) from bead %s\n' "$path" "$hsha" "$subject" "$cbead" >> "$metadata_dir/report" || exit 1; printf '%s\n' "$hsha" >> "$metadata_dir/shas" || exit 1 ;; esac
+				seen="$seen $hsha"
+				printf '1\n' >> "$metadata_dir/refused" || exit 1
+				if [ "$r1_restores" -eq 0 ]; then
+					printf '1\n' >> "$metadata_dir/r2refused" || exit 1
+				fi
+			done
+		done
+	fi
  done < "$metadata_dir/paths.lines" || { printf 'stale-worktree: cannot evaluate removed sites\n' >&2; exit 1; }
  if [ -s "$metadata_dir/refused" ]; then
 	[ "$review" -eq 0 ] || exit 1
  	report=$(cat "$metadata_dir/report" 2>/dev/null)
 	printf 'stale-worktree: REFUSED: commit would revert landed lines:\n%s\n' "$report" >&2
  	printf 'stale-worktree: declare each intended revert with a "Revert: <sha>" trailer line (or "Supersedes: <sha>" for a rewrite), or rework on a fresh worktree\n' >&2
-	# GATEDIAG1 (one complete diagnostic with its fix): every refused sha in one ready block, so declaring the
 	# whole set is one edit, never a round per sha. Rule (a) refusals on a stale worktree are still best fixed by
 	# reworking on fresh bytes; the block is for intended rewrites.
 	printf 'stale-worktree: if every revert above is intended, add this block to the commit message:\n' >&2
 	sort -u "$metadata_dir/shas" | sed 's/^/Supersedes: /' >&2
+	# An R2 refusal (not a restoration) has a second way out: authoring
+	# provenance. Never a ready-made sha: the author names the base their
+	# checkout was at, and a base from before those commits is refused.
+	if [ -s "$metadata_dir/r2refused" ]; then
+		printf 'stale-worktree: or, if this edit was authored on a checkout whose base already contained the lines named above, add one trailer: Authored-On: <sha of the commit your checkout was at when you made the edit>. A base from before those commits is refused. omp-kit land --patch FILE --base <sha> proves the base and writes the trailer for you.\n' >&2
+	fi
  	exit 1
  fi
  exit 0

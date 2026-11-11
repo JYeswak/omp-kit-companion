@@ -180,7 +180,7 @@ test("refuses a patch whose exact full suite is red before origin advances", () 
 	const setup = hunkSetup("none");
 	const { work, fakeBin, bare, base, patch } = setup;
 	const caller = join(scratch, `full-suite-caller-${fixtureNumber++}`);
-	git(scratch, ["clone", "--branch", "main", bare, caller]);
+	git(scratch, ["clone", "--no-hardlinks", "--branch", "main", bare, caller]);
 	git(caller, ["config", "user.name", "caller"]);
 	git(caller, ["config", "user.email", "caller@example.invalid"]);
 	writeFileSync(join(caller, "suite-contract.txt"), "FAIL\n");
@@ -251,7 +251,7 @@ test("merges a concurrent advance to an unrelated path and publishes the merge",
 	// commit-msg hook below pushes it before publication, so convergence must
 	// integrate it exactly the way path mode does instead of refusing.
 	const writer = join(scratch, `writer-${fixtureNumber}`);
-	git(scratch, ["clone", "--branch", "main", bare, writer]);
+	git(scratch, ["clone", "--no-hardlinks", "--branch", "main", bare, writer]);
 	git(writer, ["config", "user.name", "writer"]);
 	git(writer, ["config", "user.email", "writer@example.invalid"]);
 	writeFileSync(join(writer, "untouched.txt"), "concurrent remote change\n");
@@ -303,3 +303,70 @@ test("merges a concurrent advance to an unrelated path and publishes the merge",
 	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore.replace(" M service.txt\n", ""));
 });
 
+
+test("land --patch --base records Authored-On and lands a peer-line edit; an off-history base is refused by the hook", async () => {
+	for (const specimen of ["fresh", "offhistory", "midbody", "duplicate"] as const) {
+		const { work, fakeBin } = fixture();
+		writeFileSync(join(work, "service.txt"), SERVICE_BASE);
+		git(work, ["add", "--", "service.txt"]);
+		git(work, ["commit", "-m", "service landing [test]", "-m", "Bead: t-land"]);
+		git(work, ["push", "origin", "HEAD:refs/heads/main"]);
+		const base = remoteHead(work);
+		const common = resolve(work, git(work, ["rev-parse", "--git-common-dir"]).trim());
+		const members = join(common, "hooks", "hooks.d", "commit-msg");
+		mkdirSync(members, { recursive: true });
+		// Use the working source under test, not HEAD's pre-fix hook.
+		writeFileSync(join(members, "49-omp-kit-stale-worktree"),
+			readFileSync(join(repoRoot, "scripts", "check-stale-worktree.sh")), { mode: 0o755 });
+		writeFileSync(join(members, "kitlib-tmp.sh"),
+			readFileSync(join(repoRoot, "scripts", "kitlib-tmp.sh")), { mode: 0o644 });
+		writeFileSync(join(common, "hooks", "commit-msg"), [
+			"#!/bin/sh",
+			"set -eu",
+			'here=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd -P)',
+			'exec "$here/hooks.d/commit-msg/49-omp-kit-stale-worktree" "$@"',
+		].join("\n") + "\n", { mode: 0o755 });
+		writeServiceLines(work, (lines) => { lines[10] = "caller wording"; });
+		const selected = readFileSync(join(work, "service.txt"), "utf8");
+		const patch = join(scratch, `stale-hook-base-${specimen}-${fixtureNumber++}.patch`);
+		writeFileSync(patch, git(work, ["diff", "--", "service.txt"]));
+		// The off-history base has exactly the origin tree, so the patch
+		// verifies against it, but it is no ancestor of main: the hook,
+		// not the base proof, refuses the landing.
+		const claim = specimen === "offhistory"
+			? git(work, ["commit-tree", `${base}^{tree}`, "-m", "off-history base"]).trim()
+			: base;
+		const subject = specimen === "midbody"
+			? `feat(land): base mention [test]\n\nMentions Authored-On: deadbee1 in passing.\n\nBead: t-other`
+			: specimen === "duplicate"
+				? `feat(land): base duplicate [test]\n\nBead: t-other\nAuthored-On: ${base}`
+				: `feat(land): base ${specimen} [test]\n\nBead: t-other`;
+		const run = command(work, ["--patch", patch, "--base", claim,
+			"--message", subject, "--apply", "--yes"], patchHold(), {
+			amDir: fakeBin,
+		});
+		if (specimen === "fresh" || specimen === "midbody") {
+			expect(run.status, JSON.stringify(run.body)).toBe(0);
+			const data = run.body.data as { overall: string; commit: string };
+			expectLandSchema(run.body.data);
+			expect(data.overall).toBe("PUSHED");
+			expect(remoteHead(work)).toBe(data.commit);
+			expect(git(work, ["show", `${data.commit}:service.txt`])).toBe(selected);
+			expect(git(work, ["show", "-s", "--format=%B", data.commit])).toContain(`Authored-On: ${base}`);
+		} else if (specimen === "offhistory") {
+			expect(run.status, JSON.stringify(run.body)).toBe(1);
+			expect(responseCode(run.body)).toBe("COMMIT_CREATION_REFUSED");
+			expect(run.body.data).toMatchObject({ overall: "REFUSED", commit: null });
+			expect(JSON.stringify(run.body.errors)).toContain(`STALE_WORKTREE service.txt reverts ${base}`);
+			expect(JSON.stringify(run.body.errors)).toContain("from bead t-land");
+			expect(remoteHead(work)).toBe(base);
+			expect(readFileSync(join(work, "service.txt"), "utf8")).toBe(selected);
+		} else {
+			expect(run.status, JSON.stringify(run.body)).toBe(1);
+			expect(responseCode(run.body)).toBe("LAND_BASE_DUPLICATE");
+			expect(run.body.data).toMatchObject({ overall: "REFUSED" });
+			expect(remoteHead(work)).toBe(base);
+			expect(readFileSync(join(work, "service.txt"), "utf8")).toBe(selected);
+		}
+	}
+}, LAND_DEFAULT_TIMEOUT_MS);
