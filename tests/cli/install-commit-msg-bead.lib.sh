@@ -276,8 +276,15 @@ if [ ! -e "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes" ]; then rc=
 ok "$rc" "0" "check-retired-notes-removed"
 sh "$INSTALLER" --check "$A" > /dev/null 2>&1
 ok "$?" "0" "check-retired-notes-reinstall-fresh"
-# An older shipped copy also retires (historical pins, not just current).
-git -C "$KITROOT" show 1dbff4b19c86fb196bc7bc40ecd7837c4e1ec411:scripts/check-commit-notes.sh > "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes" 2>/dev/null || exit 1
+# An older shipped copy also retires (historical pins, not just current). The
+# bytes are a committed fixture, never a git-show of history: verdict runners
+# export a history-less tree (git archive plus a depth-1 fetch), where the old
+# blob is absent and git show would kill this worker before it publishes
+# assertion counts (2026-11-11 fleet failure: worker exited 1, 34 pass 0 fail).
+NOTES_FIXTURE="$KITROOT/tests/cli/fixtures/retired-check-commit-notes.1dbff4b.sh"
+fixture_sha=$(shasum -a 256 "$NOTES_FIXTURE" 2>/dev/null | cut -d' ' -f1)
+ok "$fixture_sha" "7311d32b1131fc8a7d9fe117a45371fd892624fbdd66574f07923ce12e21150f" "retired-notes-fixture-pinned"
+cp "$NOTES_FIXTURE" "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes" || return 1
 chmod +x "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes"
 sh "$INSTALLER" --check "$A" > "$TMP/o-retired-old" 2>&1
 ok "$?" "3" "check-retired-old-notes-rc"
