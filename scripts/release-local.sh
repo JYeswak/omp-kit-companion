@@ -487,10 +487,17 @@ done
 if [ "$DRY_RUN" = 0 ] && [ "$INSTALL" = 1 ]; then
 	[ -x "$INSTALL_PREFIX/bin/omp-kit" ] || die "install requires the existing kit at $INSTALL_PREFIX/bin/omp-kit (or --no-install)"
 	[ -f "$ROOT/skills/fleet-restart/scripts/fleet_restart.py" ] || die "fleet align readback helper is missing"
-	# RELPENDING1 (ompkit-fp72.120.16.227): an unreconciled receipt from a previous install makes the install stage's
-	# `omp-kit update --apply` refuse PENDING_RECOVERY only after build, sign and publish (0.2.89: 34 min, published but
-	# never installed). Read the file the updater reads: cli.ts receiptStateRoot (XDG_STATE_HOME, or HOME/.local/state
-	# when unset, both absolute) + /omp-kit, and mutations.ts updatePendingPath. Read only: never reconcile from here.
+	# RELPENDINGLOOP1 (ompkit-1ra0d.183): every 0.2.11x release left a PENDING kit-update receipt after a
+	# successful activation (rel119: post-activation extensions/hooks failure; rel120: refused revalidation
+	# while the job installed the version; rel121: false KIT_LIVE_TEST_FAILED postcheck on seat-omp runtime
+	# writes outside the two auto-reconciled classes), so the next preflight refused RELPENDING1 until a
+	# manual `update --reconcile` re-proved the postimages. The seat cannot be quiesced mid-release and
+	# allowlisting all seat state would gut the postcheck, so the preflight reuses the updater's own proof
+	# instead: `update --reconcile` re-verifies the recorded postimage (symlink target plus binary bytes)
+	# and only then clears the receipt. The release proceeds solely on its RECONCILED verdict; anything
+	# else keeps the existing RELPENDING1 refusal, with no new refusal code. The path below mirrors the
+	# updater's own: cli.ts receiptStateRoot (XDG_STATE_HOME, or HOME/.local/state when unset, both
+	# absolute) + /omp-kit, and mutations.ts updatePendingPath.
 	kit_state_home="${XDG_STATE_HOME-${HOME:-}/.local/state}"
 	[[ "${HOME:-}" == /* && "$kit_state_home" == /* ]] ||
 		die "install requires an absolute HOME and XDG_STATE_HOME (or XDG_STATE_HOME unset), as omp-kit update does"
@@ -499,7 +506,13 @@ if [ "$DRY_RUN" = 0 ] && [ "$INSTALL" = 1 ]; then
 		pending_id="$(jq -er '.id | select(type == "string" and test("^[a-f0-9-]{1,128}$"))' "$kit_pending" 2>/dev/null)" || pending_id=''
 		pending_warning="reconcile only a false PARTIAL whose postimages verify; nothing was built and nothing was changed"
 		[ -n "$pending_id" ] || die "RELPENDING1: pending kit update receipt $kit_pending is unreadable (no valid id), so the install stage would refuse PENDING_RECOVERY after publishing; inspect it, then run omp-kit update --reconcile <id> --yes ($pending_warning)"
-		die "RELPENDING1: a previous kit update left pending recovery receipt $pending_id ($kit_pending), so the install stage would refuse PENDING_RECOVERY after publishing; first run: omp-kit update --reconcile $pending_id --yes ($pending_warning)"
+		if bounded 300 "$INSTALL_PREFIX/bin/omp-kit" update --reconcile "$pending_id" --yes --json >"$WORK/pending-reconcile.json" &&
+			jq -e --arg id "$pending_id" '.ok == true and .data.action == "RECONCILED" and .data.receipt_id == $id' "$WORK/pending-reconcile.json" >/dev/null; then
+			cat "$WORK/pending-reconcile.json"
+			say "reconciled pending kit update receipt $pending_id; its postimages verify"
+		else
+			die "RELPENDING1: a previous kit update left pending recovery receipt $pending_id ($kit_pending), so the install stage would refuse PENDING_RECOVERY after publishing; first run: omp-kit update --reconcile $pending_id --yes ($pending_warning)"
+		fi
 	fi
 fi
 # Probe the newly used curl features locally, before a tag or draft can exist.

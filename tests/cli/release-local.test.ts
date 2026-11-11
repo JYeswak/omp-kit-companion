@@ -177,69 +177,101 @@ ${admission === 75 ? "echo 'heavy: waiting: disk low: statfs 4 GiB free, floor 1
 // Three release-local preflights run back to back (stubbed admission, git and gh); bun's 5 s default is too tight under load.
 }, fixtureDeadlineS(60) * 1_000);
 
-// RELPENDING1 (ompkit-fp72.120.16.227): a previous install's pending recovery receipt refuses the release at preflight,
-// before any build, instead of at the install stage after publishing. Same stubs as RELFAILFAST1; the fixture HOME's
-// default state root (XDG_STATE_HOME unset) is the one omp-kit update reads. Never a real release: the stubbed fetch fails.
-test.skipIf(process.platform !== "darwin")("RELPENDING1 preflight refuses a pending kit update receipt before any build", async () => {
-	const work = realpathSync(ownedTmp("relpending", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
-	const bin = join(work, "bin");
-	const home = join(work, "home");
-	const prefix = join(work, "prefix");
-	const stateRoot = join(home, ".local/state/omp-kit");
-	const pending = join(stateRoot, "kit-update.pending.json");
-	const id = "4f2daa9e-2326-4d40-be66-6d9f65b1df5e";
-	mkdirSync(bin); mkdirSync(join(prefix, "bin"), { recursive: true }); mkdirSync(stateRoot, { recursive: true });
-	const executable = hostPreflight(work);
-	const stub = (path: string, body: string) => { writeFileSync(path, `#!/bin/sh\n${body}\n`); chmodSync(path, 0o755); };
-	stub(join(bin, "gh"), "exit 0");
-	stub(join(bin, "omp-kit"), "exit 0");
-	stub(join(prefix, "bin/omp-kit"), `echo called >> "${join(work, "kit-called")}"; exit 0`);
-	stub(join(bin, "git"), `echo called >> "${join(work, "git-called")}"; exit 1`);
-	const attempt = async () => {
-		rmSync(join(work, "git-called"), { force: true });
-		const env: Record<string, string> = {};
-		for (const [name, value] of Object.entries(process.env)) if (value !== undefined && name !== "XDG_STATE_HOME") env[name] = value;
-		const started = Date.now();
-		const result = await run(["bash", executable, "--version", "9.9.9"], {
-			deadline_s: fixtureDeadlineS(60), cwd: ROOT,
-			env: { ...env, HOME: home, RELEASE_TEST_BIN: bin, TMPDIR: work, OMP_KIT_INSTALL_PREFIX: prefix },
-		});
-		return { rc: result.rc, out: new TextDecoder().decode(result.stdout), err: new TextDecoder().decode(result.stderr),
-			ms: Date.now() - started, gitCalled: existsSync(join(work, "git-called")) };
-	};
-	try {
-		// Planted: the 0.2.88 PARTIAL receipt left unreconciled.
-		const receipt = JSON.stringify({ scope: "kit", identitySha256: "0".repeat(64), kitVersion: "0.2.88", ompVersion: null, channel: null, id, state: "PENDING" });
-		writeFileSync(pending, receipt, { mode: 0o600 });
-		const held = await attempt();
-		expect(held.rc, held.err).toBe(4);
-		expect(held.err).toContain(`RELPENDING1: a previous kit update left pending recovery receipt ${id}`);
-		expect(held.err).toContain(`omp-kit update --reconcile ${id} --yes`);
-		expect(held.err).toContain("reconcile only a false PARTIAL whose postimages verify");
-		expect(held.out).not.toContain("stage source");
-		expect(held.out).not.toContain("stage build");
-		expect(held.gitCalled).toBe(false);
-		expect(existsSync(join(work, "kit-called"))).toBe(false);
-		expect(readFileSync(pending, "utf8")).toBe(receipt);
-		expect(held.ms).toBeLessThan(fixtureDeadlineS(10) * 1_000);
-		// Planted: an unreadable receipt still refuses, and says so.
-		writeFileSync(pending, "{ truncated", { mode: 0o600 });
-		const unreadable = await attempt();
-		expect(unreadable.rc, unreadable.err).toBe(4);
-		expect(unreadable.err).toContain(`RELPENDING1: pending kit update receipt ${pending} is unreadable`);
-		expect(unreadable.err).toContain("omp-kit update --reconcile <id> --yes");
-		expect(unreadable.gitCalled).toBe(false);
-		// Control: no pending receipt; preflight passes the check and reaches its next step (the stubbed fetch).
-		rmSync(pending);
-		const clear = await attempt();
-		expect(clear.rc, clear.err).toBe(4);
-		expect(clear.err).not.toContain("RELPENDING1");
-		expect(clear.err).toContain("git fetch origin main failed");
-		expect(clear.gitCalled).toBe(true);
-	} finally {
-		rmSync(work, { recursive: true, force: true });
-	}
-}, fixtureDeadlineS(60) * 1_000);
+ // RELPENDINGLOOP1 (ompkit-1ra0d.183): a previous install's pending recovery receipt no longer refuses the
+ // release outright. Preflight reuses the updater's own proof (`update --reconcile`, which re-verifies the
+ // recorded postimage before clearing the receipt) and proceeds only on its RECONCILED verdict; an
+ // unproven receipt keeps the RELPENDING1 refusal with no new refusal code. Same stubs as RELFAILFAST1; the
+ // fixture HOME's default state root (XDG_STATE_HOME unset) is the one omp-kit update reads. The kit stub
+ // emulates --reconcile: it clears the fixture pending file only when the postimages "verify" (no sentinel),
+ // and refuses with the receipt intact when they do not (sentinel present). Never a real release: the stubbed
+ // fetch fails.
+ test.skipIf(process.platform !== "darwin")("RELPENDINGLOOP1 preflight reconciles a proven pending receipt, refuses an unproven one", async () => {
+ 	const work = realpathSync(ownedTmp("relpending", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+ 	const bin = join(work, "bin");
+ 	const home = join(work, "home");
+ 	const prefix = join(work, "prefix");
+ 	const stateRoot = join(home, ".local/state/omp-kit");
+ 	const pending = join(stateRoot, "kit-update.pending.json");
+ 	const id = "4f2daa9e-2326-4d40-be66-6d9f65b1df5e";
+ 	mkdirSync(bin); mkdirSync(join(prefix, "bin"), { recursive: true }); mkdirSync(stateRoot, { recursive: true });
+ 	const executable = hostPreflight(work);
+ 	const stub = (path: string, body: string) => { writeFileSync(path, `#!/bin/sh\n${body}\n`); chmodSync(path, 0o755); };
+ 	stub(join(bin, "gh"), "exit 0");
+ 	stub(join(bin, "omp-kit"), "exit 0");
+ 	stub(join(prefix, "bin/omp-kit"), `echo "called $*" >> "${join(work, "kit-called")}"
+ if [ "$1" = "update" ] && [ "$2" = "--reconcile" ]; then
+ 	if [ -e "${join(work, "reconcile-refuse")}" ]; then
+ 		echo '{"ok":false,"data":{"overall":"FAIL","scope":"kit","action":"REFUSED","receipt_id":"'"$3"'"}}'
+ 		exit 1
+ 	fi
+ 	rm -f "${pending}"
+ 	echo '{"ok":true,"data":{"overall":"OK","scope":"kit","action":"RECONCILED","receipt_id":"'"$3"'","active_version":"0.2.88"}}'
+ 	exit 0
+ fi
+ exit 0`);
+ 	stub(join(bin, "git"), `echo called >> "${join(work, "git-called")}"; exit 1`);
+ 	const attempt = async () => {
+ 		rmSync(join(work, "git-called"), { force: true });
+ 		rmSync(join(work, "kit-called"), { force: true });
+ 		const env: Record<string, string> = {};
+ 		for (const [name, value] of Object.entries(process.env)) if (value !== undefined && name !== "XDG_STATE_HOME") env[name] = value;
+ 		const started = Date.now();
+ 		const result = await run(["bash", executable, "--version", "9.9.9"], {
+ 			deadline_s: fixtureDeadlineS(60), cwd: ROOT,
+ 			env: { ...env, HOME: home, RELEASE_TEST_BIN: bin, TMPDIR: work, OMP_KIT_INSTALL_PREFIX: prefix },
+ 		});
+ 		return { rc: result.rc, out: new TextDecoder().decode(result.stdout), err: new TextDecoder().decode(result.stderr),
+ 			ms: Date.now() - started, gitCalled: existsSync(join(work, "git-called")),
+ 			kitCalled: existsSync(join(work, "kit-called")) ? readFileSync(join(work, "kit-called"), "utf8") : "" };
+ 	};
+ 	const receipt = JSON.stringify({ scope: "kit", identitySha256: "0".repeat(64), kitVersion: "0.2.88", ompVersion: null, channel: null, id, state: "PENDING" });
+ 	try {
+ 		// Proven: the updater's proof verifies the postimage, so the release proceeds past the pending check.
+ 		writeFileSync(pending, receipt, { mode: 0o600 });
+ 		const proven = await attempt();
+ 		expect(proven.rc, proven.err).toBe(4);
+ 		expect(proven.out).toContain(`reconciled pending kit update receipt ${id}; its postimages verify`);
+ 		expect(proven.err).not.toContain("RELPENDING1");
+ 		expect(proven.kitCalled).toContain(`update --reconcile ${id} --yes --json`);
+ 		expect(existsSync(pending)).toBe(false);
+ 		expect(proven.err).toContain("git fetch origin main failed");
+ 		expect(proven.gitCalled).toBe(true);
+ 		expect(proven.out).not.toContain("stage source");
+ 		expect(proven.out).not.toContain("stage build");
+ 		// Planted: the proof does not verify, so the existing RELPENDING1 refusal fires and nothing is cleared.
+ 		writeFileSync(pending, receipt, { mode: 0o600 });
+ 		writeFileSync(join(work, "reconcile-refuse"), "refuse\n");
+ 		const held = await attempt();
+ 		expect(held.rc, held.err).toBe(4);
+ 		expect(held.err).toContain(`RELPENDING1: a previous kit update left pending recovery receipt ${id}`);
+ 		expect(held.err).toContain(`omp-kit update --reconcile ${id} --yes`);
+ 		expect(held.err).toContain("reconcile only a false PARTIAL whose postimages verify");
+ 		expect(held.out).not.toContain("stage source");
+ 		expect(held.out).not.toContain("stage build");
+ 		expect(held.gitCalled).toBe(false);
+ 		expect(held.kitCalled).toContain(`update --reconcile ${id} --yes --json`);
+ 		expect(readFileSync(pending, "utf8")).toBe(receipt);
+ 		expect(held.ms).toBeLessThan(fixtureDeadlineS(10) * 1_000);
+ 		// Planted: an unreadable receipt still refuses before any reconcile attempt, and says so.
+ 		rmSync(join(work, "reconcile-refuse"));
+ 		writeFileSync(pending, "{ truncated", { mode: 0o600 });
+ 		const unreadable = await attempt();
+ 		expect(unreadable.rc, unreadable.err).toBe(4);
+ 		expect(unreadable.err).toContain(`RELPENDING1: pending kit update receipt ${pending} is unreadable`);
+ 		expect(unreadable.err).toContain("omp-kit update --reconcile <id> --yes");
+ 		expect(unreadable.gitCalled).toBe(false);
+ 		expect(unreadable.kitCalled).not.toContain("--reconcile");
+ 		// Control: no pending receipt; preflight passes the check and reaches its next step (the stubbed fetch).
+ 		rmSync(pending);
+ 		const clear = await attempt();
+ 		expect(clear.rc, clear.err).toBe(4);
+ 		expect(clear.err).not.toContain("RELPENDING1");
+ 		expect(clear.err).toContain("git fetch origin main failed");
+ 		expect(clear.gitCalled).toBe(true);
+ 	} finally {
+ 		rmSync(work, { recursive: true, force: true });
+ 	}
+ }, fixtureDeadlineS(60) * 1_000);
 
 // Execute the production shell stages with real curl/checksums and only the
 // GitHub transport redirected to a loopback server. No signing or remote writes.
