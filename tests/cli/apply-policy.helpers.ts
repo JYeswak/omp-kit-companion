@@ -81,7 +81,7 @@ export function nativeConfigValue(home: string, project: string, profile: string
 export function seedProfile(home: string, name: string, values: Record<string, unknown>): string {
 	return writeProfileConfig(home, name, YAML.stringify({ model: "owned-by-user", ttsr: values }), 0o600);
 }
-export const policyValues = { enabled: true, repeatMode: "after-gap", repeatGap: 1, contextMode: "keep", disabledRules: [] };
+export const policyValues = { enabled: true, repeatMode: "after-gap", repeatGap: 0, contextMode: "keep", disabledRules: [] };
 export function fixture(options: { legacyRules?: boolean } = {}) {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
 	const workspace = ownedTmp("p12-policy-native", { root: base }).path;

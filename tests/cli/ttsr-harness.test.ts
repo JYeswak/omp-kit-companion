@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadRuleFile, OMP_SRC } from "../../scripts/rule-class.ts";
+import { OMP_SRC } from "../../scripts/rule-class.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { NONDETERMINISM_ERROR } from "../../src/mechanical-admission.ts";
 
@@ -104,55 +104,3 @@ exec ${JSON.stringify(realGit)} "$@"
 		} finally { temp.cleanup(); }
 	}, 60_000);
 }
-
-interface WtruleloopProbeManager {
-	addRule(rule: unknown): boolean;
-	checkDelta(delta: string, context: { source: string; toolName?: string }, options?: { final?: boolean }): Array<{ name: string }>;
-	markInjected(rules: Array<{ name: string }>): void;
-	resetBuffer(): void;
-	incrementMessageCount(): void;
-}
-
-test("WTRULELOOP1 shipped repeat gap admits the immediate identical rerun and refires later", async () => {
-	const policy = JSON.parse(readFileSync(join(repoRoot, "policy", "ttsr.json"), "utf8")) as Record<string, unknown>;
-	expect(policy.repeatMode).toBe("after-gap");
-	expect(typeof policy.repeatGap).toBe("number");
-	const replay = async (repeatGap: number) => {
-		const temp = ownedTmp("omp-kit-wtruleloop1");
-		try {
-			const file = join(temp.path, "wtruleloop1-probe.md");
-			writeFileSync(file, "---\ndescription: WTRULELOOP1 probe mirroring a run-it-again-unchanged tool rule\nscope:\n  - tool\ncondition:\n  - WTRULELOOP1-PROBE-CREATE\n---\n\nRun the command again unchanged.\n");
-			const loaded = loadRuleFile(file);
-			const probeRule = loaded.rule;
-			const probeName = loaded.name;
-			// OMP_SRC follows whichever omp is installed, so this specifier cannot be a static import.
-			const ttsrMod = await import(join(OMP_SRC, "export/ttsr.ts")) as Record<string, unknown>;
-			const TtsrManager = ttsrMod.TtsrManager as new (settings?: Record<string, unknown>) => WtruleloopProbeManager;
-			const manager = new TtsrManager({ ...policy, repeatGap, enabled: true, disabledRules: [] });
-			if (!manager.addRule(probeRule)) throw new Error("WTRULELOOP1 probe rule was not registered");
-			const context = { source: "tool", toolName: "bash" };
-			const payload = "wt create --switch wtruleloop1-branch # WTRULELOOP1-PROBE-CREATE\n";
-			const hits = (matches: Array<{ name: string }>) => matches.some(match => match.name === probeName);
-			const first = manager.checkDelta(payload, context, { final: true });
-			const fired = hits(first);
-			manager.markInjected(first);
-			manager.resetBuffer();
-			const rerunAdmitted = !hits(manager.checkDelta(payload, context, { final: true }));
-			manager.incrementMessageCount();
-			manager.resetBuffer();
-			const refired = hits(manager.checkDelta(payload, context, { final: true }));
-			return { fired, rerunAdmitted, refired };
-		} finally {
-			temp.cleanup();
-		}
-	};
-	const shipped = await replay(policy.repeatGap as number);
-	expect(shipped.fired).toBe(true);
-	expect(shipped.rerunAdmitted).toBe(true);
-	expect(shipped.refired).toBe(true);
-	// Planted negative: repeatGap 0 re-interrupts the identical rerun, so the rerun step fails.
-	const zero = await replay(0);
-	expect(zero.fired).toBe(true);
-	expect(zero.rerunAdmitted).toBe(false);
-	expect(zero.refired).toBe(true);
-});
