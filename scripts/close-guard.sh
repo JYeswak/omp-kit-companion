@@ -89,9 +89,13 @@ updated_at2=$(field updated_at) || fail "cannot parse bead $BEAD"
 if [ "$assignee2" != "$assignee" ] || [ "$updated_at2" != "$updated_at" ]; then
 	refuse "claim on $BEAD changed during the check (assignee $assignee->$assignee2 / updated_at $updated_at->$updated_at2); re-run"
 fi
-# PUBLISHGATE1 (ompkit-idun5): transitions cannot accept an unpublished commit.
-# Citations are the SHA in a DONE line, a repo@SHA token, or an explicit
-# export/commit field. Missing or unresolvable citations fail closed.
+# PUBLISHGATE1 (ompkit-idun5): close cannot accept an unpublished commit.
+# HANDOFFUNPUB1 (ompkit-1ra0d.157): --sub update is a builder-to-director
+# handoff to in_review, not a publication claim. It admits a cited commit
+# that exists in the cited repository; only close demands the commit be
+# published (an ancestor of freshly fetched origin/main). Citations are the
+# SHA in a DONE line, a repo@SHA token, or an explicit export/commit field.
+# Missing or unresolvable citations fail closed on both paths.
 if [ "$SUB" = "close" ] || [ "$SUB" = "update" ]; then
 	publication_helper=$(dirname "$0")/br-update-lint.py
 	cited=$("$publication_helper" publication-citations "$SUB" "$(pwd -P)" "$REASON") ||
@@ -104,6 +108,11 @@ if [ "$SUB" = "close" ] || [ "$SUB" = "update" ]; then
 			fi
 			source_root=$(git -C "$citation_repo" rev-parse --show-toplevel 2>/dev/null) ||
 				refuse "NOT_PUBLISHED UNKNOWN cited SHA $sha repository cannot be read; publish with git_converge.py --push"
+			resolved=$(git -C "$source_root" rev-parse --verify "$sha^{commit}" 2>/dev/null) ||
+				refuse "NOT_PUBLISHED UNKNOWN cited SHA $sha does not resolve to a commit; publish with git_converge.py --push"
+			if [ "$SUB" = "update" ]; then
+				continue
+			fi
 			if [ "$source_root" != "${fetched_root:-}" ]; then
 				git -C "$source_root" fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main ||
 					refuse "NOT_PUBLISHED UNKNOWN fresh origin/main fetch failed for cited SHA $sha; publish with git_converge.py --push"
@@ -111,8 +120,6 @@ if [ "$SUB" = "close" ] || [ "$SUB" = "update" ]; then
 					refuse "NOT_PUBLISHED UNKNOWN freshly fetched origin/main has no readable commit for cited SHA $sha; publish with git_converge.py --push"
 				fetched_root=$source_root
 			fi
-			resolved=$(git -C "$source_root" rev-parse --verify "$sha^{commit}" 2>/dev/null) ||
-				refuse "NOT_PUBLISHED UNKNOWN cited SHA $sha does not resolve to a commit; publish with git_converge.py --push"
 			git -C "$source_root" merge-base --is-ancestor "$resolved" "$remote_tip" >/dev/null 2>&1
 			ancestor_rc=$?
 			case "$ancestor_rc" in

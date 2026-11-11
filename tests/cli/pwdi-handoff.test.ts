@@ -124,23 +124,36 @@ test("PWDI actual guard preserves legacy grading ownership and non-author close 
 	expect(withLesson.rc, output(withLesson)).toBe(0);
 }, 120_000);
 
-test("PWDI author handoff still refuses unpublished, unresolved and unreachable source authority", async () => {
+test("PWDI handoff admits locally present commits on update while close still demands publication", async () => {
 	const f = await fixture();
 	await f.git(["commit", "--allow-empty", "-q", "-m", "unpublished fixture source"]);
 	const unpublished = await f.git(["rev-parse", "HEAD"]);
-	for (const sha of [unpublished, "0000000000000000000000000000000000000000"]) {
-		const refused = await f.guard("pw-owned", AUTHOR, "update", `DONE ${f.repo}@${sha}: evidence`);
-		expect(refused.rc, output(refused)).toBe(4);
-		expect(output(refused)).toContain("NOT_PUBLISHED");
-		expect(await f.state("pw-owned")).toBe("in_progress");
-	}
+	// HANDOFFUNPUB1 (ompkit-1ra0d.157): update is a builder-to-director
+	// handoff and admits a commit that exists locally; only close demands
+	// the commit be published on freshly fetched origin/main.
+	const handoff = await f.guard("pw-owned", AUTHOR, "update", `DONE ${f.repo}@${unpublished}: evidence`);
+	expect(handoff.rc, output(handoff)).toBe(0);
+	expect(await f.state("pw-owned")).toBe("in_progress");
+	// Fail-closed on both paths: a citation that resolves nowhere is refused.
+	const bogus = await f.guard("pw-owned", AUTHOR, "update", `DONE ${f.repo}@${"0".repeat(40)}: evidence`);
+	expect(bogus.rc, output(bogus)).toBe(4);
+	expect(output(bogus)).toContain("NOT_PUBLISHED");
+	// Close with the same unpublished citation is still refused.
+	const closeUnpub = await f.guard("pw-owned", REVIEWER, "close", `Lesson: none\nexport ${unpublished}`);
+	expect(closeUnpub.rc, output(closeUnpub)).toBe(4);
+	expect(output(closeUnpub)).toContain("NOT_PUBLISHED");
 	await f.git(["push", "-q", "origin", "main"]);
 	const nowPublished = await f.guard("pw-owned", AUTHOR, "update", `DONE ${f.repo}@${unpublished}: evidence`);
 	expect(nowPublished.rc, output(nowPublished)).toBe(0);
+	const closePub = await f.guard("pw-owned", REVIEWER, "close", `Lesson: none\nexport ${unpublished}`);
+	expect(closePub.rc, output(closePub)).toBe(0);
 	await f.git(["remote", "set-url", "origin", join(f.dir, "absent.git")]);
-	const unreachable = await f.guard("pw-owned", AUTHOR, "update", `DONE ${f.repo}@${unpublished}: evidence`);
-	expect(unreachable.rc, output(unreachable)).toBe(4);
-	expect(output(unreachable)).toContain("NOT_PUBLISHED");
+	// Offline: the handoff still admits the local commit; close fails closed.
+	const offlineUpdate = await f.guard("pw-owned", AUTHOR, "update", `DONE ${f.repo}@${unpublished}: evidence`);
+	expect(offlineUpdate.rc, output(offlineUpdate)).toBe(0);
+	const offlineClose = await f.guard("pw-owned", REVIEWER, "close", `Lesson: none\nexport ${unpublished}`);
+	expect(offlineClose.rc, output(offlineClose)).toBe(4);
+	expect(output(offlineClose)).toContain("NOT_PUBLISHED");
 	expect(await f.state("pw-owned")).toBe("in_progress");
 }, 120_000);
 
