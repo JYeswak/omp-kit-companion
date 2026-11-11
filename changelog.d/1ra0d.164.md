@@ -1,0 +1,1 @@
+- Fixed `omp-kit verify` falsely sending beads to rework when the acceptance box reads `0 fail: <what it proves>`; the structured head is now judged and the prose after `:` stays a description.

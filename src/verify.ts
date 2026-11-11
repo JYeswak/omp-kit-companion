@@ -269,10 +269,24 @@ export function expectedOf(body: string): string | null {
 export function judge(expected: string, rc: number | null, out: string): { pass: boolean; detail: string } {
 	const e = expected.trim();
 	let m: RegExpExecArray | null;
-	if ((m = /^rc\s+(\d+)$/i.exec(e)) || (m = /^exit\s+(\d+)$/i.exec(e))) return { pass: rc === Number(m[1]), detail: `rc ${rc}, expected ${m[1]}` };
-	if ((m = /^(\d+)\s+pass(?:\s+(\d+)\s+fail)?$/i.exec(e))) {
+	// VERIFYEXPECTHEAD1 (ompkit-1ra0d.164): a structured head followed by `:` and prose
+	// (`0 fail: what it proves`) judges the head only; the prose is the box's
+	// description, never literal output. `prints`/`contains` keeps its literal
+	// behavior (a needle like `prints "status: ok"` must keep working), so the
+	// head strip runs after the prints branch below matches the full clause.
+	// A bun run with 0 fail exits 0, so `N fail` with N 0 also requires rc 0.
+	const hm = /^(?:rc\s+[0-9]+|exit\s+[0-9]+|[0-9]+\s+pass(?:\s+[0-9]+\s+fail)?|[0-9]+\s+fail)\s*:(?=\s*\S)/i.exec(e);
+	const exp = hm !== null ? e.slice(0, hm[0].length - 1).trim() : e;
+	if ((m = /^rc\s+(\d+)$/i.exec(exp)) || (m = /^exit\s+(\d+)$/i.exec(exp))) return { pass: rc === Number(m[1]), detail: `rc ${rc}, expected ${m[1]}` };
+	if ((m = /^(\d+)\s+pass(?:\s+(\d+)\s+fail)?$/i.exec(exp))) {
 		const pass = new RegExp(`\\b${m[1]}\\s+pass\\b`).test(out) && (m[2] === undefined || new RegExp(`\\b${m[2]}\\s+fail\\b`).test(out));
 		return { pass, detail: `summary ${m[1]} pass${m[2] !== undefined ? ` ${m[2]} fail` : ""}: ${pass ? "found" : "not found"}` };
+	}
+	if ((m = /^(\d+)\s+fail$/i.exec(exp))) {
+		const n = Number(m[1]);
+		const found = new RegExp(`\\b${m[1]}\\s+fail\\b`).test(out);
+		const pass = found && (n !== 0 || rc === 0);
+		return { pass, detail: `summary ${m[1]} fail: ${pass ? "found" : "not found"}` };
 	}
 	if ((m = /^(?:prints|contains)\s+(.+)$/i.exec(e))) { const needle = m[1]!.replace(/^["'`]|["'`]$/g, ""); return { pass: out.includes(needle), detail: `output ${out.includes(needle) ? "contains" : "lacks"} ${JSON.stringify(needle)}` }; }
 	// Any other wording: the literal text must appear in the output; rc is not consulted (the box said what it expects).
