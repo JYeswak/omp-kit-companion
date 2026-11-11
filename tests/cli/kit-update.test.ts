@@ -6,6 +6,7 @@ import { runIsolatedShell } from "../../src/runtime.ts";
 import { activeConcurrentWriterPaths, compareWatched, operatorWatchedPaths, snapshotWatched } from "../../src/operator-snapshot.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import { applyKitUpdate, isUndoneCandidateReleaseDir, judgeKitPostcheck, kitPostcheckDetail, kitUpdateEnvelope, planKitUpdate, runKitPostcheck, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
+import type { KitUpdatePlan, KitUpdateResult } from "../../src/kit-update.ts";
 import { kitUpdateJobOverall, pollPublishedRelease } from "../../src/kit-update-job.ts";
 import { serviceLabel } from "../../src/service.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
@@ -634,6 +635,36 @@ function startLoopWriter(files: string[], operatorFile: string): { stop: () => P
 	return { stop: async () => { writer.kill("SIGKILL"); await writer.exited; } };
 }
 
+/**
+ * Deterministic snapshot-window write. The postcheck signals its before snapshots through
+ * OMP_KIT_POSTCHECK_WINDOW_DIR (see holdPostcheckWindowForTestWrite) and waits for release;
+ * this test's synchronous write then lands provably inside the snapshot window, while the
+ * loop writer keeps churning so the concurrent-writer probe still observes a live writer.
+ */
+async function applyKitUpdateWithWindowWrite(planned: KitUpdatePlan, operatorFile: string): Promise<KitUpdateResult> {
+	const window = ownedTmp("kit-update-window", { root: scratch });
+	try {
+		const previous = process.env.OMP_KIT_POSTCHECK_WINDOW_DIR;
+		process.env.OMP_KIT_POSTCHECK_WINDOW_DIR = window.path;
+		try {
+			const pending = applyKitUpdate(planned);
+			const beforeSentinel = join(window.path, "postcheck-before"), goSentinel = join(window.path, "postcheck-go");
+			// Real-clock poll for a file the postcheck child writes; no fake timer reaches another process.
+			// Bound by fixtureDeadlineS, well inside this test's own deadline so a stuck postcheck fails loudly.
+			const deadline = Date.now() + fixtureDeadlineS(20) * 1000;
+			while (!existsSync(beforeSentinel) && Date.now() < deadline) await Bun.sleep(10);
+			const opened = existsSync(beforeSentinel);
+			if (opened) writeFileSync(operatorFile, "postcheck window write\n");
+			writeFileSync(goSentinel, "go\n");
+			const result = await pending;
+			if (!opened) throw new Error("postcheck window did not open: the postcheck never signaled its before snapshot");
+			return result;
+		} finally {
+			if (previous === undefined) delete process.env.OMP_KIT_POSTCHECK_WINDOW_DIR; else process.env.OMP_KIT_POSTCHECK_WINDOW_DIR = previous;
+		}
+	} finally { window.cleanup(); }
+}
+
 // ompkit-2pkp1: on a live host the cc service writes its store every 15 s and every kit command appends its spool,
 // so the postcheck must distinguish installed-job state and an unrelated live operator writer.
 test("POSTCHECKBROWSER1: a concurrent operator writer is skipped; installed cc state remains ignored", async () => fixture(async ctx => {
@@ -652,7 +683,7 @@ test("POSTCHECKBROWSER1: a concurrent operator writer is skipped; installed cc s
 	try {
 		const planned = await planKitUpdate({ ...input(ctx), stateRoot: kitState });
 		if (planned.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
-		const result = await applyKitUpdate(planned);
+		const result = await applyKitUpdateWithWindowWrite(planned, operatorFile);
 		const report = result.postcheck.report;
 		if (!report) throw new Error(`expected a full-test report, observed ${JSON.stringify(result.postcheck)}`);
 		const operatorFailures = report.failures.filter(failure => failure.startsWith("Operator file changed"));
@@ -685,7 +716,7 @@ test("POSTCHECKBROWSER1: live browser profile writer is skipped while its cache 
 	try {
 		const planned = await planKitUpdate({ ...input(ctx), stateRoot: kitState });
 		if (planned.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
-		const result = await applyKitUpdate(planned);
+		const result = await applyKitUpdateWithWindowWrite(planned, operatorFile);
 		const report = result.postcheck.report;
 		if (!report) throw new Error(`expected a full-test report, observed ${JSON.stringify(result.postcheck)}`);
 		const operatorFailures = report.failures.filter(failure => failure.startsWith("Operator file changed"));

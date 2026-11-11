@@ -1,0 +1,1 @@
+- The kit-update test that checks a concurrently written operator file is skipped no longer passes or fails by chance: the test writes the file inside the post-check's snapshot window.

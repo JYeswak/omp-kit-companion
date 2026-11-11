@@ -515,6 +515,29 @@ export function fullTestVerdict(input: { passed: boolean; blocked: boolean; caus
  return input.blocked ? { status: "BLOCKED", exitCode: 3 } : { status: "FAIL", exitCode: 1 };
 }
 
+/**
+ * TEST-ONLY snapshot-window rendezvous (POSTCHECKBROWSER1). When OMP_KIT_POSTCHECK_WINDOW_DIR
+ * names a directory, runFullTest writes <dir>/postcheck-before after taking its before snapshots
+ * and waits (bounded) for <dir>/postcheck-go before running the isolated test, so the test can
+ * place a write provably inside the snapshot window instead of racing a sleep loop. Unset: no-op.
+ * A missing directory or a wait timeout throws: proceeding silently would weaken the test to a race.
+ */
+async function holdPostcheckWindowForTestWrite(): Promise<void> {
+	const dir = process.env.OMP_KIT_POSTCHECK_WINDOW_DIR;
+	if (dir === undefined || dir === "") return;
+	let stat;
+	try { stat = lstatSync(dir); } catch { throw new Error("KIT_POSTCHECK_WINDOW_INVALID"); }
+	if (!stat.isDirectory()) throw new Error("KIT_POSTCHECK_WINDOW_INVALID");
+	writeFileSync(join(dir, "postcheck-before"), "before\n");
+	// wallclock: test-only bound covering CI scheduling stalls; the outer runKitPostcheck
+	// deadline_s still caps the whole postcheck, so a stuck test fails instead of hanging a run.
+	const deadline = Date.now() + 120_000;
+	while (!existsSync(join(dir, "postcheck-go"))) {
+		if (Date.now() >= deadline) throw new Error("KIT_POSTCHECK_WINDOW_TIMEOUT");
+		await Bun.sleep(10);
+	}
+}
+
 /** Actual OMP live calls run in a private HOME; never claim the operator's effective profile was certified. */
 export async function runFullTest(input: FullTestInput, expectedCounts?: FastTestExpectations): Promise<FullTestReport> {
  if (![input.root, input.executablePath, input.home, ...(input.project ? [input.project] : [])].every(isAbsolute))
@@ -533,6 +556,7 @@ export async function runFullTest(input: FullTestInput, expectedCounts?: FastTes
  const liveWriter = { stateRoot, fence };
  const writeFence = fence ? { profile: fence.profile, profile_sha256: fence.profile_sha256 } : null;
  const before = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
+	await holdPostcheckWindowForTestWrite();
 	const fastStarted = performance.now();
 	const fastInput = { ...input, writeFence: fence };
 	const fast = expectedCounts ? await runFastTest(fastInput, expectedCounts) : await runFastTest(fastInput);
