@@ -1,4 +1,0 @@
-- `omp-kit verify` now closes beads in projects whose workflow requires no `min_reviewers` gate for the closing transition: it skips the gate report (saying so in its log) instead of failing after the acceptance ticks are written, on both the export path and `--live-readback`. A workflow that requires the gate behaves as before.
-- `omp-kit verify --live-readback` now accepts a bead that is `in_review` when every remaining box is `[live]`, as well as the open cases. Anything else is still refused.
-- `omp-kit verify` now refuses up front, before replaying anything, when the acting verifier is unknown to the target project's Agent Mail, naming the registration remedy (`am agents create --project <repo> ...`), instead of replaying and then failing at the first tracker act.
-- `omp-kit verify --live-readback` now refuses PENDING while a `[v] [build]` judgement box is unchecked, as the export path does, and ticks only the boxes it replayed.

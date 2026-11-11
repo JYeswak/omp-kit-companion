@@ -1,1 +1,0 @@
-- The remote full suite leaves one core free on each worker (three test files at once on a 4-core worker instead of four), so timing-bounded tests stop failing under the suite's own load. `FULL_SUITE_REMOTE_JOBS` still overrides the width.
