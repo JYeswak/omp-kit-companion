@@ -609,6 +609,17 @@ export function ternSendSeat(config: unknown, session: string, pane: string,
 		cwd: flags.cwd?.trim() || text(entry?.cwd) || text(entry?.repo) || (entry ? callerCwd : "") };
 }
 
+/**
+ * IMSGLIVE1: a PENDING_CONSUME that actually dispatched this message —
+ * proof pending at the seat's next turn boundary (PROOF_TIMEOUT for text,
+ * GOAL_NOT_ADOPTED for goal-set). SEND_AMBIGUOUS (dispatch failed or
+ * unknown) and SUPPRESSED_PENDING (an earlier attempt is pending; this one
+ * never ran) are not dispatches of this message, so the cursor stays put.
+ */
+export function ternSteerQueued(status: string, code: string): boolean {
+	return status === "PENDING_CONSUME" && (code === "PROOF_TIMEOUT" || code === "GOAL_NOT_ADOPTED");
+}
+
 /** SEND1 Tern route (rz5.125) for the CLI: a malformed address and an uncited dispatch each refuse with zero io and no
  * drop file; anything else is deliverToTernSeat (observe, identify, one admission, session-file proof). A window key
  * admits by one native ctl turn; no key admits by `tern send BLOCK paste` + `keys Enter` (TERNADDR1, ompkit-fixjo). */
@@ -618,6 +629,8 @@ export async function proveTernCliSend(input: {
 	message: string;
 	dropDir: string;
 	cwd?: string;
+	/** IMSGLIVE1: caller Agent Mail project for resolve-pane; defaults to AGENT_MAIL_PROJECT or the seat cwd. */
+	identityProject?: string;
 	windowKey?: string;
 	noBeadReason?: string;
 	knownPrefixes?: ReadonlySet<string>;
@@ -659,7 +672,8 @@ export async function proveTernCliSend(input: {
 		session ||= discovery.seat.session;
 		targetCwd ||= discovery.seat.cwd;
 	}
-	const result = await deliverToTernSeat({ seat: { session, pane: input.pane, windowKey, cwd: targetCwd }, text: input.message,
+	const result = await deliverToTernSeat({ seat: { session, pane: input.pane, windowKey, cwd: targetCwd,
+		...(input.identityProject?.trim() ? { identityProject: input.identityProject.trim() } : {}) }, text: input.message,
 		dropDir: input.dropDir, io, untilDeliveredMs: input.untilDeliveredMs ?? TERN_TURN_BOUNDARY_WAIT_MS,
 		pollMs: input.pollMs, deadlineMs: input.deadlineMs, wait: input.wait, composer: input.composer, env });
 	return { ...result, bead_ids: beads.bead_ids, no_bead_reason: beads.no_bead_reason };

@@ -14,12 +14,14 @@ import {
 	pickChatForHandle,
 	pollBridge,
 	readBridgeConfig,
+	resolveBridgeSendTarget,
 	runBrief,
 	sanitizeInbound,
 	sendReply,
 	type BridgeConfig,
 	type Deliver,
 } from "../../src/imessage-bridge.ts";
+import { ternSteerQueued } from "../../src/send.ts";
 
 const source = resolve(import.meta.dir, "../..");
 const scratchRoot = join(source, "var", "agent-tmp");
@@ -85,7 +87,7 @@ function toJsonLines(rows: readonly unknown[]): string {
 	return `${rows.map(row => JSON.stringify(row)).join("\n")}\n`;
 }
 
-function makeHome(tag: string, historyRows: readonly unknown[], chatRows?: readonly unknown[], handle = HANDLE): { home: string; state: string; env: Record<string, string> } {
+function makeHome(tag: string, historyRows: readonly unknown[], chatRows?: readonly unknown[], handle = HANDLE, primed = true): { home: string; state: string; env: Record<string, string> } {
 	const home = join(scratch.path, tag);
 	const state = join(home, "stub-state");
 	mkdirSync(state, { recursive: true });
@@ -93,9 +95,19 @@ function makeHome(tag: string, historyRows: readonly unknown[], chatRows?: reado
 	const bin = join(home, "bin");
 	writeStubBin(bin);
 	writeFileSync(join(home, "fleet-watch.json"), `${JSON.stringify({ imessage: { handle, seat: "leadsession", pane: "%1" } })}\n`);
+	// IMSGLIVE1: a running bridge already has a cursor. Seed a prior row and
+	// point the cursor at it so existing delivery tests exercise new arrivals,
+	// not bridge start; unprimed homes test the fresh-cursor path instead.
+	// History arrives newest-first, so the seed goes last as the oldest row.
+	const rows = primed ? [...historyRows, { guid: "bridge-prior-0", sender: handle, text: "(seed)", is_from_me: false, is_group: false }] : historyRows;
 	const chats = chatRows ?? [{ id: 7, is_group: false, participants: [handle] }];
 	writeFileSync(join(state, "chats.json"), toJsonLines(chats));
-	writeFileSync(join(state, "history.json"), toJsonLines(historyRows));
+	writeFileSync(join(state, "history.json"), toJsonLines(rows));
+	if (primed) {
+		const jobs = join(home, ".local", "state", "omp-kit", "jobs");
+		mkdirSync(jobs, { recursive: true });
+		writeFileSync(join(jobs, "imessage-bridge.cursor.json"), `${JSON.stringify({ last_key: "bridge-prior-0" })}\n`);
+	}
 	const env: Record<string, string> = {
 		...process.env as Record<string, string>,
 		HOME: home,
@@ -216,16 +228,29 @@ afterAll(() => {
 const unitConfig: BridgeConfig = { handle: HANDLE, seat: "s", pane: "%1", configPath: "unit" };
 const unitEnv: NodeJS.ProcessEnv = { ...process.env, HOME: unitHome };
 
+// IMSGLIVE1: a running bridge already has a cursor. Prime a fresh tag once
+// with a prior-only tick so the real poll exercises new arrivals, not bridge
+// start; history arrives newest-first, so the seed goes last as the oldest
+// row and only newer rows deliver.
+const primedUnitTags = new Set<string>();
 async function runUnitPoll(tag: string, config: BridgeConfig, deliver: Deliver, enforce?: boolean, chats?: string, history?: string) {
 	const prev = process.env.XDG_STATE_HOME;
 	process.env.XDG_STATE_HOME = join(unitHome, tag);
 	const chatDoc = chats ?? toJsonLines([{ id: 7, is_group: false, participants: [config.handle] }]);
 	const histDoc = history ?? toJsonLines(otherRows);
+	const prior = `${JSON.stringify({ guid: "bridge-prior-0", sender: config.handle, text: "(seed)", is_from_me: false, is_group: false })}\n`;
+	const now = () => new Date("2026-11-11T10:00:00Z");
+	const discard: Deliver = async () => ({ ok: true, marker: "", code: "OK" });
 	try {
+		if (!primedUnitTags.has(`unit:${tag}`)) {
+			primedUnitTags.add(`unit:${tag}`);
+			await pollBridge({ home: join(unitHome, tag), config, imsgBin: "imsg",
+				runImsg: argv => argv[1] === "chats" ? { code: 0, out: chatDoc } : { code: 0, out: prior },
+				deliver: discard, ...(enforce === undefined ? {} : { enforceHandleCheck: enforce }), now });
+		}
 		return await pollBridge({ home: join(unitHome, tag), config, imsgBin: "imsg",
-			runImsg: argv => argv[1] === "chats" ? { code: 0, out: chatDoc } : { code: 0, out: histDoc },
-			deliver, ...(enforce === undefined ? {} : { enforceHandleCheck: enforce }),
-			now: () => new Date("2026-11-11T10:00:00Z") });
+			runImsg: argv => argv[1] === "chats" ? { code: 0, out: chatDoc } : { code: 0, out: histDoc + prior },
+			deliver, ...(enforce === undefined ? {} : { enforceHandleCheck: enforce }), now });
 	} finally {
 		if (prev === undefined) delete process.env.XDG_STATE_HOME;
 		else process.env.XDG_STATE_HOME = prev;
@@ -276,7 +301,7 @@ test("IMSGCHIEF1 group rows never open the relay", async () => {
 	const solo = toJsonLines([{ id: 7, is_group: false, participants: [HANDLE] }]);
 	const poll = await runUnitPoll("groupmsg", unitConfig, deliver, undefined, solo, groupHistory);
 	expect(poll.delivered).toBe(1);
-	expect(poll.skipped).toBe(1);
+	expect(poll.skipped).toBe(1); // the group row; the seeded row is older than the cursor
 	expect(seen.length).toBe(1);
 	expect(seen[0]).toContain("ping from phone");
 	const chatless = await runUnitPoll("groupchat", unitConfig, deliver, undefined, toJsonLines(groupChats), groupHistory);
@@ -359,11 +384,19 @@ async function runSelfPoll(tag: string, deliver: Deliver, guard?: boolean, chats
 	process.env.XDG_STATE_HOME = join(unitHome, tag);
 	const chatDoc = chats ?? toJsonLines(SELF_CHATS);
 	const histDoc = history ?? toJsonLines(selfUserRows);
+	const prior = `${JSON.stringify({ guid: "bridge-prior-0", sender: HANDLE, destination_caller_id: HANDLE, text: "(seed)", is_from_me: true, is_group: false })}\n`;
+	const now = () => new Date("2026-11-11T10:00:00Z");
+	const discard: Deliver = async () => ({ ok: true, marker: "", code: "OK" });
 	try {
+		if (!primedUnitTags.has(`self:${tag}`)) {
+			primedUnitTags.add(`self:${tag}`);
+			await pollBridge({ home: join(unitHome, tag), config: unitConfig, imsgBin: "imsg",
+				runImsg: argv => argv[1] === "chats" ? { code: 0, out: chatDoc } : { code: 0, out: prior },
+				deliver: discard, ...(guard === undefined ? {} : { enforceLoopGuard: guard }), now });
+		}
 		return await pollBridge({ home: join(unitHome, tag), config: unitConfig, imsgBin: "imsg",
-			runImsg: argv => argv[1] === "chats" ? { code: 0, out: chatDoc } : { code: 0, out: histDoc },
-			deliver, ...(guard === undefined ? {} : { enforceLoopGuard: guard }),
-			now: () => new Date("2026-11-11T10:00:00Z") });
+			runImsg: argv => argv[1] === "chats" ? { code: 0, out: chatDoc } : { code: 0, out: histDoc + prior },
+			deliver, ...(guard === undefined ? {} : { enforceLoopGuard: guard }), now });
 	} finally {
 		if (prev === undefined) delete process.env.XDG_STATE_HOME;
 		else process.env.XDG_STATE_HOME = prev;
@@ -389,7 +422,8 @@ test("IMSGSELF1 bridge reply with recorded guid and prefix is never delivered", 
 	const prev = process.env.XDG_STATE_HOME;
 	process.env.XDG_STATE_HOME = join(unitHome, tag);
 	const home = join(unitHome, tag);
-	let histDoc = toJsonLines(selfUserRows);
+	const priorRow = selfReplyRow("bridge-prior-0", "(seed)");
+	let histDoc = toJsonLines([...selfUserRows, priorRow]);
 	const sent: string[][] = [];
 	const at = () => new Date("2026-11-11T10:00:00Z");
 	const runImsg = (argv: readonly string[]) => {
@@ -400,6 +434,13 @@ test("IMSGSELF1 bridge reply with recorded guid and prefix is never delivered", 
 	try {
 		const seen: string[] = [];
 		const deliver: Deliver = async text => { seen.push(text); return { ok: true, marker: "mself", code: "OK" }; };
+		// IMSGLIVE1: prime the cursor with a prior-only tick so the first
+		// real poll delivers the pre-existing note as a new arrival.
+		const primeHist = toJsonLines([priorRow]);
+		const prime = await pollBridge({ home, config: unitConfig, imsgBin: "imsg",
+			runImsg: argv => argv[1] === "chats" ? { code: 0, out: toJsonLines(SELF_CHATS) } : argv[1] === "send" ? runImsg(argv) : { code: 0, out: primeHist },
+			deliver: async () => ({ ok: true, marker: "", code: "OK" }), now: at });
+		expect(prime.delivered).toBe(0);
 		const first = await pollBridge({ home, config: unitConfig, imsgBin: "imsg", runImsg, deliver, now: at });
 		expect(first.selfChat).toBe(true);
 		expect(first.delivered).toBe(1);
@@ -408,13 +449,13 @@ test("IMSGSELF1 bridge reply with recorded guid and prefix is never delivered", 
 		expect(reply.receipt.guid).toBe("reply-1");
 		expect(reply.receipt.prefixed).toBe(true);
 		expect(sent.at(-1) ?? []).toContain(`${REPLY_PREFIX}got it`);
-		histDoc = toJsonLines([...selfUserRows, selfReplyRow("reply-1", `${REPLY_PREFIX}got it`)]);
+		histDoc = toJsonLines([selfReplyRow("reply-1", `${REPLY_PREFIX}got it`), ...selfUserRows, priorRow]);
 		const second = await pollBridge({ home, config: unitConfig, imsgBin: "imsg", runImsg, deliver, now: at });
 		expect(second.delivered).toBe(0);
 		expect(seen.length).toBe(1);
 		expect(JSON.stringify(seen)).not.toContain("got it");
 		// A prefixed echo with no recorded guid is still caught by the prefix.
-		histDoc = toJsonLines([...selfUserRows, selfReplyRow("reply-1", `${REPLY_PREFIX}got it`), selfReplyRow("mystery", `${REPLY_PREFIX}typed echo`)]);
+		histDoc = toJsonLines([selfReplyRow("mystery", `${REPLY_PREFIX}typed echo`), selfReplyRow("reply-1", `${REPLY_PREFIX}got it`), ...selfUserRows, priorRow]);
 		const third = await pollBridge({ home, config: unitConfig, imsgBin: "imsg", runImsg, deliver, now: at });
 		expect(third.delivered).toBe(0);
 		expect(seen.length).toBe(1);
@@ -461,7 +502,7 @@ test("IMSGSELF1 ordinary mode keeps skipping is_from_me", async () => {
 	const poll = await runSelfPoll("selfordinary", deliver, undefined, chats, history);
 	expect(poll.selfChat).toBe(false);
 	expect(poll.delivered).toBe(0);
-	expect(poll.skipped).toBe(1);
+	expect(poll.skipped).toBe(1); // the from_me row; the seeded row is older than the cursor
 	expect(seen.length).toBe(0);
 });
 
@@ -508,4 +549,177 @@ test("IMSGSELF1 cli send prefixes in self-chat mode and poll never replays it", 
 		? pushLast.text
 		: null;
 	expect(pushText).toBe(`${REPLY_PREFIX}blocked on you`);
+});
+
+test("IMSGLIVE1 fresh cursor delivers nothing pre-existing", async () => {
+	const tag = "live-fresh";
+	const prev = process.env.XDG_STATE_HOME;
+	process.env.XDG_STATE_HOME = join(unitHome, tag);
+	try {
+		const home = join(unitHome, tag);
+		const chatDoc = toJsonLines([{ id: 7, is_group: false, participants: [HANDLE] }]);
+		// Newest-first, as imsg emits: g2 is the conversation tail.
+		const older = { guid: "g1", sender: HANDLE, text: "old hello", is_from_me: false, is_group: false };
+		const newer = { guid: "g2", sender: HANDLE, text: "new hello", is_from_me: false, is_group: false };
+		const oldHist = toJsonLines([newer, older]);
+		const seen: string[] = [];
+		const deliver: Deliver = async text => { seen.push(text); return { ok: true, marker: "m1", code: "OK" }; };
+		const at = () => new Date("2026-11-11T10:00:00Z");
+		const oldRunner = (argv: readonly string[]) => argv[1] === "chats" ? { code: 0, out: chatDoc } : { code: 0, out: oldHist };
+		const first = await pollBridge({ home, config: unitConfig, imsgBin: "imsg", runImsg: oldRunner, deliver, now: at });
+		expect(first.status).toBe("OK");
+		expect(first.delivered).toBe(0);
+		expect(first.dropped).toBe(0);
+		expect(first.skipped).toBe(2);
+		expect(seen.length).toBe(0);
+		const cursor = JSON.parse(readFileSync(join(unitHome, tag, "omp-kit", "jobs", "imessage-bridge.cursor.json"), "utf8")) as { last_key: string };
+		expect(cursor.last_key).toBe("g2");
+		// A row arriving after the bridge starts is newer still, so it leads the next window and delivers.
+		const arrived = { guid: "g3", sender: HANDLE, text: "fresh hello", is_from_me: false, is_group: false };
+		const newRunner = (argv: readonly string[]) => argv[1] === "chats"
+			? { code: 0, out: chatDoc }
+			: { code: 0, out: toJsonLines([arrived, newer, older]) };
+		const second = await pollBridge({ home, config: unitConfig, imsgBin: "imsg", runImsg: newRunner, deliver, now: at });
+		expect(second.status).toBe("OK");
+		expect(second.delivered).toBe(1);
+		expect(seen.length).toBe(1);
+		expect(seen[0]).toContain("fresh hello");
+	} finally {
+		if (prev === undefined) delete process.env.XDG_STATE_HOME;
+		else process.env.XDG_STATE_HOME = prev;
+	}
+});
+
+test("IMSGLIVE1 Tern seat config routes pane, cwd and identity project", () => {
+	const home = join(scratch.path, "live-tern-config");
+	mkdirSync(home, { recursive: true });
+	const seatDir = join(scratch.path, "live-seat");
+	const projectDir = join(scratch.path, "live-project");
+	const watchPath = join(home, "fleet-watch.json");
+	writeFileSync(watchPath, JSON.stringify({ imessage: { handle: HANDLE, seat: "omp-chief", pane: "tern:8380920008540167", cwd: seatDir, project: projectDir } }));
+	const resolved = readBridgeConfig(home, { ...unitEnv, OMP_KIT_FLEET_WATCH_CONFIG: watchPath });
+	expect(resolved.ok).toBe(true);
+	if (!resolved.ok) return;
+	expect(resolved.config.cwd).toBe(seatDir);
+	expect(resolved.config.project).toBe(projectDir);
+	expect(resolveBridgeSendTarget(resolved.config)).toEqual(
+		{ route: "tern", session: "omp-chief", pane: "tern:8380920008540167", cwd: seatDir, identityProject: projectDir });
+	// A bare pane with no Tern keys keeps the legacy tmux route.
+	expect(resolveBridgeSendTarget({ handle: HANDLE, seat: "s", pane: "%1", configPath: "unit" }))
+		.toEqual({ route: "tmux", session: "s", pane: "%1" });
+	// Env overrides win over the file.
+	const over = readBridgeConfig(home, { ...unitEnv, OMP_KIT_FLEET_WATCH_CONFIG: watchPath, OMP_KIT_IMESSAGE_CWD: seatDir });
+	expect(over.ok).toBe(true);
+	if (!over.ok) return;
+	expect(over.config.cwd).toBe(seatDir);
+	// A relative cwd refuses before anything is delivered.
+	const bad = readBridgeConfig(home, { ...unitEnv, OMP_KIT_FLEET_WATCH_CONFIG: watchPath, OMP_KIT_IMESSAGE_CWD: "relative/path" });
+	expect(bad.ok).toBe(false);
+	if (bad.ok) return;
+	expect(bad.code).toBe("IMESSAGE_CONFIG_INVALID");
+});
+
+test("IMSGLIVE1 planted negative: bare-pane delivery failure reports NOT_DELIVERED", async () => {
+	const failing: Deliver = async () => ({ ok: false, marker: "", code: "NOT_DELIVERED" });
+	const poll = await runUnitPoll("liveneg", { ...unitConfig, pane: "%3" }, failing, undefined, undefined, toJsonLines(allowedRows));
+	expect(poll.status).toBe("DELIVERY_FAILED");
+	expect(poll.receipt.delivery_code).toBe("NOT_DELIVERED");
+	expect(JSON.stringify(poll.receipt)).not.toContain("ping from phone");
+	// At-least-once: the cursor still points at the prior row, so the next tick replays the message.
+	const cursor = JSON.parse(readFileSync(join(unitHome, "liveneg", "omp-kit", "jobs", "imessage-bridge.cursor.json"), "utf8")) as { last_key: string };
+	expect(cursor.last_key).toBe("bridge-prior-0");
+});
+
+test("IMSGLIVE1 self-chat echo pair delivers once and the guard covers both reply copies", async () => {
+	const tag = "live-echo";
+	const prev = process.env.XDG_STATE_HOME;
+	process.env.XDG_STATE_HOME = join(unitHome, tag);
+	const home = join(unitHome, tag);
+	try {
+		const at = () => new Date("2026-11-11T22:32:00Z");
+		// Real row shapes: typed row plus its echo a fraction of a second later, newest-first.
+		const row = (guid: string, text: string, fromMe: boolean, created: string) => ({ guid, sender: HANDLE, destination_caller_id: HANDLE, text, is_from_me: fromMe, is_group: false, created_at: created });
+		const priorRow = row("bridge-prior-0", "(seed)", true, "2026-11-11T22:29:00.000Z");
+		const chatDoc = toJsonLines(SELF_CHATS);
+		const seen: string[] = [];
+		const deliver: Deliver = async text => { seen.push(text); return { ok: true, marker: "m-echo", code: "OK" }; };
+		await pollBridge({ home, config: unitConfig, imsgBin: "imsg",
+			runImsg: argv => argv[1] === "chats" ? { code: 0, out: chatDoc } : { code: 0, out: toJsonLines([priorRow]) },
+			deliver: async () => ({ ok: true, marker: "", code: "OK" }), now: at });
+		const runImsg = (argv: readonly string[]) => argv[1] === "chats" ? { code: 0, out: chatDoc } : { code: 0, out: toJsonLines([
+			row("echo-1", "call me", false, "2026-11-11T22:31:23.400Z"),
+			row("typed-1", "call me", true, "2026-11-11T22:31:23.100Z"),
+			row("old-1", "earlier note", true, "2026-11-11T22:30:00.000Z"),
+			priorRow,
+		]) };
+		const first = await pollBridge({ home, config: unitConfig, imsgBin: "imsg", runImsg, deliver, now: at });
+		expect(first.selfChat).toBe(true);
+		expect(first.delivered).toBe(2);
+		expect(first.skipped).toBe(1);
+		expect(seen.filter(text => text.includes("call me")).length).toBe(1);
+		expect(first.lastKey).toBe("echo-1");
+		const jobs = join(unitHome, tag, "omp-kit", "jobs");
+		expect(lines(join(jobs, "imessage-bridge.deliveries.jsonl"))
+			.some(line => line.includes('"key":"echo-1"') && line.includes('"status":"ECHO_DUP"'))).toBe(true);
+		// A sent reply and both of its copies never deliver: the recorded
+		// row via guid, the echo twin via twin-guid.
+		const reply = sendReply({ home, config: unitConfig, imsgBin: "imsg",
+			runImsg: () => ({ code: 0, out: '{"status":"sent","guid":"reply-8"}' }),
+			text: "bare ok", selfChat: false, now: at });
+		expect(reply.sent).toBe(true);
+		const runImsg2 = (argv: readonly string[]) => argv[1] === "chats" ? { code: 0, out: chatDoc } : { code: 0, out: toJsonLines([
+			row("echo-8", "bare ok", false, "2026-11-11T22:31:50.200Z"),
+			row("reply-8", "bare ok", true, "2026-11-11T22:31:50.100Z"),
+			row("echo-1", "call me", false, "2026-11-11T22:31:23.400Z"),
+			row("typed-1", "call me", true, "2026-11-11T22:31:23.100Z"),
+			row("old-1", "earlier note", true, "2026-11-11T22:30:00.000Z"),
+			priorRow,
+		]) };
+		const second = await pollBridge({ home, config: unitConfig, imsgBin: "imsg", runImsg: runImsg2, deliver, now: at });
+		expect(second.delivered).toBe(0);
+		expect(seen.length).toBe(2);
+		const receipts = lines(join(jobs, "imessage-bridge.deliveries.jsonl"));
+		expect(receipts.some(line => line.includes('"key":"reply-8"') && line.includes('"via":"guid"'))).toBe(true);
+		expect(receipts.some(line => line.includes('"key":"echo-8"') && line.includes('"via":"twin-guid"'))).toBe(true);
+	} finally {
+		if (prev === undefined) delete process.env.XDG_STATE_HOME;
+		else process.env.XDG_STATE_HOME = prev;
+	}
+});
+
+test("IMSGLIVE1 dispatched pending steer advances the cursor as QUEUED", async () => {
+	const stalled: Deliver = async () => ({ ok: false, marker: "m-queued", code: "PROOF_TIMEOUT", queued: true });
+	const poll = await runUnitPoll("livequeued", unitConfig, stalled, undefined, undefined, toJsonLines(allowedRows));
+	expect(poll.status).toBe("OK");
+	expect(poll.queued).toBe(1);
+	expect(poll.delivered).toBe(0);
+	expect(poll.markers).toEqual(["m-queued"]);
+	expect(poll.lastKey).toBe("g1");
+	const jobs = join(unitHome, "livequeued", "omp-kit", "jobs");
+	expect(JSON.parse(readFileSync(join(jobs, "imessage-bridge.cursor.json"), "utf8"))).toMatchObject({ last_key: "g1" });
+	expect(lines(join(jobs, "imessage-bridge.deliveries.jsonl"))
+		.some(line => line.includes('"status":"QUEUED"') && line.includes('"marker":"m-queued"'))).toBe(true);
+	// The next tick does not re-steer the queued message.
+	const retry = await runUnitPoll("livequeued", unitConfig, async () => ({ ok: true, marker: "m2", code: "OK" }), undefined, undefined, toJsonLines(allowedRows));
+	expect(retry.delivered).toBe(0);
+	expect(retry.queued).toBe(0);
+});
+
+test("IMSGLIVE1 undispatched pending keeps the cursor for retry", async () => {
+	const ambiguous: Deliver = async () => ({ ok: false, marker: "", code: "SEND_AMBIGUOUS" });
+	const poll = await runUnitPoll("liveamb", unitConfig, ambiguous, undefined, undefined, toJsonLines(allowedRows));
+	expect(poll.status).toBe("DELIVERY_FAILED");
+	expect(poll.queued).toBe(0);
+	expect(poll.receipt.delivery_code).toBe("SEND_AMBIGUOUS");
+	expect(poll.lastKey).toBe("g1");
+});
+
+test("IMSGLIVE1 ternSteerQueued admits only dispatched pendings", () => {
+	expect(ternSteerQueued("PENDING_CONSUME", "PROOF_TIMEOUT")).toBe(true);
+	expect(ternSteerQueued("PENDING_CONSUME", "GOAL_NOT_ADOPTED")).toBe(true);
+	expect(ternSteerQueued("PENDING_CONSUME", "SEND_AMBIGUOUS")).toBe(false);
+	expect(ternSteerQueued("PENDING_CONSUME", "SUPPRESSED_PENDING")).toBe(false);
+	expect(ternSteerQueued("OK", "PROVEN")).toBe(false);
+	expect(ternSteerQueued("NOT_DELIVERED", "UNTIL_DELIVERED_EXHAUSTED")).toBe(false);
+	expect(ternSteerQueued("REFUSED", "TERN_WINDOW_UNBOUND")).toBe(false);
 });

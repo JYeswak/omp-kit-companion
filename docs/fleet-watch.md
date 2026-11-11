@@ -55,3 +55,25 @@ nothing schedules them. These functions are not a replacement polling
 service. Reaping keeps its existing liveness and admission gates.
 Stranded-work visibility remains on demand via `omp-kit doctor --scope work`
 (`--stranded-only`); native tracker recovery remains via `br doctor`.
+
+## iMessage bridge routing
+
+`omp-kit imessage poll` relays Joshua's handle into the lead seat from the
+`imessage` object: `handle`, `seat` and `pane`, with `OMP_KIT_IMESSAGE_HANDLE`
+(`_SEAT`, `_PANE`) overrides. Two optional keys route a Tern seat: `cwd` is
+the seat's working directory for the Tern send and `project` is its Agent
+Mail project for `resolve-pane` (overrides `OMP_KIT_IMESSAGE_CWD`,
+`OMP_KIT_IMESSAGE_PROJECT`; both must be absolute paths). A
+`pane: "tern:<id>"` delivers through the same Tern send path as
+`omp-kit send <session> tern:<id> --cwd <cwd>` with `project` as the
+identity project; any other pane keeps the tmux send. A first poll with no
+cursor file starts at the current newest row and delivers nothing: only rows
+arriving after the bridge starts reach the seat. History arrives
+newest-first; rows before the cursor are the new arrivals and deliver
+oldest-first. A dispatched native steer whose proof is still pending at the
+seat's next turn boundary (`PROOF_TIMEOUT` / `GOAL_NOT_ADOPTED`) is recorded
+as `QUEUED` and advances the cursor, so the next tick never re-steers it;
+any other failure keeps the cursor for retry. In self-chat mode each typed
+message delivers once: the received echo (same text within 2 s, opposite
+is_from_me) is suppressed, and the reply-loop guard covers both copies of a
+reply.

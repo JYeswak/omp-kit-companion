@@ -29,7 +29,7 @@
  */
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { runSync } from "./kitlib/run.ts";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { fleetWatchConfigPath, jobsDir } from "./service.ts";
@@ -86,6 +86,24 @@ export interface BridgeConfig {
 	seat: string;
 	pane: string;
 	configPath: string;
+	/**
+	 * IMSGLIVE1: optional Tern seat routing. When pane is `tern:<id>`,
+	 * cwd is the seat's working directory for the Tern send and project
+	 * is its Agent Mail identity project for resolve-pane.
+	 */
+	cwd?: string;
+	project?: string;
+}
+
+/** IMSGLIVE1: absolute-path form for the optional bridge cwd/project keys; longer than a handle line. */
+function cleanPath(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const trimmed = value.trim();
+	if (trimmed === "" || trimmed.length > 1024) return null;
+	for (const ch of trimmed) {
+		if (isBannedControl(ch.codePointAt(0) ?? 0)) return null;
+	}
+	return trimmed;
 }
 
 export type BridgeConfigResult =
@@ -94,7 +112,8 @@ export type BridgeConfigResult =
 
 /**
  * Resolve the bridge config: fleet-watch.json `imessage` object
- * ({handle, seat, pane}) with OMP_KIT_IMESSAGE_HANDLE/_SEAT/_PANE overrides.
+ * ({handle, seat, pane}, plus optional Tern routing keys cwd and project)
+ * with OMP_KIT_IMESSAGE_HANDLE/_SEAT/_PANE/_CWD/_PROJECT overrides.
  * No handle is configured by default; without one the bridge refuses to start.
  */
 export function readBridgeConfig(home: string, env: NodeJS.ProcessEnv = process.env): BridgeConfigResult {
@@ -128,7 +147,35 @@ export function readBridgeConfig(home: string, env: NodeJS.ProcessEnv = process.
 	if (pane === null) {
 		return { ok: false, code: "IMESSAGE_NO_PANE", message: "The bridge has no configured lead pane and refuses to start", remediation: `Set imessage.pane in ${configPath} (or OMP_KIT_IMESSAGE_PANE); nothing was delivered.` };
 	}
-	return { ok: true, config: { handle, seat, pane, configPath } };
+	const cwd = cleanPath(env.OMP_KIT_IMESSAGE_CWD ?? section.cwd);
+	if (cwd !== null && !isAbsolute(cwd)) {
+		return { ok: false, code: "IMESSAGE_CONFIG_INVALID", message: `${configPath} imessage.cwd must be an absolute path`, remediation: `Set imessage.cwd in ${configPath} (or OMP_KIT_IMESSAGE_CWD) to the Tern seat's absolute working directory; nothing was delivered.` };
+	}
+	const project = cleanPath(env.OMP_KIT_IMESSAGE_PROJECT ?? section.project);
+	if (project !== null && !isAbsolute(project)) {
+		return { ok: false, code: "IMESSAGE_CONFIG_INVALID", message: `${configPath} imessage.project must be an absolute path`, remediation: `Set imessage.project in ${configPath} (or OMP_KIT_IMESSAGE_PROJECT) to the seat's Agent Mail project directory; nothing was delivered.` };
+	}
+	return { ok: true, config: { handle, seat, pane, configPath, ...(cwd === null ? {} : { cwd }), ...(project === null ? {} : { project }) } };
+}
+
+/**
+ * IMSGLIVE1: where one bridge text goes. A `tern:<id>` pane is a Tern seat
+ * and delivers through the Tern send with the bridge cwd and identity
+ * project; anything else is a tmux pane for the legacy proveSend path.
+ */
+export interface BridgeSendTarget {
+	route: "tern" | "tmux";
+	session: string;
+	pane: string;
+	cwd?: string;
+	identityProject?: string;
+}
+
+export function resolveBridgeSendTarget(config: BridgeConfig): BridgeSendTarget {
+	if (!config.pane.startsWith("tern:")) return { route: "tmux", session: config.seat, pane: config.pane };
+	return { route: "tern", session: config.seat, pane: config.pane,
+		...(config.cwd === undefined ? {} : { cwd: config.cwd }),
+		...(config.project === undefined ? {} : { identityProject: config.project }) };
 }
 
 /** Locate the imsg binary: explicit OMP_KIT_IMSG_BIN first, then PATH. Null when absent. */
@@ -162,7 +209,7 @@ function defaultRunner(env: NodeJS.ProcessEnv, cwd: string, deadlineS: number): 
 	return createImsgRunner(env, cwd, deadlineS);
 }
 
-export interface InboundMessage { key: string; sender: string; text: string; fromMe: boolean; group: boolean; destinationCallerId: string | null }
+export interface InboundMessage { key: string; sender: string; text: string; fromMe: boolean; group: boolean; destinationCallerId: string | null; createdAtMs: number | null }
 
 function stringField(row: Record<string, unknown>, names: readonly string[]): string | null {
 	for (const name of names) {
@@ -228,9 +275,11 @@ export function parseHistoryPayload(text: string): InboundMessage[] {
 		const sender = stringField(row, ["sender", "handle", "from", "address", "participant"]);
 		const body = stringField(row, ["text", "body", "message"]);
 		if (key === null || sender === null || body === null) continue;
+		const createdAt = stringField(row, ["created_at", "createdAt", "date", "timestamp"]);
+		const createdAtMs = createdAt === null || Number.isNaN(Date.parse(createdAt)) ? null : Date.parse(createdAt);
 		messages.push({ key, sender, text: body, fromMe: row.is_from_me === true || row.from_me === true || row.isFromMe === true,
 			group: row.is_group === true,
-			destinationCallerId: stringField(row, ["destination_caller_id", "destinationCallerId", "destination"]) });
+			destinationCallerId: stringField(row, ["destination_caller_id", "destinationCallerId", "destination"]), createdAtMs });
 	}
 	return messages;
 }
@@ -413,7 +462,7 @@ export function probeSelfChatMode(options: ProbeOptions): { selfChat: boolean; c
 	}
 }
 
-export type Deliver = (text: string) => Promise<{ ok: boolean; marker: string; code: string }>;
+export type Deliver = (text: string) => Promise<{ ok: boolean; marker: string; code: string; queued?: boolean }>;
 
 export interface PollOptions {
 	home: string;
@@ -439,12 +488,44 @@ export interface PollOptions {
 	now?: () => Date;
 }
 
+/**
+ * Live self-chat echo pairs (IMSGLIVE1): every self-sent message appears
+ * twice in `imsg history` — the typed row (is_from_me true) and a received
+ * echo (is_from_me false) with a different guid in the same second. Pair
+ * rows with identical sanitized text, opposite is_from_me, and created_at
+ * within 2 s; the echo copy is suppressed and each twin maps to the other
+ * so the reply-loop guard covers both copies of a reply.
+ */
+export function echoPairs(messages: readonly InboundMessage[]): { suppressed: Set<string>; twin: Map<string, string> } {
+	const suppressed = new Set<string>();
+	const twin = new Map<string, string>();
+	const typed = messages.filter(message => message.fromMe && message.createdAtMs !== null && sanitizeInbound(message.text) !== "");
+	for (const echo of messages) {
+		if (echo.fromMe || echo.createdAtMs === null || sanitizeInbound(echo.text) === "") continue;
+		const text = sanitizeInbound(echo.text);
+		let best: InboundMessage | null = null;
+		let bestDt = 2001;
+		for (const candidate of typed) {
+			if (twin.has(candidate.key) || sanitizeInbound(candidate.text) !== text) continue;
+			const dt = Math.abs((candidate.createdAtMs as number) - (echo.createdAtMs as number));
+			if (dt <= 2000 && dt < bestDt) { best = candidate; bestDt = dt; }
+		}
+		if (best !== null) {
+			suppressed.add(echo.key);
+			twin.set(echo.key, best.key);
+			twin.set(best.key, echo.key);
+		}
+	}
+	return { suppressed, twin };
+}
+
 export interface PollResult {
 	status: string;
 	chatId: string | null;
 	delivered: number;
 	dropped: number;
 	skipped: number;
+	queued: number;
 	lastKey: string | null;
 	markers: string[];
 	selfChat: boolean;
@@ -461,39 +542,55 @@ export async function pollBridge(options: PollOptions): Promise<PollResult> {
 
 	const chats = runImsg([imsgBin, "chats", "--limit", String(HISTORY_LIMIT), "--json"]);
 	if (chats.code !== 0) {
-		return { status: "IMSG_CHATS_FAILED", chatId: null, delivered: 0, dropped: 0, skipped: 0, lastKey: readCursor(home), markers: [], selfChat: false,
+		return { status: "IMSG_CHATS_FAILED", chatId: null, delivered: 0, dropped: 0, skipped: 0, queued: 0, lastKey: readCursor(home), markers: [], selfChat: false,
 			receipt: { ...base, status: "IMSG_CHATS_FAILED", exit: chats.code, self_chat: false } };
 	}
 	const chat = pickChatRowForHandle(chats.out, config.handle);
 	if (chat === null) {
-		return { status: "NO_CHAT", chatId: null, delivered: 0, dropped: 0, skipped: 0, lastKey: readCursor(home), markers: [], selfChat: false,
+		return { status: "NO_CHAT", chatId: null, delivered: 0, dropped: 0, skipped: 0, queued: 0, lastKey: readCursor(home), markers: [], selfChat: false,
 			receipt: { ...base, status: "NO_CHAT", exit: 0, self_chat: false } };
 	}
 	const chatId = chat.id;
 	const history = runImsg([imsgBin, "history", "--chat-id", chatId, "--limit", String(HISTORY_LIMIT), "--json"]);
 	if (history.code !== 0) {
-		return { status: "IMSG_HISTORY_FAILED", chatId, delivered: 0, dropped: 0, skipped: 0, lastKey: readCursor(home), markers: [], selfChat: false,
+		return { status: "IMSG_HISTORY_FAILED", chatId, delivered: 0, dropped: 0, skipped: 0, queued: 0, lastKey: readCursor(home), markers: [], selfChat: false,
 			receipt: { ...base, chat_id: chatId, status: "IMSG_HISTORY_FAILED", exit: history.code, self_chat: false } };
 	}
 	const messages = parseHistoryPayload(history.out);
 	const selfChat = isSelfChatMode(chat, messages, config.handle);
 	const guard = options.enforceLoopGuard ?? true;
 	const replyGuids = selfChat && guard ? new Set(readReplyGuids(home)) : new Set<string>();
+	// Live self-chat echo pairs: the typed row and its received echo share
+	// text and a second; only the typed copy delivers, and the twin map lets
+	// the reply-loop guard cover both copies of a reply.
+	const { suppressed, twin } = selfChat ? echoPairs(messages) : { suppressed: new Set<string>(), twin: new Map<string, string>() };
 	const baseChat = { ...base, chat_id: chatId, self_chat: selfChat };
 	const lastSeen = readCursor(home);
-	const at = lastSeen === null ? 0 : messages.findIndex(message => message.key === lastSeen) + 1;
-	if (lastSeen !== null && at === 0) {
-		const lastKey = messages.at(-1)?.key ?? lastSeen;
+	if (lastSeen === null) {
+		// IMSGLIVE1: history arrives newest-first, so the tail is
+		// messages[0]. Rows that already exist are never delivered; only
+		// rows arriving after this tick reach the seat.
+		const lastKey = messages[0]?.key ?? null;
+		writeJsonFile(statePath(home, "imessage-bridge.cursor.json"), { last_key: lastKey, started_at: now });
+		const receipt = { ...baseChat, status: "OK", delivered: 0, dropped: 0, skipped: messages.length, queued: 0, last_key: lastKey, fresh_cursor: true };
+		return { status: "OK", chatId, delivered: 0, dropped: 0, skipped: messages.length, queued: 0, lastKey, markers: [], selfChat, receipt };
+	}
+	// Newest-first: rows before the cursor are the new arrivals; an unknown
+	// cursor means the window slid past it, so reset to the newest row.
+	const cursorIndex = messages.findIndex(message => message.key === lastSeen);
+	if (cursorIndex === -1) {
+		const lastKey = messages[0]?.key ?? lastSeen;
 		writeJsonFile(statePath(home, "imessage-bridge.cursor.json"), { last_key: lastKey, reset_at: now });
 		appendJsonLine(statePath(home, "imessage-bridge.deliveries.jsonl"), { ...baseChat, status: "CURSOR_RESET", skipped: messages.length });
-		return { status: "CURSOR_RESET", chatId, delivered: 0, dropped: 0, skipped: messages.length, lastKey, markers: [], selfChat,
-			receipt: { ...baseChat, status: "CURSOR_RESET", skipped: messages.length } };
+		return { status: "CURSOR_RESET", chatId, delivered: 0, dropped: 0, skipped: messages.length, queued: 0, lastKey, markers: [], selfChat,
+			receipt: { ...baseChat, status: "CURSOR_RESET", skipped: messages.length, queued: 0 } };
 	}
-	let delivered = 0, dropped = 0, skipped = 0;
+	let delivered = 0, dropped = 0, skipped = 0, queued = 0;
 	let lastKey: string | null = lastSeen;
 	const markers: string[] = [];
 	const want = normalizeHandle(config.handle);
-	for (const message of messages.slice(at)) {
+	// Deliver oldest-first so the at-least-once cursor advances chronologically.
+	for (const message of messages.slice(0, cursorIndex).reverse()) {
 		if (delivered >= POLL_MAX_DELIVERIES) break;
 		lastKey = message.key;
 		// Self-chat mode delivers Joshua's own typed rows, so no fromMe skip;
@@ -506,26 +603,48 @@ export async function pollBridge(options: PollOptions): Promise<PollResult> {
 				{ at: now, chat_id: chatId, key: message.key, sender_sha256: senderHash(message.sender) });
 			continue;
 		}
-		// Reply-receipt loop guard: the bridge's own sent replies (recorded
-		// guids) and any row wearing the reply prefix never become prompts.
-		if (selfChat && guard && (replyGuids.has(message.key) || sanitizeInbound(message.text).startsWith(REPLY_PREFIX))) {
+		// Reply-receipt loop guard: the bridge's own sent replies never
+		// become prompts — neither the recorded row nor its echo twin —
+		// and neither does any row wearing the reply prefix.
+		const twinKey = twin.get(message.key);
+		const guided = replyGuids.has(message.key) || (twinKey !== undefined && replyGuids.has(twinKey));
+		if (selfChat && guard && (guided || sanitizeInbound(message.text).startsWith(REPLY_PREFIX))) {
 			skipped += 1;
 			appendJsonLine(statePath(home, "imessage-bridge.deliveries.jsonl"),
-				{ at: now, chat_id: chatId, key: message.key, status: "LOOP_GUARD", via: replyGuids.has(message.key) ? "guid" : "prefix" });
+				{ at: now, chat_id: chatId, key: message.key, status: "LOOP_GUARD", via: replyGuids.has(message.key) ? "guid" : twinKey !== undefined && replyGuids.has(twinKey) ? "twin-guid" : "prefix" });
+			continue;
+		}
+		// Echo suppression: the received echo of a typed row never becomes
+		// a second prompt; the typed twin already delivers it once.
+		if (selfChat && suppressed.has(message.key)) {
+			skipped += 1;
+			appendJsonLine(statePath(home, "imessage-bridge.deliveries.jsonl"),
+				{ at: now, chat_id: chatId, key: message.key, status: "ECHO_DUP" });
 			continue;
 		}
 		const clean = sanitizeInbound(message.text);
 		if (clean.trim() === "") { skipped += 1; continue; }
 		const proof = await deliver(inboundPrompt(config.handle, clean));
+		if (proof.queued === true) {
+			// Dispatched native steer with proof pending: the seat consumes
+			// it at its next turn boundary, so the cursor advances and the
+			// next tick never re-steers it. Only an explicit failure keeps
+			// the cursor for retry.
+			queued += 1;
+			if (proof.marker !== "") markers.push(proof.marker);
+			appendJsonLine(statePath(home, "imessage-bridge.deliveries.jsonl"),
+				{ at: now, chat_id: chatId, key: message.key, marker: proof.marker, chars: clean.length, status: "QUEUED" });
+			continue;
+		}
 		if (!proof.ok) {
 			// At-least-once cursor: the cursor file keeps the last fully
 			// processed key, so the next tick replays this message. The
 			// receipt carries the marker and delivery code only; never
 			// detail text, which could quote the untrusted body.
-			const receipt = { ...baseChat, status: "DELIVERY_FAILED", delivered, dropped, skipped, last_key: lastKey,
+			const receipt = { ...baseChat, status: "DELIVERY_FAILED", delivered, dropped, skipped, queued, last_key: lastKey,
 				marker: proof.marker, delivery_code: proof.code };
 			appendJsonLine(statePath(home, "imessage-bridge.deliveries.jsonl"), receipt);
-			return { status: "DELIVERY_FAILED", chatId, delivered, dropped, skipped, lastKey, markers, selfChat, receipt };
+			return { status: "DELIVERY_FAILED", chatId, delivered, dropped, skipped, queued, lastKey, markers, selfChat, receipt };
 		}
 		delivered += 1;
 		if (proof.marker !== "") markers.push(proof.marker);
@@ -533,8 +652,8 @@ export async function pollBridge(options: PollOptions): Promise<PollResult> {
 			{ at: now, chat_id: chatId, key: message.key, marker: proof.marker, chars: clean.length });
 	}
 	writeJsonFile(statePath(home, "imessage-bridge.cursor.json"), { last_key: lastKey });
-	const receipt = { ...baseChat, status: "OK", delivered, dropped, skipped, last_key: lastKey };
-	return { status: "OK", chatId, delivered, dropped, skipped, lastKey, markers, selfChat, receipt };
+	const receipt = { ...baseChat, status: "OK", delivered, dropped, skipped, queued, last_key: lastKey };
+	return { status: "OK", chatId, delivered, dropped, skipped, queued, lastKey, markers, selfChat, receipt };
 }
 
 export interface ReplyOptions {

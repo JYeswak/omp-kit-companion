@@ -97,7 +97,7 @@ import { defaultLivenessProbe, holderVerdict, readLivenessSources } from "./hold
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { TOOL_NAME_PATTERN, defaultUpgradeRunner, dependentBinaries, findRepoPins, installedDependents, planUpgrade, verifyDependents } from "./infra-upgrade.ts";
 import { appendReapReceipt, defaultGitLockLedgerPath, indexLockStaleAfterMs, maybeMoveStaleIndexLock, reapRepoGitLocks, reapStaleAfterMs, reportOrphanedGitHelpers } from "./index-lock.ts";
-import { acknowledgeTernPending, proveSend, proveTernCliSend, routeSendTarget, ternSendSeat } from "./send.ts";
+import { acknowledgeTernPending, proveSend, proveTernCliSend, routeSendTarget, ternSendSeat, ternSteerQueued } from "./send.ts";
 import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunner } from "./sha.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
@@ -117,7 +117,7 @@ import { runMilestone } from "./milestone.ts";
 import { ccSpool, type CcSpool } from "./cc-spool.ts";
 import { custodyCheckCommand } from "./custody.ts";
 import { intakeCommand } from "./intake-verb.ts";
-import { createImsgRunner, findImsgBin, notifyBlocked, pollBridge, probeSelfChatMode, readBridgeConfig, runBrief, sendReply, type BridgeConfig } from "./imessage-bridge.ts";
+import { createImsgRunner, findImsgBin, notifyBlocked, pollBridge, probeSelfChatMode, readBridgeConfig, resolveBridgeSendTarget, runBrief, sendReply, type BridgeConfig } from "./imessage-bridge.ts";
 import { looksSecret } from "./mcp-sources.ts";
 import { formatNext, next } from "./next.ts";
 import { agentMailRetentionRoot, retainAgentMailRotations } from "./am-retain.ts";
@@ -3398,12 +3398,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 						remediation: "Install imsg (brew install steipete/tap/imsg); the next tick retries. Install itself is unaffected." }]);
 			}
 			const dropDir = join(dirname(jobsDir), "send-drop");
-			const poll = await pollBridge({ home, config: resolved.config, imsgBin: bin,
-				deliver: async text => {
-					const proved = await proveSend({ session: resolved.config.seat, pane: resolved.config.pane, message: text, dropDir,
-						noBeadReason: "imessage-bridge relay of Joshua's iMessage text; not a work dispatch", env: process.env });
-					return { ok: proved.status === "OK" || proved.status === "DELIVERED", marker: proved.marker, code: proved.status };
-				} });
+			const poll = await pollBridge({ home, config: resolved.config, imsgBin: bin, deliver: bridgeDeliver(dropDir, resolved.config) });
 			if (poll.status !== "OK") {
 				return fail(1, "FINDINGS", { started_at: started, finished_at: new Date().toISOString(), exit: 1, omp_version: null, ...poll.receipt },
 					[{ code: poll.status, message: `imessage-bridge tick ended ${poll.status}`, remediation: "Read the receipt; the cursor still guards redelivery." }]);
@@ -4136,10 +4131,29 @@ function imessageBase(request: ParsedCommand): { home: string; stateRoot: string
 	return { home, stateRoot, config: resolved.config, imsgBin };
 }
 
-function imessageDeliver(stateRoot: string, config: BridgeConfig): (text: string) => Promise<{ ok: boolean; marker: string; code: string }> {
-	const dropDir = join(stateRoot, "send-drop");
+/**
+ * IMSGLIVE1: one bridge text to the lead seat. A `tern:<id>` pane delivers
+ * through the Tern send (the same path `omp-kit send <session> tern:<id>
+ * --cwd <cwd>` uses) with the bridge cwd and identity project; anything
+ * else keeps the legacy tmux proveSend path.
+ */
+function bridgeDeliver(dropDir: string, config: BridgeConfig): (text: string) => Promise<{ ok: boolean; marker: string; code: string; queued?: boolean }> {
+	const target = resolveBridgeSendTarget(config);
+	if (target.route === "tern") {
+		return async text => {
+			const proved = await proveTernCliSend({ session: target.session, pane: target.pane, message: text, dropDir,
+				...(target.cwd === undefined ? {} : { cwd: target.cwd }),
+				...(target.identityProject === undefined ? {} : { identityProject: target.identityProject }),
+				noBeadReason: "imessage-bridge relay of Joshua's iMessage text; not a work dispatch", env: process.env });
+			// A dispatched native steer with proof pending is queued at the
+			// seat's next turn boundary: the cursor advances so the next
+			// tick never re-steers it. Any other non-OK keeps the cursor.
+			const queued = ternSteerQueued(proved.status, proved.code);
+			return { ok: proved.status === "OK", marker: proved.marker, code: proved.code, ...(queued ? { queued: true as const } : {}) };
+		};
+	}
 	return async text => {
-		const proved = await proveSend({ session: config.seat, pane: config.pane, message: text, dropDir,
+		const proved = await proveSend({ session: target.session, pane: target.pane, message: text, dropDir,
 			noBeadReason: "imessage-bridge relay of Joshua's iMessage text; not a work dispatch", env: process.env });
 		return { ok: proved.status === "OK" || proved.status === "DELIVERED", marker: proved.marker, code: proved.status };
 	};
@@ -4148,7 +4162,7 @@ function imessageDeliver(stateRoot: string, config: BridgeConfig): (text: string
 async function imessagePollCommand(request: ParsedCommand): Promise<CliResult> {
 	const base = imessageBase(request);
 	if (!("config" in base)) return base;
-	const poll = await pollBridge({ home: base.home, config: base.config, imsgBin: base.imsgBin, deliver: imessageDeliver(base.stateRoot, base.config) });
+	const poll = await pollBridge({ home: base.home, config: base.config, imsgBin: base.imsgBin, deliver: bridgeDeliver(join(base.stateRoot, "send-drop"), base.config) });
 	if (poll.status !== "OK") {
 		return { code: 1, data: { overall: "FINDINGS", command: "imessage poll", ...poll.receipt },
 			errors: [{ code: poll.status, message: `imessage poll ended ${poll.status}`, remediation: "Read the receipt fields; the cursor still guards redelivery." }], verification: "UNVERIFIED" };
