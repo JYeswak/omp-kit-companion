@@ -253,6 +253,16 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 		census: null, noCensus: "one small record per live seat session, rewritten in place every 5 s; nothing accumulates to count", ownerBead: "ompkit-hznvg",
 	},
 	{
+		id: "goal-state", title: "Seat goal state ~/.local/state/omp-kit/goal-state/<sha1(session file)[:16]>.json (schema, mode, goal id, status, writer pid, written_at) and its <record>.<pid>.tmp",
+		rows: [], class: "REHOME", ownerKey: "agent+session", scope: "seat", survivesRespawn: true,
+		writers: ["extensions/kit-goal-state.ts"],
+		cancel: "the extension removes every record it wrote at session_shutdown",
+		crash: "a crashed seat leaves its record and possibly a <record>.<pid>.tmp; self_restart trusts a record only when it names the same goal and is strictly newer than the journal's pause, so a stale record falls back to the journal",
+		respawn: "keyed by the seat's session file, so the successor that resumes the session rewrites the same record on its next goal_updated",
+		terminal: { outcome: "self-heals", producer: "extensions/kit-goal-state.ts rewrite on goal_updated, removal at shutdown" },
+		census: null, noCensus: "one small record per live seat session, rewritten in place on goal changes; nothing accumulates to count", ownerBead: "ompkit-2un74",
+	},
+	{
 		id: "inbox-wake-cursor", title: "Seat mail-wake cursor ~/.local/state/omp-kit/inbox-wake/<agent>.<sha1(project)[:12]>.json (schema, agent, project, delivery-event cursor, at) and its <record>.<pid>.tmp, plus WOKEN_INPROCESS appends to ~/.local/state/omp-kit/mail-wake.jsonl",
 		rows: [], class: "REHOME", ownerKey: "agent+project", scope: "seat", survivesRespawn: true,
 		writers: ["extensions/kit-inbox-wake.ts"],
