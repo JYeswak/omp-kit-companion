@@ -1375,9 +1375,15 @@ export async function deliverToTernSeat(input: {
 	const proofPollMs = input.pollMs ?? TERN_PROOF_POLL_MS;
 	const deadlineMs = input.deadlineMs ?? TERN_PROOF_DEADLINE_MS;
 	let queued = false;
+	/** WAKEREPLACED1: notes for stale replaced-unproven records this send auto-acknowledged; appended to every later refusal detail (empty before the sweep, so pre-sweep refusals read unchanged). */
+	const staleAcks: string[] = [];
 	const fail = (code: string, detail: string): TernDeliverResult =>
-		({ status: "REFUSED", marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null, detail, code,
+		({ status: "REFUSED", marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null,
+			detail: staleAcks.length === 0 ? detail : `${detail}; ${staleAcks.join("; ")}`, code,
 			...(queued ? { queue_states: ["QUEUED", "REFUSED"] as const } : {}) });
+	/** WAKEREPLACED1: the same note for inline (non-fail) post-sweep outcomes. */
+	const noted = (detail: string): string =>
+		staleAcks.length === 0 ? detail : `${detail}; ${staleAcks.join("; ")}`;
 	const provenance = seatProvenance(input.text, input.env ?? process.env);
 	if (provenance.refused) return fail("SEND_PROVENANCE_FORGED", provenance.detail);
 	const gate = input.gate ?? {};
@@ -1541,7 +1547,25 @@ export async function deliverToTernSeat(input: {
 		if (!name.startsWith(`${seatKey}.`) || !name.endsWith(".json")) continue;
 		const rec = readTernPending(join(pendingDir, name));
 		if (rec === null) continue;
-		if (rec.status === "REPLACED_UNPROVEN") return refuseReplaced(join(pendingDir, name), rec);
+		if (rec.status === "REPLACED_UNPROVEN" && rec.sessionId === journal.sessionId) return refuseReplaced(join(pendingDir, name), rec);
+		if (rec.status === "REPLACED_UNPROVEN") {
+			// WAKEREPLACED1: the seat journals a new session file now, so the replaced journal is gone and
+			// consumption can never be proven. Ack the stale record itself (ledgered, never resent), keep a
+			// recovery copy, note it in the result, and proceed with the new send instead of suppressing it.
+			const stalePath = join(pendingDir, name);
+			let dropPath: string;
+			try {
+				dropPath = dropMessage(input.dropDir, input.seat.session, input.seat.pane, rec.marker,
+					`stale replaced-unproven attempt auto-acknowledged (WAKEREPLACED1); consumption can never be proven.\n\n- marker: ${rec.marker}\n- seatKey: ${rec.seatKey}\n- journal session: ${rec.sessionId}\n- textSha256: ${rec.textSha256}\n- createdAt: ${rec.createdAt}\n- pending record: ${stalePath}`);
+			} catch {
+				return fail("PENDING_SETTLEMENT_FAILED", `Could not write a recovery copy for stale replaced-unproven record ${stalePath}; nothing sent.`);
+			}
+			if (!settleTernPending(pendingDir, name, rec, "ACKNOWLEDGED", null)) {
+				return fail("PENDING_SETTLEMENT_FAILED", `Could not settle stale replaced-unproven record ${stalePath}; nothing sent.`);
+			}
+			staleAcks.push(`auto-acknowledged stale replaced-unproven attempt ${rec.marker} (journal session ${rec.sessionId} gone; recovery copy at ${dropPath})`);
+			continue;
+		}
 		if (rec.sessionId !== journal.sessionId) {
 			settleTernPending(pendingDir, name, rec, "INCARNATION_GONE", null);
 			continue;
@@ -1575,7 +1599,7 @@ export async function deliverToTernSeat(input: {
 			? `; if it never landed, acknowledge the loss of proof without resending: ${ackPendingCommand(pendingPath, input.dropDir)}`
 			: `; acknowledgeable from ${new Date(ackableAt).toISOString()} if it never lands`;
 		return { status: "PENDING_CONSUME", marker: pending.marker, sends: 0, sessionFile, offset: null, drop_path: null,
-			detail: `earlier attempt unproven on this runtime incarnation; new send suppressed${how}`, code: "SUPPRESSED_PENDING",
+			detail: noted(`earlier attempt unproven on this runtime incarnation; new send suppressed${how}`), code: "SUPPRESSED_PENDING",
 			...(queued ? { queue_states: ["QUEUED", "PENDING_CONSUME"] as const } : {}) };
 	}
 	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
@@ -1592,7 +1616,7 @@ export async function deliverToTernSeat(input: {
 		try { rmSync(pendingPath, { force: true }); } catch {}
 		return { status: "NOT_DELIVERED", marker, sends: 0, sessionFile: null, offset: null,
 			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
-			detail: `destination locked by another send within the bound; nothing typed`, code: "LOCK_BUSY",
+			detail: noted(`destination locked by another send within the bound; nothing typed`), code: "LOCK_BUSY",
 			...(queued ? { queue_states: ["QUEUED", "EXPIRED"] as const } : {}) };
 	}
 	try {
@@ -1605,7 +1629,7 @@ export async function deliverToTernSeat(input: {
 		if (fresh === null || (steer ? rewritten : fresh.sha256 !== observation.sessionSha)) {
 			try { rmSync(pendingPath, { force: true }); } catch {}
 			return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
-				detail: `session moved between observe and effect; zero sends`, code: "SEAT_REBOUND",
+				detail: noted(`session moved between observe and effect; zero sends`), code: "SEAT_REBOUND",
 				...(queued ? { queue_states: ["QUEUED", "REFUSED"] as const } : {}) };
 		}
 		// F5: a failed or crashed dispatch does not prove zero native effects;
@@ -1653,7 +1677,7 @@ export async function deliverToTernSeat(input: {
 			try { rmSync(pendingPath, { force: true }); } catch {}
 			return { status: "NOT_DELIVERED", marker, sends: 1, sessionFile, offset: null,
 				drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
-				detail: `native turn rejected before running (${nativeResult}); nothing typed; recovery copy written; resend at once`,
+				detail: noted(`native turn rejected before running (${nativeResult}); nothing typed; recovery copy written; resend at once`),
 				code: "SEND_REFUSED_NATIVE",
 				...(queued ? { queue_states: ["QUEUED", "EXPIRED"] as const } : {}) };
 		}
@@ -1683,14 +1707,14 @@ export async function deliverToTernSeat(input: {
 				try { rmSync(pendingPath, { force: true }); } catch {}
 				const steered = last.steering ? " as a steering entry (program was busy at handle time)" : "";
 				return { status: "OK", marker, sends: 1, sessionFile, offset: last.offset, drop_path: null,
-					detail: `${payloadKind.kind === "goal-set" ? "goal adopted" : "USER entry"} proven at offset ${last.offset} via native agent API${steered}; ${targetNote}`,
+					detail: noted(`${payloadKind.kind === "goal-set" ? "goal adopted" : "USER entry"} proven at offset ${last.offset} via native agent API${steered}; ${targetNote}`),
 					code: last.steering ? "PROVEN_STEERED" : "PROVEN",
 					...(queued ? { queue_states: ["QUEUED", "DELIVERED"] as const } : {}) };
 			}
 			if (poll + 1 >= polls) break;
 			await wait(proofPollMs);
 		}
-		const note = "";
+		const note = staleAcks.length === 0 ? "" : `; ${staleAcks.join("; ")}`;
 		return { status: "PENDING_CONSUME", marker, sends: 1, sessionFile, offset: null,
 			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
 			detail: `${dispatched ? `sent via native agent API (${targetNote})` : `native turn (${targetNote}) failed; dispatch failed, effect unknown`}; proof ${last.status} (${last.reason})${note}; pending retained, never auto-resent`,

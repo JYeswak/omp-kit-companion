@@ -950,7 +950,7 @@ test("SENDSTUCK1: replacement proof scans history before the current bounded tai
 		.toMatchObject([{ status: "CONSUMED_LATER", marker: fx.marker, offset: Buffer.byteLength(HEADER) }]);
 });
 
-test("SENDSTUCK1: a replaced-unproven record still requires acknowledgement after a runtime incarnation changes", async () => {
+test("SENDSTUCK1: a replaced-unproven record is auto-acknowledged once the journal session is gone (WAKEREPLACED1)", async () => {
 	const fx = replacedPending(settledJournal);
 	expect((await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io })).code).toBe("REPLACED_UNPROVEN");
 	fx.fake.journal.text = HEADER.replace('"s1"', '"s2"') + assistantEntry("m1", null);
@@ -958,9 +958,12 @@ test("SENDSTUCK1: a replaced-unproven record still requires acknowledgement afte
 	const result = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io,
 		observe: idleOf(fx.fake, { runtimeBinding: bound }),
 		identify: async () => ({ ...ternIdentified, runtimeBinding: bound }) });
-	expect(result.code).toBe("REPLACED_UNPROVEN");
-	expect(fx.fake.sent).toEqual([]);
-	expect(existsSync(fx.path)).toBe(true);
+	expect(result.status).toBe("OK");
+	expect(result.marker).not.toBe(fx.marker);
+	expect(result.detail).toContain(`auto-acknowledged stale replaced-unproven attempt ${fx.marker}`);
+	expect(fx.fake.sent).toEqual([`[from agent GoldenStone via omp-kit send]\nnew\n[${result.marker}]`]);
+	expect(existsSync(fx.path)).toBe(false);
+	expect(readFileSync(join(fx.dir, "..", "tern-pending", "ledger.jsonl"), "utf8")).toContain(`"status":"ACKNOWLEDGED","marker":"${fx.marker}"`);
 });
 
 test("GOALSENDLAND1: a native turn with no journal entry reports pane, session file and native verdict", async () => {
@@ -1138,6 +1141,42 @@ test("PENDINGSTALE1: an unlanded attempt past the window is acknowledged (ledger
 	const next = await deliverTern(fake, "after ack", { dropDir: dir });
 	expect(next.code).not.toBe("SUPPRESSED_PENDING");
 	expect(fake.sent).toEqual([`[from agent GoldenStone via omp-kit send]\nafter ack\n[${next.marker}]`]);
+});
+
+test("WAKEREPLACED1: a pending record whose journal was replaced is auto-acknowledged with a drop copy and the new send dispatches", async () => {
+	const fx = replacedPending(settledJournal);
+	expect((await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io })).code).toBe("REPLACED_UNPROVEN");
+	expect(existsSync(fx.path)).toBe(true);
+	// The seat restarted onto a new session file: same pane, new journal session, old journal gone.
+	fx.fake.journal.text = HEADER.replace('"s1"', '"s2"') + assistantEntry("m1", null);
+	const bound = { ...ternRuntimeBinding, sessionUuid: "s2" };
+	const result = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io,
+		observe: idleOf(fx.fake, { runtimeBinding: bound }),
+		identify: async () => ({ ...ternIdentified, runtimeBinding: bound }) });
+	expect(result.status).toBe("OK");
+	expect(result.marker).not.toBe(fx.marker);
+	expect(result.detail).toContain(`auto-acknowledged stale replaced-unproven attempt ${fx.marker}`);
+	expect(fx.fake.sent).toEqual([`[from agent GoldenStone via omp-kit send]\nnew\n[${result.marker}]`]);
+	expect(existsSync(fx.path)).toBe(false);
+	const ledger = readFileSync(join(fx.dir, "..", "tern-pending", "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	expect(ledger).toMatchObject([{ status: "REPLACED_UNPROVEN", marker: fx.marker }, { status: "ACKNOWLEDGED", marker: fx.marker }]);
+	const drops = readdirSync(fx.dir).filter((name) => name.endsWith(`-${fx.marker}.md`));
+	expect(drops.length).toBe(1);
+	expect(readFileSync(join(fx.dir, drops[0]!), "utf8")).toContain(fx.marker);
+});
+
+test("WAKEREPLACED1 planted: a pending record whose journal still exists keeps suppressing", async () => {
+	const fx = replacedPending(settledJournal);
+	expect((await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io })).code).toBe("REPLACED_UNPROVEN");
+	const again = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io, untilDeliveredMs: 60_000,
+		wait: async () => { throw new Error("replaced-unproven must not wait out the bound"); } });
+	expect(again.status).toBe("REFUSED");
+	expect(again.code).toBe("REPLACED_UNPROVEN");
+	expect(again.detail).not.toContain("auto-acknowledged");
+	expect(fx.fake.sent).toEqual([]);
+	expect(existsSync(fx.path)).toBe(true);
+	expect(readdirSync(fx.dir).filter((name) => name.endsWith(`-${fx.marker}.md`))).toEqual([]);
+	expect(readFileSync(join(fx.dir, "..", "tern-pending", "ledger.jsonl"), "utf8")).not.toContain(`"status":"ACKNOWLEDGED"`);
 });
 
 test("TERN2.4 AM58562-4: journal append without consumption keeps suppression", async () => {
