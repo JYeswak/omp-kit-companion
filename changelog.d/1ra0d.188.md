@@ -1,0 +1,1 @@
+- `omp-kit verify` provisions every lockfile directory between the export root and a box's working directory, root first, instead of only the nearest one, so a workspace package with its own lockfile also gets the root install its `file:`/workspace dependencies need.

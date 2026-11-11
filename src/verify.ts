@@ -494,12 +494,14 @@ export function declaresDependencies(path: string): boolean {
 
 /**
  * Ensure one box command's JS dependencies are provisioned. Null: no JS runtime involved, so
- * nothing to do. Otherwise the box cwd's nearest lockfile dir up to the export root, installed
- * once per directory (cache). A package.json with no covering lockfile is the named refusal,
- * as is a deno box in a deno project (deno.json/deno.jsonc) with no deno.lock: without the
- * lockfile deno would resolve against the global cache and registry, unpinned.
+ * nothing to do. Otherwise every lockfile dir from the box cwd up to the export root, installed
+ * root first and once per directory (cache), so the nearest dir's .bin ends up first on PATH
+ * (VERIFYDEPSWALK1 ompkit-1ra0d.188: a workspace package with its own lockfile still needs the
+ * root install for its file:/workspace dependencies). A package.json with no covering lockfile
+ * is the named refusal, as is a deno box in a deno project (deno.json/deno.jsonc) with no
+ * deno.lock: without the lockfile deno would resolve against the global cache and registry, unpinned.
  */
-async function ensureBoxDeps(command: string, exportDir: string, env: Record<string, string>, log: string[], cache: Map<string, ProvisionOutcome>): Promise<ProvisionOutcome | null> {
+export async function ensureBoxDeps(command: string, exportDir: string, env: Record<string, string>, log: string[], cache: Map<string, ProvisionOutcome>): Promise<ProvisionOutcome | null> {
 	if (!JS_RUNTIME.test(command)) return null;
 	const cwd = boxCwd(command, exportDir);
 	const rel = relative(exportDir, cwd);
@@ -507,23 +509,29 @@ async function ensureBoxDeps(command: string, exportDir: string, env: Record<str
 	let dir = cwd;
 	let hasPackageJson = false;
 	let hasDenoConfig = false;
+	const lockDirs: { dir: string; lock: LockKind }[] = [];
 	for (;;) {
 		if (declaresDependencies(join(dir, "package.json"))) hasPackageJson = true;
 		if (existsSync(join(dir, "deno.json")) || existsSync(join(dir, "deno.jsonc"))) hasDenoConfig = true;
 		const lock = lockKind(dir);
-		if (lock !== null) {
-			const hit = cache.get(dir);
-			if (hit !== undefined) return hit.ok ? null : hit;
-			const outcome = await installLockedDeps(dir, lock, env, log);
-			cache.set(dir, outcome);
-			if (!outcome.ok) return outcome;
-			prependProvisionedBin(dir, env, log);
-			return null;
-		}
+		if (lock !== null) lockDirs.push({ dir, lock });
 		if (dir === exportDir) break;
 		const up = dirname(dir);
 		if (up === dir || up.length < exportDir.length) break;
 		dir = up;
+	}
+	if (lockDirs.length > 0) {
+		for (const { dir: lockDir, lock } of lockDirs.reverse()) {
+			const hit = cache.get(lockDir);
+			if (hit !== undefined && !hit.ok) return hit;
+			if (hit === undefined) {
+				const outcome = await installLockedDeps(lockDir, lock, env, log);
+				cache.set(lockDir, outcome);
+				if (!outcome.ok) return outcome;
+			}
+			prependProvisionedBin(lockDir, env, log);
+		}
+		return null;
 	}
 	if (DENO.test(command) && hasDenoConfig) return { ok: false, detail: `DEPENDENCIES_NOT_LOCKED: no deno.lock covers ${cwd}; commit one, never resolve outside it` };
 	if (!hasPackageJson) return null;
