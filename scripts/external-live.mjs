@@ -87,7 +87,9 @@ function runHelper(root, lib, args, workspace) {
 	if (result.exitCode !== 0) fail("P09_HELPER_FAILED");
 }
 async function waitForPort(child, portFile, stdout, stderr) {
-	const deadline = performance.now() + 5_000;
+	// RELFLAKE1 (ompkit-1ra0d.109): a readiness wait, not a product latency bound. 5 s failed the 0.2.122 release
+	// verdict under a loaded host (MOCK_SERVER_START_TIMEOUT twice); a dead server still fails at once (exitCode).
+	const deadline = performance.now() + 30_000;
 	while (performance.now() < deadline) {
 		if (child.exitCode !== null) {
 			await Promise.all([stdout, stderr]);
