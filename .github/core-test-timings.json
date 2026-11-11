@@ -162,8 +162,6 @@
     "tests/cli/test-preload.test.ts": 0,
     "tests/cli/test-runner.test.ts": 13152,
     "tests/cli/toolcall-corpus.test.ts": 207,
-    "tests/cli/tracker-recovery-admission.test.ts": 2,
-    "tests/cli/tracker-recovery-rate.test.ts": 5,
     "tests/cli/tracker-recovery.test.ts": 61,
     "tests/cli/watch-actuator.test.ts": 1,
     "tests/cli/work-doctor.test.ts": 1232,

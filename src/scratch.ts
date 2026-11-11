@@ -352,7 +352,7 @@ export function defaultLiveness(): LivenessDeps {
 	};
 }
 
-/** The pre-5m6ej pid probe, kept for tracker-recovery (src/tracker-recovery.ts) until it moves to kitlib proc; scratch owners use ownerIncarnationState. */
+/** The pre-5m6ej pid probe, kept for pid-keyed ownership checks until it moves to kitlib proc; scratch owners use ownerIncarnationState. */
 export function probeOwner(pid: number, expectedStart: string, deps: LivenessDeps): OwnerState {
 	if (deps.signalAlive(pid)) {
 		const current = deps.processStart(pid);

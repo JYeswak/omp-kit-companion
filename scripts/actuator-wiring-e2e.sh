@@ -6,7 +6,7 @@
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-FILES="tests/cli/actuator-admission.test.ts tests/cli/send-admission.test.ts tests/cli/fleet-watch-admission.test.ts tests/cli/flush-admission.test.ts tests/cli/service-run-admission.test.ts tests/cli/tracker-recovery-admission.test.ts tests/cli/scope-admission.test.ts"
+FILES="tests/cli/actuator-admission.test.ts tests/cli/send-admission.test.ts tests/cli/fleet-watch-admission.test.ts tests/cli/flush-admission.test.ts tests/cli/service-run-admission.test.ts tests/cli/scope-admission.test.ts"
 TOTAL=0
 PASS=0
 

@@ -1,0 +1,1 @@
+- Removed tracker-recovery code that no job had called since the fleet watcher was retired. Nothing installed changes: `br doctor` recovers a tracker on demand, and `omp-kit doctor --scope work --stranded-only` still lists stranded work.

@@ -106,7 +106,6 @@
    "src/tern/transport.ts": 1,
    "src/test-runner.ts": 1,
    "src/tmux-socket.ts": 2,
-   "src/tracker-recovery.ts": 1,
    "src/work-doctor.ts": 1,
    "tests/cli/admission-concurrency.test.ts": 1,
    "tests/cli/affected-tests.test.ts": 3,
@@ -146,7 +145,6 @@
    "tests/cli/fleet-lessons.test.ts": 19,
    "tests/cli/fleet-round.test.ts": 1,
    "tests/cli/fleet-watch-gitlock-reap.test.ts": 3,
-   "tests/cli/fleet-watch-stranded-rhy9-24.test.ts": 1,
    "tests/cli/fleet-watch.test.ts": 3,
    "tests/cli/fresh-gate.test.ts": 16,
    "tests/cli/full-test-runner.test.ts": 8,
@@ -269,6 +267,6 @@
  },
  "schema": 1,
  "totals": {
-  "raw-spawn": 736
+  "raw-spawn": 734
  }
 }

@@ -11,7 +11,9 @@ afterAll(cleanupAllOwnedTmp);
 const repoRoot = resolve(import.meta.dir, "../..");
 // Rows of docs/evidence/pid-keyed-state-inventory-20261018.md (omp-kit private repo, 282f630) that are not class NONE.
 // The NONE rows (14, 16, 19, 22, 23, 26, 27) are keyed by name, session or block and need no entry.
-const REQUIRED_ROWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 17, 18, 20, 21, 24, 25];
+// Row 5 (tracker-recovery lease) is retired: ompkit-1ra0d.123 DEADTICK1 deleted its only writer
+// (src/tracker-recovery.ts), so no entry can name it and no lint row covers it.
+const REQUIRED_ROWS = [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 15, 17, 18, 20, 21, 24, 25];
 const NONE_ROWS = [14, 16, 19, 22, 23, 26, 27];
 
 const cleanup: string[] = [];

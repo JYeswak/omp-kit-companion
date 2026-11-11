@@ -47,10 +47,11 @@ separate status fields.
 
 ## Retained, unscheduled maintenance code
 
-The internal `runFleetWatchOnce` entrypoint remains for recovery/audit callers
-and their tests, not as an installable job. It retains busy-tracker recovery,
-quarantine retention, git index-lock reaping and stranded-work audit routing.
-These functions are not a replacement polling service and are not scheduled by
-`service install`. Recovery and reaping keep their existing liveness, custody,
-admission and receipt gates. Stranded audit routing remains director-facing;
-idle workers receive no messages or key submissions.
+The internal `runFleetWatchOnce` entrypoint remains for the git index-lock
+reaping and its test, not as an installable job. ompkit-1ra0d.123 DEADTICK1
+deleted the tick's busy-tracker recovery, quarantine retention and
+stranded-work audit routing: they were called only from that tick and
+nothing schedules them. These functions are not a replacement polling
+service. Reaping keeps its existing liveness and admission gates.
+Stranded-work visibility remains on demand via `omp-kit doctor --scope work`
+(`--stranded-only`); native tracker recovery remains via `br doctor`.

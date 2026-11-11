@@ -1,16 +1,11 @@
-import type { WorkRepoReport } from "./work-doctor.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
-import { checkTrackerRecoveryCutover, defaultPostRecoverReadback, recoverBusyTracker, retainTrackerQuarantine, type TrackerQuarantineReceipt, type TrackerRecoveryCutoverInput, type TrackerRecoveryResult, type TrackerRetentionOutcome, type TrackerRetentionReceipt } from "./tracker-recovery.ts";
 import { appendFileSync, lstatSync, readFileSync, type Stats } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename } from "node:path";
 import { homedir } from "node:os";
 import { appendReapReceipt, defaultGitLockLedgerPath, reapRepoGitLocks, type RepoReapResult, type ReapReceipt } from "./index-lock.ts";
 import { defaultRunner, type ScratchRunner } from "./scratch.ts";
-import { atomicReplaceBytes } from "./kitlib/io.ts";
 
 const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷]/;
-/** Reserved uncommitted edits must exceed the work audit's 30-minute limit. */
-export const STRANDED_ESCALATION_LIMIT_MINUTES = 30;
 
 type ScopedAssignment = { bead: string; role: "builder" | "grader" };
 type CutStage = "director" | "chief" | "critical";
@@ -42,19 +37,14 @@ function cutDeclaration(cut: NonNullable<FleetWatchSession["milestone"]>): strin
 }
 /**
  * ompkit-ps3lo: MP6-registry seam. Every registered tracker is covered by
- * the health tick even when no session entry names its repo; recovery still
- * runs under the owning director named here. Absent, the legacy
- * sessions-only coverage runs.
+ * the tick's git-lock reap even when no session entry names its repo.
+ * Absent, the legacy sessions-only coverage runs.
  */
 export type FleetWatchRegisteredTracker = { repo: string; session: string };
 
-export type FleetWatchRecoveryAction = { kind: TrackerRecoveryResult["kind"]; session: string; pane: string; checks: number; text: string; receipt?: TrackerQuarantineReceipt; repo?: string };
-export type FleetWatchRetentionAction = { kind: "TRACKER_QUARANTINE_RETENTION"; session: string; pane: string; checks: number; text: string; receipt: TrackerRetentionReceipt; repo?: string };
-/** An audit routing observation, not a delivery or acceptance receipt. */
-export type FleetWatchStrandedAction = { kind: "STRANDED_ESCALATED" | "STRANDED_UNRESOLVED"; session: string; pane: string; checks: number; text: string; repo: string };
 /** GITLOCK1 (ompkit-fp72.19.1.9): a stale empty git lock renamed aside under every reaper gate; the receipt is in the lock ledger. */
 export type FleetWatchGitLockAction = { kind: "GITLOCK_REAPED"; session: string; pane: string; checks: number; text: string; repo: string; receipt: ReapReceipt };
-export type FleetWatchAction = FleetWatchRecoveryAction | FleetWatchRetentionAction | FleetWatchStrandedAction | FleetWatchGitLockAction;
+export type FleetWatchAction = FleetWatchGitLockAction;
 /** Routing evidence, not authorization to act on a bead or a seat. */
 export interface PullRefusal {
 	class: "unsupported_native" | "unauthorized_hands" | "unsafe_custody" | "tool_read_failure";
@@ -153,10 +143,6 @@ function loadFleetWatchState(path: string): FleetWatchState | undefined {
 	return parseFleetWatchState(JSON.parse(readFileSync(path, "utf8")));
 }
 
-function saveFleetWatchState(path: string, state: FleetWatchState): void {
-	atomicReplaceBytes(resolve(path), Buffer.from(`${JSON.stringify(state)}\n`, "utf8"), { mode: 0o600, durability: "full" });
-}
-
 /** Read unresolved critical episodes for the current cut, not a fresh supply or delivery claim. */
 export function readFleetWatchCriticalReportLines(configPath: string, statePath: string): string[] {
 	const state = loadFleetWatchState(statePath);
@@ -173,38 +159,9 @@ export function paneIsBusy(paneText: string): boolean {
 	return paneText.split("\n").slice(-6).some(line => SPINNER.test(line));
 }
 
-
 function stringList(value: unknown): string[] | null {
 	return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : null;
 }
-
-/** Episode deduplication for the retained stranded-work audit, not seat polling. */
-export class FleetWatcher {
-	private readonly episodes = new Map<string, { kind: string; atMs: number }>();
-	constructor(_config: FleetWatchConfig, private readonly now: () => number = Date.now, state?: FleetWatchState) {
-		for (const [key, episode] of Object.entries(state?.preassign ?? {})) {
-			if (key.startsWith("stranded:")) this.episodes.set(key, episode);
-		}
-	}
-	snapshot(): FleetWatchState {
-		return { version: 1, panes: {}, preassign: Object.fromEntries(this.episodes) };
-	}
-	claimStrandedEpisode(key: string): boolean {
-		const id = `stranded:${key}`;
-		if (this.episodes.has(id)) return false;
-		this.episodes.set(id, { kind: "STRANDED_ESCALATED", atMs: this.now() });
-		return true;
-	}
-	clearStrandedRepo(repo: string): boolean {
-		let cleared = false;
-		for (const key of this.episodes.keys()) if (key.startsWith(`stranded:${repo}\0`)) {
-			this.episodes.delete(key);
-			cleared = true;
-		}
-		return cleared;
-	}
-}
-
 
 const MISSION_REF = /^[^\n:][^\n]*:[1-9][0-9]{0,6}$/;
 
@@ -269,19 +226,8 @@ function parseRegisteredTrackers(value: unknown): FleetWatchRegisteredTracker[] 
 
 
 export type FleetWatchOnceDeps = {
-	send: (session: string, pane: string, text: string) => void;
 	logPath: string;
-	statePath?: string | null;
 	now?: () => number;
-	recoverTracker?: (repo: string, session: string) => TrackerRecoveryResult | null;
-	/** Retire the incumbent only with successor evidence and a configured registry recovery path. */
-	recoveryCutover?: ((repo: string) => TrackerRecoveryCutoverInput | null) | null;
-	/**
-	 * ompkit-rhy9.15 RET1: bounded quarantine retention per repo per tick.
-	 * Absent, the canonical retainTrackerQuarantine runs (silent unless it
-	 * reaps); null disables retention for the tick.
-	 */
-	retainTracker?: ((repo: string) => TrackerRetentionOutcome | null) | null;
 	/**
 	 * GITLOCK1 (ompkit-fp72.19.1.9): reap stale empty git locks once per repo per tick through every
 	 * gate in src/index-lock.ts (empty, age, lsof file and git-cwd clear, identity). Absent, the
@@ -290,12 +236,10 @@ export type FleetWatchOnceDeps = {
 	 */
 	gitLockReap?: { run?: ScratchRunner; ledgerPath?: string; staleAfterMs?: number } | null;
 	/**
-	 * Pause/custody admission snapshot. Retained audit and recovery effects
-	 * consult it first; a refusal performs zero effects and is logged.
+	 * Pause/custody admission snapshot. The git lock reap consults it
+	 * first; a refusal performs zero effects and is logged.
 	 */
 	admission?: AdmissionInput;
-	/** Latest work-doctor rows; reuse its reservation and uncommitted ages. */
-	workAudit?: { repos: readonly WorkRepoReport[] } | null;
 };
 
 function admittedEffect(admission: AdmissionInput | undefined, action: string): boolean {
@@ -309,141 +253,24 @@ function recordAdmissionRefusal(deps: FleetWatchOnceDeps, record: AdmissionRefus
 	appendFileSync(deps.logPath, JSON.stringify({ at: new Date(atMs).toISOString(), kind: "ADMISSION_REFUSED", ...record }) + "\n");
 }
 
-/** Route the work audit as one tick phase; return whether persisted episodes changed. */
-function recordStrandedAudit(config: FleetWatchConfig, deps: FleetWatchOnceDeps, activeWatcher: FleetWatcher, actions: FleetWatchAction[]): boolean {
-	let stateDirty = false;
-	// ompkit-rhy9.24: route aged owned work through the configured director,
-	// never infer ownership from dirty files or choose an unrelated queue.
-	if (deps.workAudit) {
-		const owners = new Map<string, FleetWatchSession>();
-		for (const session of config.sessions) if (!owners.has(session.repo)) owners.set(session.repo, session);
-		for (const tracker of config.registeredTrackers ?? []) {
-			if (owners.has(tracker.repo)) continue;
-			const owner = config.sessions.find((session) => session.session === tracker.session);
-			if (owner) owners.set(tracker.repo, owner);
-		}
-		const audited = new Set<string>();
-		const stamp = () => new Date((deps.now ?? Date.now)()).toISOString();
-		for (const row of deps.workAudit.repos) {
-			if (audited.has(row.path)) continue;
-			audited.add(row.path);
-			const overLimit = (row.stale_uncommitted_edits ?? []).filter((edit) => edit.age_minutes > STRANDED_ESCALATION_LIMIT_MINUTES);
-			const owner = owners.get(row.path);
-			if (!row.stranded || overLimit.length === 0) {
-				if (activeWatcher.clearStrandedRepo(row.path)) {
-					stateDirty = true;
-					appendFileSync(deps.logPath, JSON.stringify({ at: stamp(), kind: "STRANDED_CLEARED", session: owner?.session ?? "UNKNOWN", pane: "director", checks: 0, repo: row.path, text: `stranded finding cleared for ${row.path}; the next over-limit audit escalates again` }) + "\n");
-				}
-				continue;
-			}
-			if (!owner) {
-				const text = `Fleet watch STRANDED_UNRESOLVED: ${row.path} is stranded over the ${STRANDED_ESCALATION_LIMIT_MINUTES}min limit (${overLimit.map((edit) => `${edit.path} ${edit.age_minutes}min`).join(", ")}) but names no configured session; no director was notified. Configure the repo under a session or registeredTracker.`;
-				const action: FleetWatchStrandedAction = { kind: "STRANDED_UNRESOLVED", session: "UNKNOWN", pane: "director", checks: 0, text, repo: row.path };
-				appendFileSync(deps.logPath, JSON.stringify({ at: stamp(), ...action }) + "\n");
-				actions.push(action);
-				continue;
-			}
-			for (const edit of overLimit) {
-				if (!admittedEffect(deps.admission, "send")) {
-					recordAdmissionRefusal(deps, { session: owner.coordinatorSession, pane: owner.coordinatorPane, checks: 0, repo: row.path, text: "admission refused stranded escalation; nothing was sent" });
-					continue;
-				}
-				if (!activeWatcher.claimStrandedEpisode(`${row.path}\0${edit.bead}\0${edit.path}`)) continue;
-				stateDirty = true;
-				const text = `Fleet watch STRANDED_ESCALATED to ${owner.coordinatorSession}: ${row.path} stranded ${edit.age_minutes}min over the ${STRANDED_ESCALATION_LIMIT_MINUTES}min limit; holder ${edit.agent_name} owns ${edit.path_pattern} (${edit.path}, bead ${edit.bead}). Save-sweep remediation: run the save sweep (planRepoSweep) for the held paths, commit releasable work and push; the finding clears on the next clean audit.`;
-				const action: FleetWatchStrandedAction = { kind: "STRANDED_ESCALATED", session: owner.coordinatorSession, pane: owner.coordinatorPane, checks: 0, text, repo: row.path };
-				deps.send(owner.coordinatorSession, owner.coordinatorPane, text);
-				appendFileSync(deps.logPath, JSON.stringify({ at: stamp(), ...action }) + "\n");
-				actions.push(action);
-			}
-		}
-	}
-	return stateDirty;
-}
-
-export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnceDeps, watcher?: FleetWatcher): FleetWatchAction[] {
+/**
+ * ompkit-1ra0d.123 DEADTICK1: the fleet-watch service job is retired, so the
+ * tick keeps only the git index-lock reap. Busy-tracker recovery,
+ * quarantine retention and stranded-work audit routing were called only
+ * from this tick and nothing schedules them; stranded visibility remains
+ * on demand via `doctor --scope work` and native recovery via br doctor.
+ */
+export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnceDeps): FleetWatchAction[] {
 	if (!config.enabled) return [];
-	const statePath = deps.statePath === undefined
-		? watcher === undefined ? join(dirname(deps.logPath), "fleet-watch-state.json") : null
-		: deps.statePath;
-	const activeWatcher = watcher ?? new FleetWatcher(config, deps.now, statePath === null ? undefined : loadFleetWatchState(statePath));
 	const actions: FleetWatchAction[] = [];
-	const recoveredRepos = new Set<string>();
-	const recoverTracker = deps.recoverTracker ?? ((repo: string, session: string) =>
-		recoverBusyTracker(repo, session, { postRecoverReadback: defaultPostRecoverReadback }));
-	const configuredRecoverySessions = new Set(config.sessions.map((session) => session.session));
-	const cutoverRepos = new Set<string>();
-	for (const session of config.sessions) {
-		if (recoveredRepos.has(session.repo)) continue;
-		if (cutoverRepos.has(session.repo)) continue;
-		const evidence = deps.recoveryCutover?.(session.repo);
-		const registered = config.registeredTrackers?.some((tracker) =>
-			tracker.repo === session.repo && configuredRecoverySessions.has(tracker.session)) ?? false;
-		if (evidence && registered && checkTrackerRecoveryCutover(evidence).retired) {
-			cutoverRepos.add(session.repo);
-			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "TRACKER_RECOVERY_CUTOVER", session: session.session, pane: "tracker", checks: 0, repo: session.repo, text: `successor kit owns tracker recovery for ${session.repo}; duplicated project recovery branch retired` }) + "\n");
-			continue;
-		}
-		recoveredRepos.add(session.repo);
-		if (!admittedEffect(deps.admission, "tracker-recovery")) {
-			recordAdmissionRefusal(deps, { session: session.session, pane: "tracker", checks: 0, text: "admission refused tracker recovery; no recovery ran" });
-			continue;
-		}
-		const recovery = recoverTracker(session.repo, session.session);
-		if (!recovery) continue;
-		const action: FleetWatchRecoveryAction = { kind: recovery.kind, session: session.session, pane: "tracker", checks: 0, text: recovery.text, ...(recovery.receipt === undefined ? {} : { receipt: recovery.receipt }), repo: session.repo };
-		appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...action }) + "\n");
-		actions.push(action);
-	}
 	// ompkit-ps3lo: MP6-registered trackers are covered even without a
-	// session entry. Recovery still needs its owning director: a registered
-	// session no configured session names is covered exactly once with a
-	// named NO_OWNING_DIRECTOR block and zero recover commands.
-	const configuredSessions = new Set(config.sessions.map((session) => session.session));
-	for (const tracker of config.registeredTrackers ?? []) {
-		if (recoveredRepos.has(tracker.repo)) continue;
-		if (!configuredSessions.has(tracker.session)) {
-			recoveredRepos.add(tracker.repo);
-			const text = `Fleet Watch: tracker recovery blocked; NO_OWNING_DIRECTOR: registered tracker ${tracker.repo} names session ${tracker.session}, which is not a configured session; zero recover commands ran.`;
-			const blockedAction: FleetWatchRecoveryAction = { kind: "RECOVERY_BLOCKED", session: tracker.session, pane: "tracker", checks: 0, text, repo: tracker.repo };
-			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...blockedAction }) + "\n");
-			actions.push(blockedAction);
-			continue;
-		}
-		recoveredRepos.add(tracker.repo);
-		if (!admittedEffect(deps.admission, "tracker-recovery")) {
-			recordAdmissionRefusal(deps, { session: tracker.session, pane: "tracker", checks: 0, repo: tracker.repo, text: "admission refused tracker recovery; no recovery ran" });
-			continue;
-		}
-		const registeredRecovery = recoverTracker(tracker.repo, tracker.session);
-		if (!registeredRecovery) continue;
-		const registeredAction: FleetWatchRecoveryAction = { kind: registeredRecovery.kind, session: tracker.session, pane: "tracker", checks: 0, text: registeredRecovery.text, ...(registeredRecovery.receipt === undefined ? {} : { receipt: registeredRecovery.receipt }), repo: tracker.repo };
-		appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...registeredAction }) + "\n");
-		actions.push(registeredAction);
-	}
-	// ompkit-rhy9.15 RET1: one bounded retention pass per unique repo per
-	// tick, after recovery. The canonical operation is silent (null) unless
-	// it reaps, so healthy ticks log nothing new. Admission gates the pass
-	// like every other tracker effect; a refusal performs zero effects.
+	// session entry; sessions-only coverage otherwise.
 	const retentionRepos = new Map<string, string>();
 	for (const session of config.sessions) if (!retentionRepos.has(session.repo)) retentionRepos.set(session.repo, session.session);
 	for (const tracker of config.registeredTrackers ?? []) if (!retentionRepos.has(tracker.repo)) retentionRepos.set(tracker.repo, tracker.session);
-	const retainOne = deps.retainTracker === null ? null : (deps.retainTracker ?? ((target: string) => retainTrackerQuarantine(target, { now: deps.now })));
-	if (retainOne !== null) {
-		for (const [repo, sessionName] of retentionRepos) {
-			if (!admittedEffect(deps.admission, "tracker-quarantine-retention")) {
-				recordAdmissionRefusal(deps, { session: sessionName, pane: "tracker", checks: 0, repo, text: "admission refused tracker quarantine retention; no artifact was moved" });
-				continue;
-			}
-			const retention = retainOne(repo);
-			if (!retention) continue;
-			const action: FleetWatchRetentionAction = { kind: "TRACKER_QUARANTINE_RETENTION", session: sessionName, pane: "tracker", checks: 0, text: retention.text, receipt: retention.receipt, repo };
-			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...action }) + "\n");
-			actions.push(action);
-		}
-	}
-	// GITLOCK1 (ompkit-fp72.19.1.9): one gated reap pass per unique repo per tick, after retention.
-	// Silent unless a lock is renamed aside; HELD, TOO_YOUNG, NON_EMPTY and UNKNOWN leave it in place.
+	// GITLOCK1 (ompkit-fp72.19.1.9): one gated reap pass per unique repo per
+	// tick. Silent unless a lock is renamed aside; HELD, TOO_YOUNG,
+	// NON_EMPTY and UNKNOWN leave it in place.
 	const reapOptions = deps.gitLockReap;
 	if (reapOptions !== null) {
 		const ledger = reapOptions?.ledgerPath ?? defaultGitLockLedgerPath(homedir());
@@ -467,7 +294,5 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 			}
 		}
 	}
-	const stateDirty = recordStrandedAudit(config, deps, activeWatcher, actions);
-	if (statePath !== null && stateDirty) saveFleetWatchState(statePath, activeWatcher.snapshot());
 	return actions;
 }

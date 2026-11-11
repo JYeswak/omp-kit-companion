@@ -1,56 +1,30 @@
-import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { ownedTmp } from "../../src/kitlib/tmp";
 import { runFleetWatchOnce, type FleetWatchConfig } from "../../src/fleet-watch.ts";
-import { defaultSessionId, recoverBusyTracker, type TrackerRecoveryResult } from "../../src/tracker-recovery.ts";
-import { spawnSync } from "node:child_process";
-import type { LivenessDeps } from "../../src/scratch.ts";
-import { runSync } from "../../src/kitlib/run.ts";
+
+// ompkit-1ra0d.123 DEADTICK1: busy-tracker recovery (recoverBusyTracker) was
+// called only from the retired fleet-watch tick and nothing schedules it, so
+// it is deleted and the tick performs no recovery. A planted stale
+// BusyRecovery flag is ignored: zero actions, zero log lines, planted files
+// untouched. There is no runner left in the tick that could invoke br.
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const fixtures = join(import.meta.dir, "../fixtures/tracker-recovery");
 const session = "omp-test";
-const decoder = new TextDecoder();
 
-function plantedTracker(name: "stale-proceeds" | "live-blocks" | "no-lease") {
+function plantedTracker(name: "stale-proceeds" | "live-blocks"): { scratch: string; repo: string; runDir: string; logPath: string } {
 	const scratchParent = join(repoRoot, "var/agent-tmp");
 	mkdirSync(scratchParent, { recursive: true });
 	const scratch = ownedTmp("tracker-recovery", { root: scratchParent }).path;
 	const repo = join(scratch, "repo");
 	const runDir = join(repo, ".beads", ".br_recovery", "schema-migrations", "planted-run");
 	mkdirSync(runDir, { recursive: true });
-	const fixtureDir = join(fixtures, name === "no-lease" ? "stale-proceeds" : name);
+	const fixtureDir = join(fixtures, name);
 	copyFileSync(join(fixtureDir, "recovery-failed.json"), join(runDir, "recovery-failed.json"));
-	if (name !== "no-lease") copyFileSync(join(fixtureDir, ".omp-kit-recovery-lease.json"), join(runDir, ".omp-kit-recovery-lease.json"));
-	return { scratch, repo, logPath: join(scratch, "fleet-watch.jsonl") };
-}
-
-function recoveryDeps(options: { dbHolders?: string; lsof?: { code: number; stdout: string; stderr: string } } = {}) {
-	const brCalls: string[][] = [];
-	const lsofCalls: string[][] = [];
-	const leaseSnapshots: Record<string, unknown>[] = [];
-	const liveness: LivenessDeps = {
-		signalAlive: pid => pid === 424242,
-		psVisible: () => false,
-		processStart: pid => pid === 424242 ? "Mon Oct  5 12:00:00 2026" : pid === 700000 ? "current-process" : null,
-	};
-	const recoverTracker = (repo: string, configuredSession: string) => recoverBusyTracker(repo, configuredSession, {
-		pid: 700000,
-		liveness,
-		sessionId: candidate => candidate === "worker-live" ? "$11" : candidate === session ? "$22" : null,
-		run: (args, cwd) => {
-			if (args[0] === "lsof") { lsofCalls.push([...args]); return options.lsof ?? { code: 0, stdout: options.dbHolders ?? "", stderr: "" }; }
-			if (args[0] === "br") {
-				brCalls.push([...args, `cwd=${cwd}`]);
-				leaseSnapshots.push(JSON.parse(readFileSync(join(cwd, ".beads", ".br_recovery", "schema-migrations", "planted-run", ".omp-kit-recovery-lease.json"), "utf8")));
-			}
-			return { code: 0, stdout: "recovered", stderr: "" };
-		},
-		now: () => 1_791_276_000_000,
-		leaseId: () => "current-holder-lease",
-	});
-	return { brCalls, lsofCalls, leaseSnapshots, recoverTracker };
+	copyFileSync(join(fixtureDir, ".omp-kit-recovery-lease.json"), join(runDir, ".omp-kit-recovery-lease.json"));
+	return { scratch, repo, runDir, logPath: join(scratch, "fleet-watch.jsonl") };
 }
 
 function watchConfig(repo: string): FleetWatchConfig {
@@ -59,130 +33,24 @@ function watchConfig(repo: string): FleetWatchConfig {
 	}] };
 }
 
-function runOnce(repo: string, logPath: string, recoverTracker: (repo: string, session: string) => TrackerRecoveryResult | null) {
-	return runFleetWatchOnce(watchConfig(repo), {
-		send: () => { throw new Error("recovery events must be logged, not sent to a worker"); },
-		logPath,
-		recoverTracker,
-	});
+function expectIgnored(planted: { scratch: string; repo: string; runDir: string; logPath: string }): void {
+	try {
+		const actions = runFleetWatchOnce(watchConfig(planted.repo), { logPath: planted.logPath, gitLockReap: null });
+		expect(actions).toEqual([]);
+		// Nothing was logged: no recovery, retention or stranded routing.
+		expect(existsSync(planted.logPath)).toBe(false);
+		// The planted flag and lease are untouched: no lease claim, no br run.
+		expect(existsSync(join(planted.runDir, "recovery-failed.json"))).toBe(true);
+		expect(existsSync(join(planted.runDir, ".omp-kit-recovery-lease.json"))).toBe(true);
+	} finally {
+		if (existsSync(planted.scratch)) rmSync(planted.scratch, { recursive: true, force: true });
+	}
 }
 
-test("planted stale recovery flag proceeds with a lease and logs zero live holders", () => {
-	const planted = plantedTracker("stale-proceeds");
-	const deps = recoveryDeps();
-	try {
-		const actions = runOnce(planted.repo, planted.logPath, deps.recoverTracker);
-		expect(actions.map(action => action.kind)).toEqual(["RECOVERY_PROCEEDED"]);
-		expect(actions[0]?.text).toContain("stale holder");
-		expect(actions[0]?.text).toContain("zero live database holders");
-		expect(deps.brCalls).toEqual([["br", "doctor", "migrate-schema", "recover", `cwd=${planted.repo}`]]);
-		expect(deps.lsofCalls).toEqual([["lsof", "-nP", "-t", "--", join(planted.repo, ".beads", "beads.db")]]);
-		expect(deps.leaseSnapshots).toMatchObject([{ schema_version: 1, pid: 700000, process_start: "current-process", session, session_id: "$22" }]);
-		const logged = JSON.parse(readFileSync(planted.logPath, "utf8").trim());
-		expect(logged).toMatchObject({ kind: "RECOVERY_PROCEEDED", session, pane: "tracker" });
-		expect(existsSync(join(planted.repo, ".beads", ".br_recovery", "schema-migrations", "planted-run", ".omp-kit-recovery-lease.json"))).toBe(false);
-	} finally {
-		if (existsSync(planted.scratch)) rmSync(planted.scratch, { recursive: true, force: true });
-	}
+test("DEADTICK1: retired tick performs no tracker recovery on a planted stale BusyRecovery flag", () => {
+	expectIgnored(plantedTracker("stale-proceeds"));
 });
 
-test("planted live recovery flag and PID/session lease blocks recovery", () => {
-	const planted = plantedTracker("live-blocks");
-	const deps = recoveryDeps();
-	try {
-		const actions = runOnce(planted.repo, planted.logPath, deps.recoverTracker);
-		expect(actions.map(action => action.kind)).toEqual(["RECOVERY_BLOCKED"]);
-		expect(actions[0]?.text).toContain("live holder");
-		expect(deps.brCalls).toEqual([]);
-		expect(deps.lsofCalls).toEqual([]);
-		expect(JSON.parse(readFileSync(planted.logPath, "utf8").trim())).toMatchObject({ kind: "RECOVERY_BLOCKED" });
-	} finally {
-		if (existsSync(planted.scratch)) rmSync(planted.scratch, { recursive: true, force: true });
-	}
-});
-
-test("live database descriptor blocks a stale lease-free flag", () => {
-	const planted = plantedTracker("no-lease");
-	const deps = recoveryDeps({ dbHolders: "424242\n" });
-	try {
-		const actions = runOnce(planted.repo, planted.logPath, deps.recoverTracker);
-		expect(actions.map(action => action.kind)).toEqual(["RECOVERY_BLOCKED"]);
-		expect(actions[0]?.text).toContain("database holder PID 424242");
-		expect(deps.brCalls).toEqual([]);
-		expect(deps.lsofCalls).toEqual([["lsof", "-nP", "-t", "--", join(planted.repo, ".beads", "beads.db")]]);
-	} finally {
-		if (existsSync(planted.scratch)) rmSync(planted.scratch, { recursive: true, force: true });
-	}
-});
-
-test("real lsof with no holder (exit 1, no output) is clear and recovery proceeds", () => {
-	const planted = plantedTracker("no-lease");
-	const deps = recoveryDeps({ lsof: { code: 1, stdout: "", stderr: "" } });
-	try {
-		const actions = runOnce(planted.repo, planted.logPath, deps.recoverTracker);
-		expect(actions.map(action => action.kind)).toEqual(["RECOVERY_PROCEEDED"]);
-		expect(deps.brCalls).toEqual([["br", "doctor", "migrate-schema", "recover", `cwd=${planted.repo}`]]);
-	} finally {
-		if (existsSync(planted.scratch)) rmSync(planted.scratch, { recursive: true, force: true });
-	}
-});
-
-test("lsof exit 1 with an error message stays unknown and blocks recovery", () => {
-	const planted = plantedTracker("no-lease");
-	const deps = recoveryDeps({ lsof: { code: 1, stdout: "", stderr: "lsof: status error on beads.db: Permission denied" } });
-	try {
-		const actions = runOnce(planted.repo, planted.logPath, deps.recoverTracker);
-		expect(actions.map(action => action.kind)).toEqual(["RECOVERY_BLOCKED"]);
-		expect(actions[0]?.text).toContain("database holder liveness is unknown");
-		expect(deps.brCalls).toEqual([]);
-	} finally {
-		if (existsSync(planted.scratch)) rmSync(planted.scratch, { recursive: true, force: true });
-	}
-});
-
-const tmuxAvailable = spawnSync("tmux", ["-V"]).status === 0;
-test.skipIf(!tmuxAvailable)("planted: the old display-message =session form reads unknown on tmux 3.6a", () => {
-	// 6qth: `display-message -p -t =<name>` prints an empty line with exit 0
-	// both for a live session and a missing one, which made every session's
-	// liveness read as unknown. The list-sessions probe above replaced it;
-	// this row pins the old form's brokenness so a tmux behavior change is
-	// noticed instead of silently reviving the form.
-	const dir = ownedTmp("o").path;
-	// A relative socket address stays within sun_path even in a deeply nested exact-commit export.
-	const socket = "s";
-	const tmux = (args: readonly string[]) => {
-		const result = runSync([args[0]!, "-S", socket, ...args.slice(1)], { cwd: dir, deadline_s: 10 });
-		expect(result.timed_out || result.truncated).toBe(false);
-		return { code: result.rc, stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
-	};
-	try {
-		expect(tmux(["tmux", "new-session", "-d", "-s", "omp-test", "-x", "80", "-y", "24"]).code).toBe(0);
-		const live = tmux(["tmux", "display-message", "-p", "-t", "=omp-test", "#{session_id}"]);
-		const missing = tmux(["tmux", "display-message", "-p", "-t", "=no-such-session", "#{session_id}"]);
-		expect(live.code).toBe(0);
-		expect(missing.code).toBe(0);
-		expect(live.stdout.trim()).toBe("");
-		expect(missing.stdout.trim()).toBe("");
-	} finally {
-		tmux(["tmux", "kill-server"]);
-		rmSync(dir, { recursive: true, force: true });
-	}
-});
-
-test.skipIf(!tmuxAvailable)("the session probe returns a live tmux session id and null for a missing session", () => {
-	const dir = ownedTmp("s").path;
-	const socket = "s";
-	const tmux = (args: readonly string[]) => {
-		const result = runSync([args[0]!, "-S", socket, ...args.slice(1)], { cwd: dir, deadline_s: 10 });
-		expect(result.timed_out || result.truncated).toBe(false);
-		return { code: result.rc, stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
-	};
-	try {
-		expect(tmux(["tmux", "new-session", "-d", "-s", "omp-test", "-x", "80", "-y", "24"]).code).toBe(0);
-		expect(defaultSessionId("omp-test", dir, tmux)).toMatch(/^\$\d+$/);
-		expect(defaultSessionId("no-such-session", dir, tmux)).toBeNull();
-	} finally {
-		tmux(["tmux", "kill-server"]);
-		rmSync(dir, { recursive: true, force: true });
-	}
+test("DEADTICK1: retired tick performs no tracker recovery on a planted live-holder flag", () => {
+	expectIgnored(plantedTracker("live-blocks"));
 });

@@ -16,10 +16,8 @@ test("retired watcher never nudges an idle configured seat; admission still reso
 	const sent: string[] = [];
 	for (let check = 0; check < 12; check++) {
 		const actions = runFleetWatchOnce(loaded, {
-			send: (_session, _pane, text) => { sent.push(text); },
-			logPath: join(task.path, "actions.jsonl"), statePath: null,
-			now: () => check * 120_000, recoverTracker: () => null,
-			retainTracker: null, gitLockReap: null,
+			logPath: join(task.path, "actions.jsonl"),
+			now: () => check * 120_000, gitLockReap: null,
 		});
 		expect(actions).toEqual([]);
 		expect(actions.map(action => action.kind)).not.toContain("NUDGED");
@@ -78,10 +76,8 @@ test("planted GITLOCK1: tick reaps a stale lock and ledgers the receipt; null di
 	};
 	const clearRun = () => ({ code: 1, stdout: "", stderr: "" });
 	const quiet = {
-		send: () => {},
 		logPath,
 		now: () => now,
-		statePath: null,
 	};
 	try {
 		staleLock();

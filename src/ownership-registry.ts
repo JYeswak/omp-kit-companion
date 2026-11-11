@@ -70,16 +70,6 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 		census: null, noCensus: "its dirs sit in the same scratch roots and are counted once, by scratch-seat-dir", ownerBead: "ompkit-774u.9.3",
 	},
 	{
-		id: "tracker-recovery-lease", title: "Tracker-recovery lease (.omp-kit-recovery-lease.json)",
-		rows: [5], class: "RELEASE", ownerKey: "pid+start+session", scope: "service", survivesRespawn: false,
-		writers: ["src/tracker-recovery.ts"],
-		cancel: "the holder releases the lease when the recovery pass ends",
-		crash: "the next pass sees a dead holder (pid, start time and session id) and takes the lease over",
-		respawn: "the holder is the fleet-watch service process, not a seat",
-		terminal: { outcome: "self-heals", producer: "src/tracker-recovery.ts stale-lease takeover" },
-		census: null, noCensus: "leases live in per-repo br run directories that this doctor does not enumerate", ownerBead: null,
-	},
-	{
 		id: "service-job-claim", title: "Service job claim ~/.local/state/omp-kit/jobs/<job>.lock/pid",
 		rows: [6], class: "RELEASE", ownerKey: "pid+token", scope: "service", survivesRespawn: false,
 		writers: ["src/service-run.ts", "src/cli.ts"],

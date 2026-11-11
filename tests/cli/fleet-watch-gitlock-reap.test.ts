@@ -42,11 +42,8 @@ function tick(repo: string, log: string, extra: Record<string, unknown>) {
 			{ session: "omp-test", coordinatorPane: "%54", coordinatorSession: "omp-test", repo, workerPanes: [] },
 		] },
 		{
-			send: () => { throw new Error("the reaper never steers panes"); },
 			logPath: log,
 			now: () => NOW,
-			recoverTracker: () => null,
-			retainTracker: null,
 			...extra,
 		},
 	);
@@ -106,11 +103,10 @@ test.skipIf(!hasLsof)("with no gitLockReap option the tick still reaps, using th
 			{ enabled: true, intervalSeconds: 60, noDecisionChecks: 5, sessions: [
 				{ session: "omp-test", coordinatorPane: "%54", coordinatorSession: "omp-test", repo: f.repo, workerPanes: [] },
 			] },
-			{
-				send: () => { throw new Error("the reaper never steers panes"); },
-				logPath: f.log, recoverTracker: () => null, retainTracker: null,
-				gitLockReap: { ledgerPath: f.ledger },
-			},
+		{
+			logPath: f.log,
+			gitLockReap: { ledgerPath: f.ledger },
+		},
 		);
 		expect(existsSync(f.lock)).toBe(false);
 		expect(actions.filter((action) => action.kind === "GITLOCK_REAPED")).toHaveLength(1);

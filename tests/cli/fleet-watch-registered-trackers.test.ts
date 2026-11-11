@@ -1,12 +1,12 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
-import { loadFleetWatchConfig, runFleetWatchOnce, type FleetWatchConfig } from "../../src/fleet-watch.ts";
-import type { TrackerRecoveryResult } from "../../src/tracker-recovery.ts";
+import { loadFleetWatchConfig } from "../../src/fleet-watch.ts";
 
 // ompkit-ps3lo: config.registeredTrackers lands for retention wiring.
-// Positive, planted negatives, and legacy-absent coverage.
+// ompkit-1ra0d.123 DEADTICK1: retention wiring is deleted with
+// retainTrackerQuarantine; only the config round-trip coverage remains.
 
 const repoRoot = resolve(import.meta.dir, "../..");
 
@@ -16,67 +16,8 @@ function scratchDir(label: string): string {
 	return ownedTmp(label, { root: parent }).path;
 }
 
-function fleetConfig(repoA: string, repoB: string, repoC: string, repoD: string): FleetWatchConfig {
-	return {
-		enabled: true,
-		intervalSeconds: 60,
-		noDecisionChecks: 5,
-		sessions: [
-			{ session: "s1", coordinatorPane: "%1", coordinatorSession: "s1", repo: repoA, workerPanes: [] },
-			{ session: "s2", coordinatorPane: "%1", coordinatorSession: "s2", repo: repoA, workerPanes: [] },
-			{ session: "s3", coordinatorPane: "%1", coordinatorSession: "s3", repo: repoB, workerPanes: [] },
-		],
-		registeredTrackers: [
-			{ repo: repoA, session: "s1" },
-			{ repo: repoC, session: "s3" },
-			{ repo: repoD, session: "ghost-director" },
-		],
-	};
-}
-
-function tickDeps(logPath: string, recoverCalls: [string, string][]) {
-	return {
-		send: () => { throw new Error("must not send"); },
-		logPath,
-		recoverTracker: (repo: string, session: string): TrackerRecoveryResult | null => {
-			recoverCalls.push([repo, session]);
-			return { kind: "RECOVERY_PROCEEDED", text: `Fleet Watch: zero live holders; proceeded for ${session}.` };
-		},
-	};
-}
-
-test("[a-positive] registry fixtures: exact coverage, no duplicates, foreign director blocked", () => {
-	const scratch = scratchDir("tracker-registry-ps3lo");
-	const logPath = join(scratch, "fleet-watch.jsonl");
-	try {
-		const recoverCalls: [string, string][] = [];
-		const actions = runFleetWatchOnce(
-			fleetConfig(join(scratch, "a"), join(scratch, "b"), join(scratch, "c"), join(scratch, "d")),
-			tickDeps(logPath, recoverCalls),
-		);
-		// s1+s2 share repo A (one recover), s3 owns B, registry adds C under
-		// owning director s3, and D names a foreign director: 3 recovers, 1 block.
-		expect(recoverCalls).toEqual([
-			[join(scratch, "a"), "s1"],
-			[join(scratch, "b"), "s3"],
-			[join(scratch, "c"), "s3"],
-		]);
-		const blocked = actions.filter((action) => action.kind === "RECOVERY_BLOCKED");
-		expect(blocked).toHaveLength(1);
-		expect(blocked[0]?.text).toContain("NO_OWNING_DIRECTOR");
-		expect(blocked[0]?.text).toContain("ghost-director");
-		expect(blocked[0]?.text).toContain(join(scratch, "d"));
-		const logged = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-		expect(logged).toHaveLength(4);
-		for (const line of logged) {
-			expect(line.repo).toMatch(scratch);
-			expect(typeof line.session).toBe("string");
-			expect(typeof line.text).toBe("string");
-		}
-	} finally {
-		rmSync(scratch, { recursive: true, force: true });
-	}
-});
+// ompkit-1ra0d.123 DEADTICK1: the recovery tick tests are deleted with
+// recoverBusyTracker; only the config round-trip coverage remains.
 
 test("[a-positive] loadFleetWatchConfig round-trips valid registeredTrackers", () => {
 	const scratch = scratchDir("tracker-registry-load-ps3lo");
@@ -122,22 +63,5 @@ test("[a-negative] loadFleetWatchConfig rejects malformed registeredTrackers", (
 	}
 });
 
-test("[a-negative] absent registeredTrackers keeps legacy sessions-only coverage", () => {
-	const scratch = scratchDir("tracker-registry-absent-ps3lo");
-	const logPath = join(scratch, "fleet-watch.jsonl");
-	try {
-		const recoverCalls: [string, string][] = [];
-		const config = fleetConfig(join(scratch, "a"), join(scratch, "b"), join(scratch, "c"), join(scratch, "d"));
-		delete config.registeredTrackers;
-		const actions = runFleetWatchOnce(config, tickDeps(logPath, recoverCalls));
-		expect(recoverCalls).toEqual([
-			[join(scratch, "a"), "s1"],
-			[join(scratch, "b"), "s3"],
-		]);
-		expect(actions.filter((action) => action.kind === "RECOVERY_BLOCKED")).toHaveLength(0);
-	} finally {
-		rmSync(scratch, { recursive: true, force: true });
-	}
-});
 
 afterAll(() => cleanupAllOwnedTmp());
