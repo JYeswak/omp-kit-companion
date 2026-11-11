@@ -81,6 +81,10 @@ SH
 	mkdir -p "$notes_repo/.git/hooks/hooks.d/pre-push"
 	cp "$ADAPTER" "$notes_repo/.git/hooks/hooks.d/pre-push/40-omp-kit-fresh-gate"
 	cp "$KITREPO/scripts/check-commit-gate.sh" "$notes_repo/.git/hooks/commit-msg"
+	mkdir -p "$notes_repo/.git/hooks/scripts"
+	for helper in commit-msg-bead.sh bead-verdict.sh commit-msg-verification-level.sh check-commit-notes.sh release-notes.ts limit-process-tree.sh check-deploy-step.sh kitlib-tmp.sh kitlib-findings.sh; do
+		cp "$KITREPO/scripts/$helper" "$notes_repo/.git/hooks/scripts/$helper" || exit 1
+	done
 	chmod +x "$notes_repo/.git/hooks/commit-msg" "$notes_repo/.git/hooks/hooks.d/pre-push/40-omp-kit-fresh-gate"
 	cat "$TMP/notes-header" "$TMP/run_step" "$TMP/gate_notes" "$TMP/notes-driver" >"$notes_repo/scripts/fresh-gate.sh"
 	printf '#!/bin/sh\nexit 0\n# judging-path revision\n' >"$notes_repo/scripts/full-suite-verdict.sh"

@@ -61,11 +61,13 @@ set -u
 
 SELF=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")
 MEMBER="hooks.d/pre-push/41-omp-kit-pushed-vlevel"
-# Paired commit-msg member (VLEVELGAP1): the commit-time close for the same rule.
+# Paired commit-msg close (VLEVELGAP1): the commit-time close for the same rule.
 # Canonical source ships beside this file as commit-msg-verification-level.sh;
 # CM_SHA256 pins its bytes so the installed member (no source beside it) can
-# still judge the paired member stale. Re-pin when that source changes; the
-# selftest refuses a pin that differs from the shipped source.
+# still judge the paired close stale. Re-pin when that source changes; the
+# selftest refuses a pin that differs from the shipped source. COMMITMERGE1
+# folded the 41 commit-msg member into the 55 aggregator; the paired close is
+# either the old executable member or the aggregator helper beside 55.
 CM_MEMBER="hooks.d/commit-msg/41-omp-kit-commit-msg-vlevel"
 CM_SHA256="07b3208b91f8b01f2966abeb1faf2493b5e4c938ae262d781da278c57a161b98"
 
@@ -74,16 +76,21 @@ sha256_of() {
 }
 
 paired_fresh() {
-	# paired_fresh PATH: the paired commit-msg member exists, is executable
-	# and carries the pinned canonical bytes; names the failure otherwise.
-	if [ ! -x "$1" ]; then
+	# paired_fresh PATH: the paired commit-msg close exists and carries the pinned
+	# canonical bytes; names the failure otherwise. COMMITMERGE1 accepts the
+	# folded close: the 55 aggregator (executable) with its helper copy
+	# scripts/commit-msg-verification-level.sh (non-executable, same sha) beside it.
+	if [ -x "$1" ] && [ "$(sha256_of "$1")" = "$CM_SHA256" ]; then return 0; fi
+	chain_dir=$(dirname -- "$1")
+	for helper in "$chain_dir/scripts/commit-msg-verification-level.sh" "$chain_dir/commit-msg-verification-level.sh"; do
+		if [ -x "$chain_dir/55-omp-kit-commit-gate" ] && [ -f "$helper" ] && [ "$(sha256_of "$helper")" = "$CM_SHA256" ]; then return 0; fi
+	done
+	if [ ! -x "$1" ] && [ ! -f "$chain_dir/scripts/commit-msg-verification-level.sh" ] && [ ! -f "$chain_dir/commit-msg-verification-level.sh" ]; then
 		printf 'pre-push-verification-level: MISSING paired commit-msg member: %s (install executable copy of scripts/commit-msg-verification-level.sh)\n' "$1" >&2
 		return 1
 	fi
-	if [ "$(sha256_of "$1")" != "$CM_SHA256" ]; then
-		printf 'pre-push-verification-level: STALE paired commit-msg member: %s differs from canonical sha256 %s\n' "$1" "$CM_SHA256" >&2
-		return 1
-	fi
+	printf 'pre-push-verification-level: STALE paired commit-msg member: %s differs from canonical sha256 %s\n' "$1" "$CM_SHA256" >&2
+	return 1
 }
 
 level_of() {

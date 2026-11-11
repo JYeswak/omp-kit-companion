@@ -44,7 +44,7 @@ EOF
 chmod +x "$gate"
 export GATE_LOG="$TMP/gate.log"
 msg="$TMP/msg"
-printf 'change\n\nBead: x-1\n' > "$msg"
+printf 'change [test]\n\nBead: x-1\n' > "$msg"
 
 # 1. GREEN: a staged harmless change is judged; the ref line names a commit whose tree is the staged
 #    tree and whose parent is HEAD, against origin/main; the release verdict is opted out.

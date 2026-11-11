@@ -1,0 +1,5 @@
+- Commit-msg refusals now report once under `55-omp-kit-commit-gate` with every finding listed: a missing bead id, a missing verification level, missing release notes, and a missing Deploy-Step trailer appear as separate findings under one code instead of four codes.
+- Stale `40-omp-kit-commit-msg-bead`, `41-omp-kit-commit-msg-vlevel`, `46-omp-kit-commit-notes`, and `48-omp-kit-deploy-step` members are retired on refresh; the installer verifies the aggregator helpers instead and stays green.
+- The push-time verification-level guard accepts the folded close, so level-less pushes are still refused under their own pre-push code while commit-time closes live in the aggregator.
+- The folded commit-msg refusal now exits 1 (was 4 for a missing bead id); the finding text still names the check and its fix.
+- The four helpers live beside 55 in `scripts/` (never shadowing a legacy sibling); a repo with an upgraded 55 but no helpers warns with the reinstall command and skips those checks instead of blocking every commit, while `install --check` reports the missing helpers stale.

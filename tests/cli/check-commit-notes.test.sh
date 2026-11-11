@@ -1,10 +1,11 @@
 #!/bin/sh
 # check-commit-notes.test.sh — SHIFTLEFT1 commit-msg notes gate contract
-# (ompkit-1wgy, KITLIB-FRAG ompkit-m21ru). The member is installed by the
-# installer into fixture repos and judged through real `git commit` runs: a
-# shipped-path commit needs one `Bead:` trailer with a changelog.d fragment
-# added or modified since the last release tag (staged or committed), or one
-# `[no-changelog] <reason>` line, exactly as release-notes.sh check requires.
+# (ompkit-1wgy, KITLIB-FRAG ompkit-m21ru). The notes check runs folded inside
+# the 55-aggregator member, installed by the installer into fixture repos and
+# judged through real `git commit` runs: a shipped-path commit needs one
+# `Bead:` trailer with a changelog.d fragment added or modified since the last
+# release tag (staged or committed), or one `[no-changelog] <reason>` line,
+# exactly as release-notes.sh check requires.
 set -u
 # shellcheck source=tests/cli/git-env-fixtures.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
@@ -39,10 +40,10 @@ install_baseline() {
 	# non-fragment path added inside the range).
 	git -C "$dir" tag v0.0.0
 	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
-	[ -x "$dir/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
-	# RELEASE15 (ompkit-fp72.120.16.98): keep only the member under test and the commit-msg runner.
+	[ -x "$dir/.git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
+	# RELEASE15 (ompkit-fp72.120.16.98): keep only the aggregator under test and the commit-msg runner.
 	for member in "$dir"/.git/hooks/hooks.d/*/[0-9]*; do
-		case "$member" in */commit-msg/46-omp-kit-commit-notes) ;; *) rm -f "$member" ;; esac
+		case "$member" in */commit-msg/55-omp-kit-commit-gate) ;; *) rm -f "$member" ;; esac
 	done
 	rm -f "$dir/.git/hooks/pre-commit" "$dir/.git/hooks/pre-push" "$dir/.git/hooks/reference-transaction"
 	git -C "$dir" config maintenance.auto false
@@ -147,8 +148,8 @@ check "$?" "0" "since-tag-fragment-only-pass" "x" "x"
 out=$(release_check "$R")
 check "$?" "0" "since-tag-fragment-release-agrees" "x" "x"
 # the installed member finds its resolver beside itself, never in the kit checkout
-check "$(cmp -s "$R/.git/hooks/hooks.d/commit-msg/release-notes.ts" "$(dirname -- "$INSTALLER")/release-notes.ts"; echo $?)" "0" "resolver-installed-beside-member" "x" "x"
-rm -f "$R/.git/hooks/hooks.d/commit-msg/release-notes.ts"
+check "$(cmp -s "$R/.git/hooks/hooks.d/commit-msg/scripts/release-notes.ts" "$(dirname -- "$INSTALLER")/release-notes.ts"; echo $?)" "0" "resolver-installed-beside-member" "x" "x"
+rm -f "$R/.git/hooks/hooks.d/commit-msg/scripts/release-notes.ts"
 out=$(commit "$R" --only scripts/c.sh -m "[test] fix c" -m "Bead: x-1")
 check "$?" "1" "resolver-missing-refused" "$out" "commit-notes: REFUSED: installed resolver release-notes.ts missing beside"
 

@@ -100,6 +100,10 @@ test("the packed installer installs every advertised member into a fixture repo"
 	expect(rows.length).toBeGreaterThan(40);
 	const missing = rows.filter(([, chain, dest]) => !existsSync(join(target, ".git", "hooks", "hooks.d", chain!, dest!)));
 	expect(missing).toEqual([]);
-	for (const [chain, dest] of [["commit-msg", "48-omp-kit-deploy-step"], ["pre-commit", "55-omp-kit-staged-wallclock"]])
+	for (const [chain, dest] of [["commit-msg", "55-omp-kit-commit-gate"], ["pre-commit", "55-omp-kit-staged-wallclock"]])
 		expect(existsSync(join(target, ".git", "hooks", "hooks.d", chain!, dest!))).toBe(true);
+	for (const dest of ["scripts/commit-msg-bead.sh", "scripts/commit-msg-verification-level.sh", "scripts/check-commit-notes.sh", "scripts/check-deploy-step.sh"])
+		expect(existsSync(join(target, ".git", "hooks", "hooks.d", "commit-msg", dest))).toBe(true);
+	for (const dest of ["40-omp-kit-commit-msg-bead", "41-omp-kit-commit-msg-vlevel", "46-omp-kit-commit-notes", "48-omp-kit-deploy-step"])
+		expect(existsSync(join(target, ".git", "hooks", "hooks.d", "commit-msg", dest))).toBe(false);
 }, fixtureDeadlineS(300) * 1000);

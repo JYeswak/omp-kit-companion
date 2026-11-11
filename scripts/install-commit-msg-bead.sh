@@ -1,21 +1,23 @@
 #!/bin/sh
-# Install the bead-id commit-msg hook, the reference-transaction ref guard,
-# the shared-main pre-push member and the pushed-beads pre-push member into a
-# repo's hook chains, plus the staged-imports, staged-fragments,
-# staged-regexploit, staged-pysafe, staged-tempsafe, staged-kitlib and
-# staged-br-init pre-commit members.
+# Install the 55-aggregator commit-msg hook (bead-id, verification-level,
+# commit-notes and deploy-step findings report under the one aggregator code),
+# the reference-transaction ref guard, the shared-main pre-push member and the
+# pushed-beads pre-push member into a repo's hook chains, plus the
+# staged-imports, staged-fragments, staged-regexploit, staged-pysafe,
+# staged-tempsafe, staged-kitlib and staged-br-init pre-commit members.
 # Usage: install-commit-msg-bead.sh [--check] [--no-pushed-beads] [REPO] (default: this kit checkout).
 # The shared-main member (scripts/check-pushed-on-main.sh) is always installed:
 # it judges only where a push moves the remote main, never old messages.
 # The staged-imports member (scripts/check-staged-imports.sh, with
 # check-commit-imports.sh beside it) is always installed: it refuses a commit
 # whose staged files import a path that is neither staged nor committed.
-# The commit-notes member (scripts/check-commit-notes.sh) is always installed:
-# it refuses a shipped-path commit the push notes gate would refuse (no single
-# Bead: trailer with a changelog.d fragment, and no [no-changelog] reason).
-# The deploy-step member (scripts/check-deploy-step.sh) is always installed:
-# it requires a runbook/reference change or a Deploy-Step trailer when staged
-# paths alter installer, hook-chain, service, or update behavior.
+# The commit-notes and deploy-step checks (scripts/check-commit-notes.sh with
+# release-notes.ts beside it, scripts/check-deploy-step.sh) run folded inside
+# the 55-aggregator member: a shipped-path commit the push notes gate would
+# refuse (no single Bead: trailer with a changelog.d fragment, and no
+# [no-changelog] reason), or a deploy-sensitive commit without a runbook or
+# reference change and without an explicit Deploy-Step trailer, is refused
+# under the aggregator code with the check named in the finding.
 # The staged-fragments member (scripts/check-staged-fragments.sh) is always
 # installed: it refuses a commit whose staged changelog.d fragments the repo's
 # own scripts/release-notes.sh cannot fold (passes where the repo has none).
@@ -247,7 +249,6 @@ EOF
 # caller-supplied template data remain explicit at their existing publication sites.
 installation_manifest() {
 	cat <<'INSTALLATION_MANIFEST'
-commit_msg commit-msg 40-omp-kit-commit-msg-bead scripts/commit-msg-bead.sh +x
 commit_msg commit-msg bead-verdict.sh scripts/bead-verdict.sh -x
 pre_push pre-push check-pushed-beads.sh scripts/check-pushed-beads.sh -x
 pre_push pre-push commit-msg-bead.sh scripts/commit-msg-bead.sh -x
@@ -263,7 +264,6 @@ affected_gate pre-push fixed-env.sh scripts/fixed-env.sh -x
 affected_gate pre-push kitlib_run.py scripts/kitlib_run.py -x
 affected_gate pre-push kitlib_tmp.py scripts/kitlib_tmp.py -x
 affected_gate pre-push pysafe.py scripts/pysafe.py -x
-commit_msg_vlevel commit-msg 41-omp-kit-commit-msg-vlevel scripts/commit-msg-verification-level.sh +x
 bead_record post-commit 50-omp-kit-bead-record scripts/bead-record.sh +x
 bead_record post-commit commit-msg-bead.sh scripts/commit-msg-bead.sh -x
 bead_record post-commit bead-verdict.sh scripts/bead-verdict.sh -x
@@ -316,8 +316,6 @@ staged_readme pre-commit 46-omp-kit-staged-readme scripts/check-staged-readme.sh
 staged_embed pre-commit 56-omp-kit-staged-embed scripts/check-staged-embed.sh +x
 commit_notes commit-msg release-notes.ts scripts/release-notes.ts -x
 commit_notes commit-msg limit-process-tree.sh scripts/limit-process-tree.sh -x
-commit_notes commit-msg 46-omp-kit-commit-notes scripts/check-commit-notes.sh +x
-deploy_step commit-msg 48-omp-kit-deploy-step scripts/check-deploy-step.sh +x
 stale_worktree commit-msg 49-omp-kit-stale-worktree scripts/check-stale-worktree.sh +x
 kitlib_reversal commit-msg 50-omp-kit-staged-kitlib-reversal scripts/check-commit-kitlib-reversal.sh +x
 commit_gate commit-msg 55-omp-kit-commit-gate scripts/check-commit-gate.sh +x
@@ -327,6 +325,13 @@ commit_gate commit-msg scripts/suite-metrics.py scripts/suite-metrics.py -x
 commit_gate commit-msg scripts/kitlib_run.py scripts/kitlib_run.py -x
 commit_gate commit-msg scripts/kitlib_tmp.py scripts/kitlib_tmp.py -x
 commit_gate commit-msg scripts/pysafe.py scripts/pysafe.py -x
+commit_gate commit-msg scripts/commit-msg-bead.sh scripts/commit-msg-bead.sh -x
+commit_gate commit-msg scripts/commit-msg-verification-level.sh scripts/commit-msg-verification-level.sh -x
+commit_gate commit-msg scripts/check-commit-notes.sh scripts/check-commit-notes.sh -x
+commit_gate commit-msg scripts/check-deploy-step.sh scripts/check-deploy-step.sh -x
+commit_gate commit-msg scripts/bead-verdict.sh scripts/bead-verdict.sh -x
+commit_gate commit-msg scripts/release-notes.ts scripts/release-notes.ts -x
+commit_gate commit-msg scripts/limit-process-tree.sh scripts/limit-process-tree.sh -x
 native_preservation pre-commit native-br-preserve.py scripts/native-br-preserve.py -x
 INSTALLATION_MANIFEST
 }
@@ -431,7 +436,11 @@ chain_dir() {
 # between install sites, so match the managed basename, not its ordering slot.
 retired_hook_members() {
 	for retired in "$HOOKS/hooks.d/commit-msg/"[0-9][0-9]-omp-kit-gap-mention \
-		"$HOOKS/hooks.d/pre-commit/"[0-9][0-9]-omp-kit-staged-sources; do
+		"$HOOKS/hooks.d/pre-commit/"[0-9][0-9]-omp-kit-staged-sources \
+		"$HOOKS/hooks.d/commit-msg/"[0-9][0-9]-omp-kit-commit-msg-bead \
+		"$HOOKS/hooks.d/commit-msg/"[0-9][0-9]-omp-kit-commit-msg-vlevel \
+		"$HOOKS/hooks.d/commit-msg/"[0-9][0-9]-omp-kit-commit-notes \
+		"$HOOKS/hooks.d/commit-msg/"[0-9][0-9]-omp-kit-deploy-step; do
 		[ -e "$retired" ] || [ -L "$retired" ] || continue
 		printf '%s\n' "$retired"
 	done
@@ -460,6 +469,20 @@ legacy_stamp_sha() {
 		*) return 1 ;;
 	esac
 }
+# folded_is_shipped <key> <sha>: COMMITMERGE1 retired the standalone commit-msg
+# members into the 55 aggregator. Every historical blob content sha256 is pinned
+# here, so only a truly hand-edited member refuses refresh. Keys: bead, vlevel,
+# notes, deploy. Captured via: git log --format=%H -- <source> then
+# git show <commit>:<source> | shasum -a 256 (content bytes, as installed).
+folded_is_shipped() {
+	case "$1:$2" in
+		bead:3d777904c500bcda10390ce2adee26750e85a2090c6402937772898bafc4b3b6|bead:0d9a4d47be60ebd343f23c3692dbac55acf763a421b2363460a559f010962c4a|bead:eae7bdfd2e8b7f71cda355ea3621b5893b90d7d4df94a205a8a2350cb941fc0f|bead:9da8c3ed801b4489038b7297ff21373360a7a2998fa8cb2bb2e1dece09e2e418|bead:fc1fb6881fb55fbbb0277c36f696799ca65a9672ac451d477341e12a27b63732|bead:9d0f94b679428f35879d5db23e40e1e48adf1b97ddfb9e87508ea73856f8098f|bead:a62dab4508b9837c5bbf08ba7a8839514660076a2aafbc8d8582da9730c22941|bead:5c81c54bfe078c063acd79cdee9d29e120aee13efca06850729cfbd45859450d) return 0 ;;
+		vlevel:07b3208b91f8b01f2966abeb1faf2493b5e4c938ae262d781da278c57a161b98) return 0 ;;
+		notes:32b934256c560325bb66d6d23821bcb8d0d14efbec251be2f3af017bb60afffe|notes:782034c2b88329b6fd75f5b388bf137c24d8d64719e0368167ef2da8dcf98b33|notes:7311d32b1131fc8a7d9fe117a45371fd892624fbdd66574f07923ce12e21150f) return 0 ;;
+		deploy:3394d20967b47019dc1775ace0f51e62b1e2b86f2f28294d924a964accb747a1) return 0 ;;
+		*) return 1 ;;
+	esac
+}
 
 retire_hook_members() {
 	# Validate the complete set before removing any member.
@@ -470,10 +493,27 @@ retire_hook_members() {
 			*-omp-kit-staged-sources) expected=0d971b18f6a686b7993d3eb6a6445d100802e9a53e032f763a67e184856b2d30 ;;
 			*/10-commit-msg) expected=$(legacy_stamp_sha "$retired") ;;
 			*/commit-msg-verification-level.sh) expected=$(legacy_stamp_sha "$retired") ;;
+			*-omp-kit-commit-msg-bead|*-omp-kit-commit-msg-vlevel|*-omp-kit-commit-notes|*-omp-kit-deploy-step) expected="" ;;
 		esac
 		if [ -L "$HOOKS/hooks.d" ] || [ -L "$(dirname -- "$retired")" ] ||
-			[ -L "$retired" ] || [ ! -f "$retired" ] ||
-			[ "$(shasum -a 256 "$retired" | cut -d' ' -f1)" != "$expected" ]; then
+			[ -L "$retired" ] || [ ! -f "$retired" ]; then
+			printf 'install-commit-msg-bead: REFUSED owner-modified retired member: %s; owner review required\n' "$retired" >&2
+			exit 2
+		fi
+		case "$retired" in
+			*-omp-kit-commit-msg-bead) key=bead ;;
+			*-omp-kit-commit-msg-vlevel) key=vlevel ;;
+			*-omp-kit-commit-notes) key=notes ;;
+			*-omp-kit-deploy-step) key=deploy ;;
+			*) key="" ;;
+		esac
+		if [ -n "$key" ]; then
+			actual=$(shasum -a 256 "$retired" 2>/dev/null | cut -d' ' -f1)
+			if ! folded_is_shipped "$key" "$actual"; then
+				printf 'install-commit-msg-bead: REFUSED owner-modified retired member: %s; owner review required\n' "$retired" >&2
+				exit 2
+			fi
+		elif [ "$(shasum -a 256 "$retired" 2>/dev/null | cut -d' ' -f1)" != "$expected" ]; then
 			printf 'install-commit-msg-bead: REFUSED owner-modified retired member: %s; owner review required\n' "$retired" >&2
 			exit 2
 		fi
@@ -742,11 +782,12 @@ rollback() {
 	exit 1
 }
 
-# install_commit_msg: ours runs after any bespoke entry (sort order).
+# install_commit_msg: COMMITMERGE1 folded the 40-bead member into 55-aggregator;
+# this group now installs only the shared bead-verdict helper the aggregator,
+# the pre-push members, the ref guard and the post-commit recorder reuse.
 install_commit_msg() {
-	dest=$(chain_dir commit-msg)/40-omp-kit-commit-msg-bead
 	install_manifest_group commit_msg
-	printf 'installed bead-id hook: %s\n' "$dest"
+	printf 'installed bead-verdict helper beside the commit-msg chain\n'
 }
 
 # install_pre_push: checker libs beside a member wrapper that speaks the
@@ -865,12 +906,12 @@ install_pushed_vlevel() {
 	printf 'installed pushed-verification-level member: %s\n' "$member"
 }
 
-# install_commit_msg_vlevel: the paired commit-msg member (VLEVELGAP1,
-# VLEVELDRIFT1): the commit-time close of the same verification-level rule.
+# install_commit_msg_vlevel: COMMITMERGE1 retired the standalone 41 member into
+# the 55 aggregator (the helper lives in the commit_gate group now). Kept as a
+# no-op so refresh removes the stale member via retired_hook_members instead of
+# reinstalling it.
 install_commit_msg_vlevel() {
-	member="$(chain_dir commit-msg)/41-omp-kit-commit-msg-vlevel"
-	install_manifest_group commit_msg_vlevel
-	printf 'installed commit-msg verification-level member: %s\n' "$member"
+	printf 'retired commit-msg verification-level member into 55-omp-kit-commit-gate\n'
 }
 
 # install_ref_txn: the plumbing backstop. commit-tree + update-ref and
@@ -1021,22 +1062,17 @@ install_staged_embed() {
 	printf 'installed staged-embed member: %s\n' "$member"
 }
 
-# install_commit_notes: the commit-msg member asks release-notes.ts (the code
-# the release train runs) whether the staged commit has notes coverage; it runs
-# after the bead-id member. The resolver and its deadline wrapper sit beside
-# the member, non-executable, so the chain runner never runs them arg-less.
+# install_commit_notes: COMMITMERGE1 folded the 46-notes member into the 55
+# aggregator; this group now installs only the resolver helpers the aggregator
+# invokes beside the chain.
 install_commit_notes() {
-	dir=$(chain_dir commit-msg)
-	member="$dir/46-omp-kit-commit-notes"
 	install_manifest_group commit_notes
-	printf 'installed commit-notes member: %s\n' "$member"
+	printf 'installed commit-notes helpers beside the commit-msg chain\n'
 }
-# install_deploy_step: require a runbook/reference update or an explicit
-# install/recovery command for commits changing deploy-sensitive paths.
+# install_deploy_step: COMMITMERGE1 retired the standalone 48 member into the 55
+# aggregator (the helper lives in the commit_gate group now). Kept as a no-op.
 install_deploy_step() {
-	member="$(chain_dir commit-msg)/48-omp-kit-deploy-step"
-	install_manifest_group deploy_step
-	printf 'installed deploy-step member: %s\n' "$member"
+	printf 'retired deploy-step member into 55-omp-kit-commit-gate\n'
 }
 
 
@@ -1057,9 +1093,12 @@ install_kitlib_reversal() {
 	printf 'installed kitlib-reversal member: %s\n' "$member"
 }
 
-# install_commit_gate: COMMITPARITY1 (ompkit-9d9fx). The commit-msg member runs the installed pre-push
-# fresh-gate member on the commit being made, so a commit the push would refuse never lands on main.
-# It checks the recorded release verdict even without a pre-push member, and runs last.
+# install_commit_gate: COMMITPARITY1 (ompkit-9d9fx) + COMMITMERGE1 (ompkit-1ra0d.130).
+# The commit-msg member runs the installed pre-push fresh-gate member on the commit
+# being made, so a commit the push would refuse never lands on main. It checks the
+# recorded release verdict even without a pre-push member, and runs last. It also
+# aggregates the folded commit-msg findings (bead id, verification level, notes,
+# deploy step) under one code with the folded helpers beside it.
 install_commit_gate() {
 	member="$(chain_dir commit-msg)/55-omp-kit-commit-gate"
 	mkdir -p "$(chain_dir commit-msg)/scripts"

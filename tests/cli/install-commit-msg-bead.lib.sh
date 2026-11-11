@@ -101,7 +101,7 @@ MSG="$TMP/msg-a"
 printf 'fix widgets with no identity\n' > "$MSG"
 # Git invokes hooks from the target repo; do not inspect the caller's shared index.
 (CDPATH='' cd -- "$A" && BEADS_DB="$EMPTY_DB" sh "$A/.git/hooks/commit-msg" "$MSG") > /dev/null 2>&1
-ok "$?" "4" "absent-chain-refuses"
+ok "$?" "1" "absent-chain-refuses"
 }
 
 group_plain() {
@@ -120,7 +120,7 @@ sh "$INSTALLER" "$B" > /dev/null 2>&1
 ok "$?" "0" "plain-install-rc"
 printf 'fix widgets with no identity\n' > "$MSG"
 (CDPATH='' cd -- "$B" && BEADS_DB="$EMPTY_DB" sh "$B/.git/hooks/commit-msg" "$MSG") > /dev/null 2>&1
-ok "$?" "4" "plain-chain-refuses"
+ok "$?" "1" "plain-chain-refuses"
 grep -q "MARKED" "$MSG"
 ok "$?" "0" "plain-bespoke-also-ran"
 printf 'fix widgets ompkit-2w7h [test]\n' > "$TMP/msg-b"
@@ -190,7 +190,7 @@ printf '#!/bin/sh\nexit 1\n' > "$E/.git/hooks/commit-msg"
 chmod +x "$E/.git/hooks/commit-msg"
 sh "$INSTALLER" "$E" > /dev/null 2>&1
 ok "$?" "0" "refusing-install-rc"
-if [ -x "$E/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" ]; then rc=0; else rc=1; fi
+if [ -x "$E/.git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate" ]; then rc=0; else rc=1; fi
 ok "$rc" "0" "refusing-member-present"
 }
 
@@ -232,16 +232,16 @@ ok "$?" "0" "canonical-closure-reinstall-rc"
 sh "$INSTALLER" --check "$A" > /dev/null 2>&1
 ok "$?" "0" "canonical-closure-reinstall-fresh"
 modes=1
-[ ! -x "$A/.git/hooks/hooks.d/pre-commit/portable_paths_check.py" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/wallclock_check.py" ] && [ -x "$A/.git/hooks/hooks.d/commit-msg/48-omp-kit-deploy-step" ] && modes=0
+[ ! -x "$A/.git/hooks/hooks.d/pre-commit/portable_paths_check.py" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/wallclock_check.py" ] && [ -x "$A/.git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate" ] && [ ! -x "$A/.git/hooks/hooks.d/commit-msg/commit-msg-bead.sh" ] && modes=0
 ok "$modes" "0" "canonical-closure-helper-member-modes"
 mkdir -p "$TMP/oldkit/scripts"
 cp "$INSTALLER" "$TMP/oldkit/scripts/install-commit-msg-bead.sh"
-printf '#!/bin/sh\n# old hook predating the fix\nexit 0\n' > "$TMP/oldkit/scripts/commit-msg-bead.sh"
+printf '#!/bin/sh\n# old gate predating the fold\nexit 0\n' > "$TMP/oldkit/scripts/check-commit-gate.sh"
 printf '# old checker\n' > "$TMP/oldkit/scripts/check-pushed-beads.sh"
 printf '# old shared-main guard\n' > "$TMP/oldkit/scripts/check-pushed-on-main.sh"
 sh "$TMP/oldkit/scripts/install-commit-msg-bead.sh" --check "$A" > "$TMP/o-stale" 2>&1
 ok "$?" "3" "check-stale-rc"
-grep -q "STALE installed member: $A/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" "$TMP/o-stale"
+grep -q "STALE installed member: $A/.git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate" "$TMP/o-stale"
 ok "$?" "0" "check-stale-named"
 grep -q "STALE installed member: $A/.git/hooks/hooks.d/pre-push/30-omp-kit-on-main" "$TMP/o-stale"
 ok "$?" "0" "check-stale-on-main-named"
@@ -261,14 +261,49 @@ ok "$?" "0" "check-missing-reinstall-rc"
 
 group_notes() {
 A=$(installed_repo absent) || exit 1
-# 5c. --check names a missing commit-notes commit-msg member
-rm -f "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes"
-sh "$INSTALLER" --check "$A" > "$TMP/o-missing-notes" 2>&1
-ok "$?" "3" "check-missing-commit-notes-rc"
-grep -q "MISSING installed member: $A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes" "$TMP/o-missing-notes"
-ok "$?" "0" "check-missing-commit-notes-named"
+# 5c. COMMITMERGE1 folded the 46-notes member into 55: a stale standalone copy
+# is reported as RETIRED (not MISSING) and a refresh removes it.
+KITROOT=$(CDPATH='' cd -- "$(dirname -- "$INSTALLER")/.." && pwd -P) || exit 1
+cp "$KITROOT/scripts/check-commit-notes.sh" "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes"
+chmod +x "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes"
+sh "$INSTALLER" --check "$A" > "$TMP/o-retired-notes" 2>&1
+ok "$?" "3" "check-retired-commit-notes-rc"
+grep -q "RETIRED installed member: $A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes" "$TMP/o-retired-notes"
+ok "$?" "0" "check-retired-commit-notes-named"
 sh "$INSTALLER" "$A" > /dev/null 2>&1
-ok "$?" "0" "check-missing-notes-reinstall-rc"
+ok "$?" "0" "check-retired-notes-reinstall-rc"
+if [ ! -e "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes" ]; then rc=0; else rc=1; fi
+ok "$rc" "0" "check-retired-notes-removed"
+sh "$INSTALLER" --check "$A" > /dev/null 2>&1
+ok "$?" "0" "check-retired-notes-reinstall-fresh"
+# An older shipped copy also retires (historical pins, not just current).
+git -C "$KITROOT" show 1dbff4b19c86fb196bc7bc40ecd7837c4e1ec411:scripts/check-commit-notes.sh > "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes" 2>/dev/null || exit 1
+chmod +x "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes"
+sh "$INSTALLER" --check "$A" > "$TMP/o-retired-old" 2>&1
+ok "$?" "3" "check-retired-old-notes-rc"
+sh "$INSTALLER" "$A" > /dev/null 2>&1
+ok "$?" "0" "check-retired-old-notes-reinstall-rc"
+if [ ! -e "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes" ]; then rc=0; else rc=1; fi
+ok "$rc" "0" "check-retired-old-notes-removed"
+# A missing folded helper is reported stale by --check (the commit still warns
+# and proceeds, so one missing helper never blocks the fleet).
+rm -f "$A/.git/hooks/hooks.d/commit-msg/scripts/check-deploy-step.sh"
+sh "$INSTALLER" --check "$A" > "$TMP/o-missing-helper" 2>&1
+ok "$?" "3" "check-missing-helper-rc"
+grep -q "MISSING installed member: $A/.git/hooks/hooks.d/commit-msg/scripts/check-deploy-step.sh" "$TMP/o-missing-helper"
+ok "$?" "0" "check-missing-helper-named"
+sh "$INSTALLER" "$A" > /dev/null 2>&1
+ok "$?" "0" "check-missing-helper-reinstall-rc"
+sh "$INSTALLER" --check "$A" > /dev/null 2>&1
+ok "$?" "0" "check-missing-helper-reinstall-fresh"
+# A hand-edited copy refuses refresh (owner review), it is never silently retired.
+cp "$KITROOT/scripts/check-commit-notes.sh" "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes"
+printf '\n# hand edit\n' >> "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes"
+chmod +x "$A/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes"
+sh "$INSTALLER" "$A" > "$TMP/o-handedit" 2>&1
+ok "$?" "2" "check-handedited-notes-refused-rc"
+grep -q "owner-modified retired member" "$TMP/o-handedit"
+ok "$?" "0" "check-handedited-notes-named"
 }
 
 group_staged() {
@@ -404,9 +439,9 @@ chmod +x "$gnu_stat_bin/stat"
 for stat_flavor in native gnu; do
 F=$(new_repo "restore-$stat_flavor") || exit 1
 mkdir -p "$F/.git/hooks/hooks.d/commit-msg"
-printf '#!/bin/sh\n# older member\nexit 0\n' > "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
+printf '#!/bin/sh\n# older member\nexit 0\n' > "$F/.git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate"
 # 711 is not a plain 755, so a sloppy restore (a+x, 755) is caught.
-chmod 711 "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
+chmod 711 "$F/.git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate"
 cat > "$F/.git/hooks/commit-msg" <<'HOOK'
 #!/bin/sh
 case "$0" in */hooks/commit-msg) exit 0;; *) exit 1;; esac
@@ -416,14 +451,14 @@ restore_path=$PATH
 [ "$stat_flavor" != gnu ] || restore_path="$gnu_stat_bin:$PATH"
 PATH="$restore_path" sh "$INSTALLER" "$F" > /dev/null 2>&1
 ok "$?" "1" "restore-rollback-rc"
-grep -q "older member" "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
+grep -q "older member" "$F/.git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate"
 ok "$?" "0" "restore-member-restored"
 rc=0
 for leftover in "$F/.git/hooks/hooks.d/commit-msg"/.undo.*; do [ -e "$leftover" ] && rc=1; done
 ok "$rc" "0" "restore-no-backup-left"
 # The backup is made non-executable (other chain runners run every executable file in the directory);
 # rollback still restores the member's exact original mode.
-mode=$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o7777, "o"))' "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead")
+mode=$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o7777, "o"))' "$F/.git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate")
 [ "$mode" = 711 ]
 ok "$?" "0" "restore-member-mode-exact ($stat_flavor): $mode"
 done
@@ -440,7 +475,7 @@ mkdir -p "$G/.beads"
 git -C "$G" commit -q --no-verify --allow-empty -m "unpublished with no identity"
 sh "$INSTALLER" "$G" > "$TMP/o-idless" 2>&1
 ok "$?" "5" "idless-full-refused"
-if [ ! -e "$G/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" ] && [ ! -e "$G/.git/hooks/reference-transaction" ]; then rc=0; else rc=1; fi
+if [ ! -e "$G/.git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate" ] && [ ! -e "$G/.git/hooks/reference-transaction" ]; then rc=0; else rc=1; fi
 ok "$rc" "0" "idless-nothing-mutated"
 sh "$INSTALLER" --no-pushed-beads "$G" > /dev/null 2>&1
 ok "$?" "0" "idless-forward-only-rc"
@@ -626,7 +661,7 @@ sys.path.insert(0, str(pathlib.Path(sys.argv[2]).parent))
 import kitlib_run
 root, installer = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 repo = root / "absent"
-member = repo / ".git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
+member = repo / ".git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate"
 original = member.read_bytes()
 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
     for atomic in (True, False):

@@ -3,10 +3,11 @@
 # member and one bead-id verdict reused at push and ref-transaction time.
 # Usage: bash tests/scripts/hook_dedup_test.sh [--push]
 #   default: [a] the installed commit-msg chain refuses a stamp-less commit
-#     once (the retired legacy 10-commit-msg member is gone; the canonical 41
-#     keeps the same refusal text and code), and a commit with no bead id is
-#     refused once with one finding naming the missing id; planted negative: a
-#     commit naming a real bead id passes all members.
+#     once under the 55 aggregator (the retired legacy 10-commit-msg member is
+#     gone; the folded 41 check keeps the same refusal text as a finding), and
+#     a commit with no bead id is refused once with one finding naming the
+#     missing id; planted negative: a commit naming a real bead id passes all
+#     members.
 #   --push:  [b] a push of commits that passed commit-time checks runs no `br`
 #     per commit (a PATH shim counts `br` invocations: the commit-msg member
 #     and the post-commit recorder wrote verdict records keyed by the exact
@@ -232,7 +233,7 @@ if [ "$MODE" = "commit" ]; then
 	ok "$?" "0" "legacy-pair-planted"
 	PATH="$TMP/bin:$HOST_PATH" sh "$INSTALLER" "$A" > "$TMP/reinstall.out" 2>&1
 	ok "$?" "0" "reinstall-rc"
-	if [ ! -e "$CM/10-commit-msg" ] && [ ! -e "$CM/commit-msg-verification-level.sh" ] && [ -x "$CM/41-omp-kit-commit-msg-vlevel" ]; then rc=0; else rc=1; fi
+	if [ ! -e "$CM/10-commit-msg" ] && [ ! -e "$CM/commit-msg-verification-level.sh" ] && [ ! -e "$CM/41-omp-kit-commit-msg-vlevel" ] && [ -x "$CM/55-omp-kit-commit-gate" ] && [ -f "$CM/scripts/commit-msg-bead.sh" ] && [ -f "$CM/scripts/commit-msg-verification-level.sh" ]; then rc=0; else rc=1; fi
 	ok "$rc" "0" "legacy-pair-retired-canonical-kept"
 	PATH="$TMP/bin:$HOST_PATH" sh "$INSTALLER" --check "$A" > /dev/null 2>&1
 	ok "$?" "0" "check-fresh-after-retire"
@@ -245,9 +246,9 @@ if [ "$MODE" = "commit" ]; then
 	export OMP_KIT_FINDINGS_JSON=1
 	printf '[test] widget work with no identity\n' > "$TMP/a1"
 	(CDPATH='' cd -- "$A" && sh "$A/.git/hooks/commit-msg" "$TMP/a1" > "$TMP/a1.out" 2> "$TMP/a1.err"); rc=$?
-	ok "$rc" "4" "id-less-refused-rc"
+	ok "$rc" "1" "id-less-refused-rc"
 	ok "$(grep -c '^FINDING' "$TMP/a1.out")" "1" "id-less-one-finding"
-	ok "$(grep '^FINDING' "$TMP/a1.out" | cut -f2)" "40-omp-kit-commit-msg-bead" "id-less-finding-member"
+	ok "$(grep '^FINDING' "$TMP/a1.out" | cut -f2)" "55-omp-kit-commit-gate" "id-less-finding-member"
 	if grep -qi 'bead' "$TMP/a1.out"; then rc=0; else rc=1; fi
 	ok "$rc" "0" "id-less-finding-names-bead"
 
@@ -257,12 +258,12 @@ if [ "$MODE" = "commit" ]; then
 	ok "$rc" "0" "real-id-passes-rc"
 	ok "$(grep -c '^FINDING' "$TMP/a2.out")" "0" "real-id-no-findings"
 
-	# The stamp is enforced exactly once, with the same text and code.
+	# The stamp is enforced exactly once, with the same text as a finding under the aggregator code.
 	printf 'fix widgets ompkit-2w7h\n' > "$TMP/a3"
 	(CDPATH='' cd -- "$A" && sh "$A/.git/hooks/commit-msg" "$TMP/a3" > "$TMP/a3.out" 2> "$TMP/a3.err"); rc=$?
 	ok "$rc" "1" "no-stamp-refused-rc"
 	ok "$(grep -c '^FINDING' "$TMP/a3.out")" "1" "no-stamp-one-finding"
-	ok "$(grep '^FINDING' "$TMP/a3.out" | cut -f2)" "41-omp-kit-commit-msg-vlevel" "no-stamp-finding-member"
+	ok "$(grep '^FINDING' "$TMP/a3.out" | cut -f2)" "55-omp-kit-commit-gate" "no-stamp-finding-member"
 	if grep -q 'must say what it PROVED' "$TMP/a3.err"; then rc=0; else rc=1; fi
 	ok "$rc" "0" "no-stamp-same-refusal-text"
 else

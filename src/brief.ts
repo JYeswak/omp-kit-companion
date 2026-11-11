@@ -72,6 +72,9 @@ function memberRules(member: string, source: string): BriefRule[] {
 		if (source.includes("live coverage")) add("tests", "changed TTSR rules without live scenario coverage", "add fire plus quiet corpus rows and fire/near-miss tests/live/scenarios.json scenarios; update README rule count");
 		add("tests", "nonportable tests", "tests run in an exported tree without source git history or private HOME files; set TMPDIR inside the export's var/agent-tmp");
 	}
+	// COMMITMERGE1: the 55 aggregator folded the commit-msg close, so it teaches
+	// the commit-message contract alongside its preflight contract.
+	if (name.includes("commit-gate")) add("commit message", "a message with no existing bead id, no verification level, or (on deploy-sensitive paths) no Deploy-Step trailer", "name an existing bead id; end the subject with [test], [selftest], [live] or [pending]; add Deploy-Step: <command> or Deploy-Step: none (<reason>) when the refusal asks");
 	if (!rules.length) {
 		const header = source.split("\n").slice(0, 12).filter(line => line.startsWith("#") && !line.startsWith("#!")).map(line => line.slice(1).trim()).join(" ").slice(0, 600);
 		const { refusals, remedies } = memberRemedies(source);
