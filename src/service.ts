@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveOmpIdentity } from "./paths.ts";
 import { inspectStateRoot, repairStateRootMode } from "./state-root.ts";
 import { censusLoad, writeCensus } from "./load-doctor.ts";
-import { checkPlistContract, checkSystemdContract } from "./service-contract.ts";
+import { checkPlistContract, checkSystemdContract, plistEnvironment, systemdEnvironment, unquoteUnit } from "./service-contract.ts";
 import { KIT_UPDATE_REPO_PATTERN } from "./kit-update-job.ts";
 import { classifyScratchPressure, fleetWatchRepos, quarantineDir, reapLogPath, type ScratchPressure } from "./scratch.ts";
 import { CACHE_NAME } from "./ci-cache.ts";
@@ -548,27 +548,48 @@ function ensureServiceTmp(home: string): void {
 function xml(value: string): string {
 	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+/** Decode the entities xml() writes. plistEnvironment returns still-encoded values; decoding here
+ * (not inside plistEnvironment, which contract checks also use) keeps a kept value byte-identical
+ * across re-renders instead of re-escaping & into &amp;amp; on every pass. &amp; decodes last so
+ * &amp;lt; becomes the literal &lt;, not <. */
+function unxml(value: string): string {
+	return value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+}
 
 
 const KIT_UPDATE_ENV_KEYS = ["OMP_KIT_UPDATE_ENABLED", "OMP_KIT_UPDATE_POLL", "OMP_KIT_UPDATE_REPO", "OMP_KIT_UPDATE_INDEX", "OMP_KIT_UPDATE_ARCHIVE", "OMP_KIT_UPDATE_VERSION", "OMP_KIT_UPDATE_SOURCE_TAG"] as const;
-function kitUpdateEnvironment(job: ServiceJobDef): [string, string][] {
-	if (job.name !== "kit-update" || KIT_UPDATE_ENV_KEYS.every(key => process.env[key] === undefined)) return [];
-	const enabled = process.env.OMP_KIT_UPDATE_ENABLED;
-	const index = process.env.OMP_KIT_UPDATE_INDEX;
-	const archive = process.env.OMP_KIT_UPDATE_ARCHIVE;
-	const version = process.env.OMP_KIT_UPDATE_VERSION;
-	const tag = process.env.OMP_KIT_UPDATE_SOURCE_TAG;
-	const poll = process.env.OMP_KIT_UPDATE_POLL;
-	const repo = process.env.OMP_KIT_UPDATE_REPO;
+/** A re-render keeps the validated settings already in the installed job file unless new ones are
+ * supplied: a release or service install from a shell without OMP_KIT_UPDATE_* must not wipe the
+ * job's configuration. Explicit settings replace the installed ones and validate as before. */
+function kitUpdateEnvironment(job: ServiceJobDef, installed: Record<string, string> | null): [string, string][] {
+	if (job.name !== "kit-update") return [];
+	const explicit = KIT_UPDATE_ENV_KEYS.some(key => process.env[key] !== undefined);
+	if (!explicit && installed === null) return [];
+	const source: Record<string, string | undefined> = {};
+	if (explicit) {
+		for (const key of KIT_UPDATE_ENV_KEYS) source[key] = process.env[key];
+	} else {
+		for (const key of KIT_UPDATE_ENV_KEYS) source[key] = installed?.[key];
+	}
+	const enabled = source.OMP_KIT_UPDATE_ENABLED;
+	const index = source.OMP_KIT_UPDATE_INDEX;
+	const archive = source.OMP_KIT_UPDATE_ARCHIVE;
+	const version = source.OMP_KIT_UPDATE_VERSION;
+	const tag = source.OMP_KIT_UPDATE_SOURCE_TAG;
+	const poll = source.OMP_KIT_UPDATE_POLL;
+	const repo = source.OMP_KIT_UPDATE_REPO;
 	// Only validated inputs persist: a bad slug never rides along with a good tuple.
-	const clean = KIT_UPDATE_ENV_KEYS.every(key => !/[\r\n\0]/.test(process.env[key] ?? ""));
+	const clean = KIT_UPDATE_ENV_KEYS.every(key => !/[\r\n\0]/.test(source[key] ?? ""));
 	const staticValid = enabled === "1" && !!index && !!archive && !!version && tag === `v${version}` &&
 		/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(version) &&
 		isAbsolute(index) && isAbsolute(archive) && resolve(index) === index && resolve(archive) === archive &&
 		dirname(index) === dirname(archive) && clean;
 	const pollValid = enabled === "1" && poll === "github" && !!repo && KIT_UPDATE_REPO_PATTERN.test(repo) && clean;
 	if (!staticValid && !pollValid) {
-		throw new Error("KIT_UPDATE_LOCAL_TUPLE_REQUIRED: enabled=1 plus POLL=github with REPO=owner/repo, or absolute same-directory index/archive, version and matching source tag, are required");
+		// Explicit settings are a caller bug and fail loudly; unusable installed
+		// settings simply persist nothing, as a settings-free render always has.
+		if (explicit) throw new Error("KIT_UPDATE_LOCAL_TUPLE_REQUIRED: enabled=1 plus POLL=github with REPO=owner/repo, or absolute same-directory index/archive, version and matching source tag, are required");
+		return [];
 	}
 	const persisted: [string, string][] = [["OMP_KIT_UPDATE_ENABLED", "1"]];
 	if (pollValid) persisted.push(["OMP_KIT_UPDATE_POLL", poll!], ["OMP_KIT_UPDATE_REPO", repo!]);
@@ -607,6 +628,8 @@ function configuredProgram(job: ServiceJobDef): ServiceProgram | null {
 export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null): RenderedPlist {
 	const program = configuredProgram(job);
 	const programArguments = program !== null && job.lockedRun !== true ? program.argv : [launcher, "service", "run", job.name];
+	const installed = readInstalledPlist(home, job.label);
+	const installedUpdate = installed ? Object.fromEntries(Object.entries(plistEnvironment(installed.text)).map(([key, value]) => [key, unxml(value)])) : null;
 	const lines = [
 		'<?xml version="1.0" encoding="UTF-8"?>',
 		'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -629,7 +652,7 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		"\t\t<key>PATH</key>",
 		`\t\t<string>${xml(servicePath(home))}</string>`,
 		...ciPollerEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
-		...kitUpdateEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
+		...kitUpdateEnvironment(job, installedUpdate).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		...amRetentionEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		"\t\t<key>OMP_KIT_JOB</key>",
 		`\t\t<string>${xml(job.name)}</string>`,
@@ -670,13 +693,29 @@ function systemdQuote(value: string): string {
 export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null): RenderedSystemd {
 	const program = configuredProgram(job);
 	const execStart = program !== null && job.lockedRun !== true ? program.argv.map(systemdQuote).join(" ") : `${launcher} service run ${job.name}`;
+	const serviceFile = join(home, ".config", "systemd", "user", `omp-kit-${job.name}.service`);
+	let installedService: string | null = null;
+	try {
+		if (statSync(serviceFile).isFile() && !isSymlink(serviceFile)) installedService = readText(serviceFile);
+	} catch { /* absent installed unit renders from the environment alone */ }
+	let installedUpdate: Record<string, string> | null = null;
+	if (installedService !== null) {
+		installedUpdate = {};
+		const parsed = systemdEnvironment(installedService);
+		for (const key of KIT_UPDATE_ENV_KEYS) {
+			const raw = parsed[key];
+			// systemdQuote writes $ as $$, but unquoteUnit only decodes $$$$: without this a kept $
+			// doubles on every re-render. Kept-path only; contract checks keep their own decode.
+			if (raw !== undefined) installedUpdate[key] = unquoteUnit(raw).replace(/\$\$/g, "$");
+		}
+	}
 	const env = [
 		`Environment=HOME=${systemdQuote(home)}`,
 		`Environment=XDG_STATE_HOME=${systemdQuote(stateHome(home))}`,
 		`Environment=PATH=${systemdQuote(servicePath(home))}`,
 		`Environment=TMPDIR=${systemdQuote(serviceTmpDir(home))}`,
 		...ciPollerEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
-		...kitUpdateEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
+		...kitUpdateEnvironment(job, installedUpdate).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		...amRetentionEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		`Environment=OMP_KIT_JOB=${systemdQuote(job.name)}`,
 	];

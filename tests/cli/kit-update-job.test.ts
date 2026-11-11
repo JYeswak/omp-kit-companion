@@ -1,6 +1,6 @@
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { kitUpdateJobOverall, pollPublishedRelease, runKitUpdateJob, type KitUpdateJobConfig, type KitUpdateJobDependencies, type KitUpdateJobResult } from "../../src/kit-update-job.ts";
 import { reconcilePendingUpdate, type KitUpdateResult } from "../../src/kit-update.ts";
@@ -469,6 +469,43 @@ test("planted: reconcile failure keeps the update, reports BLOCKED and keeps the
 	expect(result).toMatchObject({ status: "UPDATED", receiptId: "r5", activeVersion: "1.2.4", notification: true, reason: "SERVICE_RECONCILE_FAILED", relink: "APPLIED", pluginReceiptId: "plugin-r5", pluginUndoCommand: "omp-kit undo plugin-r5 --yes", service: "FAILED" });
 	expect(notes).toHaveLength(1); expect(notes[0]).toContain("BLOCKED"); expect(notes[0]).toContain("r5"); expect(notes[0]).toContain("plugin-r5"); expect(notes[0]).toContain("omp-kit undo plugin-r5 --yes");
 });
+
+test("KITUPDATELIVE1: each run prunes old run records to the bound and keeps pending receipts", async () => {
+	const value = config();
+	mkdirSync(value.stateRoot, { recursive: true, mode: 0o700 });
+	const old = new Date(Date.now() - 30 * 86400000);
+	for (let i = 0; i < 50; i++) {
+		const path = join(value.stateRoot, `kit-update-job-00000000-0000-4000-8000-${String(i).padStart(12, "0")}.json`);
+		writeFileSync(path, JSON.stringify({ schema_version: 1, run_id: `old-${i}`, status: "REFUSED", receiptId: null, activeVersion: null, notification: false, reason: "KIT_TEST_OLD" }));
+		utimesSync(path, old, old);
+	}
+	// Several wedged PENDING records: only the newest one is the recovery trail.
+	const pendingNames = ["aaaaaaaa", "bbbbbbbb", "cccccccc"].map(stem =>
+		`kit-update-job-${stem}-ffff-4000-8000-ffffffffffff.json`);
+	pendingNames.forEach((pendingName, index) => {
+		const pendingPath = join(value.stateRoot, pendingName);
+		writeFileSync(pendingPath, JSON.stringify({ schema_version: 1, run_id: `old-pending-${index}`, status: "PENDING", receiptId: "old-receipt", activeVersion: "1.2.3", notification: true, reason: "KIT_RECOVERY_UNVERIFIED", receipt: "PENDING", relink: "NOT_RUN", service: "NOT_RUN" }));
+		utimesSync(pendingPath, new Date(old.getTime() + index * 60000), new Date(old.getTime() + index * 60000));
+	});
+	// A hand-placed lookalike is not a run record: never parsed, never deleted. Shaped like an
+	// old terminal record so a prefix-matching pruner would eat it.
+	const backupPath = join(value.stateRoot, "kit-update-job-backup.json");
+	const backupBytes = JSON.stringify({ schema_version: 1, run_id: "operator-copy", status: "REFUSED", receiptId: null, activeVersion: null, notification: false, reason: "KIT_TEST_OLD" });
+	writeFileSync(backupPath, backupBytes);
+	utimesSync(backupPath, old, old);
+	const result = await runKitUpdateJob(value, {
+		plan: async () => ({ status: "REFUSED", exitCode: 2, reason: "KIT_TEST_REFUSAL", provenance: "UNVERIFIED" } as never),
+	});
+	expect(result.status).toBe("REFUSED");
+	const anchored = /^kit-update-job-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+	const records = readdirSync(value.stateRoot).filter(name => anchored.test(name));
+	// The bound keeps the newest 30 terminal records plus the single newest PENDING receipt.
+	expect(records.length).toBeLessThanOrEqual(31);
+	expect(records).toContain(pendingNames[2]);
+	expect(records).not.toContain(pendingNames[0]);
+	expect(records).not.toContain(pendingNames[1]);
+	expect(readFileSync(backupPath, "utf8")).toBe(backupBytes);
+}, fixtureDeadlineS() * 1000);
 
 function installSymlink(root: string, version: string): void {
 	mkdirSync(join(root, "bin"), { recursive: true });

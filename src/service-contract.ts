@@ -33,7 +33,7 @@ function absoluteSearchPathStatus(value: string): string {
 }
 
 /** EnvironmentVariables entries of a launchd plist: key -> raw string value. */
-function plistEnvironment(text: string): Record<string, string> {
+export function plistEnvironment(text: string): Record<string, string> {
 	const entries: Record<string, string> = {};
 	const dict = text.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
 	if (!dict) return entries;
@@ -158,7 +158,7 @@ export function checkPlistContract(jobName: string, text: string, restart: Daemo
 }
 
 /** Environment lines of a systemd unit: KEY -> raw (still quoted) value. */
-function systemdEnvironment(text: string): Record<string, string> {
+export function systemdEnvironment(text: string): Record<string, string> {
 	const entries: Record<string, string> = {};
 	const linePattern = /^Environment=([A-Za-z_][A-Za-z0-9_]*)=(.+)$/gm;
 	let match: RegExpExecArray | null;
@@ -168,7 +168,7 @@ function systemdEnvironment(text: string): Record<string, string> {
 	return entries;
 }
 
-function unquoteUnit(value: string): string {
+export function unquoteUnit(value: string): string {
 	const trimmed = value.trim();
 	if (trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length >= 2) {
 		return trimmed.slice(1, -1).replace(/\\"/g, "\"").replace(/\\\\/g, "\\").replace(/\$\$\$\$/g, "$").replace(/%%/g, "%");

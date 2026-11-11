@@ -363,9 +363,9 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		// per-run record; records exist for runs that change or fail something.
 		// Nothing reads kit-update-job-*.json except this post-mortem scan, so
 		// skipping the write loses no consumer.
-		if (!source) return { status: "CURRENT", receiptId: null, activeVersion: installedVersion(config.prefix), notification: false, relink: "NOT_RUN", service: "NOT_RUN" };
+		if (!source) { pruneKitUpdateRunRecords(config.stateRoot); return { status: "CURRENT", receiptId: null, activeVersion: installedVersion(config.prefix), notification: false, relink: "NOT_RUN", service: "NOT_RUN" }; }
 		const preview = await plan({ prefix: config.prefix, stateRoot: config.stateRoot, home: config.home, platform: config.platform, ...source });
-		if (preview.status === "CURRENT") return { status: "CURRENT", receiptId: null, activeVersion: preview.current.version, notification: false, relink: "NOT_RUN" };
+		if (preview.status === "CURRENT") { pruneKitUpdateRunRecords(config.stateRoot); return { status: "CURRENT", receiptId: null, activeVersion: preview.current.version, notification: false, relink: "NOT_RUN" }; }
 		// Never a project: launchd runs the job from HOME, and watching HOME's .omp/.agents/.claude as one made every live postcheck fail.
 		if (preview.status !== "UPDATE_AVAILABLE") { const refusal = preview as KitUpdateRefusal; return record(config.stateRoot, runId, { status: "REFUSED", receiptId: null, activeVersion: null, notification: false, reason: refusal.reason, relink: "NOT_RUN" }); }
 		const runningVersion = runningReleaseVersion(config.prefix);
@@ -481,8 +481,46 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 	}
 }
 
+/** Newest terminal run records kept per state root; older ones are pruned on every recording run.
+ * The single newest non-terminal PENDING record is the recovery trail and always survives. */
+export const KIT_UPDATE_RUN_RECORD_LIMIT = 30;
+
+/** Run-record filenames are the uuid shape the job writes; anything else (a hand-placed backup,
+ * a partial download) is never parsed or deleted. */
+const RUN_RECORD_NAME = /^kit-update-job-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+
+/** Best-effort prune of kit-update-job-<uuid>.json run records: keep the newest
+ * KIT_UPDATE_RUN_RECORD_LIMIT terminal records plus the single newest non-terminal receipt. */
+export function pruneKitUpdateRunRecords(stateRoot: string): void {
+	try {
+		let names: string[];
+		try { names = readdirSync(stateRoot); } catch { return; }
+		const kept: { name: string; mtime: number; pending: boolean }[] = [];
+		for (const name of names) {
+			if (!RUN_RECORD_NAME.test(name)) continue;
+			let mtime = 0, pending = false;
+			try {
+				mtime = lstatSync(join(stateRoot, name)).mtimeMs;
+				const record: unknown = JSON.parse(readFileSync(join(stateRoot, name), "utf8"));
+				if (record !== null && typeof record === "object") {
+					if ("status" in record && record.status === "PENDING") pending = true;
+					if ("receipt" in record && record.receipt === "PENDING") pending = true;
+				}
+			} catch { continue; }
+			kept.push({ name, mtime, pending });
+		}
+		const terminal = kept.filter(entry => !entry.pending).sort((a, b) => b.mtime - a.mtime);
+		const pending = kept.filter(entry => entry.pending).sort((a, b) => b.mtime - a.mtime);
+		const drop = new Set(terminal.slice(KIT_UPDATE_RUN_RECORD_LIMIT).map(entry => entry.name));
+		for (const entry of pending.slice(1)) drop.add(entry.name);
+		for (const name of drop) {
+			try { rmSync(join(stateRoot, name), { force: true }); } catch { /* one stuck record never fails the run */ }
+		}
+	} catch { /* pruning never fails the run */ }
+}
 function record(stateRoot: string, runId: string, result: KitUpdateJobResult): KitUpdateJobResult {
 	mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
 	writeFileSync(join(stateRoot, `kit-update-job-${runId}.json`), JSON.stringify({ schema_version: 1, run_id: runId, ...result }) + "\n", { mode: 0o600 });
+	pruneKitUpdateRunRecords(stateRoot);
 	return result;
 }

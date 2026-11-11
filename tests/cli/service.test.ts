@@ -892,6 +892,69 @@ test("service run kit-update with poll-only config reaches the job instead of re
   expect(result.envelope.data).toMatchObject({ overall: "OK", job: "kit-update", status: "DISABLED" });
 }, fixtureDeadlineS(60) * 1000);
 
+const KIT_UPDATE_ENV_KEYS = ["OMP_KIT_UPDATE_ENABLED", "OMP_KIT_UPDATE_POLL", "OMP_KIT_UPDATE_REPO", "OMP_KIT_UPDATE_INDEX", "OMP_KIT_UPDATE_ARCHIVE", "OMP_KIT_UPDATE_VERSION", "OMP_KIT_UPDATE_SOURCE_TAG"];
+
+test("KITUPDATELIVE1: re-render without update env keeps installed kit-update settings", () => {
+  const { home, launcher } = fixture();
+  const job = KNOWN_JOBS["kit-update"]!;
+  const saved = new Map(KIT_UPDATE_ENV_KEYS.map(key => [key, process.env[key]]));
+  try {
+    process.env.OMP_KIT_UPDATE_ENABLED = "1";
+    process.env.OMP_KIT_UPDATE_POLL = "github";
+    process.env.OMP_KIT_UPDATE_REPO = "o/r";
+    const installedText = renderLaunchdPlist(home, job, launcher, null).text;
+    expect(installedText).toContain("<key>OMP_KIT_UPDATE_REPO</key>\n\t\t<string>o/r</string>");
+    const dest = join(home, "Library", "LaunchAgents", `${job.label}.plist`);
+    mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+    writeFileSync(dest, installedText);
+    const installedUnits = renderSystemdUnits(home, job, launcher, null).service;
+    mkdirSync(join(home, ".config", "systemd", "user"), { recursive: true });
+    writeFileSync(join(home, ".config", "systemd", "user", `omp-kit-${job.name}.service`), installedUnits);
+    // A later re-render from a shell without OMP_KIT_UPDATE_* keeps the installed settings.
+    for (const key of KIT_UPDATE_ENV_KEYS) delete process.env[key];
+    const rerendered = renderLaunchdPlist(home, job, launcher, null).text;
+    expect(rerendered).toContain("<key>OMP_KIT_UPDATE_ENABLED</key>\n\t\t<string>1</string>");
+    expect(rerendered).toContain("<key>OMP_KIT_UPDATE_REPO</key>\n\t\t<string>o/r</string>");
+    const units = renderSystemdUnits(home, job, launcher, null).service;
+    expect(units).toContain("Environment=OMP_KIT_UPDATE_POLL=\"github\"");
+    // A kept value containing & or $ is byte-identical after two re-renders: no entity or
+    // quoting layer accumulates. Uses a static tuple so both metacharacters validate.
+    const trickyDir = join(home, "rel", "a&b$c");
+    process.env.OMP_KIT_UPDATE_ENABLED = "1";
+    process.env.OMP_KIT_UPDATE_INDEX = join(trickyDir, "index.json");
+    process.env.OMP_KIT_UPDATE_ARCHIVE = join(trickyDir, "kit.tar");
+    process.env.OMP_KIT_UPDATE_VERSION = "1.2.4";
+    process.env.OMP_KIT_UPDATE_SOURCE_TAG = "v1.2.4";
+    writeFileSync(dest, renderLaunchdPlist(home, job, launcher, null).text);
+    const unitDest = join(home, ".config", "systemd", "user", `omp-kit-${job.name}.service`);
+    writeFileSync(unitDest, renderSystemdUnits(home, job, launcher, null).service);
+    for (const key of KIT_UPDATE_ENV_KEYS) delete process.env[key];
+    const plistA = renderLaunchdPlist(home, job, launcher, null).text;
+    expect(plistA).toContain("a&amp;b$c");
+    expect(plistA).not.toContain("&amp;amp;");
+    writeFileSync(dest, plistA);
+    expect(renderLaunchdPlist(home, job, launcher, null).text).toBe(plistA);
+    const unitsA = renderSystemdUnits(home, job, launcher, null).service;
+    expect(unitsA).toContain("a&b$$c");
+    expect(unitsA).not.toContain("$$$$");
+    writeFileSync(unitDest, unitsA);
+    expect(renderSystemdUnits(home, job, launcher, null).service).toBe(unitsA);
+    // Explicit settings replace the installed ones instead of merging.
+    process.env.OMP_KIT_UPDATE_ENABLED = "1";
+    process.env.OMP_KIT_UPDATE_POLL = "github";
+    process.env.OMP_KIT_UPDATE_REPO = "n/e";
+    const replaced = renderLaunchdPlist(home, job, launcher, null).text;
+    expect(replaced).toContain("<key>OMP_KIT_UPDATE_REPO</key>\n\t\t<string>n/e</string>");
+    expect(replaced).not.toContain("<string>o/r</string>");
+  } finally {
+    for (const key of KIT_UPDATE_ENV_KEYS) {
+      const prior = saved.get(key);
+      if (prior === undefined) delete process.env[key];
+      else process.env[key] = prior;
+    }
+  }
+}, fixtureDeadlineS(60) * 1000);
+
 test("scratch worker refuses a forged keeper before inspecting its root", () => {
   const { home } = fixture();
   const root = join(home, "var", "agent-tmp");
