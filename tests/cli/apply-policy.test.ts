@@ -28,7 +28,7 @@ nativeTest("plan emits only explicit native per-profile TTSR config-set commands
 	expect(plan.steps.map(step => step.command)).toEqual([
 		"omp --profile work config set ttsr.enabled true",
 		"omp --profile work config set ttsr.repeatMode after-gap",
-		"omp --profile work config set ttsr.repeatGap 0",
+		"omp --profile work config set ttsr.repeatGap 1",
 		"omp --profile work config set ttsr.contextMode keep",
 		"omp --profile work config set ttsr.disabledRules '[\"managed\"]'",
 	]);

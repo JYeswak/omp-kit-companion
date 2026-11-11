@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "repeatMode": "after-gap",
-  "repeatGap": 0,
+  "repeatGap": 1,
   "contextMode": "keep",
   "disabledRules": []
 }
