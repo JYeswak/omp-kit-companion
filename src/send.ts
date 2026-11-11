@@ -808,6 +808,28 @@ export function buildNativeSendTurn(block: string, payload: string): string | nu
 
 export type TernDeliverStatus = "OK" | "PENDING_CONSUME" | "NOT_DELIVERED" | "REFUSED";
 export type TernQueueState = "QUEUED" | "DELIVERED" | "EXPIRED" | "PENDING_CONSUME" | "REFUSED";
+/**
+ * GOALSENDLAND1: read the verdict of one `tern ctl carly lua` turn. The lua
+ * call itself exits 0 with `{"ok":true}` even when the turn never runs (Lua
+ * syntax error, unknown agent id, pane runs no agent all surface only in the
+ * next `carly ok`: exit nonzero with `{"ok":false,"error":...}`). An
+ * unparsable or missing verdict is unknown, never success.
+ */
+function parseCarlyVerdict(out: string): { ok: boolean; error: string | null } {
+	try {
+		const parsed: unknown = JSON.parse(out);
+		const rec = recordOf(parsed);
+		if (rec?.ok === true) return { ok: true, error: null };
+		const error = rec !== null && typeof rec.error === "string" ? rec.error : null;
+		if (error === null || error === "") return { ok: false, error: null };
+		// Bounded before matching (regex-engineering §2): the daemon error is sliced to 300 chars first, so the
+		// linear single-class collapse below never scans unbounded text. Required match: runs of whitespace
+		// collapse; reject: "" is refused above; near-miss: no nested quantifier exists to backtrack.
+		return { ok: false, error: error.slice(0, 300).split(/\s+/).join(" ") };
+	} catch {
+		return { ok: false, error: null };
+	}
+}
 /** Caller-declared seat posture; any stated bad value refuses with zero sends. */
 export interface TernSendGate {
 	paused?: boolean;
@@ -1127,6 +1149,9 @@ export interface TernPendingRecord extends TernProofKey {
 	textSha256: string;
 	createdAt: string;
 	status?: "REPLACED_UNPROVEN";
+	/** GOALSENDLAND1: the seat foreground's start at attempt time; a seat restart changes it, so an attempt
+	 * pinned to an older start belongs to a previous runtime incarnation and can never suppress a new send. */
+	foregroundStarted?: string | null;
 }
 
 const TERN_PENDING_STRINGS = ["marker", "payloadSha256", "objective", "sessionId", "leafId", "prefixSha256",
@@ -1155,7 +1180,9 @@ function readTernPending(path: string): TernPendingRecord | null {
 	const priorGoalIdsComplete = rec.priorGoalIdsComplete === undefined ? true : rec.priorGoalIdsComplete;
 	if (typeof priorGoalIdsComplete !== "boolean") return null;
 	if (rec.status !== undefined && rec.status !== "REPLACED_UNPROVEN") return null;
-	return { ...rec, prefixStart, fileIdentity, priorGoalIdsComplete } as unknown as TernPendingRecord;
+	const foregroundStarted = rec.foregroundStarted === undefined ? null : rec.foregroundStarted;
+	if (foregroundStarted !== null && typeof foregroundStarted !== "string") return null;
+	return { ...rec, prefixStart, fileIdentity, priorGoalIdsComplete, foregroundStarted } as unknown as TernPendingRecord;
 }
 
 /** F5: the attempt is durable (file and directory fsynced) before any effect; false means nothing was persisted. */
@@ -1260,13 +1287,17 @@ export function acknowledgeTernPending(path: string, dropDir: string, now = Date
  * a destructive payload to a pane not proven to run OMP is refused by rule
  * id) -> identify -> observe/identify/configured-pane fence (SENDX1) ->
  * eligibility from the very snapshot observe hashed -> refuse slash
- * controls with no proof contract -> sweep settled pendings (ledger only)
+ * controls with no proof contract -> sweep settled pendings (ledger only;
+ * a same-session attempt pinned to an older foreground start is a previous
+ * incarnation and refuses at once with path and ack command, GOALSENDLAND1-stale)
  * -> suppress while an attempt on this incarnation is unproven (the sweep
  * reconciles a pending whose marker has since landed, WAKEDEADLINE1) ->
  * persist the attempt durably -> lock -> re-read (incarnation pre-filter, not
- * atomicity) -> ONE native admission turn -> poll for proof (an admitted steer
+ * atomicity) -> ONE native admission turn plus its `carly ok` verdict (GOALSENDLAND1:
+ * the lua exit alone never proves the turn ran) -> poll for proof (an admitted steer
  * waits up to the caller's until-delivered bound, capped by the proof deadline
- * of default 20 s, so it covers a busy seat's next turn boundary).
+ * of default 20 s, so it covers a busy seat's next turn boundary). Every
+ * post-dispatch outcome names the targeted pane, session file and native verdict.
  *
  * Statuses: OK (entry proven; offset is its byte offset in sessionFile),
  * PENDING_CONSUME (an effect may have happened and is unproven; pending
@@ -1454,6 +1485,18 @@ export async function deliverToTernSeat(input: {
 	const refuseReplaced = (path: string, rec: TernPendingRecord): TernDeliverResult =>
 		fail("REPLACED_UNPROVEN", `Journal replaced; consumption of ${path} (${rec.marker}) is unproven; no resend. `
 			+ `To acknowledge this loss of proof without sending, run: ${ackPendingCommand(path, input.dropDir)}`);
+	// GOALSENDLAND1-stale: an attempt pinned to an older foreground start belongs to a previous runtime
+	// incarnation (the seat restarted since). It can never suppress a new send, and it is reported at once
+	// with its path and the ack command instead of waiting out any bound. Records without a pinned start
+	// predate this signal and keep the old suppression.
+	const refuseStaleIncarnation = (path: string, rec: TernPendingRecord): TernDeliverResult | null => {
+		const then = typeof rec.foregroundStarted === "string" && rec.foregroundStarted !== "" ? rec.foregroundStarted : null;
+		const current = ob.foregroundStarted;
+		if (then === null || typeof current !== "string" || current === "" || then === current) return null;
+		return fail("STALE_PENDING_INCARNATION", `earlier attempt ${rec.marker} is from a previous runtime incarnation `
+			+ `(seat foreground started ${then} at attempt time, ${current} now); zero sends; pending record at ${path}; `
+			+ `to acknowledge this loss of proof without sending, run: ${ackPendingCommand(path, input.dropDir)}`);
+	};
 	let pendingNames: string[] = [];
 	try {
 		pendingNames = readdirSync(pendingDir);
@@ -1469,6 +1512,8 @@ export async function deliverToTernSeat(input: {
 			settleTernPending(pendingDir, name, rec, "INCARNATION_GONE", null);
 			continue;
 		}
+		const stale = refuseStaleIncarnation(join(pendingDir, name), rec);
+		if (stale !== null) return stale;
 		// A key pinned before this view's tail re-reads with its own range on one snapshot.
 		const proofView = rec.prefixStart < journalView.tailStart
 			? readSessionView(input.io, sessionFile, { start: rec.prefixStart, cursor: rec.cursorBytes }) : journalView;
@@ -1489,6 +1534,8 @@ export async function deliverToTernSeat(input: {
 	const pending = readTernPending(pendingPath);
 	if (pending !== null && pending.sessionId === journal.sessionId) {
 		if (pending.status === "REPLACED_UNPROVEN") return refuseReplaced(pendingPath, pending);
+		const staleSamePath = refuseStaleIncarnation(pendingPath, pending);
+		if (staleSamePath !== null) return staleSamePath;
 		const ackableAt = pendingAckableAt(pending);
 		const how = ackableAt === null ? "" : Date.now() >= ackableAt
 			? `; if it never landed, acknowledge the loss of proof without resending: ${ackPendingCommand(pendingPath, input.dropDir)}`
@@ -1502,7 +1549,8 @@ export async function deliverToTernSeat(input: {
 	const key = buildTernProofKey(journalView, journal, { kind: payloadKind.kind, payload, marker,
 		objective: payloadKind.kind === "goal-set" ? payloadKind.objective : "" });
 	const attempt: TernPendingRecord = { ...key, seatKey, sessionSha: observation.sessionSha ?? "",
-		textSha256: sha256Hex(input.text), createdAt: new Date().toISOString() };
+		textSha256: sha256Hex(input.text), createdAt: new Date().toISOString(),
+		foregroundStarted: ob.foregroundStarted };
 	if (!persistTernAttempt(pendingPath, attempt)) return fail("PENDING_WRITE_FAILED", "attempt record not persisted; zero sends");
 	const releaseLock = await acquirePaneLock(paneLockPath(input.dropDir, input.seat.session, input.seat.pane),
 		Math.max(1, Math.ceil(deadlineMs / pollMs)), pollMs, wait);
@@ -1528,18 +1576,39 @@ export async function deliverToTernSeat(input: {
 		}
 		// F5: a failed or crashed dispatch does not prove zero native effects;
 		// the attempt stays pending and proof is still reconciled below.
+		// GOALSENDLAND1: `tern ctl carly lua` exits 0 with `{"ok":true}` even when the turn never runs (Lua
+		// syntax error, unknown agent id, pane runs no agent all surface only in the next `carly ok`, verified
+		// live 2026-11-11 on an owned sandbox serve). The verdict is read at once on the same endpoint; last_tool
+		// is a shared channel, so a foreign turn racing between the two calls can misattribute it — proof below
+		// stays the source of truth either way. An explicit native failure keeps the pending record: the
+		// misattributed-or-failed turn may still have queued nothing, or something else may have queued.
 		let dispatched = false;
+		let nativeResult = "carly verdict unread";
 		const lua = buildNativeSendTurn(paneId, payload);
 		if (lua === null) {
 			try { rmSync(pendingPath, { force: true }); } catch {}
 			return fail("BLOCK_UNWIREABLE", "block not a bare decimal pane id; zero sends");
 		}
+		const ctlPrefix = [ternCtlBin(), ...(windowKey ? ["--window", windowKey] : []), "ctl", "carly"];
+		let luaOk = false;
 		try {
-			dispatched = input.io.run([ternCtlBin(), ...(windowKey ? ["--window", windowKey] : []), "ctl", "carly", "lua", lua]).code === 0;
+			luaOk = input.io.run([...ctlPrefix, "lua", lua]).code === 0;
 		} catch {
-			dispatched = false;
+			luaOk = false;
+			nativeResult = "carly lua threw";
 		}
-		const via = " via native agent API";
+		if (!luaOk && nativeResult === "carly verdict unread") nativeResult = "carly lua exit nonzero";
+		if (luaOk) {
+			try {
+				const verdict = parseCarlyVerdict(input.io.run([...ctlPrefix, "ok"]).out);
+				nativeResult = verdict.ok ? "carly ok:true"
+					: verdict.error === null ? "carly ok:false" : `carly ok:false: ${verdict.error}`;
+			} catch {
+				nativeResult = "carly ok threw";
+			}
+		}
+		dispatched = luaOk && !nativeResult.startsWith("carly ok:false");
+		const targetNote = `pane tern:${paneId}, session file ${sessionFile}, native ${nativeResult}`;
 		// WAKEDEADLINE1: an admitted steer lands at the seat's next turn boundary, which the 3 s steer
 		// admission bound does not cover on an always-busy seat. The proof of an admitted steer therefore
 		// waits up to the caller's until-delivered bound (capped by the proof deadline), never past it;
@@ -1564,7 +1633,7 @@ export async function deliverToTernSeat(input: {
 				try { rmSync(pendingPath, { force: true }); } catch {}
 				const steered = last.steering ? " as a steering entry (program was busy at handle time)" : "";
 				return { status: "OK", marker, sends: 1, sessionFile, offset: last.offset, drop_path: null,
-					detail: `${payloadKind.kind === "goal-set" ? "goal adopted" : "USER entry"} proven at offset ${last.offset}${via}${steered}`,
+					detail: `${payloadKind.kind === "goal-set" ? "goal adopted" : "USER entry"} proven at offset ${last.offset} via native agent API${steered}; ${targetNote}`,
 					code: last.steering ? "PROVEN_STEERED" : "PROVEN",
 					...(queued ? { queue_states: ["QUEUED", "DELIVERED"] as const } : {}) };
 			}
@@ -1574,7 +1643,7 @@ export async function deliverToTernSeat(input: {
 		const note = "";
 		return { status: "PENDING_CONSUME", marker, sends: 1, sessionFile, offset: null,
 			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
-			detail: `${dispatched ? `sent${via}` : "dispatch failed, effect unknown"}; proof ${last.status} (${last.reason})${note}; pending retained, never auto-resent`,
+			detail: `${dispatched ? `sent via native agent API (${targetNote})` : `native turn (${targetNote}) failed; dispatch failed, effect unknown`}; proof ${last.status} (${last.reason})${note}; pending retained, never auto-resent`,
 			code: !dispatched ? "SEND_AMBIGUOUS" : payloadKind.kind === "goal-set" ? "GOAL_NOT_ADOPTED" : "PROOF_TIMEOUT",
 			...(queued ? { queue_states: ["QUEUED", dispatched && steer ? "EXPIRED" : "PENDING_CONSUME"] as const } : {}) };
 	} finally {

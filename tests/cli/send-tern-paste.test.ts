@@ -13,7 +13,7 @@ import { ownedTmp } from "../../src/kitlib/tmp.ts";
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratchTmp = ownedTmp("send-tern-paste", { root: scratchRoot });
+const scratchTmp = ownedTmp("send-tern-native", { root: scratchRoot });
 const scratch = scratchTmp.path;
 afterAll(() => scratchTmp.cleanup());
 
@@ -89,6 +89,8 @@ function ternFixture(opts: { overCap?: boolean; boundedReader?: boolean } = {}):
 	const io: TernObserverIo = {
 		run(argv) {
 			taken.runs.push([...argv]);
+			// The verdict read is not a turn: it reports the last tool answer, never an effect.
+			if (argv.includes("carly") && argv.includes("ok")) return { code: 0, out: `{"ok":true}` };
 			if (argv.includes("carly") && argv.includes("lua")) {
 				taken.luaDispatches++;
 				const groups = [...(argv[argv.length - 1] ?? "").matchAll(/string\.char\(([\d,]+)\)/g)].map((m) => m[1]!);

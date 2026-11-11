@@ -419,12 +419,14 @@ interface TernFake {
 	sent: string[];
 	journal: { text: string };
 }
-/** Fake Tern IO: one shared journal; a native turn may append what `respond` returns. */
 function ternFake(opts: {
 	journal?: string;
 	respond?: (payload: string, journal: string) => string;
 	runRc?: number;
 	runThrows?: boolean;
+	okOut?: string;
+	okRc?: number;
+	okThrows?: boolean;
 	capture?: (sent: string[]) => { code: number; out: string };
 	read?: (path: string, journal: string, readNo: number) => string | null;
 } = {}): TernFake {
@@ -434,6 +436,10 @@ function ternFake(opts: {
 		run: (argv: string[]) => {
 			fake.runs.push(argv);
 			if (argv.includes("carly")) {
+				if (argv.includes("ok")) {
+					if (opts.okThrows) throw new Error("ctl carly ok crashed");
+					return { code: opts.okRc ?? 0, out: opts.okOut ?? `{"ok":true}` };
+				}
 				const payload = sentPayload(argv);
 				fake.sent.push(payload);
 				if (opts.runThrows) throw new Error("ctl crashed mid-dispatch");
@@ -451,7 +457,7 @@ function ternFake(opts: {
 	};
 	return fake;
 }
-const carlyRuns = (fake: TernFake) => fake.runs.filter((argv) => argv.includes("carly")).length;
+const carlyRuns = (fake: TernFake) => fake.runs.filter((argv) => argv.includes("carly") && argv.includes("lua")).length;
 /** Observation that hashes the fake's journal as it is at observe time. */
 const idleOf = (fake: TernFake, over: Partial<TernObservation> = {}) =>
 	async (_seat: TernSeatBinding): Promise<TernObservation> => ({ ...ternIdle, sessionSha: sha(fake.journal.text), ...over });
@@ -930,6 +936,81 @@ test("SENDSTUCK1: a replaced-unproven record still requires acknowledgement afte
 	expect(existsSync(fx.path)).toBe(true);
 });
 
+test("GOALSENDLAND1: a native turn with no journal entry reports pane, session file and native verdict", async () => {
+	for (const [text, code] of [["hello", "PROOF_TIMEOUT"], ["/goal set hold the hill", "GOAL_NOT_ADOPTED"]] as const) {
+		const fake = ternFake();
+		const r = await deliverTern(fake, text);
+		expect(r.status).toBe("PENDING_CONSUME");
+		expect(r.code).toBe(code);
+		expect(r.sends).toBe(1);
+		expect(r.detail).toContain("tern:7");
+		expect(r.detail).toContain("/sf");
+		expect(r.detail).toContain("carly ok:true");
+	}
+});
+
+test("GOALSENDLAND1: a native tool error is never reported as sent; the error, pane and session file are", async () => {
+	const fake = ternFake({ okOut: `{"ok":false,"error":"carly ok: error: agent not found"}` });
+	const r = await deliverTern(fake, "hello");
+	expect(r.status).toBe("PENDING_CONSUME");
+	expect(r.code).toBe("SEND_AMBIGUOUS");
+	expect(r.sends).toBe(1);
+	expect(r.detail).toContain("agent not found");
+	expect(r.detail).toContain("tern:7");
+	expect(r.detail).toContain("/sf");
+	expect(r.detail).not.toContain("sent via native agent API");
+});
+
+test("GOALSENDLAND1-stale: a pending attempt from a previous runtime incarnation refuses at once with path and ack command", async () => {
+	const dir = ternDropDir();
+	const marker = "kit-send-0123456789ae";
+	const pendingPath = seedPending(dir, settledJournal, marker, `old\n[${marker}]`);
+	const record = JSON.parse(readFileSync(pendingPath, "utf8"));
+	writeFileSync(pendingPath, JSON.stringify({ ...record, foregroundStarted: "Mon Nov 10 22:13:00 2025" }) + "\n");
+	const fake = ternFake();
+	const bound = { ...ternRuntimeBinding, foregroundStarted: "Tue Nov 11 05:59:00 2026" };
+	const r = await deliverTern(fake, "new", { dropDir: dir, untilDeliveredMs: 60_000,
+		wait: async () => { throw new Error("stale pending must not wait out the bound"); },
+		observe: idleOf(fake, { runtimeBinding: bound }),
+		identify: async () => ({ ...ternIdentified, runtimeBinding: bound }) });
+	expect(r.status).toBe("REFUSED");
+	expect(r.code).toBe("STALE_PENDING_INCARNATION");
+	expect(r.sends).toBe(0);
+	expect(r.detail).toContain(pendingPath);
+	expect(r.detail).toContain("omp-kit send --ack-pending");
+	expect(fake.runs.length).toBe(0);
+	expect(existsSync(pendingPath)).toBe(true);
+});
+
+test("GOALSENDLAND1-stale: a replaced-unproven record refuses at once with path and ack command", async () => {
+	const fx = replacedPending(settledJournal);
+	const r = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io, untilDeliveredMs: 60_000,
+		wait: async () => { throw new Error("replaced-unproven must not wait out the bound"); } });
+	expect(r.status).toBe("REFUSED");
+	expect(r.code).toBe("REPLACED_UNPROVEN");
+	expect(r.detail).toContain(fx.path);
+	expect(r.detail).toContain("omp-kit send --ack-pending");
+	expect(fx.fake.sent).toEqual([]);
+});
+
+test("GOALSENDLAND1-stale: a different session still settles INCARNATION_GONE even with a stale pinned start", async () => {
+	const dir = ternDropDir();
+	const marker = "kit-send-0123456789af";
+	const pendingPath = seedPending(dir, settledJournal, marker, `old\n[${marker}]`);
+	const record = JSON.parse(readFileSync(pendingPath, "utf8"));
+	writeFileSync(pendingPath, JSON.stringify({ ...record, foregroundStarted: "Mon Nov 10 22:13:00 2025" }) + "\n");
+	const fake = ternFake();
+	fake.journal.text = HEADER.replace('"s1"', '"s2"') + assistantEntry("m1", null);
+	const bound = { ...ternRuntimeBinding, sessionUuid: "s2", foregroundStarted: "Tue Nov 11 05:59:00 2026" };
+	const r = await deliverTern(fake, "new", { dropDir: dir,
+		observe: idleOf(fake, { runtimeBinding: bound }),
+		identify: async () => ({ ...ternIdentified, runtimeBinding: bound }) });
+	expect(r.code).toBe("PROOF_TIMEOUT");
+	expect(r.marker).not.toBe(marker);
+	expect(existsSync(pendingPath)).toBe(false);
+	expect(readFileSync(join(dir, "..", "tern-pending", "ledger.jsonl"), "utf8")).toContain(`"status":"INCARNATION_GONE"`);
+});
+
 async function sendreachAcknowledgement(arm: "case" | "mutant") {
 	const fx = replacedPending(settledJournal);
 	const delivery = { dropDir: fx.dir, io: fx.io,
@@ -1374,6 +1455,7 @@ function ww1rFixture(repo: string, resolvePane: boolean) {
 		run(argv) {
 			taken.runs.push([...argv]);
 			if (argv.includes("carly")) {
+				if (argv.includes("ok")) return { code: 0, out: `{"ok":true}` };
 				taken.sends++;
 				journal += JSON.stringify({ type: "message", id: "m-live", parentId: "m2", message: { role: "user", content: sentPayload(argv) } }) + "\n";
 				writeFileSync(sessionFile, journal);

@@ -108,6 +108,8 @@ function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: {
 	const io: TernObserverIo = {
 		run(argv) {
 			taken.runs.push([...argv]);
+			// The verdict read is not a turn: it reports the last tool answer, never an effect.
+			if (argv.includes("carly") && argv.includes("ok")) return { code: 0, out: `{"ok":true}` };
 			if (argv.includes("carly") && argv.includes("lua")) {
 				taken.luaDispatches++;
 				const lua = argv[argv.length - 1] ?? "";

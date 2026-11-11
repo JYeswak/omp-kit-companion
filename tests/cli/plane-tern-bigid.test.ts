@@ -48,6 +48,7 @@ function fixtureIo(id: string): { io: TernObserverIo; sent: string[][] } {
 			if (argv[0] === "/bin/ps") return { code: 0, out: "Fri Nov 6 10:00:00 2026 omp AGENT_NAME=BigIdSeat" };
 			if (argv[0] === "am") return { code: 0, out: JSON.stringify({ agent_name: "BigIdSeat", pane_id: argv[argv.indexOf("--pane") + 1],
 				project_key: repo, binding: "verified-live" }) };
+			if (argv.includes("carly") && argv.includes("ok")) return { code: 0, out: `{"ok":true}` };
 			if (argv.includes("carly") && argv.includes("lua")) {
 				const groups = argv.at(-1)!.split("string.char(").slice(1)
 					.map(group => Buffer.from(group.slice(0, group.indexOf(")")).split(",").map(Number)).toString("utf8"));
