@@ -395,7 +395,11 @@ test("VERIFYDEPS1 deno refusal: a deno box in a deno project without deno.lock r
 	expect(res.replays.map(r => [r.letter, r.pass, r.rc])).toEqual([["a", null, null]]);
 });
 
-test("VERIFYDEPS1 deno frozen: a deno box with deno.lock provisions frozen and passes offline", async () => {
+// VERIFYDEPS1 (ompkit-1ra0d.154): the frozen-install half needs the deno binary itself. Linux
+// qualification workers carry no deno, so provisioning fails closed with ENVIRONMENT there
+// (verdict ed4dde1d, expected DRY_RUN). Skip by name instead of asserting the happy path
+// where the toolchain is absent; the refusal half above still guards the lockfile rule.
+test.skipIf(Bun.which("deno") === null)("VERIFYDEPS1 deno frozen: a deno box with deno.lock provisions frozen and passes offline", async () => {
 	const { dir, sha } = await denoRepo("verifydeps-denook", "ok");
 	const br = fakeBr(inReview("- [ ] [a] [build] `deno run main.ts` -> DENOHI"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: { ...br.env, DENO_NO_UPDATE_CHECK: "1" }, dryRun: true });
