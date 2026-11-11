@@ -77,7 +77,7 @@ interface TernFixtureOpts {
  * payload and journals it as a USER entry, exactly like the OMP composer.
  * `taken.luaDispatches` counts native effects: negatives must stay zero.
  */
-function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: { runs: string[][]; luaDispatches: number; blocks: string[] }; repo: string; finishTurn: () => void } {
+function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: { runs: string[][]; luaDispatches: number; blocks: string[] }; repo: string; finishTurn: () => void; landSteered: () => void } {
 	const session = opts.session ?? "omp-test";
 	const paneId = opts.paneId ?? "5";
 	if (!/^[0-9]+$/.test(paneId)) throw new Error(`fixture pane id must be decimal digits: ${paneId}`);
@@ -156,11 +156,22 @@ function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: {
 		if (pendingPrompt !== null) {
 			journal += JSON.stringify({ type: "message", id: `m-live-${taken.luaDispatches}`, parentId: activeParentId,
 				message: { role: "user", content: pendingPrompt } }) + "\n";
-			pendingPrompt = null;
 		}
 		writeFileSync(sessionFile, journal);
 	};
-	return { io, taken, repo, finishTurn };
+	// WAKEDEADLINE1: land the steered prompt while the seat stays busy, the way an
+	// always-busy director journals a steered entry at a turn boundary seconds after
+	// the proof poll gave up. Unlike finishTurn the seat keeps working, so a still
+	// short proof poll keeps timing out and suppressing the next wake.
+	const landSteered = () => {
+		if (pendingPrompt === null) return;
+		journal += JSON.stringify({ type: "message", id: `m-live-${taken.luaDispatches}`, parentId: activeParentId,
+			message: { role: "user", content: pendingPrompt } }) + "\n";
+		activeParentId = `m-live-${taken.luaDispatches}`;
+		pendingPrompt = null;
+		writeFileSync(sessionFile, journal);
+	};
+	return { io, taken, repo, finishTurn, landSteered };
 }
 
 test("router: explicit tern:<id> addresses route to the native Tern delivery", () => {
@@ -373,4 +384,28 @@ test("WAKEPENDING1: sends to 64-bit Tern blocks deliver to exactly that pane and
 		expect(got.drop_path).toBeNull();
 		expect(got.detail).toContain("USER entry proven at offset");
 	}
+});
+// WAKEDEADLINE1 (ompkit-774u.100): a wake steered to an always-busy seat whose marker lands after the
+// short proof poll ends is still proven delivered, and the next wake is not suppressed. The fixture
+// lands the steered prompt after LAND_AT proof waits: before the fix the steered proof gave up after
+// min(deadlineMs, 3000 ms), recorded PENDING_CONSUME, and suppressed the retry.
+test("WAKEDEADLINE1: a marker that lands after the short poll ends is proven and does not suppress the next wake", async () => {
+	const dir = dropDir();
+	const fx = ternFixture({ working: true, journal: busyJournal });
+	// Past the old 3000 ms steered bound (pollMs 1), inside the wake's until-delivered bound.
+	const LAND_AT = 5000;
+	let waits = 0;
+	const wait = async (_ms: number) => { if (++waits >= LAND_AT) fx.landSteered(); };
+	const send = (message: string) => proveTernCliSend({ session: "omp-test", pane: "tern:5", message,
+		dropDir: dir, cwd: fx.repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES,
+		untilDeliveredMs: 600_000, pollMs: 1, wait, io: fx.io, env: { AGENT_MAIL_PROJECT: fx.repo } });
+	const first = await send("status update alpha");
+	expect(first).toMatchObject({ status: "OK", code: "PROVEN", sends: 1 });
+	expect(first.drop_path).toBeNull();
+	expect(first.queue_states).toEqual(["QUEUED", "DELIVERED"]);
+	expect(fx.taken.luaDispatches).toBe(1);
+	const second = await send("status update beta");
+	expect(second).toMatchObject({ status: "OK", sends: 1 });
+	expect(second.code).toMatch(/PROVEN/);
+	expect(fx.taken.luaDispatches).toBe(2);
 });

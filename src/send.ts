@@ -743,8 +743,9 @@ export const TERN_PROOF_POLL_MS = 50;
 export const TERN_PROOF_DEADLINE_MS = 20_000;
 /**
  * The CLI's default until-delivered bound. Only sends that need a turn boundary use it: a keyed seat's one ctl
- * turn and a `/goal set` payload. A keyless message never waits on BUSY (SENDFAST1) and caps any wait at
- * TERN_STEER_BOUND_MS.
+ * turn and a `/goal set` payload. A keyless message never waits on BUSY (SENDFAST1) and caps observation
+ * and steer admission at TERN_STEER_BOUND_MS. Proof of an admitted steer is not admission: it waits up to
+ * the caller's until-delivered bound, capped by the proof deadline (WAKEDEADLINE1).
  */
 export const TERN_TURN_BOUNDARY_WAIT_MS = 300_000;
 /** SENDFAST1: the most a steerable message waits for a provable observation or an EMPTY composer record. */
@@ -1260,9 +1261,12 @@ export function acknowledgeTernPending(path: string, dropDir: string, now = Date
  * id) -> identify -> observe/identify/configured-pane fence (SENDX1) ->
  * eligibility from the very snapshot observe hashed -> refuse slash
  * controls with no proof contract -> sweep settled pendings (ledger only)
- * -> suppress while an attempt on this incarnation is unproven -> persist
- * the attempt durably -> lock -> re-read (incarnation pre-filter, not
- * atomicity) -> ONE native admission turn -> poll for proof (default 20 s).
+ * -> suppress while an attempt on this incarnation is unproven (the sweep
+ * reconciles a pending whose marker has since landed, WAKEDEADLINE1) ->
+ * persist the attempt durably -> lock -> re-read (incarnation pre-filter, not
+ * atomicity) -> ONE native admission turn -> poll for proof (an admitted steer
+ * waits up to the caller's until-delivered bound, capped by the proof deadline
+ * of default 20 s, so it covers a busy seat's next turn boundary).
  *
  * Statuses: OK (entry proven; offset is its byte offset in sessionFile),
  * PENDING_CONSUME (an effect may have happened and is unproven; pending
@@ -1536,8 +1540,13 @@ export async function deliverToTernSeat(input: {
 			dispatched = false;
 		}
 		const via = " via native agent API";
+		// WAKEDEADLINE1: an admitted steer lands at the seat's next turn boundary, which the 3 s steer
+		// admission bound does not cover on an always-busy seat. The proof of an admitted steer therefore
+		// waits up to the caller's until-delivered bound (capped by the proof deadline), never past it;
+		// observation and steer admission stay capped at TERN_STEER_BOUND_MS, so no seat-holding wait grows.
 		let last: TernProof = { status: "ABSENT", reason: "NOT_READ" };
-		const polls = Math.max(1, Math.ceil((steer && untilDeliveredMs > 0 ? Math.min(deadlineMs, untilDeliveredMs) : deadlineMs) / proofPollMs));
+		const proofBoundMs = steer && requestedUntilMs > 0 ? Math.min(deadlineMs, requestedUntilMs) : deadlineMs;
+		const polls = Math.max(1, Math.ceil(proofBoundMs / proofPollMs));
 		let readSize: number | null = null;
 		for (let poll = 0; ; poll++) {
 			// A journal that has not grown since the last read holds no new entry; a failed stat always re-reads.
