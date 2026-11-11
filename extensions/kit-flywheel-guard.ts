@@ -16,7 +16,7 @@ import { projectAgentBrShimPath } from "../src/gate-plane.ts";
 import { captureMineReplay } from "../src/mine-replay.ts";
 import type { MineReplay } from "../src/mine-replay.ts";
 import { resolveCustodyScript } from "../src/custody.ts";
-import { classifyMineResult } from "../src/mine-cause.ts";
+import { classifyMineResult, budgetLedgerGate } from "../src/mine-cause.ts";
 import { briefHandbackRefusal, briefHasCommitPreflight, completeTaskBrief, isBuildBriefTask, isVerifyOnlyBriefTask, type BriefCompletion } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
 import { mintNativeSpawn, nativeIdentity, type NativeContext } from "./native-identity.ts";
@@ -2970,13 +2970,20 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			pendingCalls.delete(_event.toolCallId);
 			const cause = classifyMineResult({ tool: call?.toolName ?? (typeof _event.toolName === "string" ? _event.toolName : "unknown"), result: _event.result, is_error: _event.isError === true });
 			const sourceRc = replayExitCode(_event.result);
+			// GATEBUDGETHYGIENE1 (ompkit-1ra0d.129): classifier exhaust is not a refusal, so it
+			// writes no row; a derived guard class is filed under its real code, so one refusal
+			// writes one row. recordGateEvent absorbs the same-attempt duplicate when the guard
+			// already recorded the block. No verdict changes: this is the ledger-write call only.
 			if (cause !== null) {
-				await recordGateEvent({ seat: admissionOwner(env) ?? selfDeclared, act: call?.toolName.toLowerCase() ?? "unknown", target: null,
-					...(clock ? { started_at: clock.started_at, duration_s: (performance.now() - clock.monotonic) / 1000 } : {}),
-					gate: cause.class_id, kind: "refuse", event_id: _event.toolCallId, attempt: _event.toolCallId,
-					detail: cause.summary, replay: replay ?? captureMineReplay({ tool: typeof _event.toolName === "string" ? _event.toolName : "unknown", cwd: ctx.cwd }),
+				const gate = budgetLedgerGate(cause.class_id);
+				if (gate !== null) {
+					await recordGateEvent({ seat: admissionOwner(env) ?? selfDeclared, act: call?.toolName.toLowerCase() ?? "unknown", target: null,
+						...(clock ? { started_at: clock.started_at, duration_s: (performance.now() - clock.monotonic) / 1000 } : {}),
+						gate, kind: "refuse", event_id: _event.toolCallId, attempt: _event.toolCallId,
+						detail: cause.summary, replay: replay ?? captureMineReplay({ tool: typeof _event.toolName === "string" ? _event.toolName : "unknown", cwd: ctx.cwd }),
 					// A zero found only inside prior nested command output is not this failing tool's rc.
 					...(sourceRc !== undefined && sourceRc !== 0 ? { rc: sourceRc } : {}) }, { env, home });
+				}
 			}
 			if (call === undefined) return;
 			if (_event.isError === true || resultFailed(_event.result)) { closeIntents.delete(_event.toolCallId); return; }

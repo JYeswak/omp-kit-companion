@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { ccActionOutcome } from "../../src/cli.ts";
-import { classifyMineResult } from "../../src/mine-cause.ts";
+import { budgetLedgerGate, classifyMineResult } from "../../src/mine-cause.ts";
+import { recordGateEvent } from "../../extensions/gate-events.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 // The CC event path in mine.ts: the kit's action.result data is the record, its outcome the
 // decision and its code the rule, exactly as runCli records the verb's exit and errors[].
@@ -268,4 +272,63 @@ test("LEDGERCLASS1: a fully redacted body stays unclassified without leaking", (
 	const ruled = classifyMineResult({ tool: "bash", result: { isError: true, content: `fleet-guard ${credential}: boom` } });
 	expect(ruled?.class_id).toBe("tool-error:unclassified");
 	expect(JSON.stringify(ruled)).not.toContain("ghp_");
+});
+
+// GATEBUDGETHYGIENE1 (ompkit-1ra0d.129): the refusal budget counts real refusals only, so a
+// shim or handoff refusal observed in command output files under its real code, never as a
+// tool-error row. Planted negative: the pre-fix classifier filed these as tool-error:unclassified.
+test("GATEBUDGETHYGIENE1: shim and handoff refusals file under their real code, never tool-error:unclassified", () => {
+	const handoff = "br-shim: HANDOFF_UNGATED requires a complete GREEN observation for the exact DONE source /r@abc; run: br verify";
+	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: handoff } })?.class_id).toBe("guard-friction:HANDOFF_UNGATED");
+	const midline = "comment_rc 4 br-shim: BR_SHIM_RESERVATION_UNKNOWN Agent Mail cannot verify X (rc=1): error: x";
+	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: midline } })?.class_id).toBe("guard-friction:BR_SHIM_RESERVATION_UNKNOWN");
+	const bare = "HANDOFF_UNGATED requires a complete GREEN observation";
+	expect(classifyMineResult({ tool: "bash", result: { isError: true, content: bare } })?.class_id).toBe("guard-friction:HANDOFF_UNGATED");
+	// The writer files them under the bare code, not tool-error:unclassified.
+	expect(budgetLedgerGate("guard-friction:HANDOFF_UNGATED")).toBe("HANDOFF_UNGATED");
+	expect(budgetLedgerGate("guard-friction:BR_SHIM_IDENTITY_REQUIRED")).toBe("BR_SHIM_IDENTITY_REQUIRED");
+});
+
+// GATEBUDGETHYGIENE1 (ompkit-1ra0d.129): classifier exhaust is not a refusal row; one refusal
+// writes one row under its real code. Planted negative: the pre-fix writer emitted the second
+// row below as guard-friction:SELF_CLOSE_REFUSED, so the ledger held the refusal twice.
+test("GATEBUDGETHYGIENE1: classifier exhaust never becomes a refusal row; one refusal writes one row under its real code", async () => {
+	const dir = ownedTmp("budget-hygiene").path;
+	for (const exhaust of ["finding:bash", "finding:eval", "mcp-transport:mcp__mcp_agent_mail_ensure_project", "mcp-transport:mcp__mcp_agent_mail_fetch_inbox", "kit-flywheel-guard", "kit-flywheel-guard:", "commit-refusal:COMMIT_INCOMPLETE", "guard-friction:"]) {
+		expect(budgetLedgerGate(exhaust), exhaust).toBeNull();
+	}
+	const passthrough: [string, string][] = [
+		["guard-friction:SELF_CLOSE_REFUSED", "SELF_CLOSE_REFUSED"],
+		["SELF_CLOSE_REFUSED", "SELF_CLOSE_REFUSED"],
+		["HANDOFF_UNGATED", "HANDOFF_UNGATED"],
+		["agent-input:bash:path-not-found", "agent-input:bash:path-not-found"],
+		["tool-error:bash:test-failure", "tool-error:bash:test-failure"],
+		["validation:edit-rejected", "validation:edit-rejected"],
+	];
+	for (const [gate, want] of passthrough) {
+		expect(budgetLedgerGate(gate), gate).toBe(want);
+	}
+	// One refused act: the guard's own row plus the re-observed classification collapse to one row.
+	const attempt = "attempt-budget-1";
+	const ledger = join(dir, "budget-ledger.jsonl");
+	const first = await recordGateEvent({ seat: "PlumRaven", act: "close", target: "kit-1", gate: "SELF_CLOSE_REFUSED", kind: "refuse", attempt, event_id: attempt, detail: "kit-flywheel-guard SELF_CLOSE_REFUSED: held" }, { path: ledger });
+	expect(first.ok).toBe(true);
+	const cause = classifyMineResult({ tool: "bash", result: { isError: true, content: "kit-flywheel-guard SELF_CLOSE_REFUSED: not the author" } });
+	expect(cause?.class_id).toBe("guard-friction:SELF_CLOSE_REFUSED");
+	if (cause === null) throw new Error("expected the refusal text to classify");
+	const gate = budgetLedgerGate(cause.class_id);
+	expect(gate).toBe("SELF_CLOSE_REFUSED");
+	if (gate !== null) await recordGateEvent({ seat: "PlumRaven", act: "unknown", target: null, gate, kind: "refuse", attempt, event_id: attempt, detail: cause.summary }, { path: ledger });
+	const rows = readFileSync(ledger, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	expect(rows).toHaveLength(1);
+	expect(rows[0]).toMatchObject({ gate: "SELF_CLOSE_REFUSED", kind: "refuse", attempt });
+	// A shim refusal observed in command output writes one row under its real code.
+	const shim = classifyMineResult({ tool: "bash", result: { isError: true, content: "closed rc 4 br-shim: BR_SHIM_IDENTITY_REQUIRED refusing to run br without AGENT_NAME" } });
+	if (shim === null) throw new Error("expected the shim refusal to classify");
+	const shimGate = budgetLedgerGate(shim.class_id);
+	expect(shimGate).toBe("BR_SHIM_IDENTITY_REQUIRED");
+	if (shimGate !== null) await recordGateEvent({ seat: "PlumRaven", act: "bash", target: null, gate: shimGate, kind: "refuse", attempt: "attempt-budget-2", event_id: "attempt-budget-2", detail: shim.summary }, { path: ledger });
+	const after = readFileSync(ledger, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	expect(after).toHaveLength(2);
+	expect(after[1]).toMatchObject({ gate: "BR_SHIM_IDENTITY_REQUIRED", kind: "refuse" });
 });

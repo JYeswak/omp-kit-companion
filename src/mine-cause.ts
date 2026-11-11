@@ -112,6 +112,10 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 		return name === "unknown" ? null : name;
 	};
 	const gateText: readonly [RegExp, (match: RegExpMatchArray, line: string) => string | null][] = [
+		// GATEBUDGETHYGIENE1 (ompkit-1ra0d.129): a shim or handoff refusal observed in command
+		// output files under its real code, never tool-error:unclassified. The br-shim: prefix
+		// sits mid-line in hook and mine replays (comment_rc 4 br-shim: ...), so both edges anchor.
+		[/(?:^|[\s"'([])(?:br-shim:\s*)?(HANDOFF_UNGATED|BR_SHIM_[A-Z0-9_]{1,60})\b/, match => `guard-friction:${match[1]}`],
 		[/^(?:Error: )?fleet-guard ([A-Za-z0-9_.-]+):/, match => {
 			const name = codeName(match[1]!);
 			return name ? `guard-friction:${name}` : null;
@@ -321,4 +325,24 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 		&& /^(?:(?:\(no output\)|exit=-?\d{1,3}|-?\d{1,3}|Wall time: \d{1,6}(?:\.\d{1,3})? seconds) )*Command exited with code -?\d{1,3}$/.test(statusOnly))
 		return finding(`tool-error:${toolName(tool)}:silent-exit`);
 	return failed ? finding("tool-error:unclassified") : null;
+}
+
+/** GATEBUDGETHYGIENE1 (ompkit-1ra0d.129): the gate-events gate for a classifier class.
+ * Classifier exhaust is not a refusal and writes no refusal row: a check's own FINDING
+ * answer (`finding:*`), an MCP transport failure (`mcp-transport:*`), the guard's own
+ * name with no code, and a member hook's duplicate (`commit-refusal:*`, whose real row
+ * the hook already wrote) all map to null. A derived guard class (`guard-friction:<code>`)
+ * maps to its real code so one refusal writes one row. Every other class (agent-input:*,
+ * tool-error:*, validation:*, timeout:*, assertion:*, bare gate codes) passes through: the
+ * TURN line excludes the non-refusals itself and tolerates the old rows already filed. */
+export function budgetLedgerGate(classId: string): string | null {
+	if (classId === "kit-flywheel-guard" || classId === "kit-flywheel-guard:") return null;
+	if (classId.startsWith("finding:") || classId.startsWith("mcp-transport:")) return null;
+	if (classId.startsWith("commit-refusal:")) return null;
+	if (classId.startsWith("guard-friction:")) {
+		const real = classId.slice("guard-friction:".length);
+		if (real === "" || real === "kit-flywheel-guard") return null;
+		return real;
+	}
+	return classId;
 }

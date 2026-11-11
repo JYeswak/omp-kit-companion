@@ -1,0 +1,1 @@
+- The refusal budget now counts real refusals: check answers (`finding:*`), MCP transport errors (`mcp-transport:*`), and duplicate member-hook rows no longer inflate the TURN line's refusal and code counts, and shim/handoff refusals file under their real codes.

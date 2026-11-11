@@ -102,8 +102,8 @@ const DERIVED_REFUSAL_GATE = /^(?:guard-friction|commit-refusal):/;
 /** How far back to look for the first refusal of one attempt; the second write lands seconds later. */
 const DERIVED_SIBLING_TAIL_BYTES = 256 * 1024;
 
-/** Whether the ledger already holds a non-derived refusal row for this attempt. Fail-open: any read failure keeps the append. */
-function hasRefuseSibling(path: string, attempt: string): boolean {
+/** Whether the ledger already holds a refusal row for this attempt under the same real code. Fail-open: any read failure keeps the append. */
+function hasRefuseSibling(path: string, attempt: string, code: string): boolean {
 	let fd = -1;
 	try {
 		fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -124,7 +124,7 @@ function hasRefuseSibling(path: string, attempt: string): boolean {
 			if (raw === "") continue;
 			let row: { kind?: unknown; gate?: unknown; attempt?: unknown };
 			try { row = JSON.parse(raw) as typeof row; } catch { continue; }
-			if (row.kind === "refuse" && row.attempt === attempt && typeof row.gate === "string" && !DERIVED_REFUSAL_GATE.test(row.gate)) return true;
+			if (row.kind === "refuse" && row.attempt === attempt && typeof row.gate === "string" && row.gate.replace(DERIVED_REFUSAL_GATE, "") === code) return true;
 		}
 		return false;
 	} catch {
@@ -163,11 +163,12 @@ export async function recordGateEvent(event: GateEvent, options: { env?: Record<
 		...(metadataRedacted ? { metadata_redacted: true } : {}),
 		...(metadataTruncated ? { metadata_truncated: true } : {}) };
 	// LEDGERCLASS1 (ompkit-1ra0d.68): one refused act writes one row. The guard records the block
-	// (gate X) and classifies the same attempt again (gate guard-friction:X / commit-refusal:X). The
-	// derived class belongs in the miners' own outputs, not in a second refusal row: when the ledger
-	// already holds a refusal for this attempt, the second write is absorbed. Fail-open by construction.
-	if (row.kind === "refuse" && typeof row.gate === "string" && DERIVED_REFUSAL_GATE.test(row.gate)
-		&& typeof row.attempt === "string" && row.attempt !== "" && hasRefuseSibling(path, row.attempt)) {
+	// (gate X) and classifies the same attempt again; the re-observation belongs in the miners'
+	// own outputs, not in a second refusal row. GATEBUDGETHYGIENE1 (ompkit-1ra0d.129): the guard
+	// files the re-observation under its real code, so the duplicate is caught by comparing real
+	// codes, not prefixes. Fail-open by construction.
+	if (row.kind === "refuse" && typeof row.gate === "string"
+		&& typeof row.attempt === "string" && row.attempt !== "" && hasRefuseSibling(path, row.attempt, row.gate.replace(DERIVED_REFUSAL_GATE, ""))) {
 		return { ok: true, path };
 	}
 	try {
