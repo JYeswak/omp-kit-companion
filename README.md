@@ -469,7 +469,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit update` | `update [--plan\|--apply] --version X.Y.Z --index PATH --archive PATH` or `update --reconcile RECEIPT --yes [--prefix PATH]` | Guarded update from a local index + archive; never infers latest (`LOCAL_SOURCE_REQUIRED` names a missing file) | `omp-kit help update` |
 | `omp-kit review` | `review rules\|reduce` | Compare two rule versions on witness unions, or minimize a reproduced false fire | `omp-kit review rules --incumbent-rules /old/rules --incumbent-cases /old/cases.tsv --candidate-rules /new/rules --candidate-cases /new/cases.tsv --json` |
 | `omp-kit corpus` | `corpus --sessions ABS_DIR [--out ABS_FILE] [--plan]` | Per-rule fire rates over transcripts; never uploads; `--sessions` must exist (fresh HOMEs have none) | `omp-kit corpus --sessions /absolute/sessions --json` |
-| `omp-kit skill-mine` | `skill-mine [--since 21d] [--apply] \| status` | Mine sessions and mail for skill candidates | `omp-kit skill-mine --json` |
+| `omp-kit skill-mine` | `skill-mine [--since 21d] [--apply] \| status` | Mine sessions, mail, Git for candidates | `omp-kit skill-mine --json` |
 | `omp-kit lsp` | `lsp setup --plan [--project PATH] [--file PATH]` | Readiness only; full needs a source-backed OMP | `omp-kit lsp setup --plan --json` |
 | `omp-kit memory` | `memory audit --store-root PATH --yes` | Separately consented audit of a Mnemopi store | `omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json` |
 | `omp-kit planning` | `planning score\|convert` | Score planning evidence; convert a plan into native beads (dry run or `--apply`) | `omp-kit planning score --fleet --json` |

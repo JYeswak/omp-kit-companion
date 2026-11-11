@@ -3,12 +3,12 @@
 // correction cluster, or a mail teaching thread. Single command skeletons
 // never rank; kit/tool verbs are infrastructure and drop from signatures.
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import {
 	clusterObservations, dedupeCandidates, fileBeads, fingerprintOf, isInfra, normalizeSkeleton,
-	parseMailFile, parseSinceMs, rankClusters, redactedQuote, runSkillMine, skillOverlap,
+	parseMailFile, parseSinceMs, rankClusters, readSkillMineStatus, redactedQuote, runSkillMine, skillOverlap,
 	stripInjected, textBlockKey, tokensOf, type SkillMineCandidate, type SkillMineOptions,
 } from "../../src/skill-mine.ts";
 import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
@@ -604,4 +604,255 @@ test("SKILLMINE3: wall budget exhaustion counts picked-but-unvisited sessions an
 	expect(c.not_reached).toBeGreaterThanOrEqual(3);
 	expect(c.sessions_seen + c.project_filtered + c.no_path + c.advisor_sidecar + c.per_project_cap + c.session_cap + c.not_reached).toBe(c.sessions_in_window);
 	expect(report.sources.cass.reason).toContain("wall budget");
+});
+
+// SKILLMINEGIT1: the Git source admits failure -> correction -> outcome chains
+// git can prove (sha-named fixes, revert pairs of either message form,
+// break-word-follows as weak links), then emits one candidate per recurring
+// shape (3+ strong chains in one repository, or chains in 2+ repositories).
+// Aliases of one repository are mined once; per-repository month cursors plus
+// persisted chains let a later run complete a cluster and continue; a removed
+// cursor re-mines month one.
+interface GitFixture extends Fixture {
+	gitA: string;
+	gitB: string;
+}
+
+function gitEnvFor(f: Fixture): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) if (typeof value === "string") env[key] = value;
+	mkdirSync(join(f.root, "t"), { recursive: true });
+	return {
+		...env, HOME: f.home, TMPDIR: join(f.root, "t"), GIT_CEILING_DIRECTORIES: f.root,
+		GIT_AUTHOR_NAME: "Skill Mine", GIT_AUTHOR_EMAIL: "skill-mine@example.com",
+		GIT_COMMITTER_NAME: "Skill Mine", GIT_COMMITTER_EMAIL: "skill-mine@example.com",
+	};
+}
+
+function gitCommit(dir: string, env: Record<string, string>, files: Record<string, string>, subject: string, date: string, body?: string): void {
+	for (const [rel, content] of Object.entries(files)) put(join(dir, rel), content);
+	const add = runFixture(["git", "add", "-A"], { cwd: dir, env, floor_s: fixtureDeadlineS() });
+	expect(add.rc).toBe(0);
+	const dated = { ...env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date };
+	const committed = runFixture(["git", "-c", "user.name=Skill Mine", "-c", "user.email=skill-mine@example.com",
+		"commit", "--no-gpg-sign", "-m", subject, ...(body ? ["-m", body] : [])], { cwd: dir, env: dated, floor_s: fixtureDeadlineS() });
+	expect(committed.rc).toBe(0);
+}
+
+function gitHead(dir: string, env: Record<string, string>): string {
+	const rev = runFixture(["git", "rev-parse", "HEAD"], { cwd: dir, env, floor_s: fixtureDeadlineS() });
+	expect(rev.rc).toBe(0);
+	return new TextDecoder().decode(rev.stdout).trim();
+}
+
+function makeGitFixture(label: string, kind: "recurrence" | "cursor"): GitFixture {
+	const f = makeFixture(label);
+	const env = gitEnvFor(f);
+	const gitA = join(f.root, "git-a");
+	const gitB = join(f.root, "git-b");
+	for (const dir of [gitA, gitB]) {
+		mkdirSync(dir, { recursive: true });
+		const init = runFixture(["git", "init", "-b", "main", "-q", dir], { cwd: f.root, env, floor_s: fixtureDeadlineS() });
+		expect(init.rc).toBe(0);
+	}
+	mkdirSync(join(gitA, ".beads"), { recursive: true });
+	if (kind === "recurrence") {
+		// Three sha-named fix chains on the same file svc/cart.ts.
+		gitCommit(gitA, env, { "svc/cart.ts": "total v1\n" }, "break cart total", "2026-10-05T12:00:00Z");
+		gitCommit(gitA, env, { "svc/cart.ts": "total v2\n" }, "fix(cart): total rounding", "2026-10-06T12:00:00Z", `Fixes ${gitHead(gitA, env)}.`);
+		gitCommit(gitA, env, { "svc/cart.ts": "coupon v1\n" }, "break cart coupon", "2026-10-07T12:00:00Z");
+		gitCommit(gitA, env, { "svc/cart.ts": "coupon v2\n" }, "fix(cart): coupon stacking", "2026-10-08T12:00:00Z", `Fixes ${gitHead(gitA, env)}.`);
+		gitCommit(gitA, env, { "svc/cart.ts": "tax v1\n" }, "break cart tax", "2026-10-09T12:00:00Z");
+		gitCommit(gitA, env, { "svc/cart.ts": "tax v2\n" }, "fix(cart): tax rounding", "2026-10-10T12:00:00Z", `Fixes ${gitHead(gitA, env)}.`);
+		// A conventional-commit revert pair (admitted as one chain, but a
+		// single chain is not a candidate).
+		gitCommit(gitA, env, { "svc/auth.ts": "redirect v1\n" }, "feat(auth): login redirect", "2026-10-11T12:00:00Z");
+		const original = gitHead(gitA, env);
+		gitCommit(gitA, env, { "svc/auth.ts": "redirect v2\n" }, "revert(auth): login redirect loop", "2026-10-12T12:00:00Z", `Revert: ${original}`);
+		gitCommit(gitA, env, { "svc/auth.ts": "redirect v3\n" }, "feat(auth): re-land login redirect with guard", "2026-10-13T12:00:00Z");
+		// A break-word-only pair with a unique path shape (weak, single repo:
+		// admitted, never a candidate).
+		gitCommit(gitA, env, { "svc/search.ts": "index v1\n" }, "break search cache", "2026-10-14T12:00:00Z");
+		gitCommit(gitA, env, { "svc/search.ts": "index v2\n" }, "fix search cache TTL", "2026-10-15T12:00:00Z");
+		// A break-word-only pair on scope `pay`, recurring in repo B.
+		gitCommit(gitA, env, { "svc/pay.ts": "pay v1\n" }, "break pay flow", "2026-10-16T12:00:00Z");
+		gitCommit(gitA, env, { "svc/pay.ts": "pay v2\n" }, "fix(pay): flow guard", "2026-10-17T12:00:00Z");
+		// November: a credential-tainted break plus a clean fix on the same
+		// path. The tainted endpoint is dropped, so the fix links to nothing.
+		gitCommit(gitA, env, { "svc/pay2.ts": "pay v1\n" }, `break pay flow ${SECRET}`, "2026-11-04T12:00:00Z");
+		gitCommit(gitA, env, { "svc/pay2.ts": "pay v2\n" }, "fix(pay): flow guard 2", "2026-11-05T12:00:00Z");
+		// Repo B, October: the same `pay.ts` basename and remedy (cross-repo
+		// recurrence), plus a conventional revert whose body names the sha
+		// without a trailer.
+		gitCommit(gitB, env, { "svc/pay.ts": "ledger v1\n" }, "break pay ledger", "2026-10-16T12:00:00Z");
+		gitCommit(gitB, env, { "svc/pay.ts": "ledger v2\n" }, "fix(pay): ledger guard", "2026-10-17T12:00:00Z");
+		gitCommit(gitB, env, { "svc/x.ts": "x v1\n" }, "break ledger flow", "2026-10-18T12:00:00Z");
+		const flowBroken = gitHead(gitB, env);
+		gitCommit(gitB, env, { "svc/x.ts": "x v2\n" }, "revert: ledger flow", "2026-10-19T12:00:00Z", `Backs out ${flowBroken}, it broke the flow.`);
+		// An unrelated shallow entry (repo B's tip, not an ancestor of repo
+		// A's HEAD) must not change mining: the flag alone is never a cut.
+		put(join(gitA, ".git", "shallow"), `${gitHead(gitB, env)}\n`);
+	} else {
+		// Two sha-named `dock` chains in October, the third in November: the
+		// cluster completes across runs (all on svc/dock.ts).
+		gitCommit(gitA, env, { "svc/dock.ts": "a v1\n" }, "break dock pump a", "2026-10-05T12:00:00Z");
+		gitCommit(gitA, env, { "svc/dock.ts": "a v2\n" }, "fix(dock): pump a guard", "2026-10-06T12:00:00Z", `Fixes ${gitHead(gitA, env)}.`);
+		gitCommit(gitA, env, { "svc/dock.ts": "b v1\n" }, "break dock pump b", "2026-10-07T12:00:00Z");
+		gitCommit(gitA, env, { "svc/dock.ts": "b v2\n" }, "fix(dock): pump b guard", "2026-10-08T12:00:00Z", `Fixes ${gitHead(gitA, env)}.`);
+		gitCommit(gitA, env, { "svc/dock.ts": "c v1\n" }, "break dock pump c", "2026-11-03T12:00:00Z");
+		gitCommit(gitA, env, { "svc/dock.ts": "c v2\n" }, "fix(dock): pump c guard", "2026-11-04T12:00:00Z", `Fixes ${gitHead(gitA, env)}.`);
+		// Repo B stays chain-free so the cursor covers two repositories. Its
+		// shallow file names a real ancestor: the boundary cuts the walk, is
+		// reported, but months still mine.
+		gitCommit(gitB, env, { "README.md": "base\n" }, "docs: readme base", "2026-10-01T12:00:00Z");
+		const boundary = gitHead(gitB, env);
+		gitCommit(gitB, env, { "README.md": "docs\n" }, "docs: readme touch", "2026-10-05T12:00:00Z");
+		put(join(gitB, ".git", "shallow"), `${boundary}\n`);
+	}
+	// Alias: a symlink to repo A resolves to the same canonical repository.
+	symlinkSync(gitA, join(f.root, "alias-a"));
+	put(join(f.root, "cassdata", "sessions.json"), `${JSON.stringify([
+		{ source_path: "sess-git-a", workspace: gitA },
+		{ source_path: "sess-git-alias", workspace: join(f.root, "alias-a") },
+		{ source_path: "sess-git-b", workspace: gitB },
+	])}\n`);
+	for (const sess of ["sess-git-a", "sess-git-alias", "sess-git-b"]) {
+		put(join(f.root, "cassdata", "exports", `${sess}.json`), `${JSON.stringify([{ role: "user", text: "hello" }])}\n`);
+	}
+	return { ...f, gitA, gitB };
+}
+
+function gitCandidatesOf(report: { candidates: SkillMineCandidate[] }): SkillMineCandidate[] {
+	return report.candidates.filter(candidate => candidate.evidence.some(e => e.source === "git"));
+}
+
+test("SKILLMINEGIT1: recurring fix shapes yield one candidate per cluster with provenance", async () => {
+	const f = makeGitFixture("skill-mine-git", "recurrence");
+	const emptyMail = join(f.root, "empty-mail", "projects");
+	mkdirSync(emptyMail, { recursive: true });
+	const report = await runSkillMine({
+		...f.options, since: "2026-10-01T00:00:00Z", mailArchive: join(f.root, "empty-mail"),
+		apply: true, maxNew: 3,
+	});
+	expect(report.sources.git.status).toBe("OK");
+	// The unrelated shallow entry is not an ancestor: no cut is reported.
+	expect(report.sources.git.reason).not.toContain("shallow");
+	const git = report.coverage.git;
+	expect(git.repos).toBe(2);
+	expect(git.chains).toBe(8);
+	expect(git.chains_seen).toBe(8);
+	expect(git.chains_unclustered).toBe(3);
+	expect(git.dropped_not_a_repo).toBe(1);
+	expect(git.dropped_credentials).toBe(1);
+	const workflows = gitCandidatesOf(report).map(candidate => candidate.workflow).sort();
+	expect(workflows).toEqual(["git-recurrence-pay-ts-pay", "git-recurrence-svc-cart-ts"]);
+	const cart = gitCandidatesOf(report).find(candidate => candidate.workflow === "git-recurrence-svc-cart-ts")!;
+	expect(cart.kind).toBe("git-recurrence");
+	expect(cart.projects).toEqual([f.gitA]);
+	expect(cart.occurrences).toBe(3);
+	expect(cart.months).toEqual(["2026-10"]);
+	expect(cart.evidence).toHaveLength(3);
+	for (const evidence of cart.evidence) {
+		expect(evidence.ref).toMatch(/^git:/);
+		expect(evidence.ref).toContain(f.gitA);
+		expect(evidence.ref).toMatch(/[0-9a-f]{7}$/);
+		expect(evidence.quote).toContain("fix(cart)");
+	}
+	const pay = gitCandidatesOf(report).find(candidate => candidate.workflow === "git-recurrence-pay-ts-pay")!;
+	expect(pay.kind).toBe("git-recurrence");
+	expect(pay.projects).toEqual([f.gitA, f.gitB].sort());
+	expect(pay.occurrences).toBe(2);
+	expect(pay.months).toEqual(["2026-10"]);
+	// Planted negatives: the lone conventional revert pair, the lone
+	// break-word pair and the bare-sha revert pair are admitted chains, not
+	// candidates — and no secret reaches the sink.
+	for (const candidate of report.candidates) {
+		expect(JSON.stringify(candidate)).not.toContain("search cache");
+		expect(JSON.stringify(candidate)).not.toContain("login redirect");
+		expect(JSON.stringify(candidate)).not.toContain("revert: ledger flow");
+	}
+	expect(sinkLines(f.sink).join("\n")).not.toContain(SECRET);
+	const status = readSkillMineStatus(f.stateDir);
+	expect(status.sources?.git.status).toBe("OK");
+	expect(status.git?.repos).toBe(2);
+	expect(status.git?.chains_seen).toBe(8);
+	expect(status.git?.chains_unclustered).toBe(3);
+	expect(Object.keys(status.git?.repos_detail ?? {}).sort()).toEqual([f.gitA, f.gitB].sort());
+	// Git recurrence packets are evidence for judgement: --apply skips them
+	// with a count in the report, and no bead is filed anywhere.
+	expect(report.beads_filed).toEqual([]);
+	expect(report.unfiled.map(row => row.candidate).sort()).toEqual(["git-recurrence-pay-ts-pay", "git-recurrence-svc-cart-ts"]);
+	for (const row of report.unfiled) {
+		expect(row.reason).toContain("never auto-filed");
+	}
+	expect(existsSync(join(f.root, "br-calls.log"))).toBe(false);
+});
+
+test("SKILLMINEGIT1-cursor: a cluster completes across monthly runs", async () => {
+	const f = makeGitFixture("skill-mine-git-cursor", "cursor");
+	const opts: SkillMineOptions = { ...f.options, since: "2026-10-01T00:00:00Z", gitMonthsPerRun: 1 };
+	const first = await runSkillMine(opts);
+	expect(first.coverage.git.months_mined).toEqual(["2026-10"]);
+	// The shallow boundary in repo B cuts its walk: reported, but months still mine.
+	expect(first.sources.git.reason).toContain("shallow boundary");
+	expect(gitCandidatesOf(first)).toEqual([]);
+	expect(first.coverage.git.chains_seen).toBe(2);
+	expect(first.coverage.git.chains_unclustered).toBe(2);
+	const status1 = readSkillMineStatus(f.stateDir);
+	expect(status1.git?.repos_detail[f.gitA]?.months_mined).toEqual(["2026-10"]);
+	expect(status1.git?.months_remaining).toBe(2);
+	expect(status1.git?.chains_seen).toBe(2);
+	// The third `dock` chain lands in November and completes the cluster.
+	const second = await runSkillMine(opts);
+	expect(second.coverage.git.months_mined).toEqual(["2026-11"]);
+	const dock = gitCandidatesOf(second).map(candidate => candidate.workflow);
+	expect(dock).toEqual(["git-recurrence-svc-dock-ts"]);
+	expect(gitCandidatesOf(second)[0]!.occurrences).toBe(3);
+	expect(gitCandidatesOf(second)[0]!.months).toEqual(["2026-10", "2026-11"]);
+	const status2 = readSkillMineStatus(f.stateDir);
+	expect(status2.git?.months_remaining).toBe(0);
+	expect(status2.git?.chains_seen).toBe(3);
+	expect(status2.git?.repos_detail[f.gitA]?.months_mined).toEqual(["2026-10", "2026-11"]);
+	// Planted negative: with the cursor file removed, the next run re-mines month one.
+	rmSync(join(f.stateDir, "skill-mine", "git-cursors.json"));
+	const third = await runSkillMine(opts);
+	expect(third.coverage.git.months_mined).toEqual(["2026-10"]);
+	expect(gitCandidatesOf(third)).toEqual([]);
+	expect(readSkillMineStatus(f.stateDir).git?.repos_detail[f.gitA]?.months_mined).toEqual(["2026-10"]);
+});
+
+function makeSplitFixture(label: string): GitFixture {
+	const f = makeFixture(label);
+	const env = gitEnvFor(f);
+	const gitS = join(f.root, "git-s");
+	mkdirSync(gitS, { recursive: true });
+	const init = runFixture(["git", "init", "-b", "main", "-q", gitS], { cwd: f.root, env, floor_s: fixtureDeadlineS() });
+	expect(init.rc).toBe(0);
+	gitCommit(gitS, env, { "README.md": "base\n" }, "docs: split base", "2026-10-01T12:00:00Z");
+	const pad = (subject: string): string => `${subject} ${"padding ".repeat(18)}`;
+	gitCommit(gitS, env, { "svc/widget.ts": "w1\n" }, pad("break widget flow"), "2026-11-03T12:00:00Z");
+	gitCommit(gitS, env, { "svc/widget.ts": "w2\n" }, pad("fix(widget): guard widget flow"), "2026-11-04T12:00:00Z", `Fixes ${gitHead(gitS, env)}.`);
+	put(join(f.root, "cassdata", "sessions.json"), `${JSON.stringify([{ source_path: "sess-split", workspace: gitS }])}\n`);
+	put(join(f.root, "cassdata", "exports", "sess-split.json"), `${JSON.stringify([{ role: "user", text: "hello" }])}\n`);
+	return { ...f, gitA: gitS, gitB: join(f.root, "git-unused") };
+}
+
+test("SKILLMINEGIT1: an over-cap month splits and mines every commit", async () => {
+	const f = makeSplitFixture("skill-mine-git-split");
+	const report = await runSkillMine({ ...f.options, since: "2026-10-01T00:00:00Z", gitLogBytesCap: 400 });
+	expect(report.sources.git.status).toBe("OK");
+	expect(report.coverage.git.months_mined).toEqual(["2026-10", "2026-11"]);
+	expect(report.coverage.git.dropped_errors).toBe(0);
+	expect(report.coverage.git.chains).toBe(1);
+	expect(gitCandidatesOf(report)).toEqual([]);
+});
+
+test("SKILLMINEGIT1: with splitting disabled an over-cap month errors and the cursor stays", async () => {
+	const f = makeSplitFixture("skill-mine-git-nosplit");
+	const report = await runSkillMine({ ...f.options, since: "2026-10-01T00:00:00Z", gitLogBytesCap: 400, gitNoSplit: true });
+	expect(report.sources.git.status).toBe("OK");
+	expect(report.coverage.git.months_mined).toEqual(["2026-10"]);
+	expect(report.coverage.git.dropped_errors).toBe(1);
+	expect(report.coverage.git.chains).toBe(0);
+	expect(readSkillMineStatus(f.stateDir).git?.repos_detail[f.gitA]?.months_mined).toEqual(["2026-10"]);
 });
