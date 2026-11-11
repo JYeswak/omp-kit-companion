@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -59,7 +59,7 @@ function setupFixture(opts: {
 	const work = owned.path;
 	// Caller cleans up via cleanup handle stored on the path; keep it simple: register cleanup through the owned object.
 	// Bun test files in this repo clean ownedTmp explicitly; we return the cleanup through a side table.
-	cleanups.push(() => owned.cleanup());
+	cleanups.push({ work, cleanup: () => owned.cleanup() });
 	const home = join(work, "home");
 	const binDir = join(work, "bin");
 	const stateDir = join(work, "state");
@@ -116,9 +116,59 @@ function setupFixture(opts: {
 	return { work, home, bin, stateDir, releaseDir, skillDst, fixtureDir, installed: opts.installed, latest: opts.latest };
 }
 
-const cleanups: Array<() => void> = [];
+type FixtureCleanup = { work: string; cleanup: () => void };
+const cleanups: FixtureCleanup[] = [];
+
+/** fixture uppers intentionally ship r-x dirs (the orphan-upper shape); an
+ * ovnfs checkout cannot remove those, so the owner write bit goes back on
+ * before teardown, even when the test body failed. Symlinks are never
+ * followed and nothing is removed here; ownedTmp owns removal. */
+function restoreWritableDirs(root: string): void {
+	const stack: string[] = [root];
+	while (stack.length > 0) {
+		const dir = stack.pop()!;
+		let entries;
+		try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+		for (const entry of entries) {
+			if (entry.isSymbolicLink()) continue;
+			if (entry.isDirectory()) stack.push(join(dir, entry.name));
+		}
+		try {
+			const mode = statSync(dir).mode & 0o7777;
+			if ((mode & 0o200) === 0) chmodSync(dir, mode | 0o700);
+		} catch { /* best effort; the teardown assertion below reports */ }
+	}
+}
+
+function assertNoNonWritableDirs(root: string): void {
+	const bad: string[] = [];
+	const stack: string[] = [root];
+	while (stack.length > 0) {
+		const dir = stack.pop()!;
+		let entries;
+		try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+		for (const entry of entries) {
+			if (entry.isSymbolicLink()) continue;
+			if (entry.isDirectory()) stack.push(join(dir, entry.name));
+		}
+		try {
+			if ((statSync(dir).mode & 0o200) === 0) bad.push(dir);
+		} catch { /* unreadable paths are reported by removal, not here */ }
+	}
+	expect(bad).toEqual([]);
+}
+
 function cleanupAll(): void {
-	while (cleanups.length > 0) cleanups.pop()?.();
+	let firstError: unknown = null;
+	while (cleanups.length > 0) {
+		const item = cleanups.pop()!;
+		try {
+			restoreWritableDirs(item.work);
+			assertNoNonWritableDirs(item.work);
+		} catch (error) { firstError ??= error; }
+		try { item.cleanup(); } catch (error) { firstError ??= error; }
+	}
+	if (firstError !== null) throw firstError;
 }
 
 function cliEnv(fx: Fixture, extra: Record<string, string | undefined> = {}): Record<string, string | undefined> {
