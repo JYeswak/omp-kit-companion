@@ -733,24 +733,6 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
 		] },
 	] },
-	{ name: "preflight", description: "Run every check an act will face and print every finding with its remedy and fix in one envelope; changes nothing (GATEDIAG1)", usage: "preflight commit [--message FILE] | claim|in-review|close BEAD [--actor NAME] [--project PATH] [--json]", flags: [], subcommands: [
-		{ name: "commit", description: "Judge the staged index with the pre-commit and commit-msg chain members and run each staged script's --selftest; bound to the staged tree id", usage: "preflight commit [--message FILE] [--project PATH] [--json]", flags: [
-			{ name: "--message", value: "FILE", description: "Commit message file to judge; defaults to the repo's prepared COMMIT_EDITMSG" },
-			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
-		] },
-		{ name: "claim", description: "Judge the tracker's claim predicates for one bead; bound to its updated_at", usage: "preflight claim BEAD [--actor NAME] [--project PATH] [--json]", argument: "BEAD", flags: [
-			{ name: "--actor", value: "NAME", description: "The acting seat; defaults to AGENT_NAME" },
-			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
-		] },
-		{ name: "in-review", description: "Judge the in_review transition predicates for one bead (phase tags, checklist, transition comment)", usage: "preflight in-review BEAD [--actor NAME] [--project PATH] [--json]", argument: "BEAD", flags: [
-			{ name: "--actor", value: "NAME", description: "The acting seat; defaults to AGENT_NAME" },
-			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
-		] },
-		{ name: "close", description: "Judge the close predicates for one bead (in_review, non-author, every box ticked, reviewer gate, reason)", usage: "preflight close BEAD [--actor NAME] [--project PATH] [--json]", argument: "BEAD", flags: [
-			{ name: "--actor", value: "NAME", description: "The acting seat; defaults to AGENT_NAME" },
-			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
-		] },
-	] },
 	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData },
 	{ name: "activation", description: "Record a safeguard opt-out with item, reason, actor and time; inventory stays read-only under doctor --scope activation", usage: "activation opt-out --item ITEM --reason TEXT [--by NAME]", flags: [], subcommands: [
 		{ name: "opt-out", description: "Record one activation opt-out; an empty reason is refused and nothing is written", usage: "activation opt-out --item ITEM --reason TEXT [--by NAME]", flags: [

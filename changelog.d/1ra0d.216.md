@@ -1,0 +1,1 @@
+- The command registry defines `preflight` exactly once; shell completion and grammar listings no longer carry the shadowed duplicate entry.

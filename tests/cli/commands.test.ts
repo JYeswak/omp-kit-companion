@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { MEMORY_FIXTURE_VERSION, writeReviewedMemorySources } from "./memory-source-fixture.ts";
+import { COMMANDS } from "../../src/commands.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 const fixtures: string[] = [];
@@ -285,6 +286,27 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(result.data.data.text).toContain("rules");
 		expect(result.data.data.text).toContain("policy");
 		expect(result.data.data.text).not.toContain("jsno");
+	});
+
+	test("VERBDIET1 verb names are unique and preflight registers exactly once", () => {
+		const duplicates = (names: readonly string[]): string[] => {
+			const seen = new Set<string>();
+			const dupes = new Set<string>();
+			for (const name of names) {
+				if (seen.has(name)) dupes.add(name);
+				seen.add(name);
+			}
+			return [...dupes].sort();
+		};
+		// Planted negative: the checker itself must catch a duplicated registry.
+		expect(duplicates(["preflight", "status", "preflight"])).toEqual(["preflight"]);
+		const top = COMMANDS.map((command) => command.name);
+		expect(duplicates(top)).toEqual([]);
+		expect(top.filter((name) => name === "preflight")).toHaveLength(1);
+		for (const command of COMMANDS) {
+			const children = (command.subcommands ?? []).map((child) => child.name);
+			expect(duplicates(children)).toEqual([]);
+		}
 	});
 
 	test("topic --help exposes its subcommands even without a selected mutation", () => {
