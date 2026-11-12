@@ -4,6 +4,20 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.129] - 2026-11-12
+
+### Changed
+
+- At turn end the kit now checkpoints the seat's own fully attributed dirty files to the private `refs/omp-kit/saves/<agent>` ref (never touching HEAD, the index, or `main`) and names the save in the unchanged save demand; a peer's dirty files stay untouched.
+- The packaged kit bundles the save guard, so its turn-end checkpoint loads from an installed release (the source-only import broke the package build).
+- The generated `docs/lifecycle.md` now carries `status: current` front matter, so `sh scripts/doc-status-check.sh .` passes on a clean tree again instead of refusing the kit's own lifecycle doc.
+- The upgrade notice no longer tells the seat to park in the helper's tool call: `self_restart.py` records the request and returns at once, and a detached watcher sends `/restart` only after the pane idles with an empty composer. A pane that never idles reports `RESTART_NOT_OBSERVED` without typing anything.
+- Beads filed by the daily loop-close job can now close through `omp-kit verify`. `bun scripts/lifecycle-check.ts --gap PHASE:FACET` exits 1 while that lifecycle gap is open. Gap, red-service and retire beads now replay real commands and tests, instead of planted-negative boxes that failed on every repaired tree.
+- `omp-kit land` now waits up to 600 s for another seat's landing to release the shared converge lock, so it no longer fails with `LAND_PUBLICATION_REFUSED: CONVERGE_BUSY`. `omp-kit converge` still refuses at once.
+- Moving a bead to `in_review` without a DONE line now gets a refusal that names the missing `--transition-comment 'DONE <repo>@<sha> ...'`, followed by the gate command for that sha. Before, it only said to rerun the gate, which could never admit it.
+- A DONE mail whose plain commit SHA does not resolve in the recipient's repository now gets a refusal that says to cite it as `<absolute-repo-path>@<sha>`, instead of only telling the sender to republish work that is already published.
+- New `docs/phases.md` explains the discover, verify, launch and learn commands (`intake`, `verify` with live readback, `milestone launch`, `lessons add` and `mine`). The lifecycle manifest now points those four phases at it, so their missing-doc gaps close.
+
 ## [0.2.128] - 2026-11-12
 
 ### Changed

@@ -1,1 +1,0 @@
-- The generated `docs/lifecycle.md` now carries `status: current` front matter, so `sh scripts/doc-status-check.sh .` passes on a clean tree again instead of refusing the kit's own lifecycle doc.

@@ -1,2 +1,0 @@
-- At turn end the kit now checkpoints the seat's own fully attributed dirty files to the private `refs/omp-kit/saves/<agent>` ref (never touching HEAD, the index, or `main`) and names the save in the unchanged save demand; a peer's dirty files stay untouched.
-- The packaged kit bundles the save guard, so its turn-end checkpoint loads from an installed release (the source-only import broke the package build).

@@ -1,1 +1,0 @@
-- `omp-kit land` now waits up to 600 s for another seat's landing to release the shared converge lock, so it no longer fails with `LAND_PUBLICATION_REFUSED: CONVERGE_BUSY`. `omp-kit converge` still refuses at once.

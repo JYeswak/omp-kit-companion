@@ -1,1 +1,0 @@
-- Moving a bead to `in_review` without a DONE line now gets a refusal that names the missing `--transition-comment 'DONE <repo>@<sha> ...'`, followed by the gate command for that sha. Before, it only said to rerun the gate, which could never admit it.

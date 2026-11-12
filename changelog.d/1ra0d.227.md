@@ -1,1 +1,0 @@
-- Beads filed by the daily loop-close job can now close through `omp-kit verify`. `bun scripts/lifecycle-check.ts --gap PHASE:FACET` exits 1 while that lifecycle gap is open. Gap, red-service and retire beads now replay real commands and tests, instead of planted-negative boxes that failed on every repaired tree.
