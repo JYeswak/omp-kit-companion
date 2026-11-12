@@ -103,3 +103,17 @@ test("VALUEVERB1 UNKNOWN exits 3 when stdout is not a number", async () => {
 	expect(String(result.data.reason)).toContain("no finite number");
 });
 
+
+test("VALUEVERB1 a token-shaped value in failing stderr or non-number stdout never reaches the reason", async () => {
+	// Synthetic gh-shaped values; probes like cfs-infisical-run are credential-adjacent. VALUE_PREVIEW_CHARS cuts
+	// inside the token when truncation runs first, which is the planted case.
+	const token = "ghp_" + "B".repeat(36);
+	// stderr: 190 zeros, a space, then the token, so the 200-char cut falls inside it.
+	for (const [label, script] of [["stderr", `printf '%0190d %s' 0 ${token} >&2; exit 4`], ["stdout", `printf '%0190d %s\\n' 0 ${token}`]] as const) {
+		const root = projectDir({ name: `leak-${label}`, command: ["sh", "-c", script], target: 3 });
+		const result = await valueCommand(request(root));
+		expect(result.code, JSON.stringify(result)).toBe(3);
+		// The declared argv is echoed as-is (a declaration is the project's own text); the probe's output is not.
+		expect(String(result.data.reason)).not.toContain("ghp_BBBB");
+	}
+});

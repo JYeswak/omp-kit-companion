@@ -10,6 +10,7 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { run } from "./kitlib/run.ts";
+import { previewText } from "../extensions/secret-output-guard.ts";
 import { isRecord } from "./type-guards.ts";
 import type { CliResult, ParsedCommand } from "./cli.ts";
 
@@ -124,7 +125,8 @@ export async function runValueVerb(project: string): Promise<ValueOutcome> {
 			remediation: "Make the probe finish inside its deadline; nothing was measured." };
 	}
 	if (result.rc !== 0) {
-		const stderr = new TextDecoder().decode(result.stderr).trim().slice(0, VALUE_PREVIEW_CHARS);
+		// Scrub before truncating: probes like cfs-infisical-run are credential-adjacent, and a cut first can hide a token shape.
+		const stderr = previewText(new TextDecoder().decode(result.stderr).trim(), VALUE_PREVIEW_CHARS);
 		return { verdict: "UNKNOWN", name: decl.name, value: null, target: decl.target, command: decl.command,
 			reason: `The value command exited ${String(result.rc)}${stderr === "" ? "" : `: ${stderr}`}.`,
 			remediation: "Make the declared command exit 0 and print one finite number; nothing was measured." };
@@ -132,7 +134,7 @@ export async function runValueVerb(project: string): Promise<ValueOutcome> {
 	const stdout = new TextDecoder().decode(result.stdout);
 	const measured = parseMetricValue(stdout);
 	if (measured === null) {
-		const preview = stdout.trim().slice(0, VALUE_PREVIEW_CHARS);
+		const preview = previewText(stdout.trim(), VALUE_PREVIEW_CHARS);
 		return { verdict: "UNKNOWN", name: decl.name, value: null, target: decl.target, command: decl.command,
 			reason: `The value command printed no finite number${preview === "" ? "" : `: ${JSON.stringify(preview)}`}.`,
 			remediation: "Make the declared command print exactly one finite number on stdout; nothing was measured." };
