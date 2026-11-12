@@ -377,7 +377,10 @@ prepare_release
 // writers (gate-events.jsonl, inbox-wake/*.json) plus the state-root snapshot budget overflow.
 const writerScenarios = ["writer-partial", "writer-foreign", "writer-mutant"] as const;
 const reconcileScenarios = ["reconciled-complete", "reconciled-missing-profile", "reconciled-wrong-store", "reconciled-stale-link", "reconciled-no-receipt", "reconciled-new-profile"] as const;
-for (const scenario of ["updated", "symlinked-work", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused", ...writerScenarios, ...reconcileScenarios] as const) {
+// RELDIAG1 (ompkit-1ra0d.210): the exact 0.2.125 shape, whose only changed files are the kit's own
+// diagnostics/handler-*.json files, plus a foreign-path negative outside the kit state dir.
+const diagnosticsScenarios = ["diagnostics-partial", "diagnostics-foreign"] as const;
+for (const scenario of ["updated", "symlinked-work", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused", ...writerScenarios, ...diagnosticsScenarios, ...reconcileScenarios] as const) {
 	const writer = (writerScenarios as readonly string[]).includes(scenario);
 	test(`${writer ? "RELREMEDY1 " : ""}release install ${scenario} only stamps installed after real store alignment`, async () => {
 		const work = realpathSync(ownedTmp("release-install", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
@@ -462,6 +465,17 @@ if (args[0] === "update") {
       ["omp-kit update --reconcile cd03799d-67fd --yes"], false);
     process.exit(1);
   }
+  if (scenario.startsWith("diagnostics-")) {
+    // The exact 0.2.125 PARTIAL: only the kit's own diagnostics handler files changed.
+    const changed = ["~/.local/state/omp-kit/diagnostics/handler-5735d1e1dc677c5aa334220edd816432.json", "~/.local/state/omp-kit/diagnostics/handler-8c2064fd6b9c2bcdabf25f719ce89a18.json",
+      ...(scenario === "diagnostics-foreign" ? ["~/.config/operator.json"] : [])];
+    emit({ action: "PARTIAL", receipt_id: "cd03799d-67fd", active_version: "0.0.0", matcher: "PASS", live: "PASS", postcheck: "FAIL",
+      postcheck_detail: { status: "FAIL", changed_operator_paths: changed, failed_stages: [], deferred_stages: [],
+        failures: changed.map(path => "Operator file changed during isolated test: " + path),
+        cause: { cause_code: "Error", cause_message: "KIT_POSTCHECK_FAILED" }, live_state_paths: ["~/.local/state/omp-kit/chrome-jfp"] } },
+      ["omp-kit update --reconcile cd03799d-67fd --yes"], false);
+    process.exit(1);
+  }
   emit({ action: "UPDATED", active_version: "0.0.0" }); process.exit(0);
 }
 if (args[0] === "apply" && args[1] === "plugin") {
@@ -499,25 +513,32 @@ receipt installed fixture fixture
 			const result = await runFixtureAsync(["bash", fixture, stageWork, ROOT, home], { cwd: ROOT, env: env as Record<string, string>, floor_s: 30 });
 			const stdout = new TextDecoder().decode(result.stdout);
 			const stderr = new TextDecoder().decode(result.stderr);
-			const successful = scenario === "updated" || scenario === "symlinked-work" || scenario === "browser-partial" || scenario === "writer-partial" || scenario.startsWith("reconciled-");
+			const successful = scenario === "updated" || scenario === "symlinked-work" || scenario === "browser-partial" || scenario === "writer-partial" || scenario === "diagnostics-partial" || scenario.startsWith("reconciled-");
 			expect(result.rc, stderr).toBe(successful ? 0 : 4);
 			const calls = readFileSync(join(work, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
 			expect(calls[0]).toEqual(["update", "--apply", "--yes", "--version", "0.0.0", "--index", join(work, "public/release-index.json"),
 				"--archive", join(work, "public/omp-kit-v0.0.0-darwin-arm64-none.tar.gz"), "--json"]);
-			expect(calls.filter(args => args.includes("--reconcile")).length).toBe(["browser-partial", "reconcile-refused", "writer-partial"].includes(scenario) || scenario.startsWith("reconciled-") ? 1 : 0);
+			expect(calls.filter(args => args.includes("--reconcile")).length).toBe(["browser-partial", "reconcile-refused", "writer-partial", "diagnostics-partial"].includes(scenario) || scenario.startsWith("reconciled-") ? 1 : 0);
 			if (scenario === "writer-partial") {
 				expect(calls.find(args => args.includes("--reconcile"))).toEqual(["update", "--reconcile", "cd03799d-67fd", "--yes", "--json"]);
 				expect(stdout).toContain("substep install.reconcile-kit-live-writer-state");
 				expect(stderr).toContain("release-local: postcheck: ~/.local/state/omp-kit: exceeds the postcheck snapshot budget");
 				expect(stderr).toContain("gate-events.jsonl: written by a kit service during the isolated test (live-writer race)");
 			}
-			if (scenario === "writer-foreign" || scenario === "writer-mutant") {
-				expect(stderr).toContain("not the known live-browser or kit live-writer PARTIAL");
+			if (scenario === "diagnostics-partial") {
+				expect(calls.find(args => args.includes("--reconcile"))).toEqual(["update", "--reconcile", "cd03799d-67fd", "--yes", "--json"]);
+				expect(stdout).toContain("substep install.reconcile-kit-live-writer-state");
+				expect(stderr).toContain("diagnostics/handler-5735d1e1dc677c5aa334220edd816432.json: written by a kit service during the isolated test (live-writer race)");
+				expect(stderr).toContain("diagnostics/handler-8c2064fd6b9c2bcdabf25f719ce89a18.json: written by a kit service during the isolated test (live-writer race)");
+			}
+			if (scenario === "writer-foreign" || scenario === "writer-mutant" || scenario === "diagnostics-foreign") {
+				expect(stderr).toContain("not the known live-browser, kit live-writer or deferred-live PARTIAL");
 				expect(stderr).toContain(`reconcile it with: ${kit} update --reconcile cd03799d-67fd --yes`);
 				const apply = /re-apply with: (\S+) update --apply --yes --version 0\.0\.0 --index (\/\S+) --archive (\/\S+)$/m.exec(stderr);
 				expect(apply?.[1]).toBe(kit);
 				for (const source of [apply![2]!, apply![3]!]) { expect(existsSync(source)).toBe(true); expect(source.startsWith(join(work, "public"))).toBe(false); }
 				if (scenario === "writer-foreign") expect(stderr).toContain("~/.omp/agent/config.yml: changed outside the kit live-writer class");
+				if (scenario === "diagnostics-foreign") expect(stderr).toContain("~/.config/operator.json: changed outside the kit live-writer class");
 			}
 			if (successful) {
 				expect(stdout).toContain('"installed": true');
@@ -530,11 +551,108 @@ receipt installed fixture fixture
 			} else {
 				expect(stdout).not.toContain('"installed": true');
 				expect(stdout).not.toContain("installed 0.0.0; every profile link aligned");
-				const refusal = scenario === "foreign-write" || scenario === "writer-foreign" || scenario === "writer-mutant" ? "not the known live-browser or kit live-writer PARTIAL"
+				const refusal = scenario === "foreign-write" || scenario === "writer-foreign" || scenario === "writer-mutant" || scenario === "diagnostics-foreign" ? "not the known live-browser, kit live-writer or deferred-live PARTIAL"
 					: scenario === "stale-link" ? "installed profile alignment is stale"
 					: scenario === "wrong-version" ? "installed CLI version readback differs"
 					: "live-browser-state reconcile refused";
 				expect(stderr).toContain(refusal);
+			}
+		} finally { rmSync(work, { recursive: true, force: true }); }
+	}, fixtureDeadlineS(60) * 1_000);
+}
+
+// RELPENDINGWORD1 (ompkit-1ra0d.210): 0.2.124/0.2.125 ended rc 4 although the updater left the new
+// version active with its live check pending (KITLIVEDEFER1 deferred PARTIAL), and the refusal
+// skipped the all-profile relink, so the fleet kept running the old hooks.
+for (const scenario of ["deferred-pending", "deferred-undone", "deferred-mutant"] as const) {
+	test(`RELPENDINGWORD1 release install ${scenario} finishes the relink while the live check is pending`, async () => {
+		const work = realpathSync(ownedTmp("release-pending", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+		const home = join(work, "home");
+		const prefix = join(home, ".local/opt/omp-kit");
+		const store = join(prefix, "releases/0.0.0");
+		const scriptDir = join(store, "skills/fleet-restart/scripts");
+		mkdirSync(scriptDir, { recursive: true });
+		mkdirSync(join(store, "scripts"), { recursive: true });
+		mkdirSync(join(store, "bin"));
+		mkdirSync(join(prefix, "bin"));
+		writeFileSync(join(store, "package.json"), JSON.stringify({ name: "omp-kit-companion", version: "0.0.0" }));
+		cpSync(join(ROOT, "scripts/kitlib_run.py"), join(store, "scripts/kitlib_run.py"));
+		cpSync(join(ROOT, "scripts/pysafe.py"), join(store, "scripts/pysafe.py"));
+		cpSync(join(ROOT, "skills/fleet-restart/scripts/fleet_restart.py"), join(scriptDir, "fleet_restart.py"));
+		const kit = join(prefix, "bin/omp-kit");
+		writeFileSync(kit, `#!${process.execPath}
+import { appendFileSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+const root = process.env.RELEASE_TEST_WORK;
+const scenario = process.env.RELEASE_TEST_SCENARIO;
+const prefix = join(process.env.HOME, ".local/opt/omp-kit");
+const store = join(prefix, "releases/0.0.0");
+const args = process.argv.slice(2);
+appendFileSync(join(root, "calls"), JSON.stringify(args) + "\\n");
+const emit = (data, commands = [], ok = true) => console.log(JSON.stringify({ ok, data, commands }));
+if (args[0] === "--version") { console.log("omp-kit 0.0.0"); process.exit(0); }
+if (args[0] === "update") {
+  const active = scenario === "deferred-undone" ? "0.0.1" : "0.0.0";
+  emit({ action: "PARTIAL", receipt_id: "deadbeef-1234", active_version: active, matcher: "PASS", live: "NOT_RUN",
+    postcheck: "DEFERRED", reason: "KIT_POSTCHECK_DEFERRED",
+    postcheck_detail: { failed_stages: [], deferred_stages: ["live"], live_state_paths: [] } },
+    ["omp-kit undo deadbeef-1234 --yes"], false);
+  process.exit(1);
+}
+if (args[0] === "apply" && args[1] === "plugin") {
+  for (const profile of ["", "profiles/claude/", "profiles/codex/"]) {
+    const link = join(process.env.HOME, ".omp", profile, "plugins/node_modules/omp-kit-companion");
+    mkdirSync(dirname(link), { recursive: true });
+    rmSync(link, { force: true });
+    symlinkSync(store, link);
+  }
+  emit({ action: "APPLIED" }); process.exit(0);
+}
+process.exit(99);
+`);
+		chmodSync(kit, 0o755);
+		// Planted negative: today's install stage has no deferred-live branch, so the
+		// PENDING-with-new-version-active case must fall through to the refusal. The
+		// neuter keeps the structure identical and only makes the deferred filter
+		// unreachable, which is exactly today's behavior for this envelope.
+		const neuter = '($d.postcheck == "DEFERRED" or $d.reason == "KIT_POSTCHECK_DEFERRED")';
+		expect(stagePrelude).toContain(neuter);
+		const mutantHelpers = stagePrelude.replace(neuter, '($d.postcheck == "DEFERRED-NEVER" or false)');
+		expect(mutantHelpers).not.toBe(stagePrelude);
+		const installHelpers = scenario === "deferred-mutant" ? mutantHelpers : stagePrelude;
+		const receiptFunction = releaseStage("receipt() {", 'if [ "$DRY_RUN" = 1 ]; then\n\t# shellcheck');
+		const fixture = join(work, "install.sh");
+		writeFileSync(fixture, `${installHelpers}
+ROOT=$2; HOME=$3; INSTALL_PREFIX="$HOME/.local/opt/omp-kit"; INSTALLED=0
+PUB="$WORK/public"; mkdir "$PUB"; : >"$DIST/SHA256SUMS"; : >"$PUB/release-index.json"; : >"$PUB/$DARWIN"
+STARTED=$(date +%s); PUSH_STARTED=$STARTED; RELEASED_AT=$STARTED
+SOURCE=fixture; BASE_TAG=v0.0.0; NOTARY_ID=fixture; TAG_PUSH_SECONDS=0
+. "$ROOT/scripts/kitlib-tmp.sh"
+${receiptFunction}
+install_release
+receipt installed fixture fixture
+`);
+		mkdirSync(join(work, "dist"));
+		try {
+			const env: Record<string, string | undefined> = { ...process.env, HOME: home, TMPDIR: work, RELEASE_TEST_WORK: work, RELEASE_TEST_SCENARIO: scenario };
+			delete env.XDG_STATE_HOME;
+			const result = await runFixtureAsync(["bash", fixture, work, ROOT, home], { cwd: ROOT, env: env as Record<string, string>, floor_s: 30 });
+			const stdout = new TextDecoder().decode(result.stdout);
+			const stderr = new TextDecoder().decode(result.stderr);
+			const calls = readFileSync(join(work, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
+			if (scenario === "deferred-pending") {
+				expect(result.rc, stderr).toBe(0);
+				expect(stdout).toContain("live check pending (receipt deadbeef-1234");
+				expect(calls.find(args => args[0] === "apply")).toEqual(["apply", "plugin", "--apply", "--yes", "--store", store, "--profiles", "all", "--include-default", "--json"]);
+				expect(calls.filter(args => args.includes("--reconcile"))).toEqual([]);
+				expect(JSON.parse(readFileSync(join(work, "install-align.json"), "utf8")).links).toHaveLength(3);
+				expect(stdout).toContain('"installed": true');
+			} else {
+				expect(result.rc, stderr).toBe(4);
+				expect(stdout).not.toContain('"installed": true');
+				expect(stdout).not.toContain("live check pending");
+				expect(calls.filter(args => args[0] === "apply")).toEqual([]);
+				expect(stderr).toContain("refusing reconciliation");
 			}
 		} finally { rmSync(work, { recursive: true, force: true }); }
 	}, fixtureDeadlineS(60) * 1_000);
@@ -1039,7 +1157,7 @@ echo "unreachable: the install refusal must exit"
 		const stderr = new TextDecoder().decode(result.stderr);
 		expect(result.rc, stderr).toBe(4);
 		expect(stdout).not.toContain("unreachable");
-		expect(stderr).toContain("release-local: refused: install update failed (rc 1); not the known live-browser or kit live-writer PARTIAL");
+		expect(stderr).toContain("release-local: refused: install update failed (rc 1); not the known live-browser, kit live-writer or deferred-live PARTIAL");
 		expect(stderr).toContain("v1.2.4 is published; advancing main to the next version before exiting");
 		// RELREMEDY1: the remedy is runnable: --index/--archive name sources kept past the work dir's cleanup.
 		const remedy = /not installed \(refusal above\); install it with: (\S+) update --apply --yes --version 1\.2\.4 --index (\/\S+) --archive (\/\S+)$/m.exec(stderr);

@@ -329,7 +329,10 @@ Agent: $agent" >"$message"
 # it exceeds the snapshot budget (operator-snapshot.ts MAX_ENTRIES_PER_ROOT 20000 / MAX_BYTES_PER_ROOT 512 MiB; the
 # 2026-11-05 root held 323k files, 28 GB). Only those writer paths and that root-budget overflow form the class; any
 # other changed or unreadable operator file still refuses. Every refusal names the receipt id and runnable commands.
-RELREMEDY_LIVE_WRITER='^(gate-events\.jsonl(\.1)?|inbox-wake/[A-Za-z0-9._-]+\.json)$'
+# RELDIAG1 (ompkit-1ra0d.210): 0.2.125 ended PARTIAL the same way, but through the kit's own diagnostics handler:
+# cli.ts persistHandlerDiagnostic writes diagnostics/handler-<hex16>.json (randomBytes(16).toString("hex")) when a
+# handler fails during the isolated test, so those paths join the class. Anything else still refuses.
+RELREMEDY_LIVE_WRITER='^(gate-events\.jsonl(\.1)?|inbox-wake/[A-Za-z0-9._-]+\.json|diagnostics/handler-[0-9a-f]{32}\.json)$'
 # jq prelude: $root is the absolute kit state root, $home expands the updater's ~/ display form.
 # shellcheck disable=SC2016 # jq variables, not shell expansions
 RELREMEDY_JQ='
@@ -351,7 +354,7 @@ install_postcheck_cause() {
 			if ($q | abs) == $root then "\($q): exceeds the postcheck snapshot budget (20000 entries or 512 MiB per root): size, not a race"
 			else "\($q): unreadable mid-read, a live-writer race" end),
 		(($p.changed_operator_paths // [])[] | if writer then "\(.): written by a kit service during the isolated test (live-writer race)"
-			else "\(.): changed outside the kit live-writer class (gate-events.jsonl, inbox-wake/*.json)" end)'
+			else "\(.): changed outside the kit live-writer class (gate-events.jsonl, inbox-wake/*.json, diagnostics/handler-*.json)" end)'
 	install_class_jq -r 2>/dev/null | sed 's/^/release-local: postcheck: /' >&2 || true
 }
 # Keep the verified sources past $WORK cleanup, so the printed apply command stays runnable after exit.
@@ -428,6 +431,7 @@ install_release() {
 	stage install
 	local kit="$INSTALL_PREFIX/bin/omp-kit" store="$INSTALL_PREFIX/releases/$VERSION"
 	local update_rc=0 reconcile_id kit_state_root class_filter reconcile_class=live-browser reused_relink=0
+	local pending_id=''
 	kit_state_root="${XDG_STATE_HOME-$HOME/.local/state}/omp-kit"
 	# RELINSTALLPATH1 (ompkit-fp72.120.16.155): `omp-kit update --apply` refuses a source that is not its own realpath
 	# (UNSAFE_KIT_SOURCE, kit-update.ts assertRegular), and $WORK under macOS TMPDIR sits below the /var -> /private/var
@@ -438,41 +442,59 @@ install_release() {
 		--index "$PUB/release-index.json" --archive "$PUB/$DARWIN" --json >"$WORK/install-update.json" || update_rc=$?
 	cat "$WORK/install-update.json"
 	if [ "$update_rc" -ne 0 ]; then
-		if ! jq -er --arg v "$VERSION" '
+		# RELPENDING1 (ompkit-1ra0d.210): a deferred-live PARTIAL keeps the new version active with its
+		# live check pending (KITLIVEDEFER1): the updater returns before its own relink, and reconcile
+		# alone never blesses the deferred path, so the install finishes the relink and readbacks now
+		# and names the receipt for the later `update --reconcile`. Only an UNDONE (or a missing
+		# version) stays a refusal: the filter requires the new version active and a matcher PASS.
+		if jq -er --arg v "$VERSION" '
 			.data as $d | $d.receipt_id as $id |
 			select($d.action == "PARTIAL" and $d.active_version == $v and
-				$d.matcher == "PASS" and $d.live == "PASS" and $d.postcheck == "FAIL" and
+				$d.matcher == "PASS" and
+				($d.postcheck == "DEFERRED" or $d.reason == "KIT_POSTCHECK_DEFERRED") and
 				($id | type == "string" and test("^[a-f0-9-]+$")) and
-				$d.postcheck_detail.changed_operator_paths == [] and
-				$d.postcheck_detail.failures == [] and $d.postcheck_detail.cause == null and
-				($d.postcheck_detail.live_state_paths | length > 0) and
-				(.commands | index("omp-kit update --reconcile " + $id + " --yes") != null)) | $id
+				(($d.postcheck_detail.failed_stages // []) == [])) | $id
 		' "$WORK/install-update.json" >"$WORK/install-reconcile-id"; then
-			# RELREMEDY2 (ompkit-fp72.120.16.274): the receipt comes from .data.receipt_id; the real updater lists only
-			# `omp-kit undo <id> --yes` in .commands, so a reconcile-command condition never matched production output.
-			# shellcheck disable=SC2016 # jq program
-			class_filter='.data as $d | $d.receipt_id as $id | ($d.postcheck_detail // {}) as $p |
+			IFS= read -r pending_id <"$WORK/install-reconcile-id"
+			reconcile_class='deferred-live'
+			say "installed $VERSION; live check pending (receipt $pending_id; the kit-update job finishes it with: $kit update --reconcile $pending_id --yes)"
+		else
+			if ! jq -er --arg v "$VERSION" '
+				.data as $d | $d.receipt_id as $id |
 				select($d.action == "PARTIAL" and $d.active_version == $v and
 					$d.matcher == "PASS" and $d.live == "PASS" and $d.postcheck == "FAIL" and
 					($id | type == "string" and test("^[a-f0-9-]+$")) and
-					(($p.failed_stages // []) == []) and
-					($p.cause == null or $p.cause.cause_message == "KIT_POSTCHECK_FAILED") and
-					(($p.changed_operator_paths // []) | all(writer)) and
-					(($p.failures // []) | length > 0 and all(failure_ok($p.changed_operator_paths // [])))) | $id'
-			install_class_jq -er >"$WORK/install-reconcile-id" || {
-				install_remedy
-				die "install update failed (rc $update_rc); not the known live-browser or kit live-writer PARTIAL, refusing reconciliation"
-			}
-			install_postcheck_cause
-			reconcile_class='kit-live-writer'
+					$d.postcheck_detail.changed_operator_paths == [] and
+					$d.postcheck_detail.failures == [] and $d.postcheck_detail.cause == null and
+					($d.postcheck_detail.live_state_paths | length > 0) and
+					(.commands | index("omp-kit update --reconcile " + $id + " --yes") != null)) | $id
+			' "$WORK/install-update.json" >"$WORK/install-reconcile-id"; then
+				# RELREMEDY2 (ompkit-fp72.120.16.274): the receipt comes from .data.receipt_id; the real updater lists only
+				# `omp-kit undo <id> --yes` in .commands, so a reconcile-command condition never matched production output.
+				# shellcheck disable=SC2016 # jq program
+				class_filter='.data as $d | $d.receipt_id as $id | ($d.postcheck_detail // {}) as $p |
+					select($d.action == "PARTIAL" and $d.active_version == $v and
+						$d.matcher == "PASS" and $d.live == "PASS" and $d.postcheck == "FAIL" and
+						($id | type == "string" and test("^[a-f0-9-]+$")) and
+						(($p.failed_stages // []) == []) and
+						($p.cause == null or $p.cause.cause_message == "KIT_POSTCHECK_FAILED") and
+						(($p.changed_operator_paths // []) | all(writer)) and
+						(($p.failures // []) | length > 0 and all(failure_ok($p.changed_operator_paths // [])))) | $id'
+				install_class_jq -er >"$WORK/install-reconcile-id" || {
+					install_remedy
+					die "install update failed (rc $update_rc); not the known live-browser, kit live-writer or deferred-live PARTIAL, refusing reconciliation"
+				}
+				install_postcheck_cause
+				reconcile_class='kit-live-writer'
+			fi
+			IFS= read -r reconcile_id <"$WORK/install-reconcile-id"
+			substep "install.reconcile-$reconcile_class-state"
+			bounded 300 "$kit" update --reconcile "$reconcile_id" --yes --json >"$WORK/install-reconcile.json" ||
+				{ install_remedy; die "$reconcile_class-state reconcile refused; installation remains unverified"; }
+			cat "$WORK/install-reconcile.json"
+			jq -e --arg v "$VERSION" '.ok == true and .data.action == "RECONCILED" and .data.active_version == $v' \
+				"$WORK/install-reconcile.json" >/dev/null || die "reconcile did not confirm the installed version"
 		fi
-		IFS= read -r reconcile_id <"$WORK/install-reconcile-id"
-		substep "install.reconcile-$reconcile_class-state"
-		bounded 300 "$kit" update --reconcile "$reconcile_id" --yes --json >"$WORK/install-reconcile.json" ||
-			{ install_remedy; die "$reconcile_class-state reconcile refused; installation remains unverified"; }
-		cat "$WORK/install-reconcile.json"
-		jq -e --arg v "$VERSION" '.ok == true and .data.action == "RECONCILED" and .data.active_version == $v' \
-			"$WORK/install-reconcile.json" >/dev/null || die "reconcile did not confirm the installed version"
 	else
 		jq -e --arg v "$VERSION" '.ok == true and .data.active_version == $v and
 			(.data.action == "UPDATED" or .data.action == "CURRENT")' "$WORK/install-update.json" >/dev/null ||
