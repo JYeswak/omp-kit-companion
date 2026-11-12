@@ -4,6 +4,14 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.128] - 2026-11-12
+
+### Changed
+
+- loop-close reads the whole gate-events ledger (up to 512 MiB), so codes silent for 30 days are actually found and new-code reports are sent; it used to read only the last 8 MiB, a few hours of history.
+- loop-close filings pass the tracker create lint: every acceptance box carries a scope letter and phase tag, a replayable command, and a planted negative (lifecycle replays the lifecycle check, retire names the code and its gate source, red requires a green service status); the REPORT mail goes through the token-free am CLI with the sender from loopClose.mailFrom, AGENT_NAME, or the recipient.
+- When the tracker's duplicate check matches only beads loop-close itself filed, the job confirms the work is distinct and files the bead; a match anyone else filed is left as a finding.
+
 ## [0.2.127] - 2026-11-12
 
 ### Changed
