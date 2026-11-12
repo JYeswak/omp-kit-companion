@@ -123,5 +123,15 @@ with owned_tmp('gate-event-replay') as scratch:
     execute(['sh', str(script), 'commit', 'HEAD', 'invalid-utf8', 'refuse', 'invalid-utf8-id', 'rc=7'], cwd=repo, env=dict(env, OMP_KIT_GATE_EVENT_RC='7'))
     lossy = json.loads(ledger.read_text().splitlines()[-1])['replay']
     assert lossy['truncated'] is True
+    # LEDGERFIXTURE1 (ompkit-1ra0d.194): with no XDG_STATE_HOME the ledger is the live one under HOME; a hook whose
+    # cwd is the system temp root (macOS reads /tmp as /private/tmp) is a fixture and records nothing there.
+    home = base / 'home'; home.mkdir()
+    live_env = {k: v for k, v in env.items() if k not in ('XDG_STATE_HOME', 'TMPDIR')}
+    live_env.update(HOME=str(home), OMP_KIT_GATE_EVENT_RC='7')
+    live_ledger = home / '.local' / 'state' / 'omp-kit' / 'gate-events.jsonl'
+    execute(['sh', str(script), 'commit', 'HEAD', 'live-control', 'refuse', 'live-control-id', 'rc=7'], cwd=pathlib.Path('/'), env=live_env)
+    assert [json.loads(line)['event_id'] for line in live_ledger.read_text().splitlines()] == ['live-control-id']
+    execute(['sh', str(script), 'commit', 'HEAD', 'system-temp-fixture', 'refuse', 'system-temp-id', 'rc=7'], cwd=pathlib.Path('/tmp'), env=live_env)
+    assert [json.loads(line)['event_id'] for line in live_ledger.read_text().splitlines()] == ['live-control-id'], live_ledger.read_text()
 print('gate-event replay contract passed')
 PY

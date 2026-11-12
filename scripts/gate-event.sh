@@ -18,8 +18,18 @@ ledger=$state/omp-kit/gate-events.jsonl
 # and no row is written (the probe wrote a real refuse row per install on 2026-10-25, PeachLeopard 68972).
 [ -z "${OMP_KIT_GATE_EVENTS_SKIP:-}" ] || exit 0
 if [ -z "${XDG_STATE_HOME:-}" ]; then
-	case "$PWD" in */var/agent-tmp/*) exit 0 ;; esac
-	case "${TMPDIR:-}" in ?*) case "$PWD" in "${TMPDIR%/}"/*) exit 0 ;; esac ;; esac  # tempsafe: compares the cwd against TMPDIR, creates nothing
+	# LEDGERFIXTURE1 (ompkit-1ra0d.194): compare the PHYSICAL cwd too. On macOS TMPDIR names /var/folders/...
+	# while a hook's cwd reads /private/var/folders/..., so the TMPDIR match missed and an affected-gate test
+	# put 42 fixture refusals into the live ledger in one day. No agent works in a repo under system temp.
+	cwd_real=$(pwd -P 2>/dev/null) || cwd_real=$PWD
+	tmp_real=
+	[ -z "${TMPDIR:-}" ] || tmp_real=$(CDPATH='' cd -- "$TMPDIR" 2>/dev/null && pwd -P) || tmp_real=  # tempsafe: resolves TMPDIR to compare the cwd, creates nothing
+	for cwd in "$PWD" "$cwd_real"; do
+		case "$cwd" in */var/agent-tmp/* | /tmp | /tmp/* | /private/tmp | /private/tmp/* | /var/folders/* | /private/var/folders/*) exit 0 ;; esac  # tempsafe: matches the cwd against system temp roots, creates nothing
+		for tmp in "${TMPDIR:-}" "$tmp_real"; do  # tempsafe: compares the cwd against TMPDIR, creates nothing
+			case "$tmp" in ?*) case "$cwd" in "${tmp%/}"/*) exit 0 ;; esac ;; esac
+		done
+	done
 fi
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 [ -f "$here/kitlib_jsonl.py" ] || exit 0
