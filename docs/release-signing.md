@@ -293,6 +293,17 @@ through the normal convergence route and resume with that printed SHA, rather
 than preparing another version. `--next` cannot be combined with `--source`.
 Dry runs never install or relink, even when `--install` is specified.
 
+A cut stranded after its draft (tag and draft exist, attest-local failed, e.g.
+a transient runner verifier outage) resumes with
+`--resume-from-draft --version X.Y.Z` instead of re-tagging. The resume adopts
+the remote tag only after the `version-match` gate proves it names a commit
+whose `package.json` states the version, and adopts the draft only after
+downloading every asset and proving it equals the signed bytes (`SHA256SUMS`
+plus the checksum-stage index/archive checks). It then re-dispatches
+attest-local and continues through the unchanged verify, install and
+next-version stages. A draft whose assets differ, or a tag naming another
+version, refuses before anything is dispatched.
+
 ### Former manual steps (0.2.86) and ownership
 
 | Former lead action | Current status |

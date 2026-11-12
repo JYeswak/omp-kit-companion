@@ -32,6 +32,8 @@
 #
 # Usage: scripts/release-local.sh [--version X.Y.Z | --next] [--source SHA] [--dry-run] [--install | --no-install]
 # Resume only the next-version advance of a published release: --advance-only --version X.Y.Z
+# Resume a release stranded after its draft (tag and draft exist, attest failed):
+#   --resume-from-draft --version X.Y.Z (adopts the tag and draft, re-dispatches attest, then verify/install/next-version)
 # Environment:
 #   TMPDIR                             an owned scratch directory (required); the build tree is removed on exit
 #   OMP_KIT_REPO                       GitHub repository (default: JYeswak/omp-kit-companion)
@@ -100,6 +102,7 @@ say() { echo "== $*"; }
 
 DRY_RUN=0
 ADVANCE_ONLY=0
+RESUME_FROM_DRAFT=0
 VERSION=''
 SOURCE=''
 NEXT=0
@@ -112,12 +115,13 @@ while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--dry-run) DRY_RUN=1; shift ;;
 		--advance-only) ADVANCE_ONLY=1; shift ;;
+		--resume-from-draft) RESUME_FROM_DRAFT=1; shift ;;
 		--version) VERSION="${2:-}"; shift 2 ;;
 		--next) NEXT=1; shift ;;
 		--source) SOURCE="${2:-}"; shift 2 ;;
 		--install) INSTALL=1; shift ;;
 		--no-install) INSTALL=0; shift ;;
-		-h|--help) sed -n '2,37p' "${BASH_SOURCE[0]}"; exit 0 ;;
+		-h|--help) sed -n '2,39p' "${BASH_SOURCE[0]}"; exit 0 ;;
 		*) echo "release-local: unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
@@ -128,6 +132,10 @@ done
 if [ "$ADVANCE_ONLY" = 1 ]; then
 	{ [ -n "$VERSION" ] && [ "$NEXT" = 0 ] && [ -z "$SOURCE" ] && [ "$DRY_RUN" = 0 ]; } ||
 		{ echo "release-local: use release-local --advance-only --version X.Y.Z without --next, --source or --dry-run" >&2; exit 2; }
+fi
+if [ "$RESUME_FROM_DRAFT" = 1 ]; then
+	{ [ -n "$VERSION" ] && [ "$NEXT" = 0 ] && [ -z "$SOURCE" ] && [ "$DRY_RUN" = 0 ] && [ "$ADVANCE_ONLY" = 0 ]; } ||
+		{ echo "release-local: use release-local --resume-from-draft --version X.Y.Z without --advance-only, --next, --source or --dry-run" >&2; exit 2; }
 fi
 if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]; then die "export TMPDIR to an owned scratch directory first"; fi # tempsafe: requires the caller's owned scratch, creates nothing
 
@@ -496,6 +504,10 @@ install_release() {
 # ---------------------------------------------------------------------------------------------- 1. preflight
 # Advance-only bypasses all prepare/build/sign/publish/verify/install stages.
 if [ "$ADVANCE_ONLY" = 0 ]; then
+# RELRESUME1 (ompkit-1ra0d.191): a resume adopts the existing tag and draft below and rejoins at attest,
+# so it skips this whole prepare-to-rule-gate run. receipt() stays outside the skip so the end-of-release
+# receipt works on every path. The :- default keeps extracted stage slices working under their set -u.
+if [ "${RESUME_FROM_DRAFT:-0}" = 0 ]; then
 stage preflight
 [ "$(uname -s)" = Darwin ] || die "the local release runs on macOS (it signs and notarizes the darwin archive)"
 for tool in git gh jq python3 bun shasum codesign xcrun security spctl ditto plutil openssl curl tar timeout; do
@@ -822,7 +834,8 @@ say "rule gate PASS: $(jq -c '.counts' "$WORK/rule-gate.json")"
 bounded 600 bun "$SRC/scripts/ttsr-harness.ts" --selftest >"$WORK/rule-selftest.stdout" 2>"$WORK/rule-selftest.stderr" ||
 	die "ttsr-harness --selftest failed on the release source; refusing release (see $WORK/rule-selftest.stderr)"
 say "rule selftest PASS"
-
+# End the resume skip: receipt() and the dry run below run on every path.
+fi
 
 receipt() {
 	local phase=$1 url=${2:-} run_id=${3:-}
@@ -1057,11 +1070,91 @@ for name in required:
 	advance_next_version
 	exit 0
 fi
+# RELRESUME1 (ompkit-1ra0d.191): the tag and draft already exist, so the tag and draft stages below are
+# skipped and this adoption proves them instead: the remote tag must name a commit whose package.json
+# states VERSION (the same version-match gate as a fresh tag), and every draft asset is downloaded and
+# must equal the signed bytes (SHA256SUMS over the draft plus the checksum-stage index/archive checks).
+# Attest is then re-dispatched by the unchanged stage below, followed by verify, install and next-version.
+# ----------------------------------------------------------------- resume-from-draft adoption
+# The :- default keeps this extracted stage slice working under the fixtures' set -u, where the flag is unset.
+if [ "${RESUME_FROM_DRAFT:-0}" = 1 ]; then
+stage resume
+resume="release-local --resume-from-draft --version $VERSION"
+[ "$(uname -s)" = Darwin ] || die "the local release runs on macOS (it verifies the darwin archive); retry: $resume"
+for tool in git gh jq python3 bun curl shasum codesign spctl tar timeout; do
+	command -v "$tool" >/dev/null || die "missing tool: $tool; retry: $resume"
+done
+bounded 60 gh auth status --hostname github.com >/dev/null 2>&1 || die "gh is not authenticated to github.com; retry: $resume"
+remote_tags="$(bounded 120 git -C "$ROOT" ls-remote --tags origin "refs/tags/v$VERSION")" || die "tag lookup failed; retry: $resume"
+[ -n "$remote_tags" ] || die "origin has no tag v$VERSION, nothing to resume; retry: $resume"
+bounded 300 git -C "$ROOT" fetch --quiet origin "refs/tags/v$VERSION:refs/tags/v$VERSION" ||
+	die "cannot fetch the published tag v$VERSION; retry: $resume"
+SOURCE="$(git -C "$ROOT" rev-parse "v$VERSION^{commit}")" || die "tag v$VERSION is not a commit; retry: $resume"
+sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$SOURCE" --repo "$ROOT" ||
+	die "remote v$VERSION does not name a commit stating $VERSION; retry: $resume"
+# Same read-only release listing the normal path uses for its base tag, minus the refusal: the draft for
+# vVERSION exists by design, so only the latest published stable release feeds the receipt.
+bounded 120 gh api --paginate --slurp "repos/$REPO/releases?per_page=100" >"$WORK/releases.json" || die "listing releases failed; retry: $resume"
+BASE_TAG="$(jq -er '[.[][] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last' "$WORK/releases.json")" ||
+	die "no published base release; retry: $resume"
+SRC="$WORK/src"
+mkdir -p "$SRC"
+git -C "$ROOT" archive --format=tar "$SOURCE" >"$WORK/source.tar" || die "cannot archive the adopted source $SOURCE; retry: $resume"
+tar -xf "$WORK/source.tar" -C "$SRC" || die "cannot export the adopted source $SOURCE; retry: $resume"
+rm -f "$WORK/source.tar"
+bounded 30 sh "$ROOT/scripts/release-preflight.sh" export "$SRC" "$SOURCE" ||
+	die "source export preflight failed; retry: $resume"
+bounded 120 gh release view "v$VERSION" --repo "$REPO" --json tagName,isDraft,assets >"$WORK/draft.json" || die "draft readback failed; retry: $resume"
+# The gate below is a local python check through a heredoc, exactly like receipt(). The refusal stays off
+# the heredoc's own command line: pysafe requires single-segment heredoc command ownership, and bounded
+# would reattach the step's stdin to /dev/null and starve the heredoc into a vacuous pass.
+if python3 - "$WORK/draft.json" "$VERSION" <<'PY'
+import json, re, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+version = sys.argv[2]
+required = ["SHA256SUMS", "release-index.json"] + [
+    f"omp-kit-v{version}-{platform}.tar.gz"
+    for platform in ("darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu")]
+if doc.get("tagName") != "v" + version or doc.get("isDraft") is not True:
+    raise SystemExit("draft tag or state differs")
+assets = doc.get("assets", [])
+for name in required:
+    matches = [asset for asset in assets if asset.get("name") == name]
+    if len(matches) != 1 or not re.fullmatch(r"sha256:[0-9a-f]{64}", matches[0].get("digest", "")):
+        raise SystemExit(f"missing or ambiguous draft asset digest: {name}")
+PY
+then
+	:
+else
+	die "v$VERSION is not a resumable draft (it must stay a draft whose tag and five assets match); retry: $resume"
+fi
+DIST="$WORK/dist"
+mkdir -p "$DIST"
+bounded 600 gh release download "v$VERSION" --repo "$REPO" --dir "$DIST" || die "draft download failed; retry: $resume"
+for name in SHA256SUMS release-index.json "omp-kit-v$VERSION-darwin-arm64-none.tar.gz" "omp-kit-v$VERSION-linux-arm64-gnu.tar.gz" "omp-kit-v$VERSION-linux-x64-gnu.tar.gz"; do
+	[ -f "$DIST/$name" ] || die "draft download is missing $name; retry: $resume"
+done
+(cd "$DIST" && shasum -a 256 -c SHA256SUMS >/dev/null) || die "draft SHA256SUMS check failed: the draft is not the signed bytes; retry: $resume"
+[ "$(jq -er --arg v "$VERSION" 'select(.schema_version == 1 and .version == $v and .source_tag == ("v" + $v)) | .version' "$DIST/release-index.json")" = "$VERSION" ] ||
+	die "draft release-index.json does not state $VERSION; retry: $resume"
+for platform in darwin-arm64-none linux-arm64-gnu linux-x64-gnu; do
+	bounded 120 python3 "$SRC/installer/install.py" inspect "$DIST/release-index.json" "$VERSION" "$platform" >/dev/null ||
+		die "draft index refuses $platform; retry: $resume"
+	bounded 120 python3 "$SRC/scripts/release_reuse.py" verify-archive --index "$DIST/release-index.json" \
+		--platform "$platform" --archive-dir "$DIST" >/dev/null ||
+		die "draft $platform archive differs from the draft index; retry: $resume"
+done
+DARWIN="omp-kit-v$VERSION-darwin-arm64-none.tar.gz"
+NOTARY_ID=''
+say "resumed v$VERSION from its draft: tag -> $SOURCE, draft assets verify as the signed bytes"
+fi
 
 # VERSIONSRC1 (ompkit-fp72.135.1.14): the tagged source must state the
 # release version in package.json; a mismatch refuses the tag, never a
 # silent mislabel.
 sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$SOURCE" --repo "$ROOT" || die "package.json version does not match v$VERSION at $SOURCE; refusing tag"
+# A resume adopts the existing tag and draft above and rejoins at attest; never re-tag.
+if [ "${RESUME_FROM_DRAFT:-0}" = 0 ]; then
 # ----------------------------------------------------------------------------------------------------- 5. tag
 stage tag
 remote_tags="$(bounded 120 git -C "$ROOT" ls-remote --tags origin "refs/tags/v$VERSION")" || die "tag lookup failed"
@@ -1095,7 +1188,7 @@ for file in "$DIST"/*; do
 done
 say "draft v$VERSION holds $(jq -r '[.assets[].name] | join(" ")' "$WORK/draft.json")"
 substep ''
-
+fi
 # -------------------------------------------------------------------------------------------------- 7. attest
 stage attest
 dispatched_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
