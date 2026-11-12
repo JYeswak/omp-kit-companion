@@ -111,7 +111,25 @@ inspect `base`, `localMain`, `commit` and the phase evidence separately.
 Use path mode for ordinary shared-main saves. Patch mode supplies the selected-
 hunk construction requested by the UDS committer; it does not establish full
 UDS adoption or replace JEV's separately reviewed index/history publisher.
-Neither mode grants a history rewrite or force-push.
+
+## Review mode (LANDPIPE1)
+
+`omp-kit land --checkout NAME --bead ID --review auto --message MSG --apply --yes`
+closes the build -> land loop without the lead: one act replays the bead's
+acceptance boxes in the checkout, runs one independent-session review through
+the native reviewer (`omp -p`, which runs in the author's own seat, so this is
+an independent session, never a non-author review), records the verdict as
+`Review-Session:` / `Review-Verdict: LAND` trailers, reserves the touched
+paths as this seat through `am file_reservations reserve`, then lands through
+the single publisher. `LAND` publishes; `FIX` (or a refused land, or an
+unparseable verdict) lands nothing and routes every finding to the checkout's
+author: a `land-review-<bead>.md` file in the checkout plus best-effort
+`am mail send` to the author seat, never the lead. Foreign exclusive holders
+fail fast before any review, and the reservation is released on every non-land
+exit. The review prompt carries the bead, the checkout diff and the replay log
+as fenced untrusted data, and asks for findings plus a final line that is
+exactly `VERDICT: LAND` or exactly `VERDICT: FIX`. The non-author gate stays
+`omp-kit verify` at close.
 
 ## Full-suite verdict (LAND1)
 
