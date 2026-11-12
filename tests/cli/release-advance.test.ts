@@ -1,8 +1,9 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { cleanupAllOwnedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
+import { listTreeFiles } from "../../scripts/readme-check.ts";
 import { advance, decode, fixture, helpers, originMain, prelude, publishedFixture, ROOT } from "./release-fixture.ts";
 import type { Fixture } from "./release-fixture.ts";
 afterAll(cleanupAllOwnedTmp);
@@ -70,6 +71,17 @@ function runGateReadme(f: Fixture, readme: (text: string) => string) {
 	mkdirSync(join(archive, "scripts"), { recursive: true });
 	copyFileSync(join(ROOT, "scripts/readme-check.ts"), join(archive, "scripts/readme-check.ts"));
 	writeFileSync(join(archive, "README.md"), readme(readFileSync(join(archive, "README.md"), "utf8")));
+	// The archive stands in for a full git-archive export, whose README path lint
+	// (DOCSHARMONY1) checks every backticked repo path against the tree: fill each
+	// path the real repo tracks and the fixture lacks with the real bytes, so the
+	// tree is complete and only the release line differs.
+	// Listed from the filesystem, not git: the suite also runs in a git-less export.
+	for (const rel of listTreeFiles(ROOT)) {
+		const target = join(archive, rel);
+		if (existsSync(target) || !statSync(join(ROOT, rel)).isFile()) continue;
+		mkdirSync(dirname(target), { recursive: true });
+		copyFileSync(join(ROOT, rel), target);
+	}
 	f.git(archive, "init", "-q", "-b", "main");
 	expect(f.git(archive, "tag", "-l")).toBe("");
 	const body = `set -eu\nARCHIVE_DIR=${JSON.stringify(archive)}\nROOT="$ARCHIVE_DIR"\n${gateReadme()}gate_readme\n`;

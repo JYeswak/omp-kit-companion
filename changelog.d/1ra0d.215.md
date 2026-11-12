@@ -1,1 +1,2 @@
 - `readme-check` now applies the doc-count and path-lint checks in git-less export trees instead of reporting them `NOT_APPLICABLE`: the install-rule count derives from `rules/*.md` (the manifest's source) when the generated `MANIFEST.tsv` is absent, and backticked repo paths resolve against a filesystem walk under the root when `git ls-files` lists nothing.
+- readme-check no longer crashes on a tree without `docs/`.

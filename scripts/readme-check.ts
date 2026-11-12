@@ -574,7 +574,7 @@ async function main(argv: string[]): Promise<number> {
 		if (tracked.size === 0 && !listed.ok) findings.push("path lint: neither `git ls-files` nor the filesystem lists the root or the repo; failing closed — run where the tree can be listed");
 		else if (tracked.size === 0) console.log("NOT_APPLICABLE path-lint: neither `git ls-files` nor the filesystem lists files here; backticked repo paths are not judged");
 		else {
-			const docNames = readdirSync(join(root, "docs")).filter(name => name.endsWith(".md"));
+			const docNames = existsSync(join(root, "docs")) ? readdirSync(join(root, "docs")).filter(name => name.endsWith(".md")) : [];
 			const lintFiles = [{ name: "README.md", text: readme },
 				...docNames.map(name => ({ name: `docs/${name}`, text: readFileSync(join(root, "docs", name), "utf8") }))];
 			findings.push(...checkPaths(lintFiles, tracked, lintSource));
