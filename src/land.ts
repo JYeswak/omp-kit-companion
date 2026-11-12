@@ -17,6 +17,7 @@ import { parseReservationRead } from "./fleet-guard/git.ts";
 import { reapLandedCheckouts, listOvnfsCheckouts, diffOvnfsCheckout } from "./ovnfs-checkouts.ts";
 import { commandOf, expectedOf, judge, parseBoxes, unreplayableReason } from "./verify.ts";
 import { scrubText } from "../extensions/secret-output-guard.ts";
+import { appendReapReceipt, defaultGitLockLedgerPath, reapStaleAfterMs, reapStaleIndexLock } from "./index-lock.ts";
 
 
 type GitResult = { code: number; out: string; err: string; interrupted: boolean; timedOut: boolean };
@@ -35,6 +36,27 @@ function gitEnvironment(reflogAction?: string): Record<string, string> {
 function git(repo: string, args: string[], reflogAction?: string, timeoutMs = 30_000): GitResult {
 	const run = kitlibRunSync(["git", ...args], { cwd: repo, env: gitEnvironment(reflogAction), deadline_s: timeoutMs / 1000, max_output_bytes: 8 * 1024 * 1024 });
 	return { code: run.rc, out: new TextDecoder().decode(run.stdout), err: new TextDecoder().decode(run.stderr), interrupted: run.timed_out || run.killed, timedOut: run.timed_out };
+}
+
+/** Git's own first stderr line for a refusal, bounded and scrubbed; "no git output" when it printed nothing. */
+export function landGitDetail(result: GitResult): string {
+	const line = result.err.split("\n").map(text => text.trim()).find(text => text !== "") ?? "";
+	return line === "" ? `git exited ${String(result.code)} with no output` : scrubText(line.slice(0, 300));
+}
+
+/**
+ * LANDLOCKREAP1: move a stale empty unheld `.git/index.lock` aside before land writes the index, with the
+ * guarded reaper (`reapStaleIndexLock`: empty, older than the stale age, no open fd, no live index writer,
+ * renamed aside and never unlinked) and one ledger row. Anything else is left for git to report.
+ */
+export function reapStaleIndexLockForLand(repo: string, deps: { run?: typeof defaultRunner; staleAfterMs?: number; ledger?: string } = {}): string {
+	const gitDir = git(repo, ["rev-parse", "--absolute-git-dir"]);
+	if (gitDir.code !== 0) return "UNKNOWN";
+	const lockDir = gitDir.out.trim();
+	if (!existsSync(join(lockDir, "index.lock"))) return "NOT_FOUND";
+	const result = reapStaleIndexLock(lockDir, { run: deps.run ?? defaultRunner, staleAfterMs: deps.staleAfterMs ?? reapStaleAfterMs() });
+	if (result.verdict === "REAPED" && result.receipt) appendReapReceipt(deps.ledger ?? defaultGitLockLedgerPath(process.env.HOME ?? homedir()), result.receipt);
+	return result.verdict;
 }
 
 // LANDPUSH1 (ompkit-fp72.120.16.224): the publication push runs the pre-push hook chain (fresh gate,
@@ -1596,6 +1618,10 @@ async function commitOwnedPathsAndPublish(
 		const named = stalePaths.map(({ path }) => path).join(", ");
 		return refused("LAND_STALE_RESTORE", `Owned path ${named} restores bytes the actual parent ${base} superseded; no candidate was committed`, "Rebase the owned change onto the actual parent content instead of restoring obsolete bytes, or declare the restored commit with a `Revert: <sha>` line (`Supersedes: <sha>` for a rewrite) for a deliberate restore; nothing was committed and the index is unchanged.");
 	}
+	// LANDLOCKREAP1: a stale, empty, unheld index.lock left by a crashed git blocks every index write below
+	// (CFS: ~70 moved aside by hand since September). Move it aside with the same guarded reaper
+	// `omp-kit scratch index-lock --reap --yes` uses; a fresh, held or non-empty lock is left alone.
+	reapStaleIndexLockForLand(repo);
 	// Git's native --only transaction leaves every unrelated staged entry intact.
 	// New paths must first be known to the index; only explicitly owned paths enter it.
 	for (const path of paths) {
@@ -1603,7 +1629,7 @@ async function commitOwnedPathsAndPublish(
 		if (tracked === null) return refused("STAGED_INDEX_UNREADABLE", "Tracked paths could not be rechecked safely", "Repair the Git index before landing.");
 		if (tracked.length === 0) {
 			const add = git(repo, ["add", "--intent-to-add", "--", `:(literal)${path}`]);
-			if (add.code !== 0) return refused("LAND_PATH_UNAVAILABLE", `Could not prepare owned path ${path}`, "Repair the file or index; no commit was created.");
+			if (add.code !== 0) return refused("LAND_PATH_UNAVAILABLE", `Could not prepare owned path ${path}: ${landGitDetail(add)}`, "Repair the file or index (git's own message is above); no commit was created.");
 		}
 	}
 	// GATELOCK1: the installed member judges HEAD plus these exact owned
