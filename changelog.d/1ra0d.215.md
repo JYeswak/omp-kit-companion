@@ -1,1 +1,0 @@
-- The README path lint judges only the candidate tree: a path tracked in the canonical checkout but missing from the export is RED.

@@ -4,6 +4,17 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.127] - 2026-11-12
+
+### Changed
+
+- The README path lint judges only the candidate tree: a path tracked in the canonical checkout but missing from the export is RED.
+
+### Fixed
+
+- The daily `loop-close` job reads its repo and mailbox from the `loopClose` key in fleet-watch.json (with `LOOP_CLOSE_REPO`/`LOOP_CLOSE_MAIL_TO`/`LOOP_CLOSE_MAIL_PROJECT` overrides) instead of defaulting to `$HOME`, and reports `UNCONFIGURED` in `service status`/`doctor`/`run` until the key is set.
+- Fleet mail wakeups no longer fire inside finite `omp -p` child runs: a child that inherits its parent's seat identity stays silent instead of abandoning its task on the parent's inbox.
+
 ## [0.2.126] - 2026-11-12
 
 ### Changed
