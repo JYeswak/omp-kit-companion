@@ -162,6 +162,10 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	// IMSGCHIEF1 daily brief: the native `service run imessage-brief` body sends one
 	// summary message; the daily cadence anchors at install (no wall-clock key here).
 	"imessage-brief": { name: "imessage-brief", label: "com.omp-kit.imessage-brief", kind: "interval", intervalSeconds: 86400, runAtLoad: false, lockedRun: true },
+	// LOOPCLOSE1 (ompkit-1ra0d.211): daily, consume every measured signal: retire silent
+	// refusal codes, report new codes, run live readbacks, file red services. Native body in
+	// `service run loop-close` (src/loop-close.ts); the standard run lock serializes ticks.
+	"loop-close": { name: "loop-close", label: "com.omp-kit.loop-close", kind: "interval", intervalSeconds: 86400, runAtLoad: false },
 };
 
 /** A claude-save run receipt, `claude-save-<runId>.json`, directly in the kit state root. */

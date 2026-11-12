@@ -372,6 +372,9 @@ export const RUN_TIME_CAPS_MS: Record<string, number> = {
 	"skill-mine": 1_800_000,
 	"autocut": 3_300_000,
 	"tool-update": 600_000,
+	// LOOPCLOSE1: daily, like skill-mine; 30 min. Work scales with open readback beads plus
+	// silent codes (each br call is bounded at 60 s), far below the 24 h cadence.
+	"loop-close": 1_800_000,
 };
 
 export interface SpawnHandle {

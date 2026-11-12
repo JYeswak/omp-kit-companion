@@ -2,6 +2,8 @@
 import { preflightBead, preflightCommit } from "./preflight.ts";
 import { sliceVerify } from "./slice-verify.ts";
 import { liveReadback, liveReadbackAll, verifyBead, verifyProject } from "./verify.ts";
+import { runLoopClose } from "./loop-close.ts";
+import { gateEventsPath } from "../extensions/gate-events.ts";
 import { renderEnvelope } from "./kitlib/findings.ts";
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -3538,6 +3540,40 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					"Retry the ordinary service run; no cache work was performed.");
 				return await runCacheRetainJob(home, jobsDir, bodyVersion, capMs, childEnv);
 			} finally { lock.release(); }
+		}
+		if (job.name === "loop-close") {
+			const started = new Date().toISOString();
+			let result;
+			try {
+				result = await runLoopClose({
+					ledgerPath: process.env.LOOP_CLOSE_LEDGER ?? gateEventsPath(process.env, home),
+					statePath: join(root, "loop-close.json"), home, repo: process.env.LOOP_CLOSE_REPO ?? home,
+					actor: process.env.AGENT_NAME ?? "loop-close", env: childEnv, capMs,
+					mailTo: process.env.LOOP_CLOSE_MAIL_TO, mailProjectKey: process.env.LOOP_CLOSE_MAIL_PROJECT,
+				});
+			} catch (error) {
+				lock.release();
+				const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 1, omp_version: null, status: "FAILED" };
+				if (!recordJobReceipt(home, job.name, receipt)) {
+					return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+						errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+							remediation: "Repair the state root; the loop-close run did not record." }], verification: "UNVERIFIED" };
+				}
+				return { code: 1, data: { overall: "FINDINGS", job: job.name, receipt }, verification: "UNVERIFIED",
+					errors: [{ code: "LOOP_CLOSE_FAILED", message: error instanceof Error ? error.message : String(error),
+						remediation: "Read the receipt; the aborted run filed nothing." }] };
+			}
+			lock.release();
+			const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: result.ok ? 0 : 1, omp_version: null, status: result.ok ? "OK" : "FINDINGS" };
+			if (!recordJobReceipt(home, job.name, receipt)) {
+				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+					errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+						remediation: "Repair the state root; the loop-close run may already have filed." }], verification: "UNVERIFIED" };
+			}
+			return { code: result.ok && result.findings.length === 0 ? 0 : 1, data: { overall: result.ok && result.findings.length === 0 ? "OK" : "FINDINGS", job: job.name, ...result, receipt }, verification: "UNVERIFIED",
+				errors: result.ok && result.findings.length === 0 ? [] : [{ code: "LOOP_CLOSE_FINDINGS",
+					message: `${result.summary}; findings: ${result.findings.slice(0, 3).join("; ")}`,
+					remediation: "Read the summary row and findings; rerun after repairing the named input." }] };
 		}
 		const launcher = stableLauncher(home);
 		if (!executableFile(launcher)) {

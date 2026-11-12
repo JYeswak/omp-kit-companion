@@ -241,12 +241,12 @@ mapping fields, activation commands and read-only verification.
 
 ### Service jobs and kit updates
 
-21 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
-`load-watch` (also restarts Agent Mail on fatal pressure), `ci-poller`, `fleet-flush`, `imessage-bridge`; 300 s:
+22 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
+`load-watch` (restarts Agent Mail on fatal pressure), `ci-poller`, `fleet-flush`, `imessage-bridge`; 300 s:
 `kit-update`, `close-pass`; hourly: `claude-save`, [`am-retain`](docs/service-contract.md#agent-mail-retention),
 `session-retain`, `cache-retain`, `autocut`; 6 h: `scratch-reaper`,
-`fleet-lessons`, `tool-update`; daily: `cc-compress`, `skill-mine`, `imessage-brief`; weekly: `gate-rationalize`; daemon: `cc`.
-Install previews a diff first, keeps a backup, and retires installed lifecycle definitions.
+`fleet-lessons`, `tool-update`; daily: `cc-compress`, `skill-mine`, `imessage-brief`, `loop-close`; weekly: `gate-rationalize`; daemon: `cc`.
+Install previews a diff first, keeps a backup, and retires installed definitions.
 
 ```sh
 omp-kit service list --json
