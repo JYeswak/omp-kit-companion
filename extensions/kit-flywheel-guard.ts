@@ -852,9 +852,17 @@ export async function checkExportIndex(event: FlywheelToolCallEvent, deps: Track
 		const verb = line.argv[at];
 		if (!verb || !changesGitIndexOrRefs(verb, line.argv.slice(at + 1)) || line.argv.includes("--help")) continue;
 		const lexicalRoot = scratchBoundary(gitCwd);
-		const actualCwd = realpathSync(gitCwd);
-		const root = scratchBoundary(actualCwd) ?? (lexicalRoot === undefined ? undefined : realpathSync(lexicalRoot));
+		// CDMISSING1: `ovnfs new X && cd X && git update-index` names a cwd an earlier part of the same command
+		// creates. realpathSync threw ENOENT and the whole call was refused LOOKUP_REFUSED (53 in 7 d); judge the
+		// path through its nearest existing ancestor instead, so a cwd outside every scratch boundary passes.
+		const actualCwd = canonicalPath(gitCwd);
+		const root = scratchBoundary(actualCwd) ?? (lexicalRoot === undefined ? undefined : canonicalPath(lexicalRoot));
 		if (root === undefined) continue;
+		if (!existsSync(gitCwd)) return {
+			block: true,
+			reason: `kit-flywheel-guard ${EXPORT_INDEX_REFUSED}: git ${verb} runs in ${gitCwd} inside scratch, which does not exist yet, so its repository cannot be judged before execution. `
+				+ "Create the directory in an earlier call, then run the git command; no command ran.",
+		};
 		const dynamicEnvironment = Object.entries(line.environment).some(([key, value]) =>
 			key.startsWith("GIT_") && value !== undefined && (shellExpands(value) || value.startsWith("~")));
 		if (dynamicEnvironment || line.argv.slice(1, at).some(word => shellExpands(word) || word.includes("=~"))) return {

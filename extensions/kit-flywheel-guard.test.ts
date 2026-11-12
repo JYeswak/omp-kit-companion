@@ -253,6 +253,21 @@ test("EXPORTINDEX1 controls: checkout root, read-only export git, own git init a
 	expect(readFileSync(join(f.project, ".git", "index"))).toEqual(f.index);
 });
 
+test("CDMISSING1: a git cwd the same command creates is judged, not refused LOOKUP_REFUSED", async () => {
+	const f = await exportIndexFixture();
+	// Outside every scratch boundary (an ovnfs-style checkout path that does not exist yet): allowed. The guard
+	// only judges the command text here; nothing runs, so the path is never created.
+	const later = join("/", "cdmissing-fixture-never-created", "checkouts", "fresh");
+	const outside = await toolCall(f.h, f.project, `cd '${later}' && git update-index -q --really-refresh`);
+	expect(outside?.block, outside?.reason).not.toBe(true);
+	// Inside scratch and missing: still refused as EXPORT_INDEX_REFUSED with a reason, never LOOKUP_REFUSED.
+	const missing = join(f.project, "var", "agent-tmp", "not-made-yet");
+	const inside = await toolCall(f.h, f.project, `cd '${missing}' && git read-tree HEAD`);
+	expect(inside?.block).toBe(true);
+	expect(inside?.reason).toContain("EXPORT_INDEX_REFUSED");
+	expect(inside?.reason).not.toContain("LOOKUP_REFUSED");
+});
+
 test("EXPORTINDEX1 planted: own .git and a ceiling never authorize explicit outside git/index overrides", async () => {
 	const f = await exportIndexFixture();
 	await f.git(["init", "-q"], f.exported);

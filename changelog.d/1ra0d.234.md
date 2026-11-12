@@ -1,0 +1,1 @@
+- `cd` into a directory the same command creates (for example `ovnfs new X && cd X && git update-index`) is no longer refused `LOOKUP_REFUSED`. Outside scratch it passes; inside scratch it is refused `EXPORT_INDEX_REFUSED` with a reason.
