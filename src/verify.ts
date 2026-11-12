@@ -33,6 +33,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { availableParallelism, homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { run, type RunResult } from "./kitlib/run.ts";
+import { appendLesson, readLessonsLog } from "./lessons.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { checkPublishedCommits, preflightBead } from "./preflight.ts";
 import { installReadonlyBr, resolveRealBr } from "./kitlib/readonly-br.ts";
@@ -585,6 +586,27 @@ async function closeLesson(explicit: string | undefined, bead: BeadRow, repo: st
 	return selected;
 }
 
+/**
+ * LESSONAUTO1 (ompkit-1ra0d.213): on a CLOSED verdict, feed the learn loop by appending the close
+ * lesson to the verified repo's .omp/lessons.jsonl through the existing lessons writer. Dedupes by
+ * bead: a second close of the same bead appends nothing. Best effort: a lesson-write failure is
+ * logged, never a close failure.
+ */
+function recordCloseLesson(repo: string, bead: string, lesson: string, sha: string, log: string[]): void {
+	try {
+		const existing = readLessonsLog(repo);
+		if (existing.status !== "INVALID" && existing.entries.some(entry => entry.bead === bead)) {
+			log.push(`lesson: ${bead} already recorded in .omp/lessons.jsonl; skipping`);
+			return;
+		}
+		appendLesson(repo, { kind: "LESSON", class: "OTHER:verify_close", what: lesson, evidence: `verify ${bead} export ${sha}`, bead });
+		log.push(`lesson: recorded ${bead} in .omp/lessons.jsonl`);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		log.push(`lesson: lesson append skipped (${message})`);
+	}
+}
+
 export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const env = { ...process.env, ...(input.env ?? {}) } as Record<string, string>;
 	const acts: string[][] = [];
@@ -849,6 +871,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const done = await executeActs(acts, input.repo, env, { bead: row, actor: input.actor });
 	if (done.failure !== null) return { ok: false, code: "ACT_FAILED", bead: input.bead, export: input.exportSha, replays, log: log.concat(done.failure).join("\n"), acts: done.acts, child: done.child ?? reuse, rollback: done.rollback };
 	if (done.skippedGate !== null) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${done.skippedGate}'; skipping gate report`);
+	recordCloseLesson(input.repo, input.bead, lesson, input.exportSha, log);
 	return { ok: true, code: "CLOSED", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: done.acts, child: done.child ?? reuse };
 }
 
@@ -1037,6 +1060,7 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 	const done = await executeActs(acts, input.repo, env, failed.length > 0 ? undefined : { bead: child, actor: input.actor });
 	if (done.failure !== null) return { ok: false, code: "ACT_FAILED", bead: input.bead, export: "installed", replays, log: log.concat(done.failure).join("\n"), acts: done.acts, rollback: done.rollback };
 	if (done.skippedGate !== null) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${done.skippedGate}'; skipping gate report`);
+	if (failed.length === 0) recordCloseLesson(input.repo, child.id, lesson, "installed", log);
 	return { ok: failed.length === 0, code, bead: input.bead, export: "installed", replays, log: log.join("\n"), acts: done.acts };
 }
 
