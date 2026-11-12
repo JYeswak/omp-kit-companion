@@ -470,8 +470,8 @@ test("path lint CLI: a backticked missing repo path is RED and names the file", 
 test("removing the doc-count/path-lint checks makes planted negatives pass (the checks are load-bearing)", () => {
 	const source = readFileSync(script, "utf8");
 	const cases = [
-		{ anchor: "findings.push(...checkDocCounts(docTexts[\"AGENTS.md\"]!, docTexts[\"docs/usage.md\"]!, scenarios, ruleRows));", scenarios: 4, install: 2, extraReadme: "" },
-		{ anchor: "findings.push(...checkPaths(lintFiles, tracked));", scenarios: 3, install: 2, extraReadme: "\n`scripts/no-such-file-xyz.sh` does not exist.\n" },
+		{ anchor: "findings.push(...checkDocCounts(docTexts[\"AGENTS.md\"]!, docTexts[\"docs/usage.md\"]!, scenarios, ruleRows, ruleSource));", scenarios: 4, install: 2, extraReadme: "" },
+		{ anchor: "findings.push(...checkPaths(lintFiles, tracked, lintSource));", scenarios: 3, install: 2, extraReadme: "\n`scripts/no-such-file-xyz.sh` does not exist.\n" },
 	];
 	cases.forEach(({ anchor, scenarios, install, extraReadme }, index) => {
 		expect(source).toContain(anchor);
@@ -482,4 +482,43 @@ test("removing the doc-count/path-lint checks makes planted negatives pass (the 
 		expect(result.out).toContain("README-CHECK: GREEN");
 		expect(result.code).toBe(0);
 	});
+});
+
+// DOCSHARMONY1 export applicability (ompkit-1ra0d.215 rework): a git-archive
+// export carries no .git and no generated MANIFEST.tsv, and both checks still
+// apply there -- counts derive from rules/*.md, paths resolve via the
+// filesystem. Today's code printed NOT_APPLICABLE for both.
+function exportTree(name: string, agentsScenarios: number, installRules: number, extraReadme = "", checker = readFileSync(script, "utf8")): string {
+	const root = join(workspace, name);
+	for (const dir of ["scripts", "docs", "rules", "src", "tests/live"]) mkdirSync(join(root, dir), { recursive: true });
+	writeFileSync(join(root, "scripts/readme-check.ts"), checker);
+	writeFileSync(join(root, "README.md"), KIT_README + extraReadme);
+	writeFileSync(join(root, "AGENTS.md"), `# Agents\n\nlive suite (G4, ${agentsScenarios} scenarios including a planted negative).\n`);
+	writeFileSync(join(root, "docs/usage.md"), `# Usage\n\npreviews the ${installRules}-rule install.\n`);
+	writeFileSync(join(root, "tests/live/scenarios.json"), JSON.stringify(["s0", "s1", "s2"]));
+	writeFileSync(join(root, "rules/a.md"), "# a\n");
+	writeFileSync(join(root, "rules/b.md"), "# b\n");
+	writeFileSync(join(root, "package.json"), "{\"name\":\"fixture\",\"version\":\"9.9.9\"}\n");
+	writeFileSync(join(root, "src/commands.ts"), KIT_COMMANDS);
+	return root;
+}
+
+test("export tree without .git or MANIFEST.tsv is GREEN with both checks applied", () => {
+	const result = checkRoot(exportTree("export-green", 3, 2));
+	expect(result.out).toContain("README-CHECK: GREEN");
+	expect(result.code).toBe(0);
+	expect(result.out).not.toContain("NOT_APPLICABLE doc-counts");
+	expect(result.out).not.toContain("NOT_APPLICABLE path-lint");
+});
+
+test("export tree planted negatives: a stale count and a missing path are RED", () => {
+	const staleScenarios = checkRoot(exportTree("export-stale-scenarios", 4, 2));
+	expect(staleScenarios.code).toBe(1);
+	expect(staleScenarios.out).toContain('AGENTS.md claims "4 scenarios" but tests/live/scenarios.json ships 3');
+	const staleInstall = checkRoot(exportTree("export-stale-install", 3, 5));
+	expect(staleInstall.code).toBe(1);
+	expect(staleInstall.out).toContain('docs/usage.md claims "5-rule install" but rules/*.md ships 2 rules');
+	const stalePath = checkRoot(exportTree("export-stale-path", 3, 2, "\n`scripts/no-such-file-xyz.sh` does not exist.\n"));
+	expect(stalePath.code).toBe(1);
+	expect(stalePath.out).toContain("README.md names `scripts/no-such-file-xyz.sh`");
 });

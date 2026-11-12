@@ -6,7 +6,7 @@
 //      as `omp-kit <command>` / `--scope <value>`.
 //   2. README.md pins no release version: no `vX.Y.Z` / `X.Y.Z` / `KIT_VERSION=X.Y.Z` outside the
 //      generated OMP footer (scripts/docs-footer.sh owns that block) and the generated release
-//      line (`<!-- kit-release:start --> … `Current release: vX.Y.Z`, stamped via
+//      line (`<!-- kit-release:start -->` … `Current release: vX.Y.Z`, stamped via
 //      scripts/stamp-release-line.sh). The line states the latest published release: it equals the
 //      package.json version, or (NEXTVERSION1, ompkit-d8qic: main states the version it will ship
 //      as) package.json is exactly its next patch and tag vX.Y.Z exists in the repo (--repo, default
@@ -18,12 +18,13 @@
 //      names exactly that policy's extensions (not the separate package.json plugin inventory).
 //   5. DOCSHARMONY1 generated counts: AGENTS.md's live-scenario claim equals
 //      tests/live/scenarios.json's length; docs/usage.md's install claim equals
-//      MANIFEST.tsv's rule rows.
+//      the rule rows (MANIFEST.tsv when generated, rules/*.md in an export).
 //   6. DOCSHARMONY1 path lint: every backticked repo-relative path in README.md
-//      and docs/*.md resolves via `git ls-files` (exact file, directory prefix
-//      or glob; `v<...>` placeholders and PATHLINT_ALLOW entries exempt).
-//   Rules 5-6 run only under the kit policy (like rule 1's registry); other
-//   trees print NOT_APPLICABLE doc-counts/path-lint lines.
+//      and docs/*.md resolves against the tree's file list (`git ls-files` in
+//      a checkout, a filesystem walk under the root in a git-less export;
+//      `v<...>` placeholders and PATHLINT_ALLOW entries exempt).
+//   Rules 5-6 run under the kit policy (like rule 1's registry); other trees
+//   print NOT_APPLICABLE doc-counts/path-lint lines.
 //
 // Applicability (README APPLY1, ompkit-v66l.22.3). The staged-readme hook runs this checker in any repo with a README
 // obligation (check-staged-readme.sh: README.md or scripts/readme-check.ts in the index or HEAD), and CFS's README is
@@ -236,9 +237,11 @@ function pathExistsIn(token: string, tracked: Set<string>): boolean {
 
 /**
  * DOCSHARMONY1 path lint: every backticked repo-relative path in the given
- * files must resolve via `git ls-files`. Findings name the file and token.
+ * files must resolve against the file list (from `git ls-files` when the tree
+ * is a checkout, from a filesystem walk of the root in a git-less export).
+ * Findings name the file and token.
  */
-export function checkPaths(files: { name: string; text: string }[], tracked: Set<string>): string[] {
+export function checkPaths(files: { name: string; text: string }[], tracked: Set<string>, source = "git ls-files"): string[] {
 	const findings: string[] = [];
 	for (const file of files) {
 		for (const span of codeSpans(file.text)) {
@@ -253,13 +256,37 @@ export function checkPaths(files: { name: string; text: string }[], tracked: Set
 			for (const token of tokens) {
 				if (!PATH_PREFIXES.some(prefix => token.startsWith(prefix))) continue;
 				if (!pathExistsIn(token, tracked))
-					findings.push(`${file.name} names \`${token}\` but git ls-files has no such file or directory; fix the path or allowlist it in PATHLINT_ALLOW`);
+					findings.push(`${file.name} names \`${token}\` but ${source} has no such file or directory; fix the path or allowlist it in PATHLINT_ALLOW`);
 			}
 		}
 	}
 	return findings;
 }
 
+/**
+ * The path-lint file list for a git-less export tree (git ls-files is empty
+ * or unavailable): every path under the root, bounded, skipping generated or
+ * vendored subtrees that are never lint targets.
+ */
+export function listTreeFiles(root: string): Set<string> {
+	const out = new Set<string>();
+	const stack = [""];
+	let seen = 0;
+	while (stack.length > 0 && seen <= 20_000) {
+		const rel = stack.pop()!;
+		let entries;
+		try { entries = readdirSync(join(root, rel), { withFileTypes: true }); }
+		catch { continue; }
+		for (const entry of entries) {
+			if (++seen > 20_000) break;
+			if (entry.name === ".git" || entry.name === "node_modules" || entry.name === "var") continue;
+			const child = rel === "" ? entry.name : `${rel}/${entry.name}`;
+			out.add(child);
+			if (entry.isDirectory()) stack.push(child);
+		}
+	}
+	return out;
+}
 function isDigitChar(ch: string): boolean { return ch >= "0" && ch <= "9"; }
 function isWordChar(ch: string): boolean {
 	return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || isDigitChar(ch) || ch === "_";
@@ -303,16 +330,17 @@ export function installClaims(text: string): number[] {
 /**
  * DOCSHARMONY1 generated counts: the AGENTS.md live-scenario claim must equal
  * tests/live/scenarios.json's length; the docs/usage.md install claim must
- * equal MANIFEST.tsv's rule rows.
+ * equal the rule rows, which come from MANIFEST.tsv when it is generated and
+ * from its source rules/*.md in a tree without it (a git-archive export).
  */
-export function checkDocCounts(agentsText: string, usageText: string, scenarios: number, ruleRows: number): string[] {
+export function checkDocCounts(agentsText: string, usageText: string, scenarios: number, ruleRows: number, ruleSource = "MANIFEST.tsv"): string[] {
 	const findings: string[] = [];
 	for (const claimed of scenarioClaims(agentsText))
 		if (claimed !== scenarios)
 			findings.push(`AGENTS.md claims "${claimed} scenarios" but tests/live/scenarios.json ships ${scenarios}; update the count`);
 	for (const claimed of installClaims(usageText))
 		if (claimed !== ruleRows)
-			findings.push(`docs/usage.md claims "${claimed}-rule install" but MANIFEST.tsv ships ${ruleRows} rules; update the count`);
+			findings.push(`docs/usage.md claims "${claimed}-rule install" but ${ruleSource} ships ${ruleRows} rules; update the count`);
 	return findings;
 }
 
@@ -494,44 +522,62 @@ async function main(argv: string[]): Promise<number> {
 	const findings = checkReadme(readme, { registry, inventory, release, sections: kitPolicy }, releaseVersion, releaseTagIn(repo));
 	findings.push(...defaultExtensionFindings(readme, root));
 	if (kitPolicy) {
-		// Generated counts need all four inputs. A partial tree (a preflight
-		// export has no generated MANIFEST.tsv) declares none of them, so the
-		// rule is NOT_APPLICABLE there, never a crash; a present-but-corrupt
-		// scenarios.json still fails closed below.
+		// Generated counts need AGENTS.md, docs/usage.md and
+		// tests/live/scenarios.json. The rule rows come from the generated
+		// MANIFEST.tsv when it exists; a git-archive export carries no
+		// generated files, so the rows are derived from their source rules/*.md
+		// (the same count build-manifest.sh writes) and the comparison still
+		// runs. NOT_APPLICABLE stays for trees that declare no count inputs at
+		// all; a present-but-corrupt scenarios.json still fails closed below.
 		const docTexts: Record<string, string> = {};
-		for (const file of ["AGENTS.md", "docs/usage.md", "tests/live/scenarios.json", "MANIFEST.tsv"]) {
+		for (const file of ["AGENTS.md", "docs/usage.md", "tests/live/scenarios.json"]) {
 			try { docTexts[file] = readFileSync(join(root, file), "utf8"); }
 			catch { break; }
 		}
 		let scenarios: number | null = null;
 		let ruleRows: number | null = null;
-		if (Object.keys(docTexts).length === 4) {
+		let ruleSource = "MANIFEST.tsv";
+		if (Object.keys(docTexts).length === 3) {
 			try {
 				const parsed: unknown = JSON.parse(docTexts["tests/live/scenarios.json"]!);
 				if (Array.isArray(parsed)) scenarios = parsed.length;
 			} catch { scenarios = null; }
-			const manifestRows = docTexts["MANIFEST.tsv"]!.split("\n").filter(line => line.length > 0);
-			ruleRows = manifestRows.length > 0 ? manifestRows.length - 1 : 0;
+			try {
+				const manifestText = readFileSync(join(root, "MANIFEST.tsv"), "utf8");
+				const manifestRows = manifestText.split("\n").filter(line => line.length > 0);
+				ruleRows = manifestRows.length > 0 ? manifestRows.length - 1 : 0;
+			} catch {
+				try {
+					ruleRows = readdirSync(join(root, "rules")).filter(name => name.endsWith(".md")).length;
+					ruleSource = "rules/*.md";
+				} catch { ruleRows = null; }
+			}
 		}
-		if (ruleRows === null) console.log("NOT_APPLICABLE doc-counts: a count input (AGENTS.md, docs/usage.md, tests/live/scenarios.json or MANIFEST.tsv) is unreadable here; generated counts are not judged");
+		if (ruleRows === null) console.log("NOT_APPLICABLE doc-counts: a count input (AGENTS.md, docs/usage.md, tests/live/scenarios.json or MANIFEST.tsv/rules/) is unreadable here; generated counts are not judged");
 		else if (scenarios === null) findings.push("tests/live/scenarios.json is not a JSON array; the AGENTS.md live-scenario count is unverifiable");
-		else findings.push(...checkDocCounts(docTexts["AGENTS.md"]!, docTexts["docs/usage.md"]!, scenarios, ruleRows));
+		else findings.push(...checkDocCounts(docTexts["AGENTS.md"]!, docTexts["docs/usage.md"]!, scenarios, ruleRows, ruleSource));
 		// The file list comes from the judged tree (--root); fresh-gate judges a
 		// git-less archive, so fall back to the canonical repo (--repo), whose
-		// tags already resolve there. A tree git cannot list fails closed.
+		// tags already resolve there. When git lists nothing (an unborn index,
+		// or no .git at all in an export), resolve against the filesystem under
+		// the root instead, so the lint still runs. Only a tree with no files
+		// at all stays NOT_APPLICABLE, and only a tree neither git nor the
+		// filesystem can list fails closed.
 		let listed = spawnText(["git", "-C", root, "ls-files"], root);
 		if (!listed.ok) listed = spawnText(["git", "-C", repo, "ls-files"], repo);
-		// An unborn index (a preflight export's fresh `git init`) lists nothing:
-		// no files declared, so nothing to lint. A tree git cannot read at all
-		// fails closed.
-		const tracked = listed.ok ? new Set(listed.stdout.split("\n").filter(line => line.length > 0)) : new Set<string>();
-		if (!listed.ok) findings.push("path lint: `git ls-files` lists neither the root nor the repo; failing closed — run where git can list the tree");
-		else if (tracked.size === 0) console.log("NOT_APPLICABLE path-lint: `git ls-files` lists no tracked files here; backticked repo paths are not judged");
+		let tracked = listed.ok ? new Set(listed.stdout.split("\n").filter(line => line.length > 0)) : new Set<string>();
+		let lintSource = "git ls-files";
+		if (tracked.size === 0) {
+			tracked = listTreeFiles(root);
+			if (tracked.size > 0) lintSource = "the tree";
+		}
+		if (tracked.size === 0 && !listed.ok) findings.push("path lint: neither `git ls-files` nor the filesystem lists the root or the repo; failing closed — run where the tree can be listed");
+		else if (tracked.size === 0) console.log("NOT_APPLICABLE path-lint: neither `git ls-files` nor the filesystem lists files here; backticked repo paths are not judged");
 		else {
 			const docNames = readdirSync(join(root, "docs")).filter(name => name.endsWith(".md"));
 			const lintFiles = [{ name: "README.md", text: readme },
 				...docNames.map(name => ({ name: `docs/${name}`, text: readFileSync(join(root, "docs", name), "utf8") }))];
-			findings.push(...checkPaths(lintFiles, tracked));
+			findings.push(...checkPaths(lintFiles, tracked, lintSource));
 		}
 	} else {
 		console.log("NOT_APPLICABLE doc-counts: no AGENTS.md live-scenario or docs/usage.md install-rule inputs declared; generated counts are not judged");
