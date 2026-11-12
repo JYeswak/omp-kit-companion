@@ -188,6 +188,17 @@ test("remote executable and symlink additions update disk and index", async () =
 });
 test("post-CAS dirty race preserves new peer bytes and reports races", () => { const w = world(); remote(w, "f1", "remote\n"); const r = raced(w, "before_ref", `put(a,'f1','peer dirty\\n');`); expect(r.applied).toBe(true); expect(r.races).toEqual(["f1"]); expect(read(w.a, "f1")).toBe("peer dirty\n"); expect(git(w.a, "show", ":f1")).toBe("remote"); });
 test("live converge lock refuses rather than overwriting it", async () => { const w = world(); const lock = join(w.a, ".git/git_converge.lock"); put(w.a, ".git/git_converge.lock", String(process.pid)); expect((await apply(w)).reason).toBe("CONVERGE_BUSY"); expect(readFileSync(lock, "utf8")).toBe(String(process.pid)); });
+test("CONVERGEWAIT1: a live lock released inside lockWaitMs is waited out and the converge applies", async () => {
+	const w = world(); remote(w, "f1", "remote\n");
+	const lock = join(w.a, ".git/git_converge.lock"); put(w.a, ".git/git_converge.lock", String(process.pid));
+	// Real timer by design: converge polls the real lock file on the platform clock, so a peer releasing it
+	// mid-wait is a genuine delay; the wait bound itself is the load-scaled fixture deadline.
+	const release = setTimeout(() => unlinkSync(lock), 1_500);
+	try {
+		const r = await apply(w, { lockWaitMs: fixtureDeadlineS(10) * 1000 });
+		expect(r.reason).toBeNull(); expect(r.applied).toBe(true); expect(read(w.a, "f1")).toBe("remote\n");
+	} finally { clearTimeout(release); }
+}, fixtureDeadlineS(20) * 1000);
 const command = { name: "converge", description: "converge", usage: "converge --repo PATH", flags: [], example: "converge --repo .", runnable: true };
 test("command reports usage, refused and successful exit classes", async () => {
 	expect((await convergeCommand({ command, flags: new Map(), json: true, robot: false })).code).toBe(2);

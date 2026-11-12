@@ -557,6 +557,10 @@ function fullSuiteError(verdict: Exclude<FullSuiteVerdict, "PASS">): { code: str
 
 
 const LAND_PUBLICATION_REF = "refs/heads/main";
+// CONVERGEWAIT1: a peer's land holds the converge lock through its own pushed hook chain; 7 CFS lands in
+// 24 h (2026-11-12) were refused LAND_PUBLICATION_REFUSED: CONVERGE_BUSY instead of waiting it out.
+// 600 s covers the measured land-push p95 (257 s, see LAND_PUSH_DEADLINE_ENV) with ~2x headroom.
+const LAND_CONVERGE_WAIT_MS = 600_000;
 const LAND_ACTUAL_PARENT_GUARD = "actual-parent-custody-v1";
 
 export const LAND_GUARD_PUBLIC_IDENTITY = {
@@ -1465,7 +1469,7 @@ async function publishQualifiedCandidate(
 	try {
 		convergenceStarted = true;
 		const convergence = await convergeRepository({
-			repo, apply: true, push: true, pushDeadlineS: input.pushDeadlineS,
+			repo, apply: true, push: true, pushDeadlineS: input.pushDeadlineS, lockWaitMs: LAND_CONVERGE_WAIT_MS,
 			beforePush: async (candidateSha, baseSha) => {
 				checkedCandidateSha = candidateSha;
 				checkResult = await runPushCheck(repo, baseSha, candidateSha);

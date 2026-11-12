@@ -27,6 +27,10 @@ export type ConvergeOptions = {
 	 * the land push deadline here so the shared publisher keeps LANDPUSH1's
 	 * guarantee; path mode omits it and is unchanged. */
 	pushDeadlineS?: number;
+	/** CONVERGEWAIT1: how long a live peer's converge lock is waited out (polled) before
+	 * CONVERGE_BUSY. Absent or 0 refuses at once, as the converge CLI always has; land
+	 * waits, since a peer's land holds the lock only for its own push. */
+	lockWaitMs?: number;
 };
 export type ConvergeConflict = { path: string; kind: string; detail?: string; class?: "true_divergence"; hint?: "theirs_behind" | "ours_behind" };
 export type ConvergeResult = {
@@ -438,6 +442,19 @@ function takeLock(repo: string): ConvergeLock {
 	}
 	throw new Refused("CONVERGE_BUSY");
 }
+const LOCK_POLL_MS = 500;
+/** Retry only a busy lock, and only until the deadline; every other refusal propagates at once. */
+async function takeLockWaiting(repo: string, waitMs: number): Promise<ConvergeLock> {
+	const deadline = Date.now() + waitMs;
+	for (;;) {
+		try {
+			return takeLock(repo);
+		} catch (error) {
+			if (!(error instanceof Refused) || error.reason !== "CONVERGE_BUSY" || Date.now() >= deadline) throw error;
+		}
+		await Bun.sleep(Math.min(LOCK_POLL_MS, Math.max(0, deadline - Date.now())));
+	}
+}
 /** Report by default. --push implies apply. Refusals preserve peer state; unexpected Git/I/O failures throw. */
 export async function convergeRepository(options: ConvergeOptions): Promise<ConvergeResult> {
 	const repo = resolve(options.repo), apply = options.apply === true || options.push === true, start = performance.now();
@@ -445,7 +462,7 @@ export async function convergeRepository(options: ConvergeOptions): Promise<Conv
 	const done = (): ConvergeResult => { result.elapsed_s = Math.round((performance.now() - start)) / 1000; return result; };
 	let lock: ConvergeLock | undefined;
 	try {
-		if (apply) lock = takeLock(repo);
+		if (apply) lock = await takeLockWaiting(repo, options.lockWaitMs ?? 0);
 		for (let attempt = 0; attempt < 3; attempt++) {
 			const plan = planConverge(repo, options.fetch !== false || attempt > 0, options.resolutions ?? {});
 			Object.assign(result, { state: plan.state, old: plan.old, up: plan.up, paths: plan.changes.length, resolutions: plan.resolutions });
