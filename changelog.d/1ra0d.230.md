@@ -1,0 +1,1 @@
+- A DONE mail whose plain commit SHA does not resolve in the recipient's repository now gets a refusal that says to cite it as `<absolute-repo-path>@<sha>`, instead of only telling the sender to republish work that is already published.

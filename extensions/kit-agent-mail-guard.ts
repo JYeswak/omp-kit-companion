@@ -1031,7 +1031,12 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			}
 			const failed = checks.find(check => check.status !== "PUBLISHED");
 			if (failed !== undefined) {
-				return { verdict: refuse("AM_DONE_NOT_PUBLISHED", `DONE is not sendable: ${failed.status} ${failed.sha || "(no SHA)"} in ${failed.repo}: ${failed.detail}. Save and publish on origin/main with git_converge.py --push.`), value: current };
+				// A plain SHA is checked in project_key, the RECIPIENT's repo; work published in another repository
+				// does not resolve there (2026-11-12, lead DONE for a companion sha sent to skillgrowth).
+				const elsewhere = failed.status === "UNKNOWN" && failed.repo === project && failed.sha !== ""
+					? ` If the commit lives in another repository, cite it as <absolute-repo-path>@${failed.sha}.`
+					: "";
+				return { verdict: refuse("AM_DONE_NOT_PUBLISHED", `DONE is not sendable: ${failed.status} ${failed.sha || "(no SHA)"} in ${failed.repo}: ${failed.detail}.${elsewhere} Save and publish on origin/main with git_converge.py --push.`), value: current };
 			}
 		}
 		const parts = [...notices, ...(warning?.additionalContext !== undefined ? [warning.additionalContext] : [])];

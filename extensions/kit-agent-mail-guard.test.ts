@@ -1154,6 +1154,8 @@ test("DONE mail: checks repo-qualified commit citations in their code-source rep
 	}));
 	expect(code(recipientUnknown)).toBe("AM_DONE_NOT_PUBLISHED");
 	expect(recipientUnknown?.reason).toContain(`in ${recipientRepo}:`);
+	// The plain citation is judged in the recipient's repo, so the refusal names the cross-repo form.
+	expect(recipientUnknown?.reason).toContain("cite it as <absolute-repo-path>@deadbeef");
 	const malformed = await h.mail(cwd, "send_message", send({
 		project_key: recipientRepo,
 		body_md: `Code source ${sourceRepo}@@${published}; evidence is in the bead.`,
