@@ -1,1 +1,0 @@
-- `project goal` now replaces a director goal with a single native `/goal set`, resuming a paused goal first; the confirm-gated `/goal drop` is never sent.

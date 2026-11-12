@@ -4,6 +4,19 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.123] - 2026-11-12
+
+### Changed
+
+- `project goal` now replaces a director goal with a single native `/goal set`, resuming a paused goal first; the confirm-gated `/goal drop` is never sent.
+- `load-watch` now checks the Agent Mail server each tick and restarts it (at most once per 30 min) when its RSS passes 6 GB or its stderr log shows a fresh fatal memory-pressure line, so tracker and mail writes stop stalling on the upstream leak. Restarts are recorded with RSS and reason beside the load census.
+- `scripts/release-local.sh --resume-from-draft --version X.Y.Z` resumes a release stranded after its draft: it adopts the existing tag (after proving it names a commit whose `package.json` states the version) and the existing draft (after downloading its assets and proving they match the signed bytes), then re-dispatches attest-local and continues through verify, install and next-version.
+- Hook test fixtures no longer write refusals into the live gate-events ledger on macOS: a hook's cwd under the system temp root (including `/private/var/folders`, where a `/var/folders` TMPDIR resolves) is treated as a fixture, so the daily refusal counts measure only real agent work.
+- Fleet guard judges a scratch write against the repository that owns that `var/agent-tmp` dir, so writing to a sibling repo's owned scratch from another repo no longer refuses.
+- Every scratch-is-not-a-home refusal now names the physical path it judged, so the 20/day CFS refusals are actionable.
+- `commit-preflight --tests affected` runs exactly the test files the push gate's affected-test stage will select for your staged paths, so a change's importers fail in preflight instead of at the land.
+- The build brief now tells builders to preflight with `--tests affected`.
+
 ## [0.2.122] - 2026-11-12
 
 ### Changed

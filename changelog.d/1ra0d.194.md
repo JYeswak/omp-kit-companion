@@ -1,1 +1,0 @@
-- Hook test fixtures no longer write refusals into the live gate-events ledger on macOS: a hook's cwd under the system temp root (including `/private/var/folders`, where a `/var/folders` TMPDIR resolves) is treated as a fixture, so the daily refusal counts measure only real agent work.

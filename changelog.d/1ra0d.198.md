@@ -1,2 +1,0 @@
-- `commit-preflight --tests affected` runs exactly the test files the push gate's affected-test stage will select for your staged paths, so a change's importers fail in preflight instead of at the land.
-- The build brief now tells builders to preflight with `--tests affected`.
