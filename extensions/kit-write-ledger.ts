@@ -75,9 +75,9 @@ export function appendLedgerEntry(stateRoot: string, entry: WriteLedgerEntry): L
 	}
 }
 
-/** Last ledger entry per relpath for one repo. Malformed lines are skipped, never fatal. */
-export function lastWriters(stateRoot: string, repoRoot: string): Map<string, WriteLedgerEntry> {
-	const out = new Map<string, WriteLedgerEntry>();
+/** Every ledger row for one repo, oldest first. Malformed lines are skipped, never fatal. */
+function readLedgerRows(stateRoot: string, repoRoot: string): WriteLedgerEntry[] {
+	const out: WriteLedgerEntry[] = [];
 	let raw: string;
 	try {
 		raw = readFileSync(ledgerFileFor(stateRoot, repoRoot), "utf8");
@@ -98,9 +98,26 @@ export function lastWriters(stateRoot: string, repoRoot: string): Map<string, Wr
 			typeof row.relpath !== "string" || typeof row.agent !== "string" ||
 			typeof row.session !== "string" || typeof row.ts !== "string" ||
 			!(typeof row.blob === "string" || row.blob === null)) continue;
-		out.set(row.relpath, parsed as unknown as WriteLedgerEntry);
+		out.push(parsed as unknown as WriteLedgerEntry);
 	}
 	return out;
+}
+
+/** Last ledger entry per relpath for one repo. Malformed lines are skipped, never fatal. */
+export function lastWriters(stateRoot: string, repoRoot: string): Map<string, WriteLedgerEntry> {
+	const out = new Map<string, WriteLedgerEntry>();
+	for (const entry of readLedgerRows(stateRoot, repoRoot)) out.set(entry.relpath, entry);
+	return out;
+}
+
+/**
+ * UNSAVEDAGE1 (ompkit-1ra0d.205): every ledger row for one relpath, oldest
+ * first. The turn-end checkpoint needs the whole history since the path was
+ * last clean, not just the last writer: any non-session row in that window
+ * is doubt and skips the path.
+ */
+export function ledgerRowsFor(stateRoot: string, repoRoot: string, relpath: string): WriteLedgerEntry[] {
+	return readLedgerRows(stateRoot, repoRoot).filter(entry => entry.relpath === relpath);
 }
 
 export type DirtyOwner =

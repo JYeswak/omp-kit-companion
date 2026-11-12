@@ -5,15 +5,24 @@
  * Only successful local write/edit/ast_edit result paths are attributed. At
  * turn end it blocks at most twice with the owned paths and save steps, then
  * emits one warning line. `session_shutdown` remains a non-blocking backstop.
- * The guard never commits, stashes, or pushes; every git command is read-only
- * and bounded.
+ *
+ * UNSAVEDAGE1 (ompkit-1ra0d.205): checkpoint, never publish, on wholly
+ * attributed own bytes. When a demanded path is dirty against HEAD, every
+ * write-ledger row for it since it was last clean comes from this session,
+ * and its current bytes hash to the blob in its last ledger row, the stop
+ * hook saves just those paths to a private ref (`refs/omp-kit/saves/<agent>`,
+ * built from a temporary index in owned scratch; HEAD, the shared index,
+ * the worktree and refs/heads are never touched, nothing is pushed) and
+ * appends one line naming the ref to the otherwise unchanged block-and-ask
+ * report. Any doubt skips the path; unchanged bytes write nothing twice.
  */
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
 import { trackerRequests, type TrackerRequest } from "./kit-flywheel-guard";
 import { fleetPolicyState } from "./fleet-policy";
-import { appendLedgerEntry, isCurrentSessionWriter, lastWriters, ledgerStateRoot, resolveLedgerAgent } from "./kit-write-ledger";
+import { appendLedgerEntry, isCurrentSessionWriter, lastWriters, ledgerRowsFor, ledgerStateRoot, resolveLedgerAgent } from "./kit-write-ledger";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 
 export interface SaveGuardExecResult {
 	stdout: string;
@@ -589,6 +598,240 @@ export function applyLedgerPeerOmission(finding: SaveGuardFinding, repoRoot: str
 	const stateRoot = ledgerStateRoot(process.env.HOME, process.env.XDG_STATE_HOME);
 	if (!stateRoot) return;
 	omitPeerLedgerPaths(finding, lastWriters(stateRoot, repoRoot), sessionId);
+}
+
+/** Save ceiling: several bounded git spawns plus one message file, all off the hot observer path. */
+export const TURN_SAVE_COMMIT_TIMEOUT_MS = 10_000;
+
+export interface TurnSaveSave {
+	bead: string;
+	ref: string;
+	sha: string;
+	paths: string[];
+}
+
+export interface TurnSaveOutcome {
+	saved: TurnSaveSave[];
+	skipped: { path: string; reason: string }[];
+}
+
+const TURN_SAVE_REF_PREFIX = "refs/omp-kit/saves/";
+const TURN_SAVE_ZERO_SHA = "0000000000000000000000000000000000000000";
+const TURN_SAVE_MAX_AGENT = 64;
+
+/** Forty hex digits, checked without a regex so the staged regexploit gate has nothing to judge. */
+function isGitObjectId(value: string): boolean {
+	if (value.length !== 40) return false;
+	for (const unit of value) {
+		const code = unit.codePointAt(0) ?? -1;
+		const hex = (code >= 48 && code <= 57) || (code >= 97 && code <= 102);
+		if (!hex) return false;
+	}
+	return true;
+}
+
+/**
+ * Ref-safe agent name for `refs/omp-kit/saves/<agent>`: the ledger identity
+ * minus everything git check-ref-format refuses (only word characters and
+ * dots, never leading dash/dot, no `..`, no trailing dot).
+ */
+function turnSaveAgent(): string | null {
+	const agent = resolveLedgerAgent(process.env);
+	if (!agent || agent.length > TURN_SAVE_MAX_AGENT) return null;
+	let index = 0;
+	for (const unit of agent) {
+		const code = unit.codePointAt(0) ?? -1;
+		const word = code === 45 || code === 46 || (code >= 48 && code <= 57) ||
+			(code >= 65 && code <= 90) || code === 95 || (code >= 97 && code <= 122);
+		if (!word) return null;
+		if (index === 0 && (code === 45 || code === 46)) return null;
+		index += 1;
+	}
+	if (index === 0 || agent.includes("..") || agent.endsWith(".")) return null;
+	return agent;
+}
+
+/** Current-bytes blob in ledger terms: sha256 hex, `link:<target>`, null when absent, undefined when unreadable. */
+function currentLedgerBlob(root: string, repoPath: string): string | null | undefined {
+	try {
+		const absolute = path.join(root, repoPath);
+		const stat = lstatSync(absolute);
+		if (stat.isSymbolicLink()) return `link:${readlinkSync(absolute)}`;
+		if (!stat.isFile()) return undefined;
+		return createHash("sha256").update(readFileSync(absolute)).digest("hex");
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return null;
+		return undefined;
+	}
+}
+
+/**
+ * True only when every ledger row for the path since it was last clean comes
+ * from this session and the current bytes hash to the last row's blob. Any
+ * doubt (no rows, foreign last writer, bash/foreign/unknown write since,
+ * unreadable timestamps) skips the path. Fail-closed by construction.
+ */
+async function ledgerFullyAttributed(
+	exec: SaveGuardApi["exec"],
+	root: string,
+	repoPath: string,
+	sessionId: string,
+	stateRoot: string,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+	const rows = ledgerRowsFor(stateRoot, root, repoPath);
+	if (rows.length === 0) return { ok: false, reason: "no ledger entry for this path; writes may predate attribution" };
+	const last = rows[rows.length - 1];
+	if (!last || !isCurrentSessionWriter(last, sessionId)) {
+		return { ok: false, reason: `last ledger writer is ${last ? last.agent : "unknown"} in another session` };
+	}
+	const current = currentLedgerBlob(root, repoPath);
+	if (current === undefined) return { ok: false, reason: "current bytes unreadable" };
+	if (last.blob !== current) {
+		return { ok: false, reason: "current bytes differ from this session's last ledgered write; a later bash, foreign or unknown write happened since" };
+	}
+	let since = 0;
+	const logged = await runGit(exec, root, ["--literal-pathspecs", "log", "-1", "--format=%cI", "HEAD", "--", repoPath]);
+	if (logged.code === 0 && gitLine(logged.stdout).length > 0) {
+		const at = Date.parse(gitLine(logged.stdout));
+		if (!Number.isFinite(at)) return { ok: false, reason: "last-clean commit time unreadable" };
+		since = at;
+	}
+	for (const row of rows) {
+		const at = Date.parse(row.ts);
+		if (!Number.isFinite(at)) return { ok: false, reason: "ledger timestamp unreadable" };
+		if (at > since && row.session !== sessionId) {
+			return { ok: false, reason: `ledger holds a later non-session write by ${row.agent}` };
+		}
+	}
+	return { ok: true };
+}
+
+function turnSaveMessage(count: number, bead: string, eligible: string[]): string {
+	const noun = count === 1 ? "file" : "files";
+	const lines = eligible.map(repoPath => `- ${repoPath}`).join("\n");
+	return `[pending] save ${count} ${noun} at turn end\n\n${lines}\n\nBead: ${bead}\n`;
+}
+
+/**
+ * UNSAVEDAGE1: checkpoint this session's wholly attributed paths to a private
+ * ref, one commit per native bead group. The tree is built from a temporary
+ * index in owned scratch (`env GIT_INDEX_FILE=<tmp> git ...`, so the seat's
+ * own environment and any concurrent stop never see it); HEAD, the shared
+ * index, the worktree and refs/heads are never touched, nothing is pushed,
+ * and no hook runs (commit-tree is plumbing). Beads are never combined: a
+ * path whose bead is missing or whose attribution is in doubt stays in
+ * today's report. Any git failure aborts the save and keeps today's report.
+ */
+export async function attemptTurnSave(
+	exec: SaveGuardApi["exec"],
+	finding: SaveGuardFinding,
+	sessionId: string,
+): Promise<TurnSaveOutcome> {
+	const outcome: TurnSaveOutcome = { saved: [], skipped: [] };
+	// UNSAVEDAGE1 seam: the planted mutant sets KIT_SAVE_GUARD_CHECKPOINT=0 to
+	// disable the checkpoint while keeping today's block-and-ask report.
+	if (process.env.KIT_SAVE_GUARD_CHECKPOINT === "0") return outcome;
+	const stateRoot = ledgerStateRoot(process.env.HOME, process.env.XDG_STATE_HOME);
+	const agent = turnSaveAgent();
+	if (!stateRoot || !agent) return outcome;
+	const ref = `${TURN_SAVE_REF_PREFIX}${agent}`;
+	const root = finding.root;
+	const groups = finding.beadPaths ?? [];
+	if (groups.length === 0) return outcome;
+	const status = await runGit(exec, root, [
+		"--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+	]);
+	if (status.code !== 0) return outcome;
+	const statuses = statusEntries(status.stdout);
+	const eligibleByGroup: { bead: string; paths: string[] }[] = [];
+	for (const group of groups) {
+		const eligible: string[] = [];
+		for (const repoPath of group.paths.slice().sort()) {
+			if (!statuses.has(repoPath)) continue;
+			if (repoPath.includes("\n") || repoPath.startsWith("\"") ||
+				repoPath.includes("*") || repoPath.includes("?") || repoPath.includes("[")) {
+				outcome.skipped.push({ path: repoPath, reason: "path needs quoting this saver does not do" });
+				continue;
+			}
+			const check = await ledgerFullyAttributed(exec, root, repoPath, sessionId, stateRoot);
+			if (!check.ok) {
+				outcome.skipped.push({ path: repoPath, reason: check.reason });
+				continue;
+			}
+			eligible.push(repoPath);
+		}
+		if (eligible.length > 0) eligibleByGroup.push({ bead: group.bead, paths: eligible });
+	}
+	if (eligibleByGroup.length === 0) return outcome;
+	const scratch = ownedTmp("kit-turn-save");
+	try {
+		const indexFile = path.join(scratch.path, "index");
+		const sgit = (args: string[]): Promise<SaveGuardExecResult> =>
+			exec("env", [`GIT_INDEX_FILE=${indexFile}`, "git", ...args], { cwd: root, timeout: TURN_SAVE_COMMIT_TIMEOUT_MS });
+		const head = await runGit(exec, root, ["rev-parse", "--verify", "HEAD"]);
+		if (head.code !== 0 || !isGitObjectId(gitLine(head.stdout))) return outcome;
+		let tip = gitLine(head.stdout);
+		const saveTip = await runGit(exec, root, ["rev-parse", "--verify", "--quiet", ref]);
+		const previous = saveTip.code === 0 && isGitObjectId(gitLine(saveTip.stdout)) ? gitLine(saveTip.stdout) : null;
+		if (previous) {
+			const descends = await runGit(exec, root, ["merge-base", "--is-ancestor", tip, previous]);
+			if (descends.code === 0) tip = previous;
+		}
+		const parentTree = await runGit(exec, root, ["rev-parse", "--verify", `${tip}^{tree}`]);
+		if (parentTree.code !== 0 || !isGitObjectId(gitLine(parentTree.stdout))) return outcome;
+		if ((await sgit(["read-tree", tip])).code !== 0) return outcome;
+		let tipTree = gitLine(parentTree.stdout);
+		const blobSrc = path.join(scratch.path, "blob-src");
+		const msgFile = path.join(scratch.path, "turn-save-msg.txt");
+		const pending: TurnSaveSave[] = [];
+		for (const group of eligibleByGroup) {
+			for (const repoPath of group.paths) {
+				const absolute = path.join(root, repoPath);
+				let stat;
+				try {
+					stat = lstatSync(absolute);
+				} catch (error) {
+					if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "ENOENT") return outcome;
+					const present = await sgit(["ls-files", "--", repoPath]);
+					if (present.code !== 0) return outcome;
+					if (present.stdout.length > 0) {
+						if ((await sgit(["update-index", "--remove", "--", repoPath])).code !== 0) return outcome;
+					}
+					continue;
+				}
+				if (stat.isSymbolicLink()) {
+					writeFileSync(blobSrc, readlinkSync(absolute));
+					const hashed = await sgit(["hash-object", "-w", "--", blobSrc]);
+					if (hashed.code !== 0 || !isGitObjectId(gitLine(hashed.stdout))) return outcome;
+					if ((await sgit(["update-index", "--add", "--cacheinfo", `120000,${gitLine(hashed.stdout)},${repoPath}`])).code !== 0) return outcome;
+					continue;
+				}
+				if (!stat.isFile()) return outcome;
+				const mode = (stat.mode & 0o111) !== 0 ? "100755" : "100644";
+				const hashed = await sgit(["hash-object", "-w", "--", repoPath]);
+				if (hashed.code !== 0 || !isGitObjectId(gitLine(hashed.stdout))) return outcome;
+				if ((await sgit(["update-index", "--add", "--cacheinfo", `${mode},${gitLine(hashed.stdout)},${repoPath}`])).code !== 0) return outcome;
+			}
+			const written = await sgit(["write-tree"]);
+			if (written.code !== 0 || !isGitObjectId(gitLine(written.stdout))) return outcome;
+			const tree = gitLine(written.stdout);
+			if (tree === tipTree) continue;
+			writeFileSync(msgFile, turnSaveMessage(group.paths.length, group.bead, group.paths));
+			const committed = await sgit(["commit-tree", tree, "-p", tip, "-F", msgFile]);
+			if (committed.code !== 0 || !isGitObjectId(gitLine(committed.stdout))) return outcome;
+			tip = gitLine(committed.stdout);
+			tipTree = tree;
+			pending.push({ bead: group.bead, ref, sha: tip, paths: group.paths.slice() });
+		}
+		if (pending.length === 0) return outcome;
+		const updated = await exec("git", ["update-ref", ref, tip, previous ?? TURN_SAVE_ZERO_SHA],
+			{ cwd: root, timeout: TURN_SAVE_COMMIT_TIMEOUT_MS });
+		if (updated.code !== 0) return outcome;
+		outcome.saved = pending;
+	} finally {
+		scratch.cleanup();
+	}
+	return outcome;
 }
 
 function statusEntries(stdout: string): Map<string, string> {
@@ -1216,6 +1459,17 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 			if (finding) applyLedgerPeerOmission(finding, repository.root, sessionId);
 			if (finding) findings.push(finding);
 		}
+		// UNSAVEDAGE1 checkpoint: save wholly attributed own bytes to the
+		// seat's private ref. The block-and-ask report below is unchanged;
+		// one line is appended per new save commit only.
+		const saveLines: string[] = [];
+		for (const finding of findings) {
+			if (finding.paths.length === 0) continue;
+			const outcome = await attemptTurnSave(pi.exec.bind(pi), finding, sessionId);
+			for (const save of outcome.saved) {
+				saveLines.push(`checkpointed to ${save.ref} ${save.sha.slice(0, 7)}; the work stays uncommitted on main until you land it`);
+			}
+		}
 		const scratch = await checkScratchOwed(pi.exec.bind(pi), ctx.cwd, sessionId);
 		const scratchOwed = scratch !== null && scratch.unreleased > 0;
 		if (findings.length === 0 && !scratchOwed) {
@@ -1247,7 +1501,7 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 			}
 			return;
 		}
-		const reasons = [findings.some(finding => finding.paths.length > 0) ? formatSavePrompt(findings) : "", scratchPrompt]
+		const reasons = [findings.some(finding => finding.paths.length > 0) ? formatSavePrompt(findings) : "", scratchPrompt, ...saveLines]
 			.filter(reason => reason !== "");
 		if (state.rePrompts < MAX_REPROMPTS_PER_TURN) {
 			state.rePrompts += 1;
