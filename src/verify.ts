@@ -33,7 +33,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { availableParallelism, homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { run, type RunResult } from "./kitlib/run.ts";
-import { appendLesson, readLessonsLog } from "./lessons.ts";
+import { appendLocalLesson, readLessonsLog } from "./lessons.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { checkPublishedCommits, preflightBead } from "./preflight.ts";
 import { installReadonlyBr, resolveRealBr } from "./kitlib/readonly-br.ts";
@@ -589,20 +589,23 @@ async function closeLesson(explicit: string | undefined, bead: BeadRow, repo: st
 }
 
 /**
- * LESSONAUTO1 (ompkit-1ra0d.213): on a CLOSED verdict, feed the learn loop by appending the close
- * lesson to the verified repo's .omp/lessons.jsonl through the existing lessons writer. Dedupes by
- * bead: a second close of the same bead appends nothing. Best effort: a lesson-write failure is
- * logged, never a close failure.
+ * LESSONAUTO1 (ompkit-1ra0d.213) + LESSONDIRT1 (ompkit-1ra0d.222): on a CLOSED verdict,
+ * feed the learn loop by appending the close lesson to the verified repo's untracked
+ * `.omp/lessons.local.jsonl` through the local lessons writer. The tracked
+ * `.omp/lessons.jsonl` stays untouched so a peer's verify leaves the shared main clean;
+ * readers merge both stores. Dedupes by bead across both stores: a second close of the
+ * same bead appends nothing. Best effort: a lesson-write failure is logged, never a
+ * close failure.
  */
 function recordCloseLesson(repo: string, bead: string, lesson: string, sha: string, log: string[]): void {
 	try {
 		const existing = readLessonsLog(repo);
 		if (existing.status !== "INVALID" && existing.entries.some(entry => entry.bead === bead)) {
-			log.push(`lesson: ${bead} already recorded in .omp/lessons.jsonl; skipping`);
+			log.push(`lesson: ${bead} already recorded in .omp/lessons.local.jsonl; skipping`);
 			return;
 		}
-		appendLesson(repo, { kind: "LESSON", class: "OTHER:verify_close", what: lesson, evidence: `verify ${bead} export ${sha}`, bead });
-		log.push(`lesson: recorded ${bead} in .omp/lessons.jsonl`);
+		appendLocalLesson(repo, { kind: "LESSON", class: "OTHER:verify_close", what: lesson, evidence: `verify ${bead} export ${sha}`, bead });
+		log.push(`lesson: recorded ${bead} in .omp/lessons.local.jsonl`);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		log.push(`lesson: lesson append skipped (${message})`);

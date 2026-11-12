@@ -29,3 +29,6 @@ tests/var/
 /${DB}*
 /.br-db-*.lock
 .hypothesis/
+# LESSONDIRT1 (ompkit-1ra0d.222): machine-authored verify-close lessons live in the
+# untracked per-repo store, never the shared log.
+/.omp/lessons.local.jsonl

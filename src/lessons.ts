@@ -1,9 +1,14 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeSync, closeSync } from "node:fs";
+import { constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync, writeSync, closeSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const LESSONS_RELATIVE_PATH = ".omp/lessons.jsonl";
+
+/** Untracked per-repo store for machine-authored verify-close lessons. `lessons add`
+ * (human-authored) keeps writing the tracked LESSONS_RELATIVE_PATH; verify-close
+ * rows go here so a peer's verify never dirties the shared main. Readers merge both. */
+export const LESSONS_LOCAL_RELATIVE_PATH = ".omp/lessons.local.jsonl";
 
 export type LessonKind = "NEGATIVE" | "GAP" | "LESSON" | "CHECKIN" | "CORRECTION";
 export const LESSON_CLASS_DESCRIPTIONS = {
@@ -223,20 +228,24 @@ export function latestCheckinAt(entries: readonly LessonEntry[], agent: string |
 	return latest;
 }
 
-export function readLessonsLog(repoRoot: string): LessonsReadResult {
-	const root = resolve(repoRoot);
-	const path = join(root, LESSONS_RELATIVE_PATH);
+interface SingleLessonsFile {
+	found: boolean;
+	entries: LessonEntry[];
+	invalid_lines: LessonsReadResult["invalid_lines"];
+}
+
+function readSingleLessonsFile(path: string): SingleLessonsFile {
 	let bytes: Buffer;
 	try {
 		const info = lstatSync(path);
 		if (!info.isFile() || info.isSymbolicLink()) {
-			return { status: "INVALID", path, entries: [], invalid_lines: [{ line: 0, reason: "not a regular file", code: "LESSONS_LOG_UNSAFE" }] };
+			return { found: true, entries: [], invalid_lines: [{ line: 0, reason: "not a regular file", code: "LESSONS_LOG_UNSAFE" }] };
 		}
 		bytes = readRegularFile(path);
 	} catch (error) {
 		if (error instanceof Error && "code" in error && error.code === "ENOENT")
-			return { status: "MISSING", path, entries: [], invalid_lines: [] };
-		return { status: "INVALID", path, entries: [], invalid_lines: [{ line: 0, reason: "unreadable file", code: "LESSONS_LOG_UNREADABLE" }] };
+			return { found: false, entries: [], invalid_lines: [] };
+		return { found: true, entries: [], invalid_lines: [{ line: 0, reason: "unreadable file", code: "LESSONS_LOG_UNREADABLE" }] };
 	}
 	const rawLines = bytes.toString("utf8").split("\n");
 	if (rawLines.at(-1) === "") rawLines.pop();
@@ -261,7 +270,27 @@ export function readLessonsLog(repoRoot: string): LessonsReadResult {
 			code: invalidSupersession ? "LESSON_SUPERSEDED_BY_INVALID" :
 				negativeMissingEvidence ? "NEGATIVE_EVIDENCE_MISSING" : "LESSONS_LOG_SCHEMA_INVALID" });
 	}
-	return { status: invalid_lines.length ? "INVALID" : "OK", path, entries, invalid_lines };
+	return { found: true, entries, invalid_lines };
+}
+
+/**
+ * Reads the tracked log plus the untracked local store, tracked rows first. Invalid-line
+ * numbers restart at 1 per store; either store corrupt makes the whole result INVALID so
+ * fail-closed callers (check-ins, dedup) never act on a half-read log. MISSING only when
+ * neither store exists.
+ */
+export function readLessonsLog(repoRoot: string): LessonsReadResult {
+	const root = resolve(repoRoot);
+	const path = join(root, LESSONS_RELATIVE_PATH);
+	const tracked = readSingleLessonsFile(path);
+	const local = readSingleLessonsFile(join(root, LESSONS_LOCAL_RELATIVE_PATH));
+	const invalid_lines = [...tracked.invalid_lines, ...local.invalid_lines];
+	return {
+		status: invalid_lines.length > 0 ? "INVALID" : (tracked.found || local.found) ? "OK" : "MISSING",
+		path,
+		entries: [...tracked.entries, ...local.entries],
+		invalid_lines,
+	};
 }
 
 export interface LessonCurrencyRow {
@@ -450,7 +479,7 @@ function lessonEntry(repoRoot: string, input: AddLessonInput, options: LessonEnt
 	return entry;
 }
 
-function appendLessonText(repoRoot: string, text: string): void {
+function appendLessonText(repoRoot: string, text: string, relativePath: string = LESSONS_RELATIVE_PATH): void {
 	const root = resolve(repoRoot);
 	const rootInfo = lstatSync(root);
 	if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("LESSONS_REPO_UNSAFE");
@@ -459,7 +488,7 @@ function appendLessonText(repoRoot: string, text: string): void {
 	catch { throw new Error("LESSONS_DIRECTORY_UNAVAILABLE"); }
 	const directoryInfo = lstatSync(directory);
 	if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) throw new Error("LESSONS_DIRECTORY_UNSAFE");
-	const path = join(root, LESSONS_RELATIVE_PATH);
+	const path = join(root, relativePath);
 	try {
 		const existing = readRegularFile(path);
 		if (existing.length > 0 && existing.at(-1) !== 0x0a) throw new Error("LESSONS_LOG_CORRUPT");
@@ -483,6 +512,64 @@ function appendLessonText(repoRoot: string, text: string): void {
 
 function appendEntry(repoRoot: string, entry: LessonEntry): void {
 	appendLessonText(repoRoot, JSON.stringify(entry) + "\n");
+}
+
+const LESSONS_LOCAL_EXCLUDE_BEGIN = "# BEGIN omp-kit lessons.local";
+const LESSONS_LOCAL_EXCLUDE_END = "# END omp-kit lessons.local";
+
+/**
+ * Keeps the local store out of `git status`: a marked block in the repo's own
+ * `info/exclude` (the same custody-free mechanism the hook installer uses for
+ * kit-owned members), so no tracked file is touched and nothing needs committing.
+ * No `.git` (bare path, non-checkout) means there is nothing to hide from: skip.
+ */
+function ensureLocalLessonsExcluded(repoRoot: string): void {
+	const root = resolve(repoRoot);
+	let gitDir = join(root, ".git");
+	try {
+		const info = lstatSync(gitDir);
+		if (!info.isDirectory() && info.isFile()) {
+			const pointer = readFileSync(gitDir, "utf8").split("\n", 1)[0] ?? "";
+			const match = /^gitdir: (.+)$/.exec(pointer.trim());
+			if (!match) return;
+			gitDir = resolve(root, match[1]!);
+			// A linked worktree's gitdir names its common dir; git reads info/exclude there.
+			try { gitDir = resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim()); }
+			catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error; }
+		} else if (!info.isDirectory() || info.isSymbolicLink()) {
+			return;
+		}
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+		throw error;
+	}
+	const excludePath = join(gitDir, "info", "exclude");
+	let existing = "";
+	try {
+		const info = lstatSync(excludePath);
+		if (!info.isFile() || info.isSymbolicLink()) throw new Error("LESSONS_EXCLUDE_UNSAFE");
+		existing = readFileSync(excludePath, "utf8");
+	} catch (error) {
+		if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+		try { mkdirSync(join(gitDir, "info"), { recursive: true, mode: 0o755 }); }
+		catch { throw new Error("LESSONS_EXCLUDE_UNAVAILABLE"); }
+	}
+	if (existing.includes(LESSONS_LOCAL_EXCLUDE_BEGIN) && existing.includes(LESSONS_LOCAL_RELATIVE_PATH)) return;
+	const block = `${LESSONS_LOCAL_EXCLUDE_BEGIN}\n${LESSONS_LOCAL_RELATIVE_PATH}\n${LESSONS_LOCAL_EXCLUDE_END}\n`;
+	const next = existing.length === 0 ? block : existing.endsWith("\n") ? `${existing}${block}` : `${existing}\n${block}`;
+	writeFileSync(excludePath, next, { mode: 0o644 });
+}
+
+/**
+ * Machine-authored rows (verify-close) go to the untracked local store, never the
+ * tracked log, so a peer's verify leaves the shared main clean. Dedup callers keep
+ * reading through readLessonsLog, which merges both stores.
+ */
+export function appendLocalLesson(repoRoot: string, input: AddLessonInput, options: LessonEntryOptions = {}): LessonEntry {
+	const entry = lessonEntry(repoRoot, input, options);
+	appendLessonText(repoRoot, JSON.stringify(entry) + "\n", LESSONS_LOCAL_RELATIVE_PATH);
+	ensureLocalLessonsExcluded(repoRoot);
+	return entry;
 }
 
 export function appendLesson(repoRoot: string, input: AddLessonInput, options: LessonEntryOptions = {}): LessonEntry {
