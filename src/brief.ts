@@ -67,7 +67,7 @@ function memberRules(member: string, source: string): BriefRule[] {
 	else if (name.includes("deploy-step") || name.includes("commit-msg-bead") || name.includes("pushed-beads") || name.includes("ref-txn-bead") || name.includes("vlevel") || (name === "10-commit-msg" && source.includes("verification level"))) {
 		add("commit message", "a message with no existing bead id, no verification level, or (on deploy-sensitive paths) no Deploy-Step trailer", "name an existing bead id; end the subject with [test], [selftest], [live] or [pending]; add Deploy-Step: <command> or Deploy-Step: none (<reason>) when the refusal asks");
 	} else if (name.includes("on-main")) add("publication", "pushing a commit that is not on this repo's shared local main", "commit on main (or let the lead land your branch); push only main");
-	else if (name.includes("commit-gate")) add("preflight", "a staged tree whose affected tests fail", "before DONE run sh scripts/commit-preflight.sh --files <every changed path> --tests <changed test files>; report the exact command and its commit-preflight: ... 0 refused/unjudged ...; N export test file(s) run output");
+	else if (name.includes("commit-gate")) add("preflight", "a staged tree whose affected tests fail", "before DONE run sh scripts/commit-preflight.sh --files <every changed path> --tests affected; report the exact command and its commit-preflight: ... 0 refused/unjudged ...; N export test file(s) run output");
 	else if (name.includes("fresh-gate") || member.endsWith("/fresh-gate.sh")) {
 		if (source.includes("live coverage")) add("tests", "changed TTSR rules without live scenario coverage", "add fire plus quiet corpus rows and fire/near-miss tests/live/scenarios.json scenarios; update README rule count");
 		add("tests", "nonportable tests", "tests run in an exported tree without source git history or private HOME files; set TMPDIR inside the export's var/agent-tmp");
@@ -178,7 +178,7 @@ export async function briefContract(repoPath: string, exec: BriefExec = execute,
 	rules.push(
 		{ member: "process:EXPORTINDEX1", refuses: "writes escaping an exported test tree", compliant: "exports are read-only source inputs; fixture repositories need their own git init and GIT_CEILING_DIRECTORIES so git never discovers the parent checkout", topic: "tests" },
 		{ member: "process:commit-notes", refuses: "a user-visible change without its own release note", compliant: "write changelog.d/<bead-without-ompkit-prefix>.md, user-facing '- ' bullets; update README's command reference for CLI changes", topic: "release notes" },
-		{ member: "process:BRIEFCONTRACT1", refuses: "DONE without clean changed-path preflight evidence", compliant: "before DONE run sh scripts/commit-preflight.sh --files <every changed path> --tests <changed test files>; report the exact command and its commit-preflight: ... 0 refused/unjudged ...; N export test file(s) run output", topic: "preflight" },
+		{ member: "process:BRIEFCONTRACT1", refuses: "DONE without clean changed-path preflight evidence", compliant: "before DONE run sh scripts/commit-preflight.sh --files <every changed path> --tests affected; report the exact command and its commit-preflight: ... 0 refused/unjudged ...; N export test file(s) run output", topic: "preflight" },
 	);
 	const digest = hash(JSON.stringify({ repo, kit, members, rules }));
 	return { repo, installed, digest, marker: `omp-kit-brief: ${repo} ${digest}`, rules, members, kit };
@@ -470,7 +470,7 @@ export function briefHandbackRefusal(text: string, options: BriefHandbackOptions
 	if (!tainted && scriptCmd && scriptClean) {
 		// EXPORTTEST1: a handback that changed src or test files must show those tests ran in an export.
 		const code = [...text.matchAll(/commit-preflight\.sh\b[^\n]*?--files\s+([^\n]*)/g)].some(match => match[1]!.split(/\s+/).some(path => /^(?:src|tests|extensions)\/|\.test\.[a-z]+$/.test(path)));
-		if (code && !(/\bcommit-preflight\.sh\b[^\n]*\s--tests\s+\S+/.test(text) && /commit-preflight:\s*\d+ checks, 0 refused\/unjudged\b[^\n]*;\s*[1-9]\d* export test file\(s\) run\b/.test(text))) return "BRIEF_PREFLIGHT_REFUSED: DONE names changed src/test files but shows no export test run. Rerun sh scripts/commit-preflight.sh --files <every changed path> --tests <changed test files> and report its 'commit-preflight: N checks, 0 refused/unjudged ...; M export test file(s) run' line.";
+		if (code && !(/\bcommit-preflight\.sh\b[^\n]*\s--tests\s+\S+/.test(text) && /commit-preflight:\s*\d+ checks, 0 refused\/unjudged\b[^\n]*;\s*(?:[1-9]\d* export test file\(s\) run\b|0 export test file\(s\) run; affected selection empty\b)/.test(text))) return "BRIEF_PREFLIGHT_REFUSED: DONE names changed src/test files but shows no export test run. Rerun sh scripts/commit-preflight.sh --files <every changed path> --tests affected and report its 'commit-preflight: N checks, 0 refused/unjudged ...; M export test file(s) run' line.";
 		return undefined;
 	}
 	// CHILDPREFLIGHT1: repos without the script admit the kit's own preflight. `commit: ok (...)` is the

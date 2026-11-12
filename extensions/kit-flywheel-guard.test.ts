@@ -1619,6 +1619,9 @@ test("BRIEFCONTRACT1 parent's task-result hook refuses DONE without preflight, a
 	expect(zeroTests).toMatchObject({ isError: true, details: { accepted: false } });
 	const [admitted] = await emit("DONE\nsh scripts/commit-preflight.sh --files src/feature.ts tests/cli/feature.test.ts --tests tests/cli/feature.test.ts\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s; 1 export test file(s) run; no fresh gate run");
 	expect(admitted).toBeUndefined();
+	// PREFLIGHTAFFECTED1: a code change the push gate selects no test for is clean with the empty-selection line.
+	const [emptyAffected] = await emit("DONE\nsh scripts/commit-preflight.sh --files src/feature.ts --tests affected\naffected tests selected: none\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s; 0 export test file(s) run; affected selection empty");
+	expect(emptyAffected).toBeUndefined();
 	// Control: a docs-only handback needs no export test run.
 	const [docsOnly] = await emit("DONE\nsh scripts/commit-preflight.sh --files skills/contract.md\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s; no fresh gate or tests run");
 	expect(docsOnly).toBeUndefined();

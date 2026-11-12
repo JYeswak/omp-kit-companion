@@ -128,3 +128,42 @@ test("PREFLIGHTWS1: a workspace test resolves the package's own node_modules; a 
 	expect(refused.rc, refused.out).toBe(1);
 	expect(refused.out).toContain(`REFUSED EXPORT_TEST_FAILED ${wsTest} (exit 1)`);
 }, fixtureDeadlineS(300) * 1000);
+
+// PREFLIGHTAFFECTED1 (ompkit-1ra0d.198): `--tests affected` runs what the push gate's affected-test stage
+// selects for the staged paths: the importer of a changed source runs (and its failure refuses), an
+// unrelated failing suite is not selected. Planted: before this, "affected" was read as a file name.
+test("PREFLIGHTAFFECTED1: --tests affected runs the changed source's importer and only it", async () => {
+	const lib = "src/lib.ts";
+	const importer = "tests/cli/importer.test.ts";
+	const importer2 = "tests/cli/importer-two.test.ts";
+	const unrelated = "tests/cli/unrelated.test.ts";
+	mkdirSync(join(repo, "src"), { recursive: true });
+	writeFileSync(join(repo, lib), "export const value = 1;\n");
+	writeFileSync(join(repo, importer), 'import { expect, test } from "bun:test";\nimport { value } from "../../src/lib.ts";\ntest("value", () => expect(value).toBe(1));\n');
+	writeFileSync(join(repo, importer2), 'import { expect, test } from "bun:test";\nimport { value } from "../../src/lib.ts";\ntest("value is odd", () => expect(value % 2).toBe(1));\n');
+	writeFileSync(join(repo, unrelated), 'import { expect, test } from "bun:test";\ntest("never selected", () => expect(true).toBe(false));\n');
+	expect((await sh(["git", "add", lib, importer, importer2, unrelated])).rc).toBe(0);
+	expect((await sh(["git", "commit", "-qm", "affected fixture"])).rc).toBe(0);
+	const preflight = ["sh", join(source, "scripts/commit-preflight.sh"), "--files", lib, "--tests", "affected"];
+	writeFileSync(join(repo, lib), "export const value = 1; // touched\n");
+	const admitted = await sh(preflight, 120);
+	expect(admitted.rc, admitted.out).toBe(0);
+	// Two bun importers run as one parallel stage; each still gets its own verdict line.
+	expect(admitted.out).toContain(`affected tests selected: ${importer2} ${importer}`);
+	expect(admitted.out).toContain(`PASS export-test:${importer}`);
+	expect(admitted.out).toContain(`PASS export-test:${importer2}`);
+	expect(admitted.out).not.toContain(unrelated);
+	// Control: the change breaks both importers, and the grouped run refuses each by name.
+	writeFileSync(join(repo, lib), "export const value = 2;\n");
+	const refused = await sh(preflight, 120);
+	expect(refused.rc, refused.out).toBe(1);
+	expect(refused.out).toContain(`REFUSED EXPORT_TEST_FAILED ${importer} (exit 1)`);
+	expect(refused.out).toContain(`REFUSED EXPORT_TEST_FAILED ${importer2} (exit 1)`);
+	// A path nothing imports selects nothing, and says so in the summary line the brief accepts.
+	writeFileSync(join(repo, lib), "export const value = 1;\n");
+	writeFileSync(join(repo, "notes.txt"), "no importer\n");
+	const empty = await sh(["sh", join(source, "scripts/commit-preflight.sh"), "--files", "notes.txt", "--tests", "affected"], 120);
+	expect(empty.rc, empty.out).toBe(0);
+	expect(empty.out).toContain("affected tests selected: none");
+	expect(empty.out).toMatch(/; 0 export test file\(s\) run; affected selection empty/);
+}, fixtureDeadlineS(300) * 1000);

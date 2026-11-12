@@ -10,6 +10,8 @@ verdict's shape: a stamped `git archive` of the HEAD commit with the judged inde
 overlaid, a fresh `git init -q` (no history), a long TMPDIR under the export's
 var/agent-tmp, each file through `heavy`. A
 failing file is REFUSED EXPORT_TEST_FAILED naming it. Absent --tests no test runs.
+--tests affected (PREFLIGHTAFFECTED1) selects the files the push gate's affected-test stage
+would run for the staged paths (scripts/affected-tests.ts) and runs those the same way.
 """
 import argparse
 import json
@@ -77,6 +79,24 @@ def required(argv, env=None):
     return result.stdout
 
 
+def affected_tests(root: Path, env: dict) -> list:
+    """PREFLIGHTAFFECTED1: `--tests affected` selects what the push gate will run, with the gate's own
+    selector (scripts/affected-tests.ts) over every staged path, so a builder sees the gate's failures
+    before the land does instead of after it."""
+    changed = [os.fsdecode(raw) for raw in
+               required(['git', 'diff', '--cached', '--name-only', '-z'], env).split(b'\0') if raw]
+    if not changed:
+        return []
+    argv = ['bun', 'run', '--no-env-file', '--config=/dev/null', str(HERE / 'affected-tests.ts'), '--root', str(root)]
+    for path in changed:
+        argv += ['--changed-file', path]
+    result = run(argv, deadline_s=120, grace_s=0.2, max_output_bytes=8 * 1024 * 1024, env=env, cwd=str(root))
+    if result.timed_out or result.truncated or result.rc:
+        raise RuntimeError('affected-test selection failed: ' + result.stderr.decode(errors='replace').strip())
+    sys.stderr.write(result.stderr.decode(errors='replace'))
+    return [line for line in result.stdout.decode().splitlines() if line.strip()]
+
+
 def note_has_added_line(stdout, env):
     """Use the native judge's selected fragment; do not reimplement bead/waiver parsing."""
     try:
@@ -126,8 +146,11 @@ def installed_checks(root: Path, env: dict) -> tuple[list, int]:
 EXPORT_DIR = 'fresh-gate.export-test.' + '0' * 24 + '/archive'
 
 
-def export_tests(tests: list, env: dict, root: Path) -> int:
+def export_tests(tests: list, env: dict, root: Path, workers: int = 1) -> int:
     """Run each test file in an exact export of the judged index; return failures.
+
+    workers > 1 (the `--tests affected` selection) runs each runner's files as one stage with that
+    many workers, as fresh-gate's run_affected_tests does; workers == 1 keeps one stage per file.
 
     EXPORTPARITY1: the export has the gate/verdict layout. Like fresh-gate's
     make_work it lives under the repository's var/agent-tmp, never the system
@@ -139,10 +162,10 @@ def export_tests(tests: list, env: dict, root: Path) -> int:
     parent = root / 'var' / 'agent-tmp'
     parent.mkdir(parents=True, exist_ok=True)
     with owned_tmp('commit-preflight-export', root=str(parent)) as owned:
-        return run_export_tests(tests, env, Path(owned), root)
+        return run_export_tests(tests, env, Path(owned), root, workers)
 
 
-def run_export_tests(tests: list, env: dict, scratch: Path, root: Path) -> int:
+def run_export_tests(tests: list, env: dict, scratch: Path, root: Path, workers: int = 1) -> int:
     head = required(['git', 'rev-parse', '--verify', 'HEAD^{commit}'], env).decode().strip()
     archive = scratch / EXPORT_DIR
     archive.mkdir(parents=True)
@@ -189,36 +212,62 @@ def run_export_tests(tests: list, env: dict, scratch: Path, root: Path) -> int:
     tree = required(['git', 'write-tree'], env).decode().strip()
     bun_config = archive / 'bunfig.toml'
     failures = 0
-    for index, path in enumerate(tests):
-        name = 'export-test:' + path
-        print('== ' + name + ' (export ' + str(archive) + ')', flush=True)
-        if not (archive / path).is_file():
+    present = []
+    for path in tests:
+        if (archive / path).is_file():
+            present.append(path)
+        else:
             failures += 1
             print('REFUSED EXPORT_TEST_FAILED ' + path + ': not in the exported tree (add it to --files)')
+    if workers > 1:
+        groups = [[path for path in present if path.endswith(('.test.sh', '.py'))],
+                  [path for path in present if not path.endswith(('.test.sh', '.py'))]]
+    else:
+        groups = [[path] for path in present]
+    for index, group in enumerate(groups):
+        if not group:
             continue
+        runner = 'scripts' if group[0].endswith(('.test.sh', '.py')) else 'bun'
+        print('== export-test:' + ' '.join(group) + ' (export ' + str(archive) + ')', flush=True)
         # The gate's own runner: fresh-gate's run_affected_tests stage, so bun gets
         # suite-metrics.py's flags (--timeout=120000, --config) and scripts its sh/python3 split.
         records = scratch / ('records-' + str(index))
+        summary = Path(str(records) + '.summary.json')
         stage = ['python3', str(HERE / 'suite-metrics.py'), 'stage',
-                 '--runner', 'scripts' if path.endswith(('.test.sh', '.py')) else 'bun',
+                 '--runner', runner,
                  '--records', str(records), '--cwd', str(archive), '--tree', tree,
-                 '--summary', str(records) + '.summary.json', '--workers', '1', '--deadline', '3600']
+                 '--summary', str(summary), '--workers', str(min(workers, len(group))), '--deadline', '3600']
         if bun_config.is_file():
             stage += ['--bun-config', str(bun_config)]
         # Heavy lane exactly as fresh-gate's heavy_step: the gate's own cli.
         argv = ['bun', 'run', '--no-env-file', '--config=/dev/null', str(cli), 'heavy',
                 '--label', 'commit-preflight-export-test', '--disk-observer', 'statfs', '--',
-                'env', 'PATH=' + test_env.get('PATH', ''), *stage, path]
+                'env', 'PATH=' + test_env.get('PATH', ''), *stage, *group]
         result = run(argv, deadline_s=3700, grace_s=5, max_output_bytes=8 * 1024 * 1024,
                      env=test_env, cwd=str(archive))
         sys.stdout.write(result.stdout.decode(errors='replace'))
         sys.stdout.write(result.stderr.decode(errors='replace'))
-        if result.rc or result.timed_out or result.truncated:
-            failures += 1
-            why = 'timed out' if result.timed_out else 'output truncated' if result.truncated else 'exit ' + str(result.rc)
-            print('REFUSED EXPORT_TEST_FAILED ' + path + ' (' + why + ')')
-        else:
-            print('PASS ' + name)
+        rows = []
+        if len(group) > 1 and summary.is_file():
+            try:
+                rows = json.loads(summary.read_text()).get('files') or []
+            except (OSError, ValueError):
+                rows = []
+        for position, path in enumerate(group):
+            row = rows[position] if len(group) > 1 and len(rows) == len(group) else None
+            if row is not None and row.get('path') == path and not result.timed_out and not result.truncated:
+                # A row whose output never proved a run is not a pass even with rc 0; a row with no
+                # completeness fact passes only when the whole stage did.
+                ok = row.get('rc') == 0 and (row.get('complete') is True or (row.get('complete') is None and result.rc == 0))
+                why = 'incomplete run' if row.get('complete') is False else 'exit ' + str(row.get('rc'))
+            else:
+                ok = not (result.rc or result.timed_out or result.truncated)
+                why = 'timed out' if result.timed_out else 'output truncated' if result.truncated else 'exit ' + str(result.rc)
+            if ok:
+                print('PASS export-test:' + path)
+            else:
+                failures += 1
+                print('REFUSED EXPORT_TEST_FAILED ' + path + ' (' + why + ')')
     return failures
 
 
@@ -339,13 +388,27 @@ def main():
                 failures += 1
                 remedy = '; require Docker and cached engine: docker pull koalaman/shellcheck:v0.9.0' if name.startswith('shellcheck:') else ''
                 print('UNJUDGED ' + name + ': ' + str(error) + remedy)
+        workers = 1
+        if args.tests == ['affected']:
+            # fresh-gate's test_workers: a quarter of the online cores, 2..4.
+            workers = min(4, max(2, (os.cpu_count() or 4) // 4))
+            try:
+                args.tests = affected_tests(root, env)
+                print('affected tests selected: ' + (' '.join(args.tests) or 'none'), flush=True)
+            except (OSError, RuntimeError) as error:
+                failures += 1
+                args.tests = []
+                print('UNJUDGED affected-tests: ' + str(error))
         if args.tests:
             try:
-                failures += export_tests(args.tests, env, root)
+                failures += export_tests(args.tests, env, root, workers)
             except (OSError, RuntimeError) as error:
                 failures += 1
                 print('UNJUDGED export-tests: ' + str(error))
             print(f'commit-preflight: {len(checks)} checks, {failures} refused/unjudged, {time.monotonic() - started:.2f}s; {len(args.tests)} export test file(s) run; no fresh gate run')
+        elif workers > 1:
+            # PREFLIGHTAFFECTED1: the gate selects nothing for these paths, so there is nothing to run.
+            print(f'commit-preflight: {len(checks)} checks, {failures} refused/unjudged, {time.monotonic() - started:.2f}s; 0 export test file(s) run; affected selection empty')
         else:
             print(f'commit-preflight: {len(checks)} checks, {failures} refused/unjudged, {time.monotonic() - started:.2f}s; no fresh gate or tests run')
         if not args.message:

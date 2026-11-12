@@ -59,7 +59,7 @@ test("BRIEFSTABLE1 brief derives required rules from installed members and sourc
 	}
 	const contract = await briefContract(repo, execute);
 	const text = renderBrief(contract);
-	for (const requirement of ["runFixtureAsync", "ownedTmp", "fixtureDeadlineS", "br-init", "schema-compat", "Supersedes", "live scenario coverage", "exports are read-only", "changelog.d/<bead-without-ompkit-prefix>", "commit-preflight.sh --files", "--tests <changed test files>"]) expect(text).toContain(requirement);
+	for (const requirement of ["runFixtureAsync", "ownedTmp", "fixtureDeadlineS", "br-init", "schema-compat", "Supersedes", "live scenario coverage", "exports are read-only", "changelog.d/<bead-without-ompkit-prefix>", "commit-preflight.sh --files", "--tests affected"]) expect(text).toContain(requirement);
 	expect(contract.rules.every(rule => rule.member.length > 0 && rule.refuses.length > 0 && rule.compliant.length > 0)).toBe(true);
 	expect(contract.installed).toBe(true);
 	expect(text.split("\n").at(-1)).toBe(contract.marker);
