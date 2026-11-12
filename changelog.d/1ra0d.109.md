@@ -1,1 +1,0 @@
-- The external-live release check waits up to 30 s (was 5 s) for its mock model server to report a port, so a loaded host no longer fails the release verdict with `MOCK_SERVER_START_TIMEOUT`; a server that exits still fails at once.

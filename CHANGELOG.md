@@ -4,6 +4,24 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.122] - 2026-11-12
+
+### Changed
+
+- The external-live release check waits up to 30 s (was 5 s) for its mock model server to report a port, so a loaded host no longer fails the release verdict with `MOCK_SERVER_START_TIMEOUT`; a server that exits still fails at once.
+- `omp-kit imessage poll` accepts a Tern lead seat: `pane: "tern:<id>"` in the `imessage` object now delivers through the Tern send path with the new optional `cwd` and `project` keys (seat working directory and Agent Mail identity project, overridable via `OMP_KIT_IMESSAGE_CWD`/`OMP_KIT_IMESSAGE_PROJECT`), instead of refusing delivery to Tern panes.
+- A first `omp-kit imessage poll` with no cursor file starts at the current newest message and delivers nothing already there; only messages arriving after the bridge starts reach the seat.
+- `omp-kit imessage poll` follows the real newest-first history order: only rows newer than the cursor deliver, oldest-first, so a full window sliding forward no longer replays everything as `CURSOR_RESET`.
+- In self-chat mode each typed message delivers once: the received echo copy (same text within 2 s) is suppressed, and the reply-loop guard covers both copies of a bridge reply.
+- A dispatched native steer whose proof is still pending at the seat's next turn boundary is recorded as `QUEUED` and advances the cursor instead of failing delivery and re-steering the same message on the next tick.
+- A bash call with `timeout: 0` is no longer refused with `FINITE_JOB_NO_DEADLINE`: the guard patches the input to the kit default of 3600 s and admits the call with a `DEADLINEAUTO1` note naming the patched value and pointing at named service mode for real long-lived jobs. Unparsable timeouts still refuse `FINITE_JOB_DEADLINE_UNKNOWN`.
+- The fleet guard's seat scratch dir is now created by the kit's scratch ownership API (`createScratch`, the same one `omp-kit scratch new` uses) instead of an invented directory with a hand-written owner: the `.owner` record carries the process identity, a release capability, and the throwaway bin, so the reaper, the budget ledger, and root registration all know about it. The agent and its omp session are still recorded on the first tool call, once. When the owned dir cannot be created, the guard fails closed to today's refusals with no session hint and no completion.
+- A release no longer stops at preflight when the previous install left a pending kit-update receipt after activating the release: preflight now re-runs the updater's own proof (`omp-kit update --reconcile <id> --yes`, which re-verifies the recorded postimage before clearing the receipt) and proceeds only on its `RECONCILED` verdict. A receipt whose postimages do not verify keeps the existing `RELPENDING1` refusal, so the next release no longer needs a manual reconcile for a false postcheck.
+- The kit-update postcheck no longer reports `PARTIAL` when a live seat rewrites its own runtime state during the update: `goal-state/` records, `jobs/imessage-bridge.*` relay files, `send-locks/` and `tern-pending/` are now classed as live-writer state alongside `gate-events.jsonl` and `inbox-wake/*`, so a successful update reports `UPDATED`. A write to any other path still fails the postcheck.
+- `scripts/release-local.sh` copies itself into its owned scratch and re-execs the copy exactly once at startup, so a landing that edits the checkout's file while a release runs can no longer break the running release with a mid-run syntax error.
+- `omp-kit verify` provisions every lockfile directory between the export root and a box's working directory, root first, instead of only the nearest one, so a workspace package with its own lockfile also gets the root install its `file:`/workspace dependencies need.
+- `omp-kit send` no longer suppresses every wake forever when a pending record's journal was replaced by a restart: the stale record is acknowledged itself (ledgered, never resent), a recovery copy is kept beside the drop folder, and the new send proceeds with a note in its result. A pending record whose journal session is still the seat's journal keeps suppressing until it is proven or hand-acknowledged.
+
 ## [0.2.121] - 2026-11-11
 
 ### Changed

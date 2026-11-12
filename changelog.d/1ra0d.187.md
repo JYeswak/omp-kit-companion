@@ -1,1 +1,0 @@
-- `scripts/release-local.sh` copies itself into its owned scratch and re-execs the copy exactly once at startup, so a landing that edits the checkout's file while a release runs can no longer break the running release with a mid-run syntax error.

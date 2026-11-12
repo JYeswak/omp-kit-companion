@@ -1,5 +1,0 @@
-- `omp-kit imessage poll` accepts a Tern lead seat: `pane: "tern:<id>"` in the `imessage` object now delivers through the Tern send path with the new optional `cwd` and `project` keys (seat working directory and Agent Mail identity project, overridable via `OMP_KIT_IMESSAGE_CWD`/`OMP_KIT_IMESSAGE_PROJECT`), instead of refusing delivery to Tern panes.
-- A first `omp-kit imessage poll` with no cursor file starts at the current newest message and delivers nothing already there; only messages arriving after the bridge starts reach the seat.
-- `omp-kit imessage poll` follows the real newest-first history order: only rows newer than the cursor deliver, oldest-first, so a full window sliding forward no longer replays everything as `CURSOR_RESET`.
-- In self-chat mode each typed message delivers once: the received echo copy (same text within 2 s) is suppressed, and the reply-loop guard covers both copies of a bridge reply.
-- A dispatched native steer whose proof is still pending at the seat's next turn boundary is recorded as `QUEUED` and advances the cursor instead of failing delivery and re-steering the same message on the next tick.
