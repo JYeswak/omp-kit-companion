@@ -378,7 +378,7 @@ function writeFakeOvnfs(fakeBin: string): void {
 	chmodSync(join(fakeBin, "ovnfs"), 0o755);
 }
 
-function checkoutSetup(work: string, names: { name: string; files: Record<string, string>; diff: { path: string; status: string }[] }[]): { lsJson: string; diffDir: string; rmLog: string } {
+function checkoutSetup(work: string, names: { name: string; files: Record<string, string>; diff: { path: string; status: string }[]; touched?: string }[]): { lsJson: string; diffDir: string; rmLog: string } {
 	const repo = git(work, ["rev-parse", "--show-toplevel"]).trim();
 	const rows = [];
 	const diffDir = join(scratch, `co-diff-${globalThis.fixtureNumber++}`);
@@ -393,7 +393,7 @@ function checkoutSetup(work: string, names: { name: string; files: Record<string
 			if (parts.length > 1) mkdirSync(join(coDir, ...parts.slice(0, -1)), { recursive: true });
 			writeFileSync(join(coDir, rel), content);
 		}
-		rows.push({ name: entry.name, path: coDir, source: repo, dirty: true, created: new Date().toISOString(), touched: new Date().toISOString() });
+		rows.push({ name: entry.name, path: coDir, source: repo, dirty: true, created: new Date().toISOString(), touched: entry.touched ?? new Date().toISOString() });
 		writeFileSync(join(diffDir, `${entry.name}.json`), JSON.stringify({ changes: entry.diff }));
 	}
 	return { lsJson: JSON.stringify({ checkouts: rows }), diffDir, rmLog };
@@ -421,7 +421,7 @@ function ovnfsEnv(setup: { lsJson: string; diffDir: string; rmLog: string }, fai
 	return { OVNFS_LS_JSON: setup.lsJson, OVNFS_DIFF_DIR: setup.diffDir, OVNFS_RM_LOG: setup.rmLog, OVNFS_FAIL: fail, OVNFS_SLEEP_S: sleepS };
 }
 
-test("CHECKOUTRETAIN1 report-only without --checkout reports the match and removes nothing", () => {
+test("LANDREAPDEFAULT1 default without --checkout removes the unnamed fully-landed checkout", () => {
 	const { work, fakeBin } = fixture();
 	writeFileSync(join(work, "owned.txt"), "base owned\nowner change\n");
 	const setup = checkoutSetup(work, [
@@ -431,13 +431,107 @@ test("CHECKOUTRETAIN1 report-only without --checkout reports the match and remov
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin, gitEnv: ovnfsEnv(setup) });
 	expect(run.status, JSON.stringify(run.body)).toBe(0);
-	const data = run.body.data as { overall: string; ovnfs: string; checkoutScan: string; checkoutsRemoved: string[]; checkoutsMatching: string[]; checkout_text: string };
+	const data = run.body.data as { overall: string; ovnfs: string; checkoutScan: string; checkoutsRemoved: string[]; checkoutsKept: unknown[]; checkoutsMatching: string[]; checkout_text: string };
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("PUSHED");
+	expect(data.checkoutsRemoved).toEqual(["co-report"]);
+	expect(data.checkoutsKept).toEqual([]);
+	expect(data.checkoutsMatching).toEqual(["co-report"]);
+	expect(data.checkout_text).toContain("Removed ovnfs checkout");
+	expect(data.checkout_text).toContain("co-report");
+	expect(rmLogNames(setup.rmLog)).toEqual(["co-report"]);
+});
+
+test("LANDREAPDEFAULT1 default keeps the unnamed checkout with one extra unlanded change", () => {
+	const { work, fakeBin } = fixture();
+	writeFileSync(join(work, "owned.txt"), "base owned\nowner change\n");
+	const setup = checkoutSetup(work, [
+		{ name: "co-extra", files: { "owned.txt": "base owned\nowner change\n", "extra.txt": "extra\n" }, diff: [{ path: "owned.txt", status: "M" }, { path: "extra.txt", status: "A" }] },
+	]);
+	writeFakeOvnfs(fakeBin);
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin, gitEnv: ovnfsEnv(setup) });
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	const data = run.body.data as { overall: string; checkoutsRemoved: string[]; checkoutsKept: { name: string; unappliedPaths: string[] }[]; checkoutsMatching: string[]; checkout_text: string };
 	expectLandSchema(run.body.data);
 	expect(data.overall).toBe("PUSHED");
 	expect(data.checkoutsRemoved).toEqual([]);
-	expect(data.checkoutsMatching).toEqual(["co-report"]);
-	expect(data.checkout_text).toContain("ovnfs rm co-report");
+	expect(data.checkoutsKept.length).toBe(1);
+	expect(data.checkoutsKept[0]!.name).toBe("co-extra");
+	expect(data.checkoutsKept[0]!.unappliedPaths).toEqual(["extra.txt"]);
+	expect(data.checkoutsMatching).toEqual(["co-extra"]);
+	expect(data.checkout_text).toContain("Kept co-extra");
 	expect(rmLogNames(setup.rmLog)).toEqual([]);
+});
+
+test("LANDREAPDEFAULT1 --keep-checkout keeps both the fully-landed and the extra-change checkout", () => {
+	const { work, fakeBin } = fixture();
+	writeFileSync(join(work, "owned.txt"), "base owned\nowner change\n");
+	const setup = checkoutSetup(work, [
+		{ name: "co-clean", files: { "owned.txt": "base owned\nowner change\n" }, diff: [{ path: "owned.txt", status: "M" }] },
+		{ name: "co-extra", files: { "owned.txt": "base owned\nowner change\n", "extra.txt": "extra\n" }, diff: [{ path: "owned.txt", status: "M" }, { path: "extra.txt", status: "A" }] },
+	]);
+	writeFakeOvnfs(fakeBin);
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, [...landArgs("owned.txt"), "--keep-checkout"], hold, { amDir: fakeBin, gitEnv: ovnfsEnv(setup) });
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	const data = run.body.data as { overall: string; checkoutsRemoved: string[]; checkoutsKept: unknown[]; checkoutsMatching: string[]; checkout_text: string };
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("PUSHED");
+	expect(data.checkoutsRemoved).toEqual([]);
+	expect(data.checkoutsKept).toEqual([]);
+	expect(data.checkoutsMatching).toEqual([]);
+	expect(data.checkout_text).toContain("--keep-checkout");
+	expect(rmLogNames(setup.rmLog)).toEqual([]);
+});
+
+test("LANDREAPDEFAULT1 default removes an old fully-landed checkout regardless of touch age", () => {
+	const { work, fakeBin } = fixture();
+	writeFileSync(join(work, "owned.txt"), "base owned\nowner change\n");
+	const setup = checkoutSetup(work, [
+		{ name: "co-old", files: { "owned.txt": "base owned\nowner change\n" }, diff: [{ path: "owned.txt", status: "M" }], touched: "2020-01-01T00:00:00.000Z" },
+	]);
+	writeFakeOvnfs(fakeBin);
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin, gitEnv: ovnfsEnv(setup) });
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	const data = run.body.data as { overall: string; checkoutsRemoved: string[]; checkoutsMatching: string[]; checkout_text: string };
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("PUSHED");
+	expect(data.checkoutsRemoved).toEqual(["co-old"]);
+	expect(data.checkoutsMatching).toEqual(["co-old"]);
+	expect(data.checkout_text).toContain("co-old");
+	expect(rmLogNames(setup.rmLog)).toEqual(["co-old"]);
+});
+
+test("LANDREAPDEFAULT1 late final deadline is TIMED_OUT with no rm", () => {
+	const { work, fakeBin } = fixture();
+	writeFileSync(join(work, "owned.txt"), "base owned\nowner change\n");
+	const setup = checkoutSetup(work, [
+		{ name: "co-slow-recheck", files: { "owned.txt": "base owned\nowner change\n" }, diff: [{ path: "owned.txt", status: "M" }] },
+	]);
+	writeFakeOvnfs(fakeBin);
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	// Each diff fits its own 2 s deadline; together the reads exceed the 2.5 s
+	// total budget, so the final gate keeps the checkout and the scan is TIMED_OUT.
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin, gitEnv: ovnfsEnv(setup, "", "1.5") });
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	const data = run.body.data as { overall: string; checkoutScan: string; checkoutsRemoved: string[]; checkoutsKept: { name: string; unappliedPaths: string[] }[]; checkoutsMatching: string[] };
+	expectLandSchema(run.body.data);
+	expect(data.overall).toBe("PUSHED");
+	expect(data.checkoutScan).toBe("TIMED_OUT");
+	expect(data.checkoutsRemoved).toEqual([]);
+	expect(data.checkoutsKept.length).toBe(1);
+	expect(data.checkoutsKept[0]!.name).toBe("co-slow-recheck");
+	expect(data.checkoutsKept[0]!.unappliedPaths).toEqual(["<rm-timeout>"]);
+	expect(data.checkoutsMatching).toEqual(["co-slow-recheck"]);
+	expect(rmLogNames(setup.rmLog)).toEqual([]);
+});
+
+test("LANDREAPDEFAULT1 planted: the report-only default is gone from the reaper", () => {
+	const source = readFileSync(join(repoRoot, "src", "ovnfs-checkouts.ts"), "utf8");
+	expect(source).not.toContain("not removed without --checkout");
+	expect(source).toContain("judgeAndRemoveRow");
 });
 
 test("CHECKOUTRETAIN1 named --checkout removes the matching checkout", () => {
@@ -674,13 +768,20 @@ test("CHECKOUTRETAIN1 scan timeout is fail-open (TIMED_OUT, PUSHED)", () => {
 	]);
 	writeFakeOvnfs(fakeBin);
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
-	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin, gitEnv: ovnfsEnv(setup, "", "1") });
+	// Each diff sleeps past the 2 s diff deadline, so every assessed row is kept
+	// with <diff-unavailable> and the sweep stops at its budget: TIMED_OUT,
+	// PUSHED, nothing removed. The kept count (1 or 2) depends on kill timing,
+	// so only its shape is pinned.
+	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin, gitEnv: ovnfsEnv(setup, "", "3") });
 	expect(run.status, JSON.stringify(run.body)).toBe(0);
-	const data = run.body.data as { overall: string; checkoutScan: string; checkoutsRemoved: string[] };
+	const data = run.body.data as { overall: string; checkoutScan: string; checkoutsRemoved: string[]; checkoutsKept: { name: string; unappliedPaths: string[] }[]; checkoutsMatching: string[] };
 	expectLandSchema(run.body.data);
 	expect(data.overall).toBe("PUSHED");
 	expect(data.checkoutScan).toBe("TIMED_OUT");
 	expect(data.checkoutsRemoved).toEqual([]);
+	expect(data.checkoutsKept.length).toBeGreaterThanOrEqual(1);
+	for (const kept of data.checkoutsKept) expect(kept.unappliedPaths).toEqual(["<diff-unavailable>"]);
+	expect(data.checkoutsMatching).toEqual([]);
 });
 
 test("CHECKOUTRETAIN1 dry run removes nothing", () => {

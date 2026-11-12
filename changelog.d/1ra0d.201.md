@@ -1,0 +1,1 @@
+- `land` now removes every matching ovnfs checkout whose whole diff was published, without needing `--checkout`; a checkout with any further change is kept and named, and `--keep-checkout` keeps all checkouts.

@@ -26,7 +26,7 @@ execution is `UNRUN`.
 Failed admission does not publish, and an origin advance after checking
 is refused without force or retry. `UNRUN` means admission or publication could
 not be verified. `SKIP` does not prove that a full suite passed.
-On `PUSHED`, land removes only the named ovnfs checkout (`--checkout NAME`, or `land --patch` when the patch file lies inside a checkout's path) after re-checking its diff and bytes plus modes right before `ovnfs rm`; without a name it only reports matches with their `ovnfs rm` lines and removes nothing. All files inside a removed checkout, including untracked and ignored ones, are removed with it. Pass `--keep-checkout` to keep even the named checkout; `ovnfs rm <name>` is for abandoned ones.
+On `PUSHED`, land removes every matching ovnfs checkout whose whole diff was published, after re-checking its diff and bytes plus modes right before `ovnfs rm`; `--checkout NAME` (or `land --patch` when the patch file lies inside a checkout's path) pins the removal to one checkout, and a checkout with any further change is kept and named. All files inside a removed checkout, including untracked and ignored ones, are removed with it. Pass `--keep-checkout` to keep all checkouts; `ovnfs rm <name>` is for abandoned ones.
 
 | Result | Exit | Meaning |
 |---|---|---|

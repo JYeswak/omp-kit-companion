@@ -557,8 +557,8 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--message", value: "MSG", aliases: ["-m"], description: "Commit message for the shared-main commit" },
 		{ name: "--apply", description: "Request owner-bound save and publication" },
 		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
-		{ name: "--checkout", value: "NAME", description: "Remove only this named ovnfs checkout after publishing; without it land only reports matches" },
-		{ name: "--keep-checkout", description: "Keep the named ovnfs checkout instead of removing it after publishing" },
+		{ name: "--checkout", value: "NAME", description: "Pin checkout removal to this named ovnfs checkout after publishing; without it land removes every matching checkout whose whole diff was published" },
+		{ name: "--keep-checkout", description: "Keep all ovnfs checkouts instead of removing fully-landed matches after publishing" },
 	], example: "omp-kit land --paths src/a.ts --message 'fix: x [pending]' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
 	{ name: "push-check", description: "Run the repo's committed .omp/push-check against a commit and record the verdict the author handoff reads", usage: "push-check --commit SHA [--repo PATH]", flags: [
 		{ name: "--commit", value: "SHA", description: "Commit whose tree the HEAD push-check runs against" },

@@ -3,10 +3,13 @@ import { resolve } from "node:path";
 import { runSync, type RunResult } from "./kitlib/run.ts";
 
 /**
- * CHECKOUTRETAIN1 (ompkit-1ra0d.147): after a successful land publication,
- * land removes a checkout ONLY when it is named: `--checkout NAME`, or for
- * `land --patch` when the patch file lies inside a checkout's path.
- * Without a name, land only reports matching checkouts (never removes).
+ * LANDREAPDEFAULT1 (ompkit-1ra0d.201): after a successful land publication,
+ * land removes every matching checkout whose ENTIRE diff against its base is
+ * contained in what was just published, unless `--keep-checkout` is passed.
+ * `--checkout NAME` (or, for `land --patch`, a patch file inside a checkout's
+ * path) pins the removal to one checkout; a checkout with any further change
+ * is kept and named. The single judge is `judgeAndRemoveRow`, shared by the
+ * named path and the default unnamed sweep.
  */
 
 export const OVNFS_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -351,36 +354,6 @@ function pathMatchesLanded(repo: string, checkoutRoot: string, path: string, lan
   return true;
 }
 
-function checkoutIsMatching(repo: string, row: OvnfsCheckoutRow, landedSet: Set<string>, landedRev: string): boolean | null {
-  const diff = diffOvnfsCheckout(repo, row.name);
-  if ("unavailable" in diff) return null;
-  if ("unhandled" in diff) return false;
-  const validPaths = diff.changes.map((change) => change.path).filter(isValidDiffPath);
-  if (validPaths.length !== diff.changes.length) return false;
-  if (validPaths.length === 0) return false;
-  for (const path of validPaths) {
-    if (pathEscapesCheckout(row.path, path) === "escapes") return false;
-  }
-  const unapplied = validPaths.filter((path) => !landedSet.has(path));
-  if (unapplied.length > 0) {
-    if (visibleUnapplied(repo, unapplied).length > 0) return false;
-    let allIgnored = true;
-    for (const path of validPaths) {
-      if (gitCheckIgnored(repo, path) !== true) {
-        allIgnored = false;
-        break;
-      }
-    }
-    if (allIgnored) return false;
-  }
-  for (const path of validPaths) {
-    if (!landedSet.has(path)) continue;
-    const match = pathMatchesLanded(repo, row.path, path, landedRev);
-    if (match !== true) return match === null ? null : false;
-  }
-  return true;
-}
-
 function findPatchCheckout(rows: OvnfsCheckoutRow[], repo: string, patchFile: string): OvnfsCheckoutRow | null {
   let best: OvnfsCheckoutRow | null = null;
   for (const row of rows) {
@@ -399,8 +372,115 @@ function findPatchCheckout(rows: OvnfsCheckoutRow[], repo: string, patchFile: st
   return best;
 }
 
+type RowReap = {
+  removed: string[];
+  kept: OvnfsKept[];
+  matching: string[];
+  /** The row's diff overlaps at least one landed path (or the rm itself was attempted). */
+  overlaps: boolean;
+  scan: CheckoutScanStatus;
+  /** Single-checkout sentence; empty when the row is unrelated to this land. */
+  note: string;
+};
+
 /**
- * Named removal with re-check before rm, or report-only matching scan.
+ * LANDREAPDEFAULT1 (ompkit-1ra0d.201): the single safety judge for one
+ * checkout row, shared by the named path and the default unnamed sweep.
+ * A row is removable only when its ENTIRE diff against its base is contained
+ * in what was just published (no further unlanded change, no untracked
+ * non-ignored file: both surface as unapplied diff paths), every landed
+ * path still matches the published bytes plus modes, and a re-check right
+ * before `ovnfs rm` sees the same diff and bytes. Anything else is kept and
+ * named. Never throws; fail-open keeps the land PUSHED.
+ */
+function judgeAndRemoveRow(args: {
+  repo: string;
+  row: OvnfsCheckoutRow;
+  landedSet: Set<string>;
+  landedRev: string;
+  started: number;
+  budgetMs: number;
+  isNamed: boolean;
+}): RowReap {
+  const { repo, row, landedSet, landedRev, started, budgetMs, isNamed } = args;
+  const clean = (note: string): RowReap => ({ removed: [], kept: [], matching: [], overlaps: false, scan: "OK", note });
+  const keep = (unappliedPaths: string[], note: string, opts?: { matching?: string[]; overlaps?: boolean; scan?: CheckoutScanStatus }): RowReap => ({
+    removed: [],
+    kept: [{ name: row.name, unappliedPaths }],
+    matching: opts?.matching ?? [],
+    overlaps: opts?.overlaps ?? false,
+    scan: opts?.scan ?? "OK",
+    note,
+  });
+  const noChangesNote = isNamed ? `Named checkout ${row.name} has no changes; nothing removed.` : "";
+  if (!row.dirty) return clean(noChangesNote);
+  const first = diffOvnfsCheckout(repo, row.name);
+  if ("unavailable" in first) {
+    return keep(["<diff-unavailable>"], `Kept ${row.name}: checkout diff unreadable before rm.`);
+  }
+  if ("unhandled" in first) {
+    return keep(["<unhandled-diff-shape>"], `Kept ${row.name}: unhandled diff shape.`);
+  }
+  const validPaths = first.changes.map((change) => change.path).filter(isValidDiffPath);
+  if (validPaths.length !== first.changes.length) {
+    return keep(["<invalid-path>"], `Kept ${row.name}: invalid diff path.`);
+  }
+  if (validPaths.length === 0) return clean(noChangesNote);
+  for (const path of validPaths) {
+    if (pathEscapesCheckout(row.path, path) === "escapes") {
+      return keep(["<path-escapes-checkout>"], `Kept ${row.name}: a checkout path resolves outside the checkout root.`);
+    }
+  }
+  if (!validPaths.some((path) => landedSet.has(path))) return clean("");
+  const unapplied = validPaths.filter((path) => !landedSet.has(path));
+  const visible = visibleUnapplied(repo, unapplied);
+  if (visible.length > 0) {
+    return keep(visible, `Kept ${row.name} with further changes: ${visible.join(", ")}.`, { overlaps: true });
+  }
+  for (const path of validPaths) {
+    if (!landedSet.has(path)) continue;
+    const match = pathMatchesLanded(repo, row.path, path, landedRev);
+    if (match !== true) {
+      return keep([path], `Kept ${row.name}: ${path} differs (bytes or mode).`, { overlaps: true });
+    }
+  }
+  if (performance.now() - started > budgetMs) {
+    return keep(["<recheck-timeout>"], `Kept ${row.name}: re-check timed out before rm.`, { overlaps: true, scan: "TIMED_OUT" });
+  }
+  const second = diffOvnfsCheckout(repo, row.name);
+  if ("unavailable" in second || ("unhandled" in second)) {
+    return keep(["<recheck-unavailable>"], `Kept ${row.name}: re-check diff unreadable before rm.`, { overlaps: true });
+  }
+  if (!sameDiff(first.changes, second.changes)) {
+    return keep(["<changed-before-rm>"], `Kept ${row.name}: checkout changed before rm.`, { overlaps: true });
+  }
+  for (const path of validPaths) {
+    if (!landedSet.has(path)) continue;
+    const match = pathMatchesLanded(repo, row.path, path, landedRev);
+    if (match !== true) {
+      return keep([path], `Kept ${row.name}: ${path} changed before rm.`, { overlaps: true });
+    }
+  }
+  // The final reads above cost wall-clock too: re-check the TOTAL budget
+  // after them, immediately before `ovnfs rm`.
+  if (performance.now() - started > budgetMs) {
+    return keep(["<rm-timeout>"], `Kept ${row.name}: sweep budget expired before rm.`, { overlaps: true, scan: "TIMED_OUT" });
+  }
+  if (removeCheckout(repo, row.name)) {
+    return {
+      removed: [row.name],
+      kept: [],
+      matching: [row.name],
+      overlaps: true,
+      scan: "OK",
+      note: `Removed ovnfs checkout ${row.name}.`,
+    };
+  }
+  return keep(["<rm-failed>"], `Kept ${row.name}: rm failed. Land stays PUSHED; remove it with \`ovnfs rm ${row.name}\`.`, { matching: [row.name], overlaps: true });
+}
+
+/**
+ * Named removal, or the default sweep removing every fully-landed match.
  * Never throws; fail-open keeps the land PUSHED.
  */
 export function reapLandedCheckouts(input: {
@@ -426,7 +506,7 @@ export function reapLandedCheckouts(input: {
       checkoutsRemoved: [],
       checkoutsKept: [],
       checkoutsMatching: [],
-      checkout_text: "Checkout retention skipped (--keep-checkout); land removes only the named checkout it landed, `ovnfs rm <name>` is for abandoned ones.",
+      checkout_text: "Checkout retention skipped (--keep-checkout); without it land removes every matching checkout whose whole diff was published, `ovnfs rm <name>` is for abandoned ones.",
     });
   }
   if (landedSet.size === 0 || input.landedRev.trim().length === 0) {
@@ -469,7 +549,7 @@ export function reapLandedCheckouts(input: {
         checkoutsRemoved: [],
         checkoutsKept: [{ name: input.namedCheckout, unappliedPaths: ["<invalid-name>"] }],
         checkoutsMatching: [],
-        checkout_text: `Named checkout ${input.namedCheckout} is not a valid ovnfs name; nothing removed. Land removes only the named checkout it landed; \`ovnfs rm <name>\` is for abandoned ones.`,
+        checkout_text: `Named checkout ${input.namedCheckout} is not a valid ovnfs name; nothing removed. Land removes every matching checkout whose whole diff was published; \`ovnfs rm <name>\` is for abandoned ones.`,
       });
     }
     namedRow = sameRepo.find((row) => row.name === input.namedCheckout) ?? null;
@@ -488,168 +568,23 @@ export function reapLandedCheckouts(input: {
   }
   if (namedRow !== null) {
     const row = namedRow;
-    if (!row.dirty) {
-      return done({
-        ovnfs: "present",
-        checkoutScan: "OK",
-        checkoutsRemoved: [],
-        checkoutsKept: [],
-        checkoutsMatching: [],
-        checkout_text: `Named checkout ${row.name} has no changes; nothing removed.`,
-      });
-    }
-    const first = diffOvnfsCheckout(repo, row.name);
-    if ("unavailable" in first) {
-      return done({
-        ovnfs: "present",
-        checkoutScan: "OK",
-        checkoutsRemoved: [],
-        checkoutsKept: [{ name: row.name, unappliedPaths: ["<diff-unavailable>"] }],
-        checkoutsMatching: [],
-        checkout_text: `Kept ${row.name}: checkout diff unreadable before rm.`,
-      });
-    }
-    if ("unhandled" in first) {
-      return done({
-        ovnfs: "present",
-        checkoutScan: "OK",
-        checkoutsRemoved: [],
-        checkoutsKept: [{ name: row.name, unappliedPaths: ["<unhandled-diff-shape>"] }],
-        checkoutsMatching: [],
-        checkout_text: `Kept ${row.name}: unhandled diff shape.`,
-      });
-    }
-    const validPaths = first.changes.map((change) => change.path).filter(isValidDiffPath);
-    if (validPaths.length !== first.changes.length) {
-      return done({
-        ovnfs: "present",
-        checkoutScan: "OK",
-        checkoutsRemoved: [],
-        checkoutsKept: [{ name: row.name, unappliedPaths: ["<invalid-path>"] }],
-        checkoutsMatching: [],
-        checkout_text: `Kept ${row.name}: invalid diff path.`,
-      });
-    }
-    if (validPaths.length === 0) {
-      return done({
-        ovnfs: "present",
-        checkoutScan: "OK",
-        checkoutsRemoved: [],
-        checkoutsKept: [],
-        checkoutsMatching: [],
-        checkout_text: `Named checkout ${row.name} has no changes; nothing removed.`,
-      });
-    }
-    for (const path of validPaths) {
-      if (pathEscapesCheckout(row.path, path) === "escapes") {
-        return done({
-          ovnfs: "present",
-          checkoutScan: "OK",
-          checkoutsRemoved: [],
-          checkoutsKept: [{ name: row.name, unappliedPaths: ["<path-escapes-checkout>"] }],
-          checkoutsMatching: [],
-          checkout_text: `Kept ${row.name}: a checkout path resolves outside the checkout root.`,
-        });
-      }
-    }
-    const unapplied = validPaths.filter((path) => !landedSet.has(path));
-    if (unapplied.length > 0 && visibleUnapplied(repo, unapplied).length > 0) {
-      return done({
-        ovnfs: "present",
-        checkoutScan: "OK",
-        checkoutsRemoved: [],
-        checkoutsKept: [{ name: row.name, unappliedPaths: visibleUnapplied(repo, unapplied) }],
-        checkoutsMatching: [],
-        checkout_text: `Kept ${row.name} with further changes: ${visibleUnapplied(repo, unapplied).join(", ")}.`,
-      });
-    }
-    for (const path of validPaths) {
-      if (!landedSet.has(path)) continue;
-      const match = pathMatchesLanded(repo, row.path, path, input.landedRev);
-      if (match !== true) {
-        return done({
-          ovnfs: "present",
-          checkoutScan: "OK",
-          checkoutsRemoved: [],
-          checkoutsKept: [{ name: row.name, unappliedPaths: [path] }],
-          checkoutsMatching: [],
-          checkout_text: `Kept ${row.name}: ${path} differs (bytes or mode).`,
-        });
-      }
-    }
-    if (performance.now() - started > budgetMs) {
-      return done({
-        ovnfs: "present",
-        checkoutScan: "TIMED_OUT",
-        checkoutsRemoved: [],
-        checkoutsKept: [{ name: row.name, unappliedPaths: ["<recheck-timeout>"] }],
-        checkoutsMatching: [],
-        checkout_text: `Kept ${row.name}: re-check timed out before rm.`,
-      });
-    }
-    const second = diffOvnfsCheckout(repo, row.name);
-    if ("unavailable" in second || ("unhandled" in second)) {
-      return done({
-        ovnfs: "present",
-        checkoutScan: "OK",
-        checkoutsRemoved: [],
-        checkoutsKept: [{ name: row.name, unappliedPaths: ["<recheck-unavailable>"] }],
-        checkoutsMatching: [],
-        checkout_text: `Kept ${row.name}: re-check diff unreadable before rm.`,
-      });
-    }
-    if (!sameDiff(first.changes, second.changes)) {
-      return done({
-        ovnfs: "present",
-        checkoutScan: "OK",
-        checkoutsRemoved: [],
-        checkoutsKept: [{ name: row.name, unappliedPaths: ["<changed-before-rm>"] }],
-        checkoutsMatching: [],
-        checkout_text: `Kept ${row.name}: checkout changed before rm.`,
-      });
-    }
-    for (const path of validPaths) {
-      if (!landedSet.has(path)) continue;
-      const match = pathMatchesLanded(repo, row.path, path, input.landedRev);
-      if (match !== true) {
-        return done({
-          ovnfs: "present",
-          checkoutScan: "OK",
-          checkoutsRemoved: [],
-          checkoutsKept: [{ name: row.name, unappliedPaths: [path] }],
-          checkoutsMatching: [],
-          checkout_text: `Kept ${row.name}: ${path} changed before rm.`,
-        });
-      }
-    }
-    if (removeCheckout(repo, row.name)) {
-      return done({
-        ovnfs: "present",
-        checkoutScan: "OK",
-        checkoutsRemoved: [row.name],
-        checkoutsKept: [],
-        checkoutsMatching: [row.name],
-        checkout_text: `Removed ovnfs checkout ${row.name}. All files inside it, including untracked and ignored ones, are removed with it; \`ovnfs rm <name>\` is for abandoned ones.`,
-      });
-    }
+    const verdict = judgeAndRemoveRow({ repo, row, landedSet, landedRev: input.landedRev, started, budgetMs, isNamed: true });
+    const text = verdict.removed.length > 0
+      ? `Removed ovnfs checkout ${row.name}. All files inside it, including untracked and ignored ones, are removed with it; \`ovnfs rm <name>\` is for abandoned ones.`
+      : verdict.note;
     return done({
       ovnfs: "present",
-      checkoutScan: "OK",
-      checkoutsRemoved: [],
-      checkoutsKept: [{ name: row.name, unappliedPaths: ["<rm-failed>"] }],
-      checkoutsMatching: [row.name],
-      checkout_text: `Kept ${row.name}: rm failed. Land stays PUSHED; remove it with \`ovnfs rm ${row.name}\`.`,
+      checkoutScan: verdict.scan,
+      checkoutsRemoved: verdict.removed,
+      checkoutsKept: verdict.kept,
+      checkoutsMatching: verdict.matching,
+      checkout_text: text,
     });
   }
-  const baseTime = typeof input.landedBaseTimeMs === "number" && Number.isFinite(input.landedBaseTimeMs) ? input.landedBaseTimeMs : null;
+  // Recency orders the bounded sweep (newest first) but never excludes: a
+  // fully-landed checkout is removable however old its touch time is.
   const candidates = sameRepo
     .filter((row) => row.dirty && isValidCheckoutName(row.name))
-    .filter((row) => {
-      if (baseTime === null) return true;
-      const touched = touchedMs(row);
-      if (!Number.isFinite(touched)) return true;
-      return touched >= baseTime;
-    })
     .sort((left, right) => {
       const l = touchedMs(left);
       const r = touchedMs(right);
@@ -658,6 +593,9 @@ export function reapLandedCheckouts(input: {
       if (!Number.isFinite(r)) return -1;
       return (r as number) - (l as number);
     });
+  const removed: string[] = [];
+  const kept: OvnfsKept[] = [];
+  const keptNotes: string[] = [];
   const matching: string[] = [];
   let timedOut = false;
   for (const row of candidates) {
@@ -665,19 +603,24 @@ export function reapLandedCheckouts(input: {
       timedOut = true;
       break;
     }
-    const match = checkoutIsMatching(repo, row, landedSet, input.landedRev);
-    if (match === true) matching.push(row.name);
+    const verdict = judgeAndRemoveRow({ repo, row, landedSet, landedRev: input.landedRev, started, budgetMs, isNamed: false });
+    removed.push(...verdict.removed);
+    kept.push(...verdict.kept);
+    if (verdict.note.length > 0 && verdict.kept.length > 0) keptNotes.push(verdict.note);
+    if (verdict.removed.length > 0 || verdict.overlaps) matching.push(row.name);
+    if (verdict.scan === "TIMED_OUT") timedOut = true;
   }
-  const lines = matching.length > 0
-    ? [`Matching checkout${matching.length === 1 ? "" : "s"} (not removed without --checkout): ${matching.map((name) => `${name} (\`ovnfs rm ${name}\`)`).join("; ")}`]
-    : ["No matching ovnfs checkouts"];
-  if (timedOut) lines.push(`checkoutScan TIMED_OUT after ${(budgetMs / 1000).toFixed(1)} s; report is partial`);
-  lines.push("Land removes only the named checkout it landed (--checkout NAME, or --patch inside a checkout); all files inside it, including untracked and ignored ones, are removed with it. `ovnfs rm <name>` is for abandoned ones.");
+  const lines: string[] = [];
+  if (removed.length > 0) lines.push(`Removed ovnfs checkout${removed.length === 1 ? "" : "s"}: ${removed.join(", ")}`);
+  lines.push(...keptNotes);
+  if (matching.length === 0) lines.push("No matching ovnfs checkouts");
+  if (timedOut) lines.push(`checkoutScan TIMED_OUT after ${(budgetMs / 1000).toFixed(1)} s; sweep is partial`);
+  lines.push("Land removes every matching checkout whose whole diff was published (--checkout NAME pins one; --keep-checkout keeps all); all files inside a removed checkout, including untracked and ignored ones, are removed with it. `ovnfs rm <name>` is for abandoned ones.");
   return done({
     ovnfs: "present",
     checkoutScan: timedOut ? "TIMED_OUT" : "OK",
-    checkoutsRemoved: [],
-    checkoutsKept: [],
+    checkoutsRemoved: removed,
+    checkoutsKept: kept,
     checkoutsMatching: matching,
     checkout_text: lines.join(". "),
   });
@@ -747,6 +690,6 @@ export function listRepoCheckouts(repo: string, now: number = Date.now()): {
   return {
     ovnfs: "present",
     checkouts: views,
-    note: "ovnfs records no creator, so checkouts are listed by repository, not by seat. Land removes only the named checkout it landed; `ovnfs rm <name>` is for abandoned ones.",
+    note: "ovnfs records no creator, so checkouts are listed by repository, not by seat. Land removes every matching checkout whose whole diff was published; `ovnfs rm <name>` is for abandoned ones.",
   };
 }
