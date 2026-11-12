@@ -1662,19 +1662,25 @@ async function mineGit(options: SkillMineOptions, sinceMs: number, now: number, 
 	}
 	const monthsPerRun = options.gitMonthsPerRun ?? Number.POSITIVE_INFINITY;
 	const state = loadGitState(options.stateDir);
-	// Drop cursor rows for repositories that are no longer registered, after
-	// reporting them once in this run's coverage.
-	for (const key of Object.keys(state.repos)) {
-		if (repos.has(key)) continue;
-		const stale = state.repos[key]!;
-		const display = stale.display ?? key;
-		coverage.repos_detail[display] = {
-			months_mined: [...stale.months_mined],
-			months_remaining: 0,
-			last_error: "repository no longer registered",
-		};
-		delete state.repos[key];
-		state.chains = state.chains.filter(chain => chain.repo !== display);
+	// A scoped pass merges into shared state, never replaces it: --project
+	// restricts mining, and the Git-only cwd fallback (no cass workspaces,
+	// single implicit seed) knows nothing about other repositories. Only a
+	// full unscoped pass may drop rows for repositories that are genuinely
+	// no longer registered.
+	const scoped = explicit.length > 0 || cassWorkspaces.length === 0;
+	if (!scoped) {
+		for (const key of Object.keys(state.repos)) {
+			if (repos.has(key)) continue;
+			const stale = state.repos[key]!;
+			const display = stale.display ?? key;
+			coverage.repos_detail[display] = {
+				months_mined: [...stale.months_mined],
+				months_remaining: 0,
+				last_error: "repository no longer registered",
+			};
+			delete state.repos[key];
+			state.chains = state.chains.filter(chain => chain.repo !== display);
+		}
 	}
 	const minedThisRun: string[] = [];
 	const shallowCuts: string[] = [];
