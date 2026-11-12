@@ -4,6 +4,21 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.126] - 2026-11-12
+
+### Changed
+
+- A `skill-mine` pass restricted with `--project` (or the Git-only fallback when no session workspaces are known) no longer deletes other repositories' cursors and chain evidence: it merges into shared state, so other repos keep their month coverage and resuming them picks up where they left off.
+- `release-local` no longer reports "not installed" when the update ends with the new version active and its live check pending: the install stage now says "installed, live check pending (receipt <id>)" and continues through the all-profile plugin relink and readbacks, exiting 0. Only an install whose version is not active still refuses.
+- `release-local` now also reconciles the kit's own diagnostics handler writes (`diagnostics/handler-*.json`, emitted when a handler fails during the isolated postcheck test) as part of the live-writer class instead of refusing them; the 0.2.125 install ended rc 4 on exactly those two files and skipped the plugin relink.
+- `readme-check` now applies the doc-count and path-lint checks in git-less export trees instead of reporting them `NOT_APPLICABLE`: the install-rule count derives from `rules/*.md` (the manifest's source) when the generated `MANIFEST.tsv` is absent, and backticked repo paths resolve against a filesystem walk under the root when `git ls-files` lists nothing.
+- readme-check no longer crashes on a tree without `docs/`.
+- `N fails` is no longer read as a summary head: only `fail`, `failure` and `failures` are, so `0 fails` stays a literal match.
+- `land` no longer strands a commit when custody lapses after the local save: the refusal names the saved commit (`stranded_commit`) and tells you to re-reserve and re-run, and the retry publishes that commit instead of refusing `LAND_NO_CHANGES`.
+- A retry only adopts a tip that is exactly one commit ahead of `origin/main`, touches only your reserved paths, and carries its own `Bead:` trailer; anything else keeps its refusal and is never auto-published.
+- `omp-kit verify` close lessons now land in the repo's untracked `.omp/lessons.local.jsonl` instead of the tracked `.omp/lessons.jsonl`, so a peer's verify leaves the shared main clean. `lessons add` (human-authored) keeps writing the tracked log, and every lessons reader merges both stores with dedup by bead. The kit hides the local store via the repo's own `info/exclude`, touching no tracked file.
+- An unreadable fleet opt-in no longer locks the repo: when `.omp/fleet.json` cannot be used, the guard now judges each call exactly as the opted-in path would instead of refusing everything, so reads work and the seat can repair the marker (which must then be exactly `{"enabled": true}` or `{"enabled": false}`); fleet hazards such as raw `git push` are still refused, and the repair is named once per session. (ompkit-1ra0d.223)
+
 ## [0.2.125] - 2026-11-12
 
 ### Added

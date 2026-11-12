@@ -1,2 +1,0 @@
-- `land` no longer strands a commit when custody lapses after the local save: the refusal names the saved commit (`stranded_commit`) and tells you to re-reserve and re-run, and the retry publishes that commit instead of refusing `LAND_NO_CHANGES`.
-- A retry only adopts a tip that is exactly one commit ahead of `origin/main`, touches only your reserved paths, and carries its own `Bead:` trailer; anything else keeps its refusal and is never auto-published.

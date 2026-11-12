@@ -1,1 +1,0 @@
-- A `skill-mine` pass restricted with `--project` (or the Git-only fallback when no session workspaces are known) no longer deletes other repositories' cursors and chain evidence: it merges into shared state, so other repos keep their month coverage and resuming them picks up where they left off.
