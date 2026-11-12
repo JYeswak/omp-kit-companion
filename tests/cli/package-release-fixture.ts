@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { delimiter, join, resolve } from "node:path";
 import type { ReleaseAsset, ReleasePlatform } from "../../src/kit-release.ts";
@@ -71,25 +71,78 @@ function sourceTree(directory: string, mode: "freeze" | "digest" | "release"): s
 	visit(directory, "");
 	return digest.digest("hex");
 }
+const sourceRevisionPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+function readExportStamp(directory: string): string | undefined {
+	// Commit-preflight's verdict export records the HEAD it archived plus the
+	// judged overlay. The export's git holds no objects, so this stamp (not
+	// rev-parse) names the revision an export builds from.
+	const raw = join(directory, ".git", "omp-kit-export.json");
+	if (!existsSync(raw)) return undefined;
+	const stamp: unknown = JSON.parse(readFileSync(raw, "utf8"));
+	if (stamp === null || typeof stamp !== "object" || Array.isArray(stamp)
+		|| !("source_revision" in stamp) || typeof stamp.source_revision !== "string"
+		|| !sourceRevisionPattern.test(stamp.source_revision)) return undefined;
+	return stamp.source_revision;
+}
+function copyExportTree(root: string, dest: string): void {
+	// `git archive` without its object store: the export already holds the
+	// archived HEAD plus the judged overlay, so copy that tree, skipping what
+	// an archive never carries (the export's fresh .git, scratch, linked
+	// dependencies) and what the gate generates beside the judged tree.
+	const visit = (rel: string): void => {
+		const parts = rel === "" ? [] : rel.split("/");
+		if (parts.includes(".git") || parts.includes("node_modules")
+			|| parts[0] === "var" || (parts.length === 1 && parts[0] === "MANIFEST.tsv")) return;
+		const from = join(root, rel);
+		const to = join(dest, rel);
+		const stat = lstatSync(from);
+		if (stat.isDirectory()) {
+			mkdirSync(to, { recursive: true });
+			for (const child of readdirSync(from).sort()) visit(rel === "" ? child : `${rel}/${child}`);
+			chmodSync(to, stat.mode & 0o7777);
+		} else if (stat.isSymbolicLink()) {
+			symlinkSync(readlinkSync(from), to);
+		} else if (stat.isFile()) {
+			copyFileSync(from, to);
+			chmodSync(to, stat.mode & 0o7777);
+		} else {
+			throw new Error(`package-release fixture: cannot copy special file ${rel}`);
+		}
+	};
+	visit("");
+}
 
 beforeAll(async () => {
 	const metadata: unknown = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
 	const exported = metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
 		&& "source_revision" in metadata && typeof metadata.source_revision === "string"
 		&& metadata.source_revision !== "$Format:%H$" ? metadata.source_revision : undefined;
-	const selected = process.env.OMP_KIT_CASE_SOURCE_SHA ?? exported;
-	// An admitted archive has no HEAD; its expanded revision selects objects from the explicit caller.
-	const objectStore = exported === undefined ? repo : caseCwd;
-	if (exported === undefined)
-		expect(sourceGit(repo, ["rev-parse", "--show-toplevel"]).toString().trim()).toBe(repo);
-	sourceRevision = sourceGit(objectStore, ["rev-parse", "--verify", "--end-of-options", `${selected ?? "HEAD"}^{commit}`]).toString().trim();
-	if (selected !== undefined) expect(sourceRevision).toBe(selected);
-	const sourceArchive = join(output, "selected-source.tar");
-	sourceGit(objectStore, ["archive", "--format=tar", `--output=${sourceArchive}`, sourceRevision]);
+	const stampRevision = readExportStamp(repo);
+	const selected = process.env.OMP_KIT_CASE_SOURCE_SHA ?? stampRevision ?? exported;
 	const archived = join(output, "archived-source");
-	mkdirSync(archived);
-	const extracted = await releaseProcess(["tar", "-xf", sourceArchive, "-C", archived], { stdout: "pipe", stderr: "pipe", deadline_s: fixtureDeadlineS(120) });
-	expect(extracted.exitCode, extracted.stderr.toString()).toBe(0);
+	if (stampRevision !== undefined || exported !== undefined) {
+		// Export layout (commit-preflight's verdict export or the push gate's
+		// exact-commit archive): the fresh `git init -q` leaves HEAD unborn
+		// with no objects, so rev-parse/archive would refuse. Both layouts
+		// stamp the revision instead (.git/omp-kit-export.json names HEAD;
+		// git's export-subst stamps package.json on archive); cross-check the
+		// two git-authored stamps and build from the exported tree, never the
+		// caller's checkout or its history.
+		expect(selected).toMatch(sourceRevisionPattern);
+		if (stampRevision !== undefined && exported !== undefined) expect(exported).toBe(stampRevision);
+		sourceRevision = selected as string;
+		copyExportTree(repo, archived);
+	} else {
+		// A real checkout carries its history; resolve and archive HEAD there.
+		expect(sourceGit(repo, ["rev-parse", "--show-toplevel"]).toString().trim()).toBe(repo);
+		sourceRevision = sourceGit(repo, ["rev-parse", "--verify", "--end-of-options", `${selected ?? "HEAD"}^{commit}`]).toString().trim();
+		if (selected !== undefined) expect(sourceRevision).toBe(selected);
+		const sourceArchive = join(output, "selected-source.tar");
+		sourceGit(repo, ["archive", "--format=tar", `--output=${sourceArchive}`, sourceRevision]);
+		mkdirSync(archived);
+		const extracted = await releaseProcess(["tar", "-xf", sourceArchive, "-C", archived], { stdout: "pipe", stderr: "pipe", deadline_s: fixtureDeadlineS(120) });
+		expect(extracted.exitCode, extracted.stderr.toString()).toBe(0);
+	}
 	expect(existsSync(join(archived, "MANIFEST.tsv"))).toBe(false);
 	const sourceBefore = sourceTree(archived, "freeze");
 	const built = await releaseProcess(["sh", join(archived, "scripts", "package-release.sh"), "--version", "1.2.3", "--platform", key, "--out", output], { cwd: output, env: { ...process.env, OMP_KIT_TEST_WORK_ROOT: output, TMPDIR: output }, stdout: "pipe", stderr: "pipe", deadline_s: fixtureDeadlineS(120) });
