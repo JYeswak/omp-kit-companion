@@ -306,3 +306,79 @@ test("sessionKey: stable, hex, distinct per seat", () => {
 	expect(sessionKey("seat-1")).not.toBe(sessionKey("seat-2"));
 	expect(UPGRADE_NOTICE).toBe("UPGRADE_NOTICE");
 });
+
+// UPGRADENOTES1 (ompkit-1ra0d.209): the notice lists what changed between the seat's release and
+// the installed one, read from the installed release's CHANGELOG.md.
+const CHANGELOG_125 = [
+	"# Changelog",
+	"",
+	"## [1.2.5] - 2026-11-01",
+	"",
+	"### Added",
+	"",
+	"- new flag `--frobnicate` on `omp-kit sync`.",
+	"- faster restarts on macOS.",
+	"",
+	"## [1.2.4] - 2026-10-20",
+	"",
+	"### Fixed",
+	"",
+	"- repair the stalled tick loop.",
+	"",
+	"## [1.2.3] - 2026-10-01",
+	"",
+	"### Fixed",
+	"",
+	"- old news the seat already runs.",
+	"",
+].join("\n");
+
+test("UPGRADENOTES1: sections newer than the seat list newest-first; the seat's own section is excluded", () => {
+	const msg = upgradeNoticeMessage("1.2.5", "1.2.3", true, { path: "/p/releases/1.2.5/CHANGELOG.md", text: CHANGELOG_125 });
+	const head = msg.indexOf("What changed since 1.2.3:");
+	expect(head).toBeGreaterThan(-1);
+	const five = msg.indexOf("- new flag `--frobnicate`", head);
+	const fast = msg.indexOf("- faster restarts on macOS.", head);
+	const fix = msg.indexOf("- repair the stalled tick loop.", head);
+	expect(five).toBeGreaterThan(head);
+	expect(fast).toBeGreaterThan(five);
+	expect(fix).toBeGreaterThan(fast);
+	expect(msg).not.toContain("old news the seat already runs");
+});
+
+test("UPGRADENOTES1: an over-cap changelog ends with the 'and N more' line naming the path", () => {
+	const bullets = Array.from({ length: 60 }, (_, i) => `- change number ${i}.`).join("\n");
+	const text = `## [1.2.5]\n\n${bullets}\n`;
+	const path = "/p/releases/1.2.5/CHANGELOG.md";
+	const msg = upgradeNoticeMessage("1.2.5", "1.2.4", false, { path, text });
+	expect(msg).toContain("What changed since 1.2.4:");
+	expect(msg).toContain(`and 20 more; full notes: ${path}`);
+	expect(msg).not.toContain("- change number 59.");
+});
+
+test("UPGRADENOTES1: a missing changelog yields today's exact notice", () => {
+	expect(upgradeNoticeMessage("0.2.58", "0.2.57")).toBe(
+		"kit-upgrade-notice UPGRADE_NOTICE: omp-kit 0.2.58 is installed; this seat runs 0.2.57; upgrade now.\n" +
+			"To load the new release, restart omp: save your work, exit omp, then start it again with `omp --resume` " +
+			"to continue this session on 0.2.58.",
+	);
+	const fleet = upgradeNoticeMessage("0.2.58", "0.2.57", true, { path: "/p/CHANGELOG.md", text: undefined });
+	expect(fleet).not.toContain("What changed since");
+});
+
+test("UPGRADENOTES1 planted: today's notice has no changelog lines", () => {
+	for (const msg of [upgradeNoticeMessage("0.2.58", "0.2.57"), upgradeNoticeMessage("0.2.58", "0.2.57", true)]) {
+		expect(msg).not.toContain("What changed since");
+		expect(msg).not.toContain("full notes:");
+	}
+});
+
+test("UPGRADENOTES1: the handler reads the installed release's changelog through readFile", async () => {
+	const f = files({ "/h/.local/opt/omp-kit/releases/0.2.58/CHANGELOG.md": "## [0.2.58]\n\n- installed news.\n" });
+	const { api, sent, handlers } = fakePi(IDLE);
+	await kitUpgradeNotice(api, { selfPath: LOADED, session: "seat-1", home: "/h", ...f.deps });
+	handlers["session_start"]!(null, IDLE);
+	expect(sent.length).toBe(1);
+	expect(sent[0]!.content).toContain("What changed since 0.2.57:");
+	expect(sent[0]!.content).toContain("- installed news.");
+});

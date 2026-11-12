@@ -159,6 +159,13 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(existsSync(join(staged.root, "reports"))).toBe(false);
 });
 
+test("UPGRADENOTES1 (ompkit-1ra0d.209): the packaged release tree contains CHANGELOG.md", async () => {
+	const members = await new Bun.Archive(bytes).files();
+	const changelog = members.get("CHANGELOG.md");
+	expect(changelog, "packaged release tree omits CHANGELOG.md").toBeDefined();
+	expect(await changelog!.text()).toBe(readFileSync(join(output, "archived-source", "CHANGELOG.md"), "utf8"));
+});
+
 test("packaging's manifest producer supersedes stale input and changed rule bytes without editing archived source", async () => {
  const selected = join(output, "archived-source", "tests", "fixtures", "package-manifest-inputs");
  // Module bytes come from the runtime-selected Git revision, not this test harness's tree.

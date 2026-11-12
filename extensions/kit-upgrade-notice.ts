@@ -36,6 +36,17 @@ export const UPGRADE_NOTICE = "UPGRADE_NOTICE";
 const MAX_PATH_LEN = 4096;
 const RELEASES_SEGMENT = /\/releases\/(\d+\.\d+\.\d+)\//;
 const INSTALLED_TARGET = /^\.\.\/releases\/(\d+\.\d+\.\d+)\/bin\/omp-kit$/;
+/**
+ * UPGRADENOTES1 (ompkit-1ra0d.209): anchored section/bullet patterns (same weakest-sufficient
+ * discipline: no `g` flag, exclusive classes, one line at a time). A section opens on a line that
+ * is exactly `## [X.Y.Z]` plus trailing text; a bullet is a line starting with `- ` and a
+ * non-blank first character.
+ */
+const CHANGELOG_SECTION = /^## \[(\d+\.\d+\.\d+)\][^\n]*$/;
+const CHANGELOG_BULLET = /^- [^ \t\n][^\n]*$/;
+/** About 40 lines / 6 KB of bullets; the rest folds into the 'and N more' line. */
+const MAX_CHANGELOG_LINES = 40;
+const MAX_CHANGELOG_BYTES = 6144;
 
 /** The release this process loaded, from the extension's own installed path, or null outside releases/. */
 export function loadedRelease(selfPath: string | undefined): string | null {
@@ -75,32 +86,77 @@ export const SELF_RESTART_SCRIPT = join(".claude", "skills", "omp-kit-orchestrat
 export const SELF_RESTART_COMMAND = "python3 ~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py";
 
 /**
+ * UPGRADENOTES1 (ompkit-1ra0d.209): the installed release's changelog, read through the caller's
+ * injectable readFile dep. Undefined (or missing) text means today's exact notice, unchanged.
+ */
+export interface ChangelogNotes {
+	path: string;
+	text: string | undefined;
+}
+
+/**
+ * The `- ` bullets of every `## [X.Y.Z]` section with loaded < X.Y.Z <= installed, newest
+ * section first, capped at MAX_CHANGELOG_LINES / MAX_CHANGELOG_BYTES. Returns the taken bullets
+ * plus how many were omitted by the cap.
+ */
+export function selectChangelogBullets(loaded: string, installed: string, text: string): { bullets: string[]; omitted: number } {
+	const sections: { version: string; bullets: string[] }[] = [];
+	for (const line of text.split("\n")) {
+		const heading = CHANGELOG_SECTION.exec(line);
+		if (heading?.[1] !== undefined) {
+			sections.push({ version: heading[1], bullets: [] });
+			continue;
+		}
+		if (sections.length > 0 && CHANGELOG_BULLET.exec(line) !== null) sections[sections.length - 1]!.bullets.push(line);
+	}
+	const wanted = sections
+		.filter(section => compareSemver(loaded, section.version) < 0 && compareSemver(section.version, installed) <= 0)
+		.sort((a, b) => compareSemver(b.version, a.version));
+	const all = wanted.flatMap(section => section.bullets);
+	const taken: string[] = [];
+	let bytes = 0;
+	for (const bullet of all) {
+		if (taken.length >= MAX_CHANGELOG_LINES || bytes + bullet.length + 1 > MAX_CHANGELOG_BYTES) break;
+		taken.push(bullet);
+		bytes += bullet.length + 1;
+	}
+	return { bullets: taken, omitted: all.length - taken.length };
+}
+
+/**
  * The notice body: the gap plus the restart steps. Fleet mode: (1) save work, (2) run the self-restart helper,
  * (3) end the turn with no further tool call. Stock mode: only how to restart omp to load the release.
+ * With the installed release's changelog, both modes append the bullets newer than the seat's release.
  */
-export function upgradeNoticeMessage(installed: string, loaded: string, fleet = false): string {
+export function upgradeNoticeMessage(installed: string, loaded: string, fleet = false, notes?: ChangelogNotes): string {
 	const head = `kit-upgrade-notice ${UPGRADE_NOTICE}: omp-kit ${installed} is installed; this seat runs ${loaded}; upgrade now.\n`;
+	let body: string;
 	if (!fleet) {
-		return (
+		body =
 			head +
 			`To load the new release, restart omp: save your work, exit omp, then start it again ` +
-			`with \`omp --resume\` to continue this session on ${installed}.`
-		);
+			`with \`omp --resume\` to continue this session on ${installed}.`;
+	} else {
+		body =
+			head +
+			`At your next turn boundary, without starting new work, restart this seat yourself:\n` +
+			`1. On omp 18.18.1 or later, running background task agents keep working across the restart. On an older ` +
+			`omp, first collect each running agent's result (or message it to wrap up and wait for its report): the ` +
+			`helper refuses while one still runs there (REFUSED_LIVE_AGENTS). Then save your work: ` +
+			`\`git commit --only -m "<msg>" -- <your reserved paths>\` and publish, or a \`[pending]\` commit.\n` +
+			`2. Run the self-restart helper: \`${SELF_RESTART_COMMAND}\`\n` +
+			`3. Leave that command running: it holds this tool call while omp's own \`/restart\` replaces this ` +
+			`process in place (same session and launch flags) on omp-kit ${installed}, and your goal resumes once if ` +
+			`it was active. If it prints RESTART_NOT_OBSERVED instead, nothing restarted: carry on and report it.\n` +
+			`A background task subagent is not the seat: ignore this notice and finish your task. Only the seat ` +
+			`restarts the seat, and the helper refuses a subagent (REFUSED_SUBAGENT).`;
 	}
-	return (
-		head +
-		`At your next turn boundary, without starting new work, restart this seat yourself:\n` +
-		`1. On omp 18.18.1 or later, running background task agents keep working across the restart. On an older ` +
-		`omp, first collect each running agent's result (or message it to wrap up and wait for its report): the ` +
-		`helper refuses while one still runs there (REFUSED_LIVE_AGENTS). Then save your work: ` +
-		`\`git commit --only -m "<msg>" -- <your reserved paths>\` and publish, or a \`[pending]\` commit.\n` +
-		`2. Run the self-restart helper: \`${SELF_RESTART_COMMAND}\`\n` +
-		`3. Leave that command running: it holds this tool call while omp's own \`/restart\` replaces this ` +
-		`process in place (same session and launch flags) on omp-kit ${installed}, and your goal resumes once if ` +
-		`it was active. If it prints RESTART_NOT_OBSERVED instead, nothing restarted: carry on and report it.\n` +
-		`A background task subagent is not the seat: ignore this notice and finish your task. Only the seat ` +
-		`restarts the seat, and the helper refuses a subagent (REFUSED_SUBAGENT).`
-	);
+	if (notes?.text === undefined) return body;
+	const { bullets, omitted } = selectChangelogBullets(loaded, installed, notes.text);
+	if (bullets.length === 0 && omitted === 0) return body;
+	let tail = `\nWhat changed since ${loaded}:\n${bullets.join("\n")}`;
+	if (omitted > 0) tail += `\nand ${omitted} more; full notes: ${notes.path}`;
+	return body + tail;
 }
 
 /** Filesystem-safe per-seat marker key: session ids carry slashes, so they hash. */
@@ -202,10 +258,15 @@ export default async function kitUpgradeNotice(pi: UpgradeNoticeApi, deps: Upgra
 				sentMemory.add(gap.installed);
 				return; // an earlier session already noticed this release: never repeated
 			}
+			// UPGRADENOTES1 (ompkit-1ra0d.209): the installed release's changelog, read through the
+			// injectable readFile dep. A missing or unreadable file reads undefined and keeps
+			// today's exact notice.
+			const changelogPath = join(home, ".local", "opt", "omp-kit", "releases", gap.installed, "CHANGELOG.md");
+			const notes: ChangelogNotes = { path: changelogPath, text: (deps.readFile ?? defaultReadFile)(changelogPath) };
 			pi.sendMessage(
 				{
 					customType: "kit-upgrade-notice",
-					content: upgradeNoticeMessage(gap.installed, gap.loaded, (deps.isFile ?? defaultIsFile)(join(home, SELF_RESTART_SCRIPT))),
+					content: upgradeNoticeMessage(gap.installed, gap.loaded, (deps.isFile ?? defaultIsFile)(join(home, SELF_RESTART_SCRIPT)), notes),
 					display: true,
 					details: { behavior: UPGRADE_NOTICE },
 				},
