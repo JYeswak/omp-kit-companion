@@ -1,0 +1,1 @@
+- `N fails` is no longer read as a summary head: only `fail`, `failure` and `failures` are, so `0 fails` stays a literal match.

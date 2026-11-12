@@ -26,4 +26,9 @@ test("VERIFYFAILURESHEAD1: `N failures` / `N failure` heads judge like `N fail`"
 	// Planted negative: the pre-fix literal judge fails the head case (the whole
 	// `0 failures: proves X` clause never appears verbatim in a summary).
 	expect(passing.includes("0 failures: proves X")).toBe(false);
+	// Planted negative (REWORK from FoggyValley): `fails` is not a summary head,
+	// so `0 fails` stays a literal and does not match a `0 fail` summary ...
+	expect(judge("0 fails", 0, "0 fail").pass).toBe(false);
+	// ... while the literal still passes when the text really appears.
+	expect(judge("0 fails", 0, "ok\n0 fails\n").pass).toBe(true);
 });
