@@ -7,6 +7,8 @@ import { clearReservationCache } from "../src/fleet-guard/reservations.ts";
 import type { FleetGuardBlock, FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
 import { parseOwnerFile } from "../src/scratch.ts";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
+import { check as checkDurability } from "../src/fleet-guard/durability.ts";
+import { runFixture } from "../tests/cli/fixture-process.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -515,4 +517,72 @@ test("CONTENTION1: a 60k near-miss is judged in under 2 s", () => {
 	const started = performance.now();
 	for (const command of [`while ${" ".repeat(60_000)}x`, `while :${" ".repeat(60_000)};do x`, `for i in $(seq ${"9".repeat(60_000)}`, `yes ${"a".repeat(60_000)}`, "while :;".repeat(7_500)]) checkContention(bashCall(command), 32);
 	expect(performance.now() - started).toBeLessThan(2_000);
+});
+
+// SCRATCHOWNERREPO1 (ompkit-1ra0d.196): the scratch's owning repo (the directory above
+// /var/agent-tmp/) is the reference, never the caller's cwd. A write to a sibling repo's
+// owned scratch from another repo's cwd is admitted; a tracked-source copy into that sibling
+// scratch is still refused against the sibling's index; a var/agent-tmp under a non-repo dir
+// is refused naming the path.
+test("SCRATCHOWNERREPO1: a sibling repo's owned scratch is admitted from another repo's cwd", async () => {
+	const caller = fixture();
+	const sibling = fixture();
+	const siblingPi = fakePi();
+	await seated(siblingPi, { cwd: sibling.cwd, pid: sibling.pid });
+	const scratch = join(sibling.cwd, "var", "agent-tmp", `omp.${sibling.pid}`);
+	const target = join(scratch, "notes.txt");
+	// Planted negative: the old caller-repo reference refuses this write (the sibling
+	// physical path is not under the caller's scratch root), so it cannot be the reference.
+	const callerScratchRoot = join(caller.cwd, "var", "agent-tmp");
+	expect(target.startsWith(`${callerScratchRoot}/`)).toBe(false);
+	const admitted = await checkDurability(
+		{ toolName: "write", input: { path: target, content: "synthetic probe\n" } },
+		{ cwd: caller.cwd });
+	expect(admitted).toBeUndefined();
+});
+test("SCRATCHOWNERREPO1: a tracked-source copy into the sibling scratch is refused against the sibling index", async () => {
+	const caller = fixture();
+	const sibling = fixture();
+	const siblingPi = fakePi();
+	await seated(siblingPi, { cwd: sibling.cwd, pid: sibling.pid });
+	const scratch = join(sibling.cwd, "var", "agent-tmp", `omp.${sibling.pid}`);
+	writeFileSync(join(sibling.cwd, "tracked.txt"), "sibling canonical\n");
+	expect(runFixture(["git", "-C", sibling.cwd, "add", "tracked.txt"], { cwd: sibling.cwd }).rc).toBe(0);
+	const target = join(scratch, "copy.txt");
+	const refused = await checkDurability(
+		{ toolName: "write", input: { path: target, content: "sibling canonical\n" } },
+		{ cwd: caller.cwd });
+	expect(refused?.block).toBe(true);
+	expect(refused?.reason).toContain("tracked-source-copy");
+	expect(refused?.reason).toContain(target);
+});
+test("SCRATCHOWNERREPO1: a var/agent-tmp under a non-repo dir is refused naming the path", async () => {
+	const caller = fixture();
+	const plain = freshDir(fleetBase, "fleet-norepo-");
+	roots.push(plain);
+	const target = join(plain, "var", "agent-tmp", "hand.1", "out.txt");
+	const refused = await checkDurability(
+		{ toolName: "write", input: { path: target, content: "synthetic probe\n" } },
+		{ cwd: caller.cwd });
+	expect(refused?.block).toBe(true);
+	expect(refused?.reason).toContain(target);
+});
+test("SCRATCHOWNERREPO1: every refusal names the physical path", async () => {
+	const caller = fixture();
+	const sibling = fixture();
+	const siblingPi = fakePi();
+	await seated(siblingPi, { cwd: sibling.cwd, pid: sibling.pid });
+	const scratch = join(sibling.cwd, "var", "agent-tmp", `omp.${sibling.pid}`);
+	const script = join(scratch, "rerun.sh");
+	const refused = await checkDurability(
+		{ toolName: "write", input: { path: script, content: "echo hi\n" } },
+		{ cwd: caller.cwd });
+	expect(refused?.block).toBe(true);
+	expect(refused?.reason).toContain(script);
+	const packet = join(scratch, "packet-plan.md");
+	const packetRefused = await checkDurability(
+		{ toolName: "write", input: { path: packet, content: "synthetic probe\n" } },
+		{ cwd: caller.cwd });
+	expect(packetRefused?.block).toBe(true);
+	expect(packetRefused?.reason).toContain(packet);
 });

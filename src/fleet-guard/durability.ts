@@ -38,6 +38,25 @@ class UnknownReadError extends Error {
 	}
 }
 
+/** GUARDGITLOAD1: only git's own clean not-a-repository report means the prefix
+ * is not a repo. A failure (non-zero exit with other stderr), a hang (killed,
+ * signaled) or a truncated flood stays UNKNOWN via the rethrow. The comparison
+ * is a prefix match on git's canonical first line, never a pattern, so a
+ * planted message that merely mentions a repository never counts as clean. */
+function isCleanNotARepo(error: unknown): boolean {
+	if (!(error instanceof UnknownReadError)) return false;
+	const cause = error.cause;
+	if (!cause || typeof cause !== "object") return false;
+	if (!("code" in cause) || !("stderr" in cause)) return false;
+	const killed = "killed" in cause ? cause.killed : undefined;
+	const signal = "signal" in cause ? cause.signal : undefined;
+	if (killed === true || (signal !== null && signal !== undefined)) return false;
+	if (cause.code !== 128) return false;
+	const stderr = typeof cause.stderr === "string" ? cause.stderr : "";
+	const first = stderr.split("\n", 1)[0] ?? "";
+	return first.startsWith("fatal: not a git repository (or any of the parent directories)");
+}
+
 async function readBounded(path: string, limit = LIMIT): Promise<string> {
 	const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
 	try {
@@ -324,7 +343,6 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 		// only opens the patch-carrying variant; ordinary writes are untouched.
 		const patch = patchText(event);
 		let simulated: { contents: Map<string, string>; rejected: boolean } | undefined;
-		let referenceRepo: string | undefined;
 		for (const entry of entries) {
 			const path = resolveFilesystemWriteTarget(cwd, entry.path, context);
 			if (path === undefined) continue;
@@ -337,21 +355,71 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 			const marker = `/${join("var", "agent-tmp")}/`;
 			const lexicalScratch = path.includes(marker);
 			if (!physical.includes(marker) && !lexicalScratch) continue;
-			// The native caller's repository is the reference, never a nested .git
-			// created beneath the destination. A synthetic repository may itself
-			// live in an owned test directory without making its canonical files copies.
+			const refuseAt = (detail: string): FleetGuardBlock => refuse(`${detail} for ${physical}`);
+			// The caller's own directory filters here without a Git read: a target
+			// inside it but outside its scratch root is judged now — a lexical
+			// scratch claim that resolved elsewhere is an escape, anything else
+			// is not scratch. No read means no extra Git execution that could
+			// heal a changed live read (ADMITFLAKE1) or break the first-exec
+			// attempt bound (GUARDGITLOAD1).
 			read = "calling repository realpath";
-			referenceRepo ??= await realpath((await git(cwd, ["rev-parse", "--show-toplevel"], undefined, true)).trimEnd());
-			const repo = referenceRepo;
-			const scratchRoot = join(repo, "var", "agent-tmp");
-			if (inside(repo, physical) && !inside(scratchRoot, physical)) {
-				if (lexicalScratch && (!inside(repo, path) || inside(scratchRoot, path)))
-					return refuse("scratch path escapes its calling repository's scratch root");
+			const pseudoCaller = await realpath(cwd);
+			const pseudoScratchRoot = join(pseudoCaller, "var", "agent-tmp");
+			if (inside(pseudoCaller, physical) && !inside(pseudoScratchRoot, physical)) {
+				if (lexicalScratch && (!inside(pseudoCaller, path) || inside(pseudoScratchRoot, path)))
+					return refuseAt("scratch path escapes its owning repository's scratch root");
 				continue;
 			}
-			if (!inside(scratchRoot, physical)) return refuse("scratch path does not belong to the calling repository");
+			// SCRATCHOWNERREPO1: the hazard is about the scratch's owning repo (the
+			// directory above /var/agent-tmp/), not the caller's cwd. Resolve the
+			// owning repo from the physical path's prefix before its last scratch
+			// marker segment, verified with git rev-parse --show-toplevel. Only a
+			// clean not-a-repository report, or a toplevel that differs from the
+			// prefix, means not-a-repo; every other read failure stays UNKNOWN.
+			const scratchString = physical.includes(marker) ? physical : path;
+			const ownerPrefix = scratchString.slice(0, scratchString.lastIndexOf(marker));
+			read = "scratch owning repository";
+			const ownerPrefixReal = ownerPrefix === "" ? "/" : await realpath(ownerPrefix);
+			let repo: string;
+			let changedRoot = false;
+			try {
+				const toplevel = (await git(ownerPrefix || "/", ["rev-parse", "--show-toplevel"], undefined, true)).trimEnd();
+				repo = await realpath(toplevel);
+				if (repo !== ownerPrefixReal) {
+					if (inside(repo, ownerPrefixReal)) return refuseAt("scratch path is not under a repository");
+					// A successful read that is not even an ancestor of the
+					// prefix is a changed live read, not a repository fact
+					// (ADMITFLAKE1): keep the old verdict shape below with no
+					// further Git execution that could heal it.
+					changedRoot = true;
+				}
+			} catch (error) {
+				if (isCleanNotARepo(error)) return refuseAt("scratch path is not under a repository");
+				throw error;
+			}
+			const scratchRoot = join(repo, "var", "agent-tmp");
+			if (!inside(scratchRoot, physical)) {
+				if (!changedRoot) {
+					// Outside the owning scratch root the native caller's repository
+					// decides, exactly as before: a failed or hanging read stays
+					// UNKNOWN (GUARDGITLOAD1); a lexical escape refuses, anything
+					// else is not scratch; a foreign path does not belong to the
+					// calling repository.
+					read = "calling repository realpath";
+					const callerRepo = await realpath((await git(cwd, ["rev-parse", "--show-toplevel"], undefined, true)).trimEnd());
+					const callerScratchRoot = join(callerRepo, "var", "agent-tmp");
+					if (inside(callerRepo, physical) && !inside(callerScratchRoot, physical)) {
+						if (lexicalScratch && (!inside(callerRepo, path) || inside(callerScratchRoot, path)))
+							return refuseAt("scratch path escapes its owning repository's scratch root");
+						continue;
+					}
+				}
+				return refuseAt("scratch path does not belong to the calling repository");
+			}
+			// Inside the owning scratch root the owning read above already
+			// verified this root: judging below issues no second Git execution.
 			const beneath = relative(scratchRoot, physical).split("/");
-			if (beneath.length < 2) return refuse("scratch write has no owned session child");
+			if (beneath.length < 2) return refuseAt("scratch write has no owned session child");
 			const scratch = join(scratchRoot, beneath[0]!);
 			const ownerPath = join(scratch, ".owner");
 			read = "scratch ownership metadata lstat";
@@ -361,29 +429,28 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 				if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
 				throw error;
 			});
-			if (ownerStat === null) return refuse(`var/agent-tmp/${beneath[0]} was not created by \`omp-kit scratch new\` (it has no .owner). Run \`omp-kit scratch new --label ${beneath[0]!.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 40)} --json\` in this repository and write under the dir it prints`);
-			if (ownerStat.isSymbolicLink()) return refuse("scratch ownership metadata is a symlink");
-			// The one owner parser the kit writes against: the seat owner (agent/session/bin) and the JSON owner
+			if (ownerStat === null) return refuseAt(`var/agent-tmp/${beneath[0]} was not created by \`omp-kit scratch new\` (it has no .owner). Run \`omp-kit scratch new --label ${beneath[0]!.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 40)} --json\` in this repository and write under the dir it prints`);
+			if (ownerStat.isSymbolicLink()) return refuseAt("scratch ownership metadata is a symlink");
 			// from `omp-kit scratch new` are both owned scratch, not invalid metadata (ompkit-26xhq).
 			read = "scratch ownership metadata read";
 			const owner = parseOwnerFile(await readBounded(ownerPath, 4096));
-			if (owner === null) return refuse("scratch ownership metadata is invalid");
+			if (owner === null) return refuseAt("scratch ownership metadata is invalid");
 			read = "scratch owner repository realpath";
 			const ownerRepo = await realpath(owner.repo).catch(error => {
 				if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
 				throw error;
 			});
 			if (!Number.isInteger(owner.pid) || owner.pid < 1 || !Number.isFinite(Date.parse(owner.createdAt)) || ownerRepo !== repo)
-				return refuse("scratch ownership metadata does not identify this repository");
+				return refuseAt("scratch ownership metadata does not identify this repository");
 			const snapshot = await git(repo, ["ls-files", "--stage", "-z"]);
 			const canonical = relative(scratch, physical);
 			const blobs = new Set<string>();
 			for (const row of snapshot.split("\0")) {
 				if (!row) continue;
 				const match = /^(\d{6}) ([0-9a-f]{40,64}) ([0-3])\t([\s\S]+)$/.exec(row);
-				if (!match) return refuse("Git index facts are unsupported");
+				if (!match) return refuseAt("Git index facts are unsupported");
 				if (inside("var/agent-tmp", match[4]!)) continue;
-				if (match[4] === canonical || canonical.endsWith(`/${match[4]}`)) return refuse("tracked-source-copy path matches the canonical Git index");
+				if (match[4] === canonical || canonical.endsWith(`/${match[4]}`)) return refuseAt("tracked-source-copy path matches the canonical Git index");
 				blobs.add(match[2]!);
 			}
 			let content = entry.content;
@@ -398,9 +465,9 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 				read = "scratch edit content read";
 				const before = await readBounded(physical);
 				const beforeHash = (await git(repo, ["hash-object", "--stdin", "--no-filters"], before)).trim();
-				if (blobs.has(beforeHash)) return refuse("tracked-source-copy existing content matches the canonical Git index");
+				if (blobs.has(beforeHash)) return refuseAt("tracked-source-copy existing content matches the canonical Git index");
 				const { old, next, all } = entry.replacement;
-				if (!old || !before.includes(old) || (!all && before.indexOf(old) !== before.lastIndexOf(old))) return refuse("edit replacement facts are ambiguous");
+				if (!old || !before.includes(old) || (!all && before.indexOf(old) !== before.lastIndexOf(old))) return refuseAt("edit replacement facts are ambiguous");
 				content = all ? before.split(old).join(next) : before.replace(old, () => next);
 			}
 			if (content === undefined) {
@@ -432,25 +499,25 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 					// read (delete, move source, non-hashline patch) is admitted with the
 					// same one-line notice as an edit. A write naming no payload variant
 					// at all (no content, no patch) stays refused above.
-					if (event.toolName !== "edit" && patch === undefined) return refuse("scratch edit/write content cannot be established from this payload variant");
+					if (event.toolName !== "edit" && patch === undefined) return refuseAt("scratch edit/write content cannot be established from this payload variant");
 					context.warn?.(unreadableScratchNotice(scratch, physical));
 					continue;
 				}
 			}
-			if (Buffer.byteLength(content) > LIMIT) return refuse("scratch content exceeds admission limit");
-			if (/^#!/.test(content) || /\.sh$/i.test(physical)) return refuse("rerunnable script belongs in a repository home");
+			if (Buffer.byteLength(content) > LIMIT) return refuseAt("scratch content exceeds admission limit");
+			if (/^#!/.test(content) || /\.sh$/i.test(physical)) return refuseAt("rerunnable script belongs in a repository home");
 			const segments = canonical.split("/");
 			if (segments.some(segment => segment.toLowerCase().includes("prompt") || segment.toLowerCase().startsWith("packet")) ||
 				segments.includes("skills") || (segments[segments.length - 2] === "rules" && physical.endsWith(".md")))
-				return refuse("instruction or packet artifact belongs in a repository home");
+				return refuseAt("instruction or packet artifact belongs in a repository home");
 			// Empty sentinels carry no source bytes; matching an empty tracked file
 			// is not copy evidence. Ownership, canonical paths and artifact checks still apply.
 			if (content === "") continue;
 			const hash = (await git(repo, ["hash-object", "--stdin", "--no-filters"], content)).trim();
-			if (!GIT_OBJECT_ID.test(hash)) return refuse("Git blob identity is unavailable");
-			if (blobs.has(hash)) return refuse("tracked-source-copy content matches the canonical Git index");
+			if (!GIT_OBJECT_ID.test(hash)) return refuseAt("Git blob identity is unavailable");
+			if (blobs.has(hash)) return refuseAt("tracked-source-copy content matches the canonical Git index");
 			read = "materialized canonical source";
-			if (await workingCopyMatches(repo, content, hash)) return refuse("tracked-source-copy content matches materialized canonical source");
+			if (await workingCopyMatches(repo, content, hash)) return refuseAt("tracked-source-copy content matches materialized canonical source");
 		}
 		return undefined;
 	} catch (error) {

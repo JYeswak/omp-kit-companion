@@ -1,0 +1,2 @@
+- Fleet guard judges a scratch write against the repository that owns that `var/agent-tmp` dir, so writing to a sibling repo's owned scratch from another repo no longer refuses.
+- Every scratch-is-not-a-home refusal now names the physical path it judged, so the 20/day CFS refusals are actionable.
