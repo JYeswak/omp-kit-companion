@@ -680,7 +680,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--undo", value: "RECEIPT", description: "Restore every store byte-identically and close the created seats" },
 		], example: "omp-kit project add ~/Developer/skill-library-growth --session skillgrowth --workers 1 --profile codex --apply --json", runnable: false, mutation: true },
 		{ name: "status", description: "Report per-seat identity, aliveness, goal and latest mail wake outcome/timestamp, plus bead counts and last commit", usage: "project status SESSION [--json]", argument: "SESSION", flags: [], example: "omp-kit project status skillgrowth --json", runnable: false },
-		{ name: "goal", description: "Replace the director seat's goal through the gated send path, proving drop then set from the journal", usage: "project goal SESSION --set TEXT|--from-file FILE [--plan|--apply]", argument: "SESSION", flags: [...planApply,
+		{ name: "goal", description: "Replace the director seat's goal with native /goal set (a paused goal resumes first), each leg proven from the journal", usage: "project goal SESSION --set TEXT|--from-file FILE [--plan|--apply]", argument: "SESSION", flags: [...planApply,
 			{ name: "--set", value: "TEXT", description: "Replacement goal objective, at most 16 KiB, no line starting with /" },
 			{ name: "--from-file", value: "FILE", description: "Read the replacement goal from FILE (at most 16 KiB)" },
 		], example: "omp-kit project goal skillgrowth --set 'Own skillgrowth: land the queue' --apply --json", runnable: false, mutation: true },

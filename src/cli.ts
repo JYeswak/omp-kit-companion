@@ -1774,7 +1774,7 @@ async function projectGoalCommand(request: ParsedCommand): Promise<CliResult> {
 		if (!applied.ok) {
 			return { code: applied.partial === true ? 1 : 2, data: { overall: "FAIL", scope: "project", action: "APPLY" }, errors: [{ code: applied.code, message: applied.detail, remediation: applied.remediation }], verification: "UNVERIFIED" };
 		}
-		return { code: 0, data: { overall: "OK", scope: "project", action: "APPLIED", session: applied.result.session, seat: applied.result.seat, previous_goal: applied.result.previousGoal, goal_id: applied.result.goalId, dropped: applied.result.dropped }, verification: "UNVERIFIED" };
+		return { code: 0, data: { overall: "OK", scope: "project", action: "APPLIED", session: applied.result.session, seat: applied.result.seat, previous_goal: applied.result.previousGoal, goal_id: applied.result.goalId }, verification: "UNVERIFIED" };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		const code = /^[A-Z][A-Z_0-9]+$/.test(message) ? message : "PROJECT_FAILED";

@@ -694,7 +694,7 @@ export interface ProjectGoalPlan {
 	seat: string;
 	currentGoal: string | null;
 	newGoal: string;
-	deliveries: { seat: string; kind: "goal-drop" | "goal-set" }[];
+	deliveries: { seat: string; kind: "goal-resume" | "goal-set" }[];
 	gate: { paused: boolean; pullEnabled: boolean | null };
 }
 
@@ -704,7 +704,6 @@ export interface ProjectGoalApplied {
 	seat: string;
 	previousGoal: string | null;
 	goalId: string;
-	dropped: boolean;
 }
 
 function failGoal(code: string, detail: string, remediation: string): { ok: false; code: string; detail: string; remediation: string } {
@@ -876,15 +875,15 @@ export async function planProjectGoal(input: ProjectGoalInput): Promise<{ ok: tr
 			session: input.session, seat: pane,
 			currentGoal: read.state.activeGoal === null ? null : read.state.activeGoal.objective,
 			newGoal: text.text,
-			deliveries: read.state.activeGoal === null
-				? [{ seat: pane, kind: "goal-set" as const }]
-				: [{ seat: pane, kind: "goal-drop" as const }, { seat: pane, kind: "goal-set" as const }],
+			deliveries: read.state.paused
+				? [{ seat: pane, kind: "goal-resume" as const }, { seat: pane, kind: "goal-set" as const }]
+				: [{ seat: pane, kind: "goal-set" as const }],
 			gate: { paused: read.state.paused, pullEnabled: located.entry.pullEnabled ?? null },
 		},
 	};
 }
 
-interface GoalDropProof {
+interface GoalResumeProof {
 	sessionFile: string;
 	offset: number;
 	entryId: string;
@@ -904,22 +903,24 @@ function recordIdsOf(text: string): Set<string> {
 	return ids;
 }
 
-/** A post-cursor mode_change is goal-less when it leaves goal mode or retires the goal. */
-function isGoallessModeChange(value: unknown): boolean {
+/** A post-cursor mode_change proves a resume when it returns to active goal mode. */
+function isResumedModeChange(value: unknown): boolean {
 	const record = goalRecordOf(value);
-	if (record === null) return false;
-	if (record.mode !== "goal") return true;
-	return record.goal !== null && typeof record.goal.status === "string" && record.goal.status !== "active";
+	if (record === null || record.mode !== "goal") return false;
+	return record.goal !== null && record.goal.status === "active" && typeof record.goal.id === "string" && record.goal.id !== "";
 }
 
 /**
- * PROJECTGOAL1 drop leg: send `/goal drop` through the native turn and prove
- * the goal-less mode_change from the bound journal. Gate first (zero sends on
- * refuse), then the same observe/identify/binding checks the proven send path
- * performs, then a cursor-pinned poll for a goal-less entry descending from
- * the pre-send journal.
+ * PROJECTGOAL1 resume leg: send `/goal resume` through the native turn and
+ * prove the return to active goal mode from the bound journal. `/goal set`
+ * on a paused goal only warns, so a paused seat resumes first; `/goal drop`
+ * is never sent (its confirm picker has nobody to answer it over the native
+ * turn). Gate first (zero sends on refuse), then the same
+ * observe/identify/binding checks the proven send path performs, then a
+ * cursor-pinned poll for an active goal entry descending from the pre-send
+ * journal. A goal-state pause never refuses here: resuming clears it.
  */
-export async function deliverGoalDrop(input: {
+export async function deliverGoalResume(input: {
 	seat: TernSeatBinding;
 	io: TernObserverIo;
 	gate?: TernSendGate;
@@ -927,10 +928,9 @@ export async function deliverGoalDrop(input: {
 	pollMs?: number;
 	deadlineMs?: number;
 	wait?: (ms: number) => Promise<void>;
-}): Promise<{ ok: true; proof: GoalDropProof } | { ok: false; code: string; detail: string; remediation: string }> {
+}): Promise<{ ok: true; proof: GoalResumeProof } | { ok: false; code: string; detail: string; remediation: string }> {
 	const failed = (code: string, detail: string, remediation: string) => ({ ok: false as const, code, detail, remediation });
 	const gate = input.gate ?? {};
-	if (gate.paused === true) return failed("GATE_PAUSED", "seat is paused; zero sends", "Unpause the seat, then set the goal again.");
 	if (gate.pullEnabled === false) return failed("GATE_PULL_DISABLED", "pullEnabled is false; zero sends", "Re-enable pulls for the project, then set the goal again.");
 	const io = input.io;
 	const pollMs = input.pollMs ?? 50;
@@ -971,7 +971,7 @@ export async function deliverGoalDrop(input: {
 	if (journal.status !== "KNOWN") return failed("ELIGIBILITY_UNSETTLED", "turn not settled; zero sends", "Wait for the seat to settle, then set the goal again.");
 	const cursorBytes = journalView.fileSize;
 	const knownIds = recordIdsOf(journalView.tail.toString("utf8"));
-	const lua = buildNativeSendTurn(paneId, "/goal drop");
+	const lua = buildNativeSendTurn(paneId, "/goal resume");
 	if (lua === null) return failed("BLOCK_UNWIREABLE", "block not a bare decimal pane id; zero sends", "Repair the project registration; the goal was not changed.");
 	let dispatched = false;
 	try {
@@ -979,7 +979,7 @@ export async function deliverGoalDrop(input: {
 	} catch {
 		dispatched = false;
 	}
-	if (!dispatched) return failed("SEND_AMBIGUOUS", "drop dispatch failed, effect unknown; proof never attempted", "Inspect the seat; the goal was not changed.");
+	if (!dispatched) return failed("SEND_AMBIGUOUS", "resume dispatch failed, effect unknown; proof never attempted", "Inspect the seat; the goal was not changed.");
 	const polls = Math.max(1, Math.ceil(deadlineMs / pollMs));
 	for (let poll = 0; poll < polls; poll++) {
 		if (poll > 0) await wait(pollMs);
@@ -990,7 +990,7 @@ export async function deliverGoalDrop(input: {
 			size = null;
 		}
 		if (size === null || size < cursorBytes) {
-			return failed("PROJECT_GOAL_UNPROVEN", "journal shrank during drop proof; the drop is unproven", "Inspect the seat journal; the goal was not changed.");
+			return failed("PROJECT_GOAL_UNPROVEN", "journal shrank during resume proof; the resume is unproven", "Inspect the seat journal; the goal was not changed.");
 		}
 		if (size === cursorBytes) continue;
 		const current = readSessionView(io, sessionFile);
@@ -1008,7 +1008,7 @@ export async function deliverGoalDrop(input: {
 					const record = JSON.parse(bytes.subarray(position, newline).toString("utf8")) as { id?: unknown; parentId?: unknown };
 					if (typeof record === "object" && record !== null && typeof record.id === "string" && record.id !== "") {
 						parents.set(record.id, typeof record.parentId === "string" ? record.parentId : null);
-						if (isGoallessModeChange(record)) {
+						if (isResumedModeChange(record)) {
 							let ancestor: string | null = typeof record.parentId === "string" ? record.parentId : null;
 							for (let hops = 0; hops <= parents.size; hops++) {
 								if (ancestor === null) break;
@@ -1027,7 +1027,7 @@ export async function deliverGoalDrop(input: {
 			position = newline + 1;
 		}
 	}
-	return failed("PROJECT_GOAL_UNPROVEN", "drop unproven: no goal-less mode_change after the drop send", "Inspect the seat journal; the goal was not changed.");
+	return failed("PROJECT_GOAL_UNPROVEN", "resume unproven: no active goal mode_change after the resume send", "Inspect the seat journal; the goal was not changed.");
 }
 
 function readGoalIdAt(input: { io: TernObserverIo; sessionFile: string; offset: number }): string | null {
@@ -1075,36 +1075,37 @@ export async function applyProjectGoal(input: ProjectGoalInput): Promise<{ ok: t
 	const read = await readDirectorGoalState({ session: input.session, pane, repo: located.entry.repo, env: input.env, io });
 	if (!read.ok) return read;
 	const gate = goalGateOf(located.entry, read.state.paused);
-	if (gate.paused === true) return failGoal("GATE_PAUSED", "seat is paused; zero sends", "Unpause the seat, then set the goal again.");
 	if (gate.pullEnabled === false) return failGoal("GATE_PULL_DISABLED", "pullEnabled is false; zero sends", "Re-enable pulls for the project, then set the goal again.");
+	// The gate's paused flag is the goal-state pause only; the resume leg
+	// below clears it, so neither leg refuses on it. A paused seat resumes
+	// first because `/goal set` on a paused goal only warns.
+	const sendGate: TernSendGate = located.entry.pullEnabled === false ? { pullEnabled: false } : {};
 	const previousGoal = read.state.activeGoal === null ? null : read.state.activeGoal.objective;
-	let dropped = false;
-	if (read.state.activeGoal !== null) {
-		const drop = await deliverGoalDrop({
+	if (read.state.paused) {
+		const resume = await deliverGoalResume({
 			seat: { session: input.session, pane, windowKey: "", cwd: located.entry.repo, identityProject: located.entry.repo },
-			io, gate, env: input.env, pollMs, deadlineMs, ...(wait === undefined ? {} : { wait }),
+			io, gate: sendGate, env: input.env, pollMs, deadlineMs, ...(wait === undefined ? {} : { wait }),
 		});
-		if (!drop.ok) return drop;
-		dropped = true;
+		if (!resume.ok) return resume;
 	}
 	const goalText = `/goal set ${text.text}`;
 	const sent = await deliverToTernSeat({
 		seat: { session: input.session, pane, windowKey: "", cwd: located.entry.repo, identityProject: located.entry.repo }, text: goalText,
 		dropDir: located.paths.stateRoot, io, env: input.env,
-		pollMs, deadlineMs, untilDeliveredMs: deadlineMs, gate, ...(wait === undefined ? {} : { wait }),
+		pollMs, deadlineMs, untilDeliveredMs: deadlineMs, gate: sendGate, ...(wait === undefined ? {} : { wait }),
 	});
 	if (sent.status !== "OK" || sent.sessionFile === null) {
 		const reread = await readDirectorGoalState({ session: input.session, pane, repo: located.entry.repo, env: input.env, io });
 		const state = reread.ok
 			? (reread.state.activeGoal === null ? "the seat is now goal-less" : `the seat still carries goal ${JSON.stringify(reread.state.activeGoal.objective)}`)
 			: "the seat state could not be re-read";
-		return { ...failGoal("PROJECT_GOAL_UNPROVEN", `drop proven but set unproven: ${sent.detail}; ${state}`, "Inspect the seat journal, then set the goal again with project goal."), partial: true };
+		return { ...failGoal("PROJECT_GOAL_UNPROVEN", `set unproven: ${sent.detail}; ${state}`, "Inspect the seat journal, then set the goal again with project goal."), partial: true };
 	}
 	const goalId = readGoalIdAt({ io, sessionFile: sent.sessionFile, offset: sent.offset ?? -1 });
 	if (goalId === null) {
 		return { ...failGoal("PROJECT_GOAL_UNPROVEN", `set proven at offset ${sent.offset ?? 0} but the new goal id could not be read back`, "Inspect the seat journal, then set the goal again with project goal."), partial: true };
 	}
-	return { ok: true, result: { status: "APPLIED", session: input.session, seat: pane, previousGoal, goalId, dropped } };
+	return { ok: true, result: { status: "APPLIED", session: input.session, seat: pane, previousGoal, goalId } };
 }
 
 

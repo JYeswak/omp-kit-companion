@@ -218,10 +218,17 @@ if (args[0] === "ctl") {
 		}
 	} catch { /* virgin journal: the assistant root stays the parent */ }
 	const stamp = "g" + String(fs.readFileSync(file, "utf8").split("\\n").filter((line) => line.trim() !== "").length + 1);
-	if (payload === "/goal drop") {
+	fs.appendFileSync(dir + "/dispatched.log", JSON.stringify(payload) + "\\n");
+	if (payload === "/goal resume") {
 		const entry = { type: "mode_change", id: stamp, parentId: parent, mode: "goal",
-		data: { goal: { id: prev === null ? "goal-none" : prev.id, objective: prev === null ? "" : prev.objective, status: "dropped" } } };
+		data: { goal: { id: prev === null ? "goal-resumed" : prev.id, objective: prev === null ? "resumed" : prev.objective, status: "active" } } };
 		fs.appendFileSync(file, JSON.stringify(entry) + "\\n");
+		process.exit(0);
+	}
+	if (payload === "/goal drop") {
+		const dropEntry = { type: "mode_change", id: stamp, parentId: parent, mode: "goal",
+		data: { goal: { id: prev === null ? "goal-none" : prev.id, objective: prev === null ? "" : prev.objective, status: "dropped" } } };
+		fs.appendFileSync(file, JSON.stringify(dropEntry) + "\\n");
 		process.exit(0);
 	}
 	if (process.env.PROJECTGOAL_NO_SET === "1" && payload.startsWith("/goal set ")) process.exit(0);
@@ -616,7 +623,19 @@ async function goalFixture(): Promise<Fixture> {
 	return f;
 }
 
-test("PROJECTGOAL1 replace: drop proven, set proven, previous text reported, status shows the new goal", async () => {
+/** Every native payload the fake tern dispatched, in order (`/goal set`, `/goal resume`, never `/goal drop`). */
+function dispatchedPayloads(f: Fixture): string[] {
+	const path = join(f.dir, "tern-state", "dispatched.log");
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch {
+		return [];
+	}
+	return text.split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line) as string);
+}
+
+test("PROJECTGOAL1 replace: a single native /goal set replaces the active goal, previous text reported, status shows the new goal", async () => {
 	const f = await goalFixture();
 	try {
 		const journalBefore = readFileSync(f.sessionFile(f.directorBlock), "utf8");
@@ -628,9 +647,9 @@ test("PROJECTGOAL1 replace: drop proven, set proven, previous text reported, sta
 		expect(plan.seat).toBe(`tern:${f.directorBlock}`);
 		expect(plan.current_goal).toBe("Grow the skill library");
 		expect(plan.new_goal).toBe("Own skillgrowth: land the queue");
-		expect(plan.deliveries).toEqual([{ seat: `tern:${f.directorBlock}`, kind: "goal-drop" }, { seat: `tern:${f.directorBlock}`, kind: "goal-set" }]);
+		expect(plan.deliveries).toEqual([{ seat: `tern:${f.directorBlock}`, kind: "goal-set" }]);
 		expect(readFileSync(f.sessionFile(f.directorBlock), "utf8")).toBe(journalBefore);
-		// Apply drops the old goal, then sets the new one, each proven from the journal.
+		// Apply replaces the old goal with one native set, proven from the journal.
 		const changed = await cli(f, ["project", "goal", "skillgrowth", "--set", "Own skillgrowth: land the queue", "--apply", "--yes", "--json"]);
 		expect(changed.code, changed.out + changed.err).toBe(0);
 		const done = JSON.parse(changed.out).data;
@@ -638,9 +657,9 @@ test("PROJECTGOAL1 replace: drop proven, set proven, previous text reported, sta
 		expect(done.seat).toBe(`tern:${f.directorBlock}`);
 		expect(done.previous_goal).toBe("Grow the skill library");
 		expect(typeof done.goal_id).toBe("string");
-		expect(done.dropped).toBe(true);
+		expect("dropped" in done).toBe(false);
 		const journal = readFileSync(f.sessionFile(f.directorBlock), "utf8");
-		expect(journal).toContain('"status":"dropped"');
+		expect(journal).not.toContain('"status":"dropped"');
 		expect(journal).toContain('"objective":"Own skillgrowth: land the queue"');
 		// Status reads the new active goal from the journal.
 		const status = await cli(f, ["project", "status", "skillgrowth", "--json"]);
@@ -652,7 +671,7 @@ test("PROJECTGOAL1 replace: drop proven, set proven, previous text reported, sta
 	}
 }, fixtureDeadlineS(300) * 1000);
 
-test("PROJECTGOAL1 set on a goal-less seat sends no drop", async () => {
+test("PROJECTGOAL1 set on a goal-less seat sends a single set", async () => {
 	const f = await goalFixture();
 	try {
 		// A restarted seat whose journal carries no active goal.
@@ -667,7 +686,7 @@ test("PROJECTGOAL1 set on a goal-less seat sends no drop", async () => {
 		const done = JSON.parse(changed.out).data;
 		expect(done.action).toBe("APPLIED");
 		expect(done.previous_goal).toBe(null);
-		expect(done.dropped).toBe(false);
+		expect("dropped" in done).toBe(false);
 		expect(typeof done.goal_id).toBe("string");
 		expect(readFileSync(f.sessionFile(f.directorBlock), "utf8")).not.toContain('"status":"dropped"');
 	} finally {
@@ -676,18 +695,35 @@ test("PROJECTGOAL1 set on a goal-less seat sends no drop", async () => {
 	}
 }, fixtureDeadlineS(300) * 1000);
 
-test("PROJECTGOAL1 a paused seat is refused with zero sends", async () => {
+test("PROJECTGOAL1 a paused seat resumes, then sets the new goal", async () => {
 	const f = await goalFixture();
 	try {
 		const path = f.sessionFile(f.directorBlock);
 		const before = readFileSync(path, "utf8");
 		const tip = JSON.parse(before.split("\n").filter((line) => line.trim() !== "").pop()!);
 		writeFileSync(path, before + JSON.stringify({ type: "mode_change", id: "gp1", parentId: tip.id, mode: "goal_paused" }) + "\n");
+		const planned = await cli(f, ["project", "goal", "skillgrowth", "--set", "Own skillgrowth: land the queue", "--plan", "--json"]);
+		expect(planned.code, planned.out + planned.err).toBe(0);
+		expect(JSON.parse(planned.out).data.current_goal).toBe(null);
+		expect(JSON.parse(planned.out).data.deliveries).toEqual([
+			{ seat: `tern:${f.directorBlock}`, kind: "goal-resume" },
+			{ seat: `tern:${f.directorBlock}`, kind: "goal-set" },
+		]);
 		const changed = await cli(f, ["project", "goal", "skillgrowth", "--set", "Own skillgrowth: land the queue", "--apply", "--yes", "--json"]);
-		expect(changed.code).toBe(2);
-		expect(JSON.parse(changed.out).errors[0].code).toBe("GATE_PAUSED");
-		expect(readFileSync(path, "utf8").split("\n").filter((line) => line.trim() !== "").length)
-			.toBe(before.split("\n").filter((line) => line.trim() !== "").length + 1);
+		expect(changed.code, changed.out + changed.err).toBe(0);
+		const done = JSON.parse(changed.out).data;
+		expect(done.action).toBe("APPLIED");
+		expect(done.previous_goal).toBe(null);
+		expect(typeof done.goal_id).toBe("string");
+		expect("dropped" in done).toBe(false);
+		const journal = readFileSync(path, "utf8");
+		expect(journal).not.toContain('"status":"dropped"');
+		expect(journal).toContain('"objective":"Own skillgrowth: land the queue"');
+		expect(dispatchedPayloads(f).slice(-2)).toEqual(["/goal resume", "/goal set Own skillgrowth: land the queue"]);
+		// Status reads the resumed-then-replaced goal from the journal.
+		const status = await cli(f, ["project", "status", "skillgrowth", "--json"]);
+		expect(status.code, status.out + status.err).toBe(0);
+		expect(JSON.parse(status.out).data.seats[0].activeGoal).toBe("Own skillgrowth: land the queue");
 	} finally {
 		f.killDecoys();
 		f.mail.server.stop(true);
@@ -730,7 +766,7 @@ test("PROJECTGOAL1 goal text refusals: empty, over cap, and a line starting with
 	}
 }, fixtureDeadlineS(300) * 1000);
 
-test("PROJECTGOAL1 set unproven after a proven drop reports the partial state", async () => {
+test("PROJECTGOAL1 set unproven reports the partial state", async () => {
 	const f = await goalFixture();
 	try {
 		f.env.PROJECTGOAL_NO_SET = "1";
@@ -738,11 +774,33 @@ test("PROJECTGOAL1 set unproven after a proven drop reports the partial state", 
 		expect(changed.code).toBe(1);
 		const errors = JSON.parse(changed.out).errors;
 		expect(errors[0].code).toBe("PROJECT_GOAL_UNPROVEN");
-		expect(errors[0].message).toContain("drop proven but set unproven");
-		expect(errors[0].message).toContain("goal-less");
+		expect(errors[0].message).toContain("set unproven");
+		expect(errors[0].message).not.toContain("drop proven");
+		expect(errors[0].message).toContain("still carries goal");
 		const journal = readFileSync(f.sessionFile(f.directorBlock), "utf8");
-		expect(journal).toContain('"status":"dropped"');
+		expect(journal).not.toContain('"status":"dropped"');
 		expect(journal).not.toContain('"objective":"Own skillgrowth: land the queue"');
+	} finally {
+		f.killDecoys();
+		f.mail.server.stop(true);
+	}
+}, fixtureDeadlineS(300) * 1000);
+
+test("GOALSENDLAND1-native: replacing an active goal dispatches one /goal set and never /goal drop", async () => {
+	const f = await goalFixture();
+	try {
+		const before = dispatchedPayloads(f);
+		// The fixture's first goal arrives staged, not dispatched: only this apply dispatches.
+		const changed = await cli(f, ["project", "goal", "skillgrowth", "--set", "Own skillgrowth: land the queue", "--apply", "--yes", "--json"]);
+		expect(changed.code, changed.out + changed.err).toBe(0);
+		const done = JSON.parse(changed.out).data;
+		// The replaced goal is reported alongside the new goal id.
+		expect(done.previous_goal).toBe("Grow the skill library");
+		expect(typeof done.goal_id).toBe("string");
+		// Exactly one new dispatch: the native set. The confirm-gated drop is never sent.
+		expect(dispatchedPayloads(f).slice(before.length)).toEqual(["/goal set Own skillgrowth: land the queue"]);
+		// Planted negative: an implementation that dispatches `/goal drop` fails here.
+		expect(dispatchedPayloads(f).filter((payload) => payload === "/goal drop")).toEqual([]);
 	} finally {
 		f.killDecoys();
 		f.mail.server.stop(true);

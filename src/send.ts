@@ -901,10 +901,13 @@ function firstSpaceAt(text: string): number {
  * 18.12.2), dispatches `/name` as a slash control, and journals anything
  * else as a USER message. `/goal set BODY` replaces or starts a goal whose
  * objective is BODY trimmed (interactive-mode.ts parseGoalSubcommand and
- * #handleGoalSetSubcommand); its proof is a new goal mode_change, so it
- * travels without a marker. Other slash controls have no journal proof
- * contract here (`/goal drop` opens a confirmation picker; `/goal set` with
- * no body opens an editor).
+ * #handleGoalSetSubcommand, which calls goalRuntime.replaceGoal natively on
+ * an active goal, so no drop is ever needed); its proof is a new goal
+ * mode_change, so it travels without a marker. Other slash controls have no
+ * journal proof contract here (`/goal drop` opens a confirmation picker
+ * nobody answers over the native turn, so the kit never sends it; `/goal
+ * set` with no body opens an editor; `/goal resume` is proven by the project
+ * goal resume leg, not here).
  */
 export type TernPayloadKind =
 	| { kind: "message" }
