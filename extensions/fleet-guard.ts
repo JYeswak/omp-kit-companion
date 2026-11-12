@@ -1,12 +1,12 @@
 import { cpus } from "node:os";
-import { readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { check as checkGit, commandFromEvent, executedShellCommands } from "../src/fleet-guard/git.ts";
 import { check as checkReservations, exportAgentMailStorageRoot } from "../src/fleet-guard/reservations.ts";
 import { runSync } from "../src/kitlib/run.ts";
-import { adoptOwnerlessDir, applyScratchEnv, autoCompletedLine, check as checkScratch, checkSystemTemp, createdScratchTops, hostAgentName, rewriteShellCommand, rewriteToolInput, toolTargetPaths, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent, type RewriteMapping } from "../src/fleet-guard/scratch.ts";
+import { adoptOwnerlessDir, applyScratchEnv, autoCompletedLine, check as checkScratch, checkSystemTemp, createdScratchTops, hostAgentName, resolveFilesystemWriteTarget, rewriteShellCommand, rewriteToolInput, toolTargetPaths, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent, type RewriteMapping } from "../src/fleet-guard/scratch.ts";
 import { createSeatScratch, endSeat, liveSeatEndDeps, recordSeatOwner, type SeatEndDeps, type SeatScratchOpts } from "../src/fleet-guard/seat-end.ts";
-import { check as checkDurability } from "../src/fleet-guard/durability.ts";
+import { check as checkDurability, targets as durableTargets } from "../src/fleet-guard/durability.ts";
 import { check as checkWriteOwnership } from "../src/fleet-guard/write-own.ts";
 import { checkPlutilInPlace } from "../src/fleet-guard/plutil.ts";
 import { fleetPolicyState } from "./fleet-policy.ts";
@@ -284,6 +284,52 @@ async function recordCompletion(seatName: string | undefined, tool: string, noti
 		await recordGateEvent({ seat: seatName ?? null, act: tool, target: from, gate, kind: "auto_complete", detail: notice.slice(0, 200) });
 	} catch { /* the verdict stands; the ledger is best effort */ }
 }
+/**
+ * FLEETAPPLIC1 (ompkit-1ra0d.223): an unreadable opt-in must not lock the repo. On
+ * unavailable the call falls through to the on-path verdict, except a write/edit whose
+ * every filesystem target is the policy marker itself is admitted, so the seat can effect
+ * the repair (the marker must then be exactly `{"enabled": true}` or `{"enabled": false}`).
+ * No new refusal codes. Note this is not literally the opted-in path: non-repair writes
+ * stay refused by write-own's WRITE_OWN_POLICY_UNAVAILABLE, which fails closed while the
+ * policy cannot be proven.
+ */
+async function isPolicyRepair(event: FleetGuardEvent, cwd: string, localRoot: string | undefined, root: string): Promise<boolean> {
+	const tool = typeof event.toolName === "string" ? event.toolName : "";
+	if (tool !== "write" && tool !== "edit") return false;
+	let entries;
+	try {
+		entries = await durableTargets(event);
+	} catch {
+		return false;
+	}
+	if (entries.length === 0) return false;
+	const marker = join(root, ".omp", "fleet.json");
+	const probe: FleetGuardContext = { cwd, localRoot };
+	for (const entry of entries) {
+		let resolved: string | undefined;
+		try {
+			resolved = resolveFilesystemWriteTarget(cwd, entry.path, probe);
+		} catch {
+			return false;
+		}
+		if (resolved === undefined || resolved !== marker) return false;
+	}
+	// A symlinked `.omp` or marker is itself an `unavailable` reason: admitting the repair
+	// there would follow the link and write an arbitrary file with no checks, so refuse.
+	// A missing marker (ENOENT) is the create-the-marker repair and stays admitted.
+	try {
+		const dirStat = lstatSync(join(root, ".omp"));
+		if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) return false;
+	} catch {
+		return false;
+	}
+	try {
+		if (lstatSync(marker).isSymbolicLink()) return false;
+	} catch (error) {
+		if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "ENOENT") return false;
+	}
+	return true;
+}
 export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Promise<void> {
 	const cwd = deps?.cwd ?? process.cwd();
 	const pid = deps?.pid ?? process.pid;
@@ -315,6 +361,7 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 	}
 	pi.setLabel("fleet-guard");
 	const state: SessionRewriteState = { dir: "", aliases: new Map(), createdDirs: new Set(), adopted: [] };
+	let unavailableWarned = false;
 	pi.on("tool_call", async (event, context) => {
 		const agent = seat !== null && !seat.recorded ? hostAgentName(deps?.env) : undefined;
 		const session = agent !== undefined ? context?.sessionManager?.getSessionId?.() : undefined;
@@ -340,7 +387,17 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 			const refusal = checkSystemTemp(event, { cwd: callingCwd, localRoot: localRootOf(context) });
 			return withSessionHint(refusal, hintDir);
 		}
-		if (policy.kind === "unavailable") return { block: true, reason: `fleet-guard applicability: ${policy.reason}` };
+		if (policy.kind === "unavailable") {
+			// FLEETAPPLIC1 (ompkit-1ra0d.223): the blanket applicability refusal locked the repo —
+			// one bad field refused reads and the repair edit too. Fall through to the on-path
+			// verdict (reads admitted, hazards still refused; non-repair writes stay refused by
+			// write-own's WRITE_OWN_POLICY_UNAVAILABLE), except the marker repair itself is admitted.
+			if (!unavailableWarned) {
+				unavailableWarned = true;
+				context?.ui?.notify?.(`fleet-guard: fleet policy unavailable (${policy.reason}); repair: .omp/fleet.json must be exactly {"enabled": true} or {"enabled": false}`, "info");
+			}
+			if (await isPolicyRepair(event, callingCwd, localRootOf(context), policy.root)) return undefined;
+		}
 		// OMP supplies the calling session's mapping (including subagent sharing).
 		// No cwd/default-session guess: an absent backing root fails closed for local://.
 		// NATIVEPREGRADE1 (ompkit-1ra0d.41): a native child's own spawn-minted name; its holds cover its own writes.
