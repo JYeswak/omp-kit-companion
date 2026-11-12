@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Fetch-backed source citations
 
 `scripts/sources.py` uses Python 3.9+ and the standard library. It proves that a fetched page contained each supplied quote after Unicode, punctuation and whitespace normalization (case-insensitive matching). Stored body/text hashes and excerpt hashes preserve the observation. It does **not** prove that the claim follows from the quote, that the page is authoritative, or that it has not changed. A non-author must read the claim against its quotes; `verify` checks current availability, not faithfulness.

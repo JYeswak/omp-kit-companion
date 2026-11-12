@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Troubleshooting
 
 | Error | Meaning | Fix |

@@ -381,6 +381,9 @@ jobs:
       - name: Check README currency (every command and doctor scope documented, no pinned release version)
         if: matrix.suite == 'core' || matrix.suite == 'core-1'
         run: bun scripts/readme-check.ts
+      - name: Check doc front-matter status (every doc carries current, draft or superseded)
+        if: matrix.suite == 'core' || matrix.suite == 'core-1'
+        run: sh scripts/doc-status-check.sh .
       - name: Exercise the release train, release-bump and doc-drift contracts
         if: matrix.suite == 'core' || matrix.suite == 'core-1'
         run: |

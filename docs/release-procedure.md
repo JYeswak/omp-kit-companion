@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Release procedure
 
 How any fleet repo cuts a versioned release (PUB1c). The companion repo is

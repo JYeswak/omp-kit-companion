@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Safe operator interrupt for a looping turn (LOOPGUARD1 AC4)
 
 Measured 2026-10-19 on installed omp 18.12.3 (Tern), owned tmux pane,

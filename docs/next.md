@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # next
 
 ```sh

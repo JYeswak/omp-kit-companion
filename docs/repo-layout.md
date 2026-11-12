@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Standard repo layout
 
 Every fleet repo keeps the same top-level shape so agents and checks work

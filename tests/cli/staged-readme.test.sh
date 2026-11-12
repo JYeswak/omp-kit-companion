@@ -109,13 +109,18 @@ MD
 
 install_baseline() {
 	dir="$TMP/installed-baseline"
-	mkdir -p "$dir/rules" "$dir/skills/s1" "$dir/skills/s2" "$dir/src"
+	mkdir -p "$dir/rules" "$dir/skills/s1" "$dir/skills/s2" "$dir/src" "$dir/docs" "$dir/tests/live"
 	write_base_readme "$dir"
 	write_gate_stub "$dir"
 	printf '{"name":"fixture","version":"0.0.1","omp":{"extensions":["e1","e2"]}}\n' > "$dir/package.json"
 	printf 'export const COMMANDS = [{ name: "alpha" }, { name: "doctor", flags: [{ name: "--scope", value: "red|blue" }] }];\n' > "$dir/src/commands.ts"
 	printf '# rule a\n' > "$dir/rules/a.md"
 	printf '# rule b\n' > "$dir/rules/b.md"
+	printf '# Agents\n\nlive suite (G4, 2 scenarios including a planted negative).\n' > "$dir/AGENTS.md"
+	# shellcheck disable=SC2016 # literal $KIT: fixture doc text, not an expansion
+	printf '# Usage\n\n`"$KIT" apply rules --plan --json` previews the 2-rule install.\n' > "$dir/docs/usage.md"
+	printf '[{"id":"a"},{"id":"b"}]\n' > "$dir/tests/live/scenarios.json"
+	printf 'name\tsha256\tclass\tpack\na\t0\ttripwire\tpack\nb\t1\treminder\tpack\n' > "$dir/MANIFEST.tsv"
 	printf '# skill one\n' > "$dir/skills/s1/SKILL.md"
 	printf '# skill two\n' > "$dir/skills/s2/SKILL.md"
 	git -C "$dir" init -q 2>/dev/null

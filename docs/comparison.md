@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Comparison
 
 | | omp-kit | Plain OMP rules (`ttsr`) | Hand-written AGENTS.md text | Generic pre-commit hooks / sandboxing |

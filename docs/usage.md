@@ -39,7 +39,7 @@ KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
 "$KIT" apply extensions --plan --json
 ```
 
-`"$KIT" apply rules --plan --json` previews the 18-rule install (see the
+`"$KIT" apply rules --plan --json` previews the 26-rule install (see the
 README try). `apply policy --plan` needs a profile selection and refuses
 without one. Applying needs `--apply` plus interactive confirmation or
 `--yes`; `--robot --json` returns the envelope without prompting but never

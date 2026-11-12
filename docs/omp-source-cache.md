@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 ### OMP source cache
 
 OMP installed through Tern ships compiled code without the TypeScript the

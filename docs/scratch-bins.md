@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Scratch bins
 
 Every scratch directory has an owner and, when its work ends, a destination. The destination is a *bin*. The kit stops treating the reaper as the way scratch gets cleaned up: the owner disposes of its own directory, and a reap is an emergency whose report names what failed to bin it.

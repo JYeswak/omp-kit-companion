@@ -187,22 +187,22 @@ Existing profile entries are preserved; use their original receipt to undo them.
 - **omp-kit-native:** fleet situations mapped to the native verb that handles
   them (waiting, verification, publishing, CI state, scratch, sends, doctor,
   receipts) instead of hand-rolled loops; file a bead for any missing verb.
-- **omp-native:** use native OMP tooling first: `omp ttsr list/test/scan`,
+- **omp-native:** prefer native OMP tooling: `omp ttsr list/test/scan`,
   plugin links, and read-only settings.
 - **jeff-planning-enhanced:** the fleet planning protocol (plan, review,
   beads, polish), scored with `omp-kit planning score`.
 - **fleet-restart:** native Tern daemon persistence and OMP session/goal
-  lifecycle replace kit respawn loops. Preserve owner identity and explicit
-  pause intent; never resume a paused goal automatically. Tern restart does
-  not reload extensions inside OMP. The retained read-only
-  `scripts/fleet_restart.py align --version X.Y.Z` checks release profile links.
-- **fleet-round:** the lock-step fleet round protocol and a read-only
-  validator for its reports. `scripts/fleet-round.ts` has `collect`,
+  lifecycle replace kit respawn loops. Preserve owner identity and pause
+  intent; never resume a paused goal. Tern restart does not reload extensions
+  inside OMP. The read-only
+  `skills/fleet-restart/scripts/fleet_restart.py align --version X.Y.Z` checks profile links.
+- **fleet-round:** the lockstep fleet round protocol and a read-only report
+  validator. `skills/fleet-round/scripts/fleet-round.ts` has `collect`,
   `snapshot`, `check`, `validate`, `spot-check`, `score` and `barrier`: it
   recomputes each director's claims from br, git, tmux and Agent Mail identity
   files, checks the round-0 pass bar, reports UNKNOWN, never PASS, for anything
-  it cannot observe, and at each barrier reports per project whether its report
-  arrived on time and was accepted, escalating a repeated blocker.
+  unobservable, and at each barrier reports per project whether its report
+  arrived and was accepted, escalating a repeated blocker.
 
 ```sh
 OMP_KIT_TERN_LIVE=1 bun test extensions/kit-goal-keepalive.test.ts -t NATIVESESSION1
@@ -477,7 +477,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and hashes; `anchor` compares live-doc Mission with the record | `omp-kit mission anchor --json` |
 | `omp-kit preflight` | `preflight commit\|claim\|in-review\|close [BEAD]` | Every finding an act faces, with fix, at once; changes nothing | `omp-kit preflight close x` |
 | `omp-kit verify` | `verify BEAD --export SHA` | Non-author close: replay each box's command on the export, judge by named outcome, tick, gate, close | `omp-kit verify x` |
-| `omp-kit slice-verify` | `slice-verify --overlay PATH [--test FILE...]` | Base-vs-overlay verdict on a clean export | `omp-kit slice-verify --overlay src/x.ts --test tests/x.test.ts` |
+| `omp-kit slice-verify` | `slice-verify --overlay PATH [--test FILE...]` | Base-vs-overlay verdict | `omp-kit slice-verify --overlay src/next.ts --test tests/cli/next.test.ts` |
 | `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Report landed-but-open beads and orphaned claims; reclaim only with no live holder; UNKNOWN never reclaimed | `omp-kit drain stale-claims --project .` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
 | `omp-kit heavy` | `heavy [--label LABEL] [--lane NAME] [--no-wait] [--max-runtime S] -- COMMAND [ARG ...]` | Run one load/disk-admitted command at nice 10; exit 75 deferred, 124 over budget, 69 observer-unavailable | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
@@ -488,7 +488,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit land` | `land --paths PATH... --message MSG --apply --yes\|land --patch FILE [--base SHA] --message MSG --apply --yes` | Commit reserved paths, pass `commit-msg` and [push check](docs/land.md), publish without force: `PUSHED`/`REFUSED`/`UNRUN` | `omp-kit help land` |
 | `omp-kit push-check` | `push-check --commit SHA [--repo PATH]` | Record a commit's `.omp/push-check` verdict | `omp-kit help push-check` |
 | `omp-kit ovnfs-land` | `ovnfs-land --repo PATH --checkout PATH --base SHA --apply --yes` | Serialize a committed worker checkout into main | `omp-kit help ovnfs-land` |
-| `omp-kit save` | `save -m MSG -- PATH...` | `land --apply --yes` in one step | `omp-kit save -m 'fix: x [pending]' -- src/a.ts` |
+| `omp-kit save` | `save -m MSG -- PATH...` | `land --apply --yes` in one step | `omp-kit save -m 'fix: x [pending]' -- README.md` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them; even with a fresh HOME these inspect the real launchd domain (read-only) | `omp-kit service list --json` |
 | `omp-kit send` | `send SESSION PANE MESSAGE [--no-bead-reason TEXT] [--drop-dir PATH]` | Tags agent text; bare slash commands; refuses forgeries | `omp-kit send s %1 "status" --json` |
 | `omp-kit brief` | `brief --repo PATH [--paths PATH...]` | Gate contract/digest; landed-line deletion candidates require author review | `omp-kit brief --repo . --json` |

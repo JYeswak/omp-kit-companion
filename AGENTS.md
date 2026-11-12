@@ -90,7 +90,7 @@ A permanent test must catch a plausible user-visible bug: behavior, boundaries, 
 ### Test Categories
 
 - `tests/cli/*.test.ts` (`bun test tests/cli`): CLI contracts, receipts, real OMP matcher (G1–G3), selected packs, review and reduction.
-- `scripts/ladder.sh`: manifest, harness gate and selftests, claim/readiness checkers, and the isolated live suite (G4, 70 scenarios plus a planted negative) using real OMP with a credential-free scripted model.
+- `scripts/ladder.sh`: manifest, harness gate and selftests, claim/readiness checkers, and the isolated live suite (G4, 151 scenarios including a planted negative) using real OMP with a credential-free scripted model.
 - `tests/cli/installer.test.sh`: the versioned installer against a real archive.
 - CI native certification (`scripts/native-candidate.py`) on each released archive and platform.
 

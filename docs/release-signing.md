@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Release signing: Developer ID on a local signer (DEVID-SIGN-V1)
 
 Bead `ompkit-v66l.27.4` (DEVIDSIGN1); decision J-2026-10-18-23: Developer ID signing on a

@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Mission anchor mapping (ANCHOR1, ompkit-fp72.9)
 
 One anchor, two faces. The live-doc Mission statement (a `Mission` heading plus an

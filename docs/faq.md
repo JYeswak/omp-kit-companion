@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # FAQ
 
 **Does omp-kit install or update OMP?**

@@ -2,9 +2,9 @@
 // CLI (a command or doctor scope missing from its reference) or pins a release version, and nothing
 // goes RED -- the 87-commit staleness behind ompkit-readme-changelog-currency-vrrn.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { COUNT_CLAIM, VERSION_LITERAL } from "../../scripts/readme-check.ts";
+import { COUNT_CLAIM, VERSION_LITERAL, checkDocCounts, checkPaths, codeSpans, globMatch, installClaims, scenarioClaims } from "../../scripts/readme-check.ts";
 import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 
 const repo = resolve(import.meta.dir, "../..");
@@ -256,21 +256,38 @@ test("fresh-gate's readme gate checks the archive tree and resolves tags from FR
 	const gateReadme = freshGate.slice(start, freshGate.indexOf("\n}\n", start) + 3);
 	expect(gateReadme).toContain('--repo "${FRESH_GATE_REPO:-$ROOT}"');
 	// The archive is a git-less copy of the inputs readme-check reads, as fresh-gate's `git archive` export is.
+	// The lint reads README.md, docs/*.md, AGENTS.md, scenarios.json and MANIFEST.tsv, so the archive carries
+	// the workdir minus .git, var scratch and the two audit dumps (unreferenced by any backticked path); a partial copy would fake path-lint misses.
 	const archive = join(workspace, "gate-archive");
-	mkdirSync(join(archive, "scripts"), { recursive: true });
-	for (const path of ["src", "rules", "skills"]) cpSync(join(repo, path), join(archive, path), { recursive: true });
-	cpSync(script, join(archive, "scripts/readme-check.ts"));
-	cpSync(join(repo, "package.json"), join(archive, "package.json"));
+	mkdirSync(archive, { recursive: true });
+	for (const entry of readdirSync(repo)) {
+		if (entry === ".git" || entry === "var" || entry === "agent_ergonomics_audit" || entry === "beads_compliance_audit") continue;
+		cpSync(join(repo, entry), join(archive, entry), { recursive: true });
+	}
 	writeFileSync(join(archive, "README.md"), releaseLine(published));
 	const gate = (root: string, body: string) => {
 		const result = runFixture(["bash", "-c", `${body}\ngate_readme`], { cwd: workspace, floor_s: 60,
 			env: { ...ceilingEnv, ARCHIVE_DIR: archive, ROOT: root, README_GATE: join(workspace, "no-readme-gate") } });
 		return { code: result.rc, out: new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr) };
 	};
-	const tagged = gate(taggedRepo("root-tagged", [published]), gateReadme);
-	expect(tagged.out).toContain("readme-check: registry");
-	expect(tagged.out).not.toContain("release line");
-	const untagged = gate(taggedRepo("root-untagged", []), gateReadme);
+	// The tag repo is seeded from the archive, so --repo lists the same files
+	// the archive lints (fresh-gate's real FRESH_GATE_REPO is that checkout).
+	const taggedArchive = (name: string, tags: string[]): string => {
+		const dir = join(workspace, name);
+		mkdirSync(dir, { recursive: true });
+		for (const entry of readdirSync(archive)) cpSync(join(archive, entry), join(dir, entry), { recursive: true });
+		const env = { ...ceilingEnv, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "fixture",
+			GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid" };
+		for (const args of [["init", "-q"], ["add", "-A"], ["commit", "-qm", "fixture"], ...tags.map(tag => ["tag", `v${tag}`])]) {
+			const result = runFixture(["git", ...args], { cwd: dir, env, floor_s: 30 });
+			if (result.rc !== 0) throw new Error(`git ${args.join(" ")}: ${new TextDecoder().decode(result.stderr)}`);
+		}
+		return dir;
+	};
+	const tagged = gate(taggedArchive("root-tagged", [published]), gateReadme);
+	expect(tagged.out).toContain("README-CHECK: GREEN");
+	expect(tagged.code).toBe(0);
+	const untagged = gate(taggedArchive("root-untagged", []), gateReadme);
 	expect(untagged.code).toBe(1);
 	expect(untagged.out).toContain(`tag v${published} does not exist`);
 	// Planted: without --repo the check looks for tags in the git-less archive and fails closed.
@@ -345,4 +362,124 @@ test("README APPLY1 mutant: restoring the unconditional registry import crashes 
 	expect(mutant.code).not.toBe(0);
 	expect(mutant.out).toContain("Cannot find module");
 	expect(mutant.out).not.toContain("README-CHECK: GREEN");
+});
+
+// DOCSHARMONY1 (ompkit-1ra0d.215): generated counts and the backticked-path lint.
+test("doc counts: stale AGENTS scenario and usage install claims are RED naming both numbers", () => {
+	// Export trees carry no generated MANIFEST.tsv; the CLI kit-tree tests below
+	// cover the mechanism there, and CI generates the manifest before testing.
+	let manifestText: string;
+	try { manifestText = readFileSync(join(repo, "MANIFEST.tsv"), "utf8"); }
+	catch {
+		console.log("SKIP live doc-counts: no MANIFEST.tsv in this tree");
+		return;
+	}
+	const liveAgents = readFileSync(join(repo, "AGENTS.md"), "utf8");
+	const liveUsage = readFileSync(join(repo, "docs/usage.md"), "utf8");
+	const scenarios: number = JSON.parse(readFileSync(join(repo, "tests/live/scenarios.json"), "utf8")).length;
+	const manifestRows = manifestText.split("\n").filter(line => line.length > 0);
+	const ruleRows = manifestRows.length - 1;
+	expect(checkDocCounts(liveAgents, liveUsage, scenarios, ruleRows)).toEqual([]);
+	const staleScenarios = checkDocCounts(liveAgents.replace(`${scenarios} scenarios`, "70 scenarios"), liveUsage, scenarios, ruleRows);
+	expect(staleScenarios).toHaveLength(1);
+	expect(staleScenarios[0]).toContain('"70 scenarios"');
+	expect(staleScenarios[0]).toContain(`ships ${scenarios}`);
+	const staleInstall = checkDocCounts(liveAgents, liveUsage.replace(`${ruleRows}-rule install`, "18-rule install"), scenarios, ruleRows);
+	expect(staleInstall).toHaveLength(1);
+	expect(staleInstall[0]).toContain('"18-rule install"');
+	expect(staleInstall[0]).toContain(`ships ${ruleRows} rules`);
+	expect(scenarioClaims("no counts here")).toEqual([]);
+	expect(scenarioClaims("70 scenarios and 151 scenarios")).toEqual([70, 151]);
+	expect(scenarioClaims("version v70 scenarios")).toEqual([]);
+	expect(installClaims("no counts here")).toEqual([]);
+	expect(installClaims("previews the 18-rule install")).toEqual([18]);
+});
+
+test("code spans never cross a newline and the glob matcher covers *, ? and classes", () => {
+	expect(codeSpans("see `docs/usage.md` here")).toEqual(["docs/usage.md"]);
+	expect(codeSpans("```mermaid\nflowchart TD\n```")).toEqual([]);
+	expect(codeSpans("``code`` and `other`")).toEqual(["code", "other"]);
+	expect(codeSpans("unbalanced ` span\nnext `ok` line")).toEqual(["ok"]);
+	expect(globMatch("scripts/check-*.sh", "scripts/check-staged-imports.sh")).toBe(true);
+	expect(globMatch("scripts/check-*.sh", "scripts/other.ts")).toBe(false);
+	expect(globMatch("tests/cli/*.test.?s", "tests/cli/readme-check.test.ts")).toBe(true);
+	expect(globMatch("rules/[a-z]*.md", "rules/a.md")).toBe(true);
+	expect(globMatch("rules/[a-z]*.md", "rules/0.md")).toBe(false);
+});
+
+test("path lint: a missing backticked repo path is RED; dirs, globs, placeholders and allowlist entries pass", () => {
+	const tracked = new Set(["scripts/check-staged-imports.sh", "skills/fleet-round/scripts/fleet-round.ts", "docs/usage.md", "src/commands.ts"]);
+	const clean = "see `skills/fleet-round/scripts/fleet-round.ts`, `docs/` and `scripts/check-*.sh`.";
+	expect(checkPaths([{ name: "README.md", text: clean }], tracked)).toEqual([]);
+	const placeholder = "one paragraph at `docs/releases/v<version>.md`";
+	expect(checkPaths([{ name: "docs/release-rubric.md", text: placeholder }], tracked)).toEqual([]);
+	const allowed = "like upstream `scripts/release.ts`";
+	expect(checkPaths([{ name: "docs/release-procedure.md", text: allowed }], tracked)).toEqual([]);
+	const missing = checkPaths([{ name: "README.md", text: "run `sh scripts/old-tool.sh --json`" }], tracked);
+	expect(missing).toEqual(["README.md names `scripts/old-tool.sh` but git ls-files has no such file or directory; fix the path or allowlist it in PATHLINT_ALLOW"]);
+	const twoFiles = checkPaths([
+		{ name: "README.md", text: clean },
+		{ name: "docs/setup.md", text: "needs `src/missing-thing.ts`" },
+	], tracked);
+	expect(twoFiles).toEqual(["docs/setup.md names `src/missing-thing.ts` but git ls-files has no such file or directory; fix the path or allowlist it in PATHLINT_ALLOW"]);
+});
+
+// DOCSHARMONY1 CLI: a kit-policy fixture tree wires AGENTS.md, docs/usage.md,
+// tests/live/scenarios.json, MANIFEST.tsv and `git ls-files` end to end.
+const KIT_README = "<!-- kit-release:start -->\nCurrent release: v9.9.9\n<!-- kit-release:end -->\n\n# Fixture\n\n## Command reference\n\n`omp-kit doctor` covers `doctor --scope red`.\n\n## Limitations\n\nNone.\n\n## About Contributions\n\nNone.\n\n## License\n\nPrivate.\n";
+const KIT_COMMANDS = "export const COMMANDS = [{ name: \"doctor\", flags: [{ name: \"--scope\", value: \"red\" }] }];\n";
+function kitTree(name: string, agentsScenarios: number, installRules: number, extraReadme = "", checker = readFileSync(script, "utf8")): string {
+	const root = join(workspace, name);
+	for (const dir of ["scripts", "docs", "rules", "src", "tests/live"]) mkdirSync(join(root, dir), { recursive: true });
+	writeFileSync(join(root, "scripts/readme-check.ts"), checker);
+	writeFileSync(join(root, "README.md"), KIT_README + extraReadme);
+	writeFileSync(join(root, "AGENTS.md"), `# Agents\n\nlive suite (G4, ${agentsScenarios} scenarios including a planted negative).\n`);
+	writeFileSync(join(root, "docs/usage.md"), `# Usage\n\npreviews the ${installRules}-rule install.\n`);
+	writeFileSync(join(root, "tests/live/scenarios.json"), JSON.stringify(["s0", "s1", "s2"]));
+	writeFileSync(join(root, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\na\t0\treminder\tpack\nb\t1\ttripwire\tpack\n");
+	writeFileSync(join(root, "package.json"), "{\"name\":\"fixture\",\"version\":\"9.9.9\"}\n");
+	writeFileSync(join(root, "src/commands.ts"), KIT_COMMANDS);
+	const env = { ...ceilingEnv, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "fixture",
+		GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid" };
+	for (const args of [["init", "-q"], ["add", "-A"], ["commit", "-qm", "fixture"]]) {
+		const result = runFixture(["git", ...args], { cwd: root, env, floor_s: 30 });
+		if (result.rc !== 0) throw new Error(`git ${args.join(" ")}: ${new TextDecoder().decode(result.stderr)}`);
+	}
+	return root;
+}
+
+test("doc counts CLI: a kit tree matching its generated files is GREEN; stale counts are RED", () => {
+	const green = checkRoot(kitTree("kit-green", 3, 2));
+	expect(green.out).toContain("README-CHECK: GREEN");
+	expect(green.code).toBe(0);
+	const staleScenarios = checkRoot(kitTree("kit-stale-scenarios", 4, 2));
+	expect(staleScenarios.code).toBe(1);
+	expect(staleScenarios.out).toContain('AGENTS.md claims "4 scenarios" but tests/live/scenarios.json ships 3');
+	const staleInstall = checkRoot(kitTree("kit-stale-install", 3, 5));
+	expect(staleInstall.code).toBe(1);
+	expect(staleInstall.out).toContain('docs/usage.md claims "5-rule install" but MANIFEST.tsv ships 2 rules');
+});
+
+test("path lint CLI: a backticked missing repo path is RED and names the file", () => {
+	const root = kitTree("kit-stale-path", 3, 2, "\n`scripts/no-such-file-xyz.sh` does not exist.\n");
+	const result = checkRoot(root);
+	expect(result.code).toBe(1);
+	expect(result.out).toContain("README.md names `scripts/no-such-file-xyz.sh` but git ls-files has no such file or directory");
+});
+
+test("removing the doc-count/path-lint checks makes planted negatives pass (the checks are load-bearing)", () => {
+	const source = readFileSync(script, "utf8");
+	const cases = [
+		{ anchor: "findings.push(...checkDocCounts(docTexts[\"AGENTS.md\"]!, docTexts[\"docs/usage.md\"]!, scenarios, ruleRows));", scenarios: 4, install: 2, extraReadme: "" },
+		{ anchor: "findings.push(...checkPaths(lintFiles, tracked));", scenarios: 3, install: 2, extraReadme: "\n`scripts/no-such-file-xyz.sh` does not exist.\n" },
+	];
+	cases.forEach(({ anchor, scenarios, install, extraReadme }, index) => {
+		expect(source).toContain(anchor);
+		const mutant = source.replace(anchor, anchor.replace("findings.push(...", "void ").slice(0, -2) + ";");
+		expect(mutant).not.toBe(source);
+		const dir = kitTree(`kit-mutant-${index}`, scenarios, install, extraReadme, mutant);
+		const result = checkRoot(dir, join(dir, "scripts/readme-check.ts"));
+		expect(result.out).toContain("README-CHECK: GREEN");
+		expect(result.code).toBe(0);
+	});
 });

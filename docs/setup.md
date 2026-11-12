@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # External tools setup
 
 Every external tool the kit uses: whether it is required, what kit feature it

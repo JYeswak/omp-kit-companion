@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # kitlib
 
 kitlib holds the kit's shared primitives. Any work that repeats across kit scripts and tests belongs here: one

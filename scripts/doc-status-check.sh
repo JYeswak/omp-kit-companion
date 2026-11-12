@@ -2,10 +2,12 @@
 # doc-status-check.sh — PUB1b doc status gate
 # (ompkit-rc-epic-land-fix-release-dogfood-rz5.106.2).
 # Every doc carries YAML front matter with a status (current, draft or
-# superseded); a superseded doc names its replacement in superseded-by, and a
-# dangling target is refused. With --index the script regenerates docs/INDEX.md
-# (current, draft and superseded groups); the output is sorted, so a second
-# run produces no diff.
+# superseded), except README.md: readme-check already guards its freshness and
+# the readme skill requires its first non-blank line to be the H1 title, which
+# front matter would break. A superseded doc names its replacement in
+# superseded-by, and a dangling target is refused. With --index the script
+# regenerates docs/INDEX.md (current, draft and superseded groups); the output
+# is sorted, so a second run produces no diff.
 # Usage: doc-status-check.sh [REPO] [--index]
 # Exit 0 clean, 1 on a status violation, 2 on usage errors.
 set -u
@@ -35,7 +37,7 @@ LIST=$work/list
 if [ -d "$REPO/docs" ]; then
 	find "$REPO/docs" -maxdepth 1 -name '*.md' ! -name 'INDEX.md' | sort >> "$LIST"
 fi
-for root in README.md ROADMAP.md AGENTS.md CONTRIBUTING.md; do
+for root in ROADMAP.md AGENTS.md CONTRIBUTING.md; do
 	[ -f "$REPO/$root" ] || continue
 	printf '%s\n' "$REPO/$root" >> "$LIST"
 done

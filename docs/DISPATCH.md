@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Dispatch format (D lines)
 
 A work dispatch is a message whose first token is `D`, or any message with

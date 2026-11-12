@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # Source-bound Tern verb map
 
 Reviewed 2026-10-16. SDK commit: `f3f9fee82bf692166c2a477a895a347ac2a47ca2`. Kit base: `033598f89e9b12c5449965ecf74e5e9baf024747`.

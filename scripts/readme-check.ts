@@ -16,6 +16,14 @@
 //      the repo's own structural checks always run (CI has no skills directory).
 //   4. When policy/extensions.json is present, the marked default profile extension list
 //      names exactly that policy's extensions (not the separate package.json plugin inventory).
+//   5. DOCSHARMONY1 generated counts: AGENTS.md's live-scenario claim equals
+//      tests/live/scenarios.json's length; docs/usage.md's install claim equals
+//      MANIFEST.tsv's rule rows.
+//   6. DOCSHARMONY1 path lint: every backticked repo-relative path in README.md
+//      and docs/*.md resolves via `git ls-files` (exact file, directory prefix
+//      or glob; `v<...>` placeholders and PATHLINT_ALLOW entries exempt).
+//   Rules 5-6 run only under the kit policy (like rule 1's registry); other
+//   trees print NOT_APPLICABLE doc-counts/path-lint lines.
 //
 // Applicability (README APPLY1, ompkit-v66l.22.3). The staged-readme hook runs this checker in any repo with a README
 // obligation (check-staged-readme.sh: README.md or scripts/readme-check.ts in the index or HEAD), and CFS's README is
@@ -123,6 +131,190 @@ function section(readme: string, heading: string): string | undefined {
 const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
 /** "30 rules", "five guard extensions", "30 diagnostic scopes": a count claim about the shipped inventory. */
 export const COUNT_CLAIM = new RegExp(`(?<![\\w.-])(\\d{1,4}|${NUMBER_WORDS.join("|")})[ \\t]+(?:[a-z]+(?:-[a-z]+)*[ \\t]+)?(rules|scopes|commands|extensions|skills)\\b`, "gi");
+
+/** DOCSHARMONY1: a backticked repo-relative path starts with one of these. */
+export const PATH_PREFIXES = ["scripts/", "src/", "docs/", "skills/", "extensions/", "rules/", "tests/"];
+
+/**
+ * DOCSHARMONY1: backticked paths that name no repo file but are still correct.
+ * Each entry names its reason; add one only with the same. Upstream omp
+ * paths (this procedure quotes the omp repo), the installed-OMP path,
+ * created-on-use skill state, a cross-repo discovery candidate, and a
+ * canonical baseline key format.
+ */
+export const PATHLINT_ALLOW: Record<string, string> = {
+	"docs/ROADMAP.md": "mission-anchor discovery candidate, resolved per fleet repo",
+	"scripts/release.ts": "upstream omp repo commit, not this repo",
+	"scripts/ci-release-notes.ts": "upstream omp repo script, not this repo",
+	"docs/research/sources.jsonl": "created on use by the sources skill",
+	"docs/research/APPLICATION.md": "created on use by the sources skill",
+	"src/config/mcp-schema.json": "installed-OMP path, not a repo path",
+	"scripts/*.html": "canonical docs-crawler baseline key format, not a repo glob",
+};
+
+/**
+ * Backticked code spans, one line at a time. A span never crosses a newline,
+ * so one unbalanced fence marker cannot swallow the rest of the file into a
+ * phantom span. Double-backtick spans (``code``) unwrap as one span.
+ */
+export function codeSpans(text: string): string[] {
+	const spans: string[] = [];
+	for (const line of text.split("\n")) {
+		let from = 0;
+		for (;;) {
+			const open = line.indexOf("`", from);
+			if (open < 0) break;
+			if (line[open + 1] === "`") {
+				const close = line.indexOf("``", open + 2);
+				if (close < 0) break;
+				spans.push(line.slice(open + 2, close));
+				from = close + 2;
+			} else {
+				const close = line.indexOf("`", open + 1);
+				if (close < 0) break;
+				spans.push(line.slice(open + 1, close));
+				from = close + 1;
+			}
+		}
+	}
+	return spans;
+}
+
+/** Glob `*`, `?` and `[...]` matching with no regex (the regexploit gate). */
+export function globMatch(pattern: string, name: string): boolean {
+	const charMatch = (pi: number, c: string): { hit: boolean; next: number } => {
+		const pch = pattern[pi]!;
+		if (pch === "?") return { hit: true, next: pi + 1 };
+		if (pch === "[") {
+			const end = pattern.indexOf("]", pi + 1);
+			if (end < 0) return { hit: pch === c, next: pi + 1 };
+			const neg = pattern[pi + 1] === "^" || pattern[pi + 1] === "!";
+			let i = pi + 1 + (neg ? 1 : 0), hit = false;
+			while (i < end) {
+				if (i + 2 < end && pattern[i + 1] === "-") {
+					if (pattern[i]! <= c && c <= pattern[i + 2]!) hit = true;
+					i += 3;
+				} else {
+					if (pattern[i] === c) hit = true;
+					i++;
+				}
+			}
+			return { hit: neg ? !hit : hit, next: end + 1 };
+		}
+		return { hit: pch === c, next: pi + 1 };
+	};
+	let px = 0, nx = 0, starPx = -1, starNx = 0;
+	while (nx < name.length) {
+		if (px < pattern.length && pattern[px] === "*") { starPx = px; starNx = nx; px++; continue; }
+		if (px < pattern.length) {
+			const step = charMatch(px, name[nx]!);
+			if (step.hit) { px = step.next; nx++; continue; }
+		}
+		if (starPx >= 0) { starNx++; nx = starNx; px = starPx + 1; continue; }
+		return false;
+	}
+	while (px < pattern.length && pattern[px] === "*") px++;
+	return px >= pattern.length;
+}
+
+/** A lint token resolves when it names a tracked file, a tracked directory, or a matching tracked glob. */
+function pathExistsIn(token: string, tracked: Set<string>): boolean {
+	let clean = token;
+	while (clean.length > 0 && ".,;:!?".includes(clean[clean.length - 1]!)) clean = clean.slice(0, -1);
+	while (clean.endsWith("/")) clean = clean.slice(0, -1);
+	if (clean.length === 0) return true;
+	if (PATHLINT_ALLOW[token] !== undefined || PATHLINT_ALLOW[clean] !== undefined) return true;
+	if (clean.includes("<") || clean.includes(">")) return true;
+	if (tracked.has(clean)) return true;
+	for (const file of tracked) if (file.startsWith(clean + "/")) return true;
+	if (clean.includes("*") || clean.includes("?") || clean.includes("[")) {
+		for (const file of tracked) if (globMatch(clean, file)) return true;
+		return false;
+	}
+	return false;
+}
+
+/**
+ * DOCSHARMONY1 path lint: every backticked repo-relative path in the given
+ * files must resolve via `git ls-files`. Findings name the file and token.
+ */
+export function checkPaths(files: { name: string; text: string }[], tracked: Set<string>): string[] {
+	const findings: string[] = [];
+	for (const file of files) {
+		for (const span of codeSpans(file.text)) {
+			let current = "";
+			const tokens: string[] = [];
+			for (const ch of span) {
+				if (ch === " " || ch === "\t") {
+					if (current !== "") { tokens.push(current); current = ""; }
+				} else current += ch;
+			}
+			if (current !== "") tokens.push(current);
+			for (const token of tokens) {
+				if (!PATH_PREFIXES.some(prefix => token.startsWith(prefix))) continue;
+				if (!pathExistsIn(token, tracked))
+					findings.push(`${file.name} names \`${token}\` but git ls-files has no such file or directory; fix the path or allowlist it in PATHLINT_ALLOW`);
+			}
+		}
+	}
+	return findings;
+}
+
+function isDigitChar(ch: string): boolean { return ch >= "0" && ch <= "9"; }
+function isWordChar(ch: string): boolean {
+	return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || isDigitChar(ch) || ch === "_";
+}
+
+/** Every "<n> scenario(s)" claim in order ("70 scenarios", "151 scenarios"). */
+export function scenarioClaims(text: string): number[] {
+	const out: number[] = [];
+	let from = 0;
+	for (;;) {
+		const at = text.indexOf("scenario", from);
+		if (at < 0) return out;
+		from = at + "scenario".length;
+		let end = from;
+		if (text[end] === "s") end++;
+		if (end < text.length && isWordChar(text[end]!)) continue;
+		let i = at - 1;
+		while (i >= 0 && (text[i] === " " || text[i] === "\t")) i--;
+		let digits = "";
+		while (i >= 0 && isDigitChar(text[i]!)) { digits = text[i]! + digits; i--; }
+		if (digits === "") continue;
+		if (i >= 0 && (isWordChar(text[i]!) || text[i] === "." || text[i] === ",")) continue;
+		out.push(Number(digits));
+	}
+}
+
+/** Every "<n>-rule install" claim in order ("18-rule install"). */
+export function installClaims(text: string): number[] {
+	const out: number[] = [];
+	let from = 0;
+	for (;;) {
+		const at = text.indexOf("-rule install", from);
+		if (at < 0) return out;
+		from = at + "-rule install".length;
+		let i = at - 1, digits = "";
+		while (i >= 0 && isDigitChar(text[i]!)) { digits = text[i]! + digits; i--; }
+		if (digits !== "") out.push(Number(digits));
+	}
+}
+
+/**
+ * DOCSHARMONY1 generated counts: the AGENTS.md live-scenario claim must equal
+ * tests/live/scenarios.json's length; the docs/usage.md install claim must
+ * equal MANIFEST.tsv's rule rows.
+ */
+export function checkDocCounts(agentsText: string, usageText: string, scenarios: number, ruleRows: number): string[] {
+	const findings: string[] = [];
+	for (const claimed of scenarioClaims(agentsText))
+		if (claimed !== scenarios)
+			findings.push(`AGENTS.md claims "${claimed} scenarios" but tests/live/scenarios.json ships ${scenarios}; update the count`);
+	for (const claimed of installClaims(usageText))
+		if (claimed !== ruleRows)
+			findings.push(`docs/usage.md claims "${claimed}-rule install" but MANIFEST.tsv ships ${ruleRows} rules; update the count`);
+	return findings;
+}
 
 /** Which input-dependent rules the tree declares (see Applicability above); registry null means rule 1 is not applicable. */
 export type ReadmeScope = { registry: Registry | null; inventory: Inventory; release: boolean; sections: boolean };
@@ -301,6 +493,50 @@ async function main(argv: string[]): Promise<number> {
 	} catch { releaseVersion = undefined; }
 	const findings = checkReadme(readme, { registry, inventory, release, sections: kitPolicy }, releaseVersion, releaseTagIn(repo));
 	findings.push(...defaultExtensionFindings(readme, root));
+	if (kitPolicy) {
+		// Generated counts need all four inputs. A partial tree (a preflight
+		// export has no generated MANIFEST.tsv) declares none of them, so the
+		// rule is NOT_APPLICABLE there, never a crash; a present-but-corrupt
+		// scenarios.json still fails closed below.
+		const docTexts: Record<string, string> = {};
+		for (const file of ["AGENTS.md", "docs/usage.md", "tests/live/scenarios.json", "MANIFEST.tsv"]) {
+			try { docTexts[file] = readFileSync(join(root, file), "utf8"); }
+			catch { break; }
+		}
+		let scenarios: number | null = null;
+		let ruleRows: number | null = null;
+		if (Object.keys(docTexts).length === 4) {
+			try {
+				const parsed: unknown = JSON.parse(docTexts["tests/live/scenarios.json"]!);
+				if (Array.isArray(parsed)) scenarios = parsed.length;
+			} catch { scenarios = null; }
+			const manifestRows = docTexts["MANIFEST.tsv"]!.split("\n").filter(line => line.length > 0);
+			ruleRows = manifestRows.length > 0 ? manifestRows.length - 1 : 0;
+		}
+		if (ruleRows === null) console.log("NOT_APPLICABLE doc-counts: a count input (AGENTS.md, docs/usage.md, tests/live/scenarios.json or MANIFEST.tsv) is unreadable here; generated counts are not judged");
+		else if (scenarios === null) findings.push("tests/live/scenarios.json is not a JSON array; the AGENTS.md live-scenario count is unverifiable");
+		else findings.push(...checkDocCounts(docTexts["AGENTS.md"]!, docTexts["docs/usage.md"]!, scenarios, ruleRows));
+		// The file list comes from the judged tree (--root); fresh-gate judges a
+		// git-less archive, so fall back to the canonical repo (--repo), whose
+		// tags already resolve there. A tree git cannot list fails closed.
+		let listed = spawnText(["git", "-C", root, "ls-files"], root);
+		if (!listed.ok) listed = spawnText(["git", "-C", repo, "ls-files"], repo);
+		// An unborn index (a preflight export's fresh `git init`) lists nothing:
+		// no files declared, so nothing to lint. A tree git cannot read at all
+		// fails closed.
+		const tracked = listed.ok ? new Set(listed.stdout.split("\n").filter(line => line.length > 0)) : new Set<string>();
+		if (!listed.ok) findings.push("path lint: `git ls-files` lists neither the root nor the repo; failing closed — run where git can list the tree");
+		else if (tracked.size === 0) console.log("NOT_APPLICABLE path-lint: `git ls-files` lists no tracked files here; backticked repo paths are not judged");
+		else {
+			const docNames = readdirSync(join(root, "docs")).filter(name => name.endsWith(".md"));
+			const lintFiles = [{ name: "README.md", text: readme },
+				...docNames.map(name => ({ name: `docs/${name}`, text: readFileSync(join(root, "docs", name), "utf8") }))];
+			findings.push(...checkPaths(lintFiles, tracked));
+		}
+	} else {
+		console.log("NOT_APPLICABLE doc-counts: no AGENTS.md live-scenario or docs/usage.md install-rule inputs declared; generated counts are not judged");
+		console.log("NOT_APPLICABLE path-lint: no docs/*.md inventory declared; backticked repo paths are not judged");
+	}
 	const count = (value: number | null) => value ?? "undeclared";
 	console.log(`readme-check: ${registry ? `registry ${registry.commands.length} commands, ${registry.scopes.length} doctor scopes (${registryPath})` : "no registry"}; ${count(inventory.rules)} rules, ${count(inventory.extensions)} extensions, ${count(inventory.skills)} skills`);
 	if (!registry) console.log("NOT_APPLICABLE command-reference: no COMMANDS registry at src/commands.ts; the command reference and command/scope counts are not judged");
