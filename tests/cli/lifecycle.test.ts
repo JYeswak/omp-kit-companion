@@ -24,6 +24,12 @@ test("LIFECYCLEMANIFEST1: the rendered doc matches the committed docs/lifecycle.
 	expect(renderLifecycleDoc(manifest)).toBe(readFileSync(join(ROOT, "docs", "lifecycle.md"), "utf8"));
 });
 
+test("DOCSHARMONY1: the generated lifecycle doc carries the front-matter status doc-status requires", () => {
+	// doc-status-check.sh refuses any docs/*.md without `status:` front matter; the generator owns it.
+	const rendered = renderLifecycleDoc(shippedManifest());
+	expect(rendered.startsWith("---\nstatus: current\n---\n")).toBe(true);
+});
+
 test("LIFECYCLEMANIFEST1: a row naming a missing verb fails validation", () => {
 	const manifest = shippedManifest();
 	const planted = JSON.parse(JSON.stringify(manifest)) as LifecycleManifest;
