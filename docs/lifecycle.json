@@ -1,0 +1,94 @@
+{
+	"version": 1,
+	"rows": [
+		{
+			"phase": "discover",
+			"exit_criterion": "A user need is recorded as checkable text.",
+			"verbs": ["intake"],
+			"doc": null,
+			"test": "src/intake-verb.test.ts",
+			"metric": "UNKNOWN"
+		},
+		{
+			"phase": "validate",
+			"exit_criterion": "The need survives a falsifiable proposition (problem, appetite, price).",
+			"verbs": [],
+			"doc": null,
+			"test": null,
+			"metric": "UNKNOWN"
+		},
+		{
+			"phase": "plan",
+			"exit_criterion": "Beads carry what, why and acceptance with no uncovered letters.",
+			"verbs": ["planning score", "planning convert", "mission validate", "mission anchor"],
+			"doc": "docs/mission-anchor-mapping.md",
+			"test": "tests/cli/planning-score.test.ts",
+			"metric": "creates_7d"
+		},
+		{
+			"phase": "build",
+			"exit_criterion": "Checked work lands on main through a gate.",
+			"verbs": ["land", "scratch new"],
+			"doc": "docs/land.md",
+			"test": "tests/cli/land.test.ts",
+			"metric": "closes_7d"
+		},
+		{
+			"phase": "verify",
+			"exit_criterion": "Shipped behavior is proven live, not just green in CI.",
+			"verbs": ["verify", "preflight commit"],
+			"doc": null,
+			"test": "tests/cli/verify.test.ts",
+			"metric": "UNKNOWN"
+		},
+		{
+			"phase": "release",
+			"exit_criterion": "A signed, reversible release reaches users.",
+			"verbs": [],
+			"doc": "docs/release-procedure.md",
+			"test": "tests/cli/release-local.test.ts",
+			"metric": "UNKNOWN",
+			"note": "Automated by scripts/release-local.sh and the kit-update job; no registry verb."
+		},
+		{
+			"phase": "launch",
+			"exit_criterion": "Readiness (asset freeze, runbook, value metric, rollback) is pinned before users arrive.",
+			"verbs": ["milestone launch"],
+			"doc": null,
+			"test": "tests/cli/milestone-launch.test.ts",
+			"metric": "UNKNOWN"
+		},
+		{
+			"phase": "operate",
+			"exit_criterion": "Services stay green and support answers.",
+			"verbs": ["service status", "service run"],
+			"doc": "docs/service-contract.md",
+			"test": "tests/cli/service.test.ts",
+			"metric": "UNKNOWN"
+		},
+		{
+			"phase": "measure-value",
+			"exit_criterion": "Each managed project reports its user-value metric against target.",
+			"verbs": [],
+			"doc": null,
+			"test": null,
+			"metric": "UNKNOWN"
+		},
+		{
+			"phase": "revenue",
+			"exit_criterion": "Pricing and collection exist for the value delivered.",
+			"verbs": [],
+			"doc": null,
+			"test": null,
+			"metric": "UNKNOWN"
+		},
+		{
+			"phase": "learn",
+			"exit_criterion": "Every rung files lessons and the mine replays them.",
+			"verbs": ["mine", "lessons add"],
+			"doc": null,
+			"test": "tests/cli/mine.test.ts",
+			"metric": "UNKNOWN"
+		}
+	]
+}

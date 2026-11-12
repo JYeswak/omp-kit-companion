@@ -1,0 +1,153 @@
+import { expect, test } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { lifecycleGaps, loadLifecycleManifest, renderLifecycleDoc, validateLifecycleManifest, type LifecycleManifest } from "../../src/lifecycle.ts";
+import { LIFECYCLE_FILE_CAP, runLoopClose, type LoopCloseBrResult } from "../../src/loop-close.ts";
+
+const ROOT = resolve(import.meta.dir, "../..");
+
+function shippedManifest(): LifecycleManifest {
+	const loaded = loadLifecycleManifest(join(ROOT, "docs", "lifecycle.json"));
+	expect(loaded.reason).toBe("ok");
+	return loaded.manifest as LifecycleManifest;
+}
+
+test("LIFECYCLEMANIFEST1: the shipped manifest validates", () => {
+	const manifest = shippedManifest();
+	expect(validateLifecycleManifest(manifest, ROOT)).toEqual([]);
+	expect(lifecycleGaps(manifest).length).toBeGreaterThan(0);
+});
+
+test("LIFECYCLEMANIFEST1: the rendered doc matches the committed docs/lifecycle.md", () => {
+	const manifest = shippedManifest();
+	expect(renderLifecycleDoc(manifest)).toBe(readFileSync(join(ROOT, "docs", "lifecycle.md"), "utf8"));
+});
+
+test("LIFECYCLEMANIFEST1: a row naming a missing verb fails validation", () => {
+	const manifest = shippedManifest();
+	const planted = JSON.parse(JSON.stringify(manifest)) as LifecycleManifest;
+	planted.rows[0]!.verbs = ["no-such-verb"];
+	const findings = validateLifecycleManifest(planted, ROOT);
+	expect(findings.some(finding => finding.startsWith("LIFECYCLE_MANIFEST_UNKNOWN_VERB"))).toBe(true);
+});
+
+interface FixtureBead { id: string; title: string; labels: string[]; status: string }
+
+function fixtureManifest(): LifecycleManifest {
+	const rows = ["discover", "validate", "plan", "build", "verify", "release", "launch", "operate", "measure-value", "revenue", "learn"].map(phase => ({
+		phase,
+		exit_criterion: `Fixture exit for ${phase}.`,
+		verbs: ["land"],
+		doc: "doc.md",
+		test: "test.ts",
+		metric: phase === "launch" ? "UNKNOWN" : "closes_7d",
+	}));
+	return { version: 1, rows };
+}
+
+test("LIFECYCLEMANIFEST1: a loop-close run files one lifecycle gap bead and a second run files none", async () => {
+	const root = ownedTmp("lifecycle-test").path;
+	mkdirSync(join(root, "docs"), { recursive: true });
+	writeFileSync(join(root, "docs", "lifecycle.json"), JSON.stringify(fixtureManifest()));
+	writeFileSync(join(root, "doc.md"), "fixture doc");
+	writeFileSync(join(root, "test.ts"), "fixture test");
+	const calls: string[][] = [];
+	const beads: FixtureBead[] = [];
+	let seq = 0;
+	const runBr = async (argv: string[]): Promise<LoopCloseBrResult> => {
+		calls.push(argv);
+		if (argv[0] === "create") {
+			seq += 1;
+			const id = `lifecycle-test.${seq}`;
+			const flag = argv.indexOf("-l");
+			const labels = flag >= 0 ? String(argv[flag + 1] ?? "").split(",") : [];
+			beads.push({ id, title: String(argv[1] ?? ""), labels, status: "open" });
+			return { rc: 0, stdout: JSON.stringify({ id }), stderr: "" };
+		}
+		if (argv[0] === "list") return { rc: 0, stdout: JSON.stringify({ issues: beads }), stderr: "" };
+		return { rc: 0, stdout: "{}", stderr: "" };
+	};
+	const deps = {
+		ledgerPath: join(root, "missing-ledger.jsonl"),
+		statePath: join(root, "kit-state", "loop-close.json"),
+		home: root, repo: root, actor: "lifecycle-test",
+		nowMs: Date.parse("2026-11-12T00:00:00Z"),
+		runBr,
+		readServiceStatus: async () => [],
+		listLiveReadbacks: async () => [],
+		runLiveReadback: async () => ({ ok: true }),
+	};
+
+	const first = await runLoopClose(deps);
+	expect(first.lifecycleFiled).toHaveLength(1);
+	expect(first.lifecycleUpdated).toEqual([]);
+	const creates = calls.filter(argv => argv[0] === "create");
+	expect(creates).toHaveLength(1);
+	const label = String(creates[0]![creates[0]!.indexOf("-l") + 1] ?? "");
+	expect(label).toContain("lifecycle:launch:metric");
+
+	const second = await runLoopClose(deps);
+	expect(calls.filter(argv => argv[0] === "create")).toHaveLength(1);
+	expect(second.lifecycleFiled).toEqual([]);
+	expect(second.lifecycleUpdated).toEqual(first.lifecycleFiled);
+});
+
+test("LIFECYCLEMANIFEST1: the shipped manifest files at most 5 gap beads per run and completes across runs", async () => {
+	const manifest = shippedManifest();
+	const gaps = lifecycleGaps(manifest);
+	expect(gaps.length).toBe(23);
+	const root = ownedTmp("lifecycle-burst-test").path;
+	const calls: string[][] = [];
+	const beads: FixtureBead[] = [];
+	let seq = 0;
+	const runBr = async (argv: string[]): Promise<LoopCloseBrResult> => {
+		calls.push(argv);
+		if (argv[0] === "create") {
+			seq += 1;
+			const id = `lifecycle-burst.${seq}`;
+			const flag = argv.indexOf("-l");
+			const labels = flag >= 0 ? String(argv[flag + 1] ?? "").split(",") : [];
+			beads.push({ id, title: String(argv[1] ?? ""), labels, status: "open" });
+			return { rc: 0, stdout: JSON.stringify({ id }), stderr: "" };
+		}
+		if (argv[0] === "list") return { rc: 0, stdout: JSON.stringify({ issues: beads }), stderr: "" };
+		return { rc: 0, stdout: "{}", stderr: "" };
+	};
+	const deps = {
+		ledgerPath: join(root, "missing-ledger.jsonl"),
+		statePath: join(root, "kit-state", "loop-close.json"),
+		home: root, repo: ROOT, actor: "lifecycle-burst-test",
+		nowMs: Date.parse("2026-11-12T00:00:00Z"),
+		runBr,
+		readServiceStatus: async () => [],
+		listLiveReadbacks: async () => [],
+		runLiveReadback: async () => ({ ok: true }),
+	};
+	const titles: string[] = [];
+	const seen = new Set<string>();
+	let runs = 0;
+	for (;;) {
+		const result = await runLoopClose(deps);
+		runs += 1;
+		expect(result.lifecycleFiled.length).toBeLessThanOrEqual(LIFECYCLE_FILE_CAP);
+		for (const id of result.lifecycleFiled) seen.add(id);
+		if (runs === 1) {
+			expect(result.lifecycleFiled).toHaveLength(LIFECYCLE_FILE_CAP);
+			for (const id of result.lifecycleFiled) {
+				const bead = beads.find(candidate => candidate.id === id);
+				titles.push(bead?.title ?? "");
+			}
+		}
+		if (result.lifecycleFiled.length === 0) break;
+		if (runs > 10) throw new Error("burst cap never drains the shipped gaps");
+	}
+	expect(seen.size).toBe(gaps.length);
+	expect(titles).toEqual([
+		"LIFECYCLE: discover missing doc",
+		"LIFECYCLE: discover missing metric",
+		"LIFECYCLE: validate missing verbs",
+		"LIFECYCLE: validate missing doc",
+		"LIFECYCLE: validate missing test",
+	]);
+});

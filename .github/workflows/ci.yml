@@ -384,6 +384,7 @@ jobs:
       - name: Check doc front-matter status (every doc carries current, draft or superseded)
         if: matrix.suite == 'core' || matrix.suite == 'core-1'
         run: sh scripts/doc-status-check.sh .
+      - { name: Check lifecycle manifest currency, if: matrix.suite == 'core' || matrix.suite == 'core-1', run: bun scripts/lifecycle-check.ts --check }
       - name: Exercise the release train, release-bump and doc-drift contracts
         if: matrix.suite == 'core' || matrix.suite == 'core-1'
         run: |

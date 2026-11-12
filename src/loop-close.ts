@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { run } from "./kitlib/run.ts";
 import { callAgentMail } from "./fleet-guard/reservations.ts";
 import { jobReceiptPath, KNOWN_JOBS } from "./service.ts";
+import { lifecycleGaps, lifecycleManifestPath, loadLifecycleManifest, validateLifecycleManifest, type LifecycleGap, type LifecycleManifest } from "./lifecycle.ts";
 import { LIVE_READBACK_LABEL, liveReadback } from "./verify.ts";
 
 // LOOPCLOSE1 (ompkit-1ra0d.211): the daily consumer. Every measured signal gets an
@@ -64,6 +65,9 @@ export function parseGateTs(value: unknown): number | null {
 export const LOOP_CLOSE_LABEL = "loop-close";
 export const LOOP_CLOSE_RETIRE_DAYS = 30;
 export const LOOP_CLOSE_RED_HOURS = 24;
+
+/** LIFECYCLEMANIFEST1: new gap-bead filings per run; updates to filed beads are uncapped. */
+export const LIFECYCLE_FILE_CAP = 5;
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Bounded ledger read; gate-events stays small but never unbounded. */
 const MAX_LEDGER_BYTES = 8 * 1024 * 1024;
@@ -102,6 +106,8 @@ export interface LoopCloseDeps {
 	listLiveReadbacks?: () => Promise<string[]>;
 	/** One bead visit; default is verify.ts liveReadback, the same per-bead fn --all uses. */
 	runLiveReadback?: (bead: string) => Promise<LoopCloseLiveVisit>;
+	/** Lifecycle manifest path; default docs/lifecycle.json under the run repo. */
+	lifecycleManifestPath?: string;
 }
 
 export interface LoopCloseResult {
@@ -110,6 +116,10 @@ export interface LoopCloseResult {
 	retiredUpdated: string[];
 	redFiled: string[];
 	redUpdated: string[];
+	/** LIFECYCLEMANIFEST1: gap beads filed, updated, and closed-comment this run. */
+	lifecycleFiled: string[];
+	lifecycleUpdated: string[];
+	lifecycleClosed: string[];
 	newCodes: string[];
 	mail: "SENT" | "SKIPPED-NEW-MAIL-SEEN" | "SKIPPED-QUIET" | "SKIPPED-UNCONFIGURED" | "SKIPPED-TRUNCATED" | "FAILED";
 	liveReadback: LoopCloseLiveReadback | null;
@@ -377,6 +387,21 @@ function redIncidentKey(name: string, redSinceMs: number): string {
 	return `red-service:${name}:${new Date(redSinceMs).toISOString().slice(0, 10)}`;
 }
 
+/** LIFECYCLEMANIFEST1: one bead per manifest gap, closed with a comment. */
+function lifecycleGapTitle(gap: LifecycleGap): string {
+	return `LIFECYCLE: ${gap.phase} missing ${gap.facet}`;
+}
+
+function lifecycleGapDescription(gap: LifecycleGap, manifest: LifecycleManifest): string {
+	const row = manifest.rows.find(candidate => candidate.phase === gap.phase);
+	const exit = row !== undefined ? row.exit_criterion : "unknown";
+	return `WHAT: lifecycle phase \`${gap.phase}\` is missing its ${gap.facet} (exit criterion: ${exit}).\n\nWHY: the lifecycle manifest (docs/lifecycle.json) is the checked phase map (LIFECYCLEMANIFEST1 ompkit-1ra0d.217); every gap gets an automatic consumer, never a human reader.`;
+}
+
+function lifecycleGapAcceptance(gap: LifecycleGap): string {
+	return `- [ ] Fill the ${gap.facet} for phase \`${gap.phase}\` in docs/lifecycle.json\n- [ ] Run \`bun scripts/lifecycle-check.ts --check\` green\n- [ ] Close this bead when the gap row is complete`;
+}
+
 export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult> {
 	const findings: string[] = [];
 	const nowMs = deps.nowMs ?? Date.now();
@@ -388,6 +413,7 @@ export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult
 	const runLiveReadback = deps.runLiveReadback ?? ((bead: string) => defaultRunLiveReadback(bead, deps));
 	const result: LoopCloseResult = {
 		ok: true, retiredFiled: [], retiredUpdated: [], redFiled: [], redUpdated: [],
+		lifecycleFiled: [], lifecycleUpdated: [], lifecycleClosed: [],
 		newCodes: [], mail: "SKIPPED-QUIET", liveReadback: null, deadlineMs: deadline, findings, summary: "",
 	};
 
@@ -554,6 +580,53 @@ export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult
 		findings.push(`STATUS_FAILED: service status unreadable: ${error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300)}`);
 	}
 
+	// LIFECYCLEMANIFEST1: audit the checked phase map; every gap files or updates
+	// one bead, and a closed gap gets a closing comment on its old bead (the
+	// tracker has no close route here, so the mapping stays for a reopen).
+	try {
+		const manifestPath = deps.lifecycleManifestPath ?? lifecycleManifestPath(deps.repo);
+		const loaded = loadLifecycleManifest(manifestPath);
+		if (loaded.reason === "absent") {
+			// Trees without the manifest predate the loop; nothing to audit.
+		} else if (loaded.reason !== "ok" || loaded.manifest === null) {
+			findings.push(`LIFECYCLE_MANIFEST_UNREADABLE: ${manifestPath} cannot be loaded (${loaded.reason}); gap beads are skipped`);
+		} else {
+			const problems = validateLifecycleManifest(loaded.manifest, deps.repo);
+			if (problems.length > 0) {
+				const first = problems[0] ?? "unknown problem";
+				findings.push(`LIFECYCLE_MANIFEST_INVALID: ${first.slice(0, 300)}${problems.length > 1 ? ` (+${problems.length - 1} more)` : ""}; gap beads are skipped`);
+			} else {
+				const manifest = loaded.manifest as LifecycleManifest;
+				const open = lifecycleGaps(manifest);
+				const openKeys = new Set(open.map(gap => `lifecycle:${gap.phase}:${gap.facet}`));
+				let newFiled = 0;
+				for (const gap of open) {
+					const key = `lifecycle:${gap.phase}:${gap.facet}`;
+					// First-run burst cap: new filings stop at the cap in manifest
+					// order; already-filed keys update freely below the cap.
+					if (state.filed[key] === undefined && newFiled >= LIFECYCLE_FILE_CAP) continue;
+					const before = result.lifecycleFiled.length;
+					await fileOrUpdate(key, lifecycleGapTitle(gap),
+						lifecycleGapDescription(gap, manifest), lifecycleGapAcceptance(gap),
+						result.lifecycleFiled, result.lifecycleUpdated);
+					if (result.lifecycleFiled.length > before) newFiled += 1;
+				}
+				for (const key of Object.keys(state.filed)) {
+					if (!key.startsWith("lifecycle:") || openKeys.has(key)) continue;
+					const bead = state.filed[key];
+					if (bead === undefined) continue;
+					const refreshed = await runBr(["update", bead, "--description",
+						`The lifecycle gap \`${key}\` is closed: docs/lifecycle.json now completes that row. This bead stays as the record; reopen it if the gap returns.`,
+						"--actor", deps.actor]);
+					if (refreshed.rc === 0) result.lifecycleClosed.push(bead);
+					else findings.push(`TRACKER_UPDATE_FAILED: ${key} bead ${bead} not comment-closed (rc ${String(refreshed.rc)}): ${refreshed.stderr.slice(0, 300)}`);
+				}
+			}
+		}
+	} catch (error) {
+		findings.push(`LIFECYCLE_AUDIT_FAILED: lifecycle audit threw: ${error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300)}`);
+	}
+
 	try {
 		const beads = await listLiveReadbacks();
 		let visited = 0;
@@ -575,7 +648,7 @@ export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult
 		findings.push(`LIVE_READBACK_LIST_FAILED: live-readback discovery failed: ${error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300)}`);
 	}
 
-	result.summary = `loop-close retired_filed=${result.retiredFiled.length} retired_updated=${result.retiredUpdated.length} red_filed=${result.redFiled.length} red_updated=${result.redUpdated.length} new_codes=${result.newCodes.length} mail=${result.mail} live_readback=${result.liveReadback === null ? "failed" : `ok=${result.liveReadback.ok} visited=${result.liveReadback.visited} skipped=${result.liveReadback.skipped}`} findings=${findings.length}`;
+	result.summary = `loop-close retired_filed=${result.retiredFiled.length} retired_updated=${result.retiredUpdated.length} red_filed=${result.redFiled.length} red_updated=${result.redUpdated.length} lifecycle_filed=${result.lifecycleFiled.length} lifecycle_updated=${result.lifecycleUpdated.length} lifecycle_closed=${result.lifecycleClosed.length} new_codes=${result.newCodes.length} mail=${result.mail} live_readback=${result.liveReadback === null ? "failed" : `ok=${result.liveReadback.ok} visited=${result.liveReadback.visited} skipped=${result.liveReadback.skipped}`} findings=${findings.length}`;
 	try {
 		mkdirSync(dirname(deps.statePath), { recursive: true, mode: 0o700 });
 		appendFileSync(join(dirname(deps.statePath), "loop-close-runs.jsonl"),
