@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveOmpIdentity } from "./paths.ts";
 import { inspectStateRoot, repairStateRootMode } from "./state-root.ts";
 import { censusLoad, writeCensus } from "./load-doctor.ts";
+import { checkAmWatch, type AmWatchDeps } from "./am-watch.ts";
 import { checkPlistContract, checkSystemdContract, plistEnvironment, systemdEnvironment, unquoteUnit } from "./service-contract.ts";
 import { KIT_UPDATE_REPO_PATTERN } from "./kit-update-job.ts";
 import { classifyScratchPressure, fleetWatchRepos, quarantineDir, reapLogPath, type ScratchPressure } from "./scratch.ts";
@@ -281,10 +282,15 @@ function servicePath(home: string): string {
 }
 
 const LOG_THRESHOLD_BYTES = 50 * 1024 * 1024;
-export function runLoadWatch(stateRoot: string) {
+/**
+ * AMWATCH1 (ompkit-1ra0d.190): the load-watch tick ends with the Agent Mail
+ * health step. The am check never throws and never fails the census: on any
+ * unreadable input it reports UNKNOWN and the census still records.
+ */
+export function runLoadWatch(stateRoot: string, amDeps?: AmWatchDeps) {
 	const census = censusLoad({ stateRoot });
 	writeCensus(stateRoot, census);
-	return census;
+	return { ...census, amWatch: checkAmWatch(stateRoot, amDeps) };
 }
 
 export function validateLabel(label: string): boolean {

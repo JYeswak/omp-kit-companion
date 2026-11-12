@@ -242,7 +242,7 @@ mapping fields, activation commands and read-only verification.
 ### Service jobs and kit updates
 
 21 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
-`load-watch`, `ci-poller`, `fleet-flush`, `imessage-bridge`; 300 s:
+`load-watch` (also restarts Agent Mail on fatal pressure), `ci-poller`, `fleet-flush`, `imessage-bridge`; 300 s:
 `kit-update`, `close-pass`; hourly: `claude-save`, [`am-retain`](docs/service-contract.md#agent-mail-retention),
 `session-retain`, `cache-retain`, `autocut`; 6 h: `scratch-reaper`,
 `fleet-lessons`, `tool-update`; daily: `cc-compress`, `skill-mine`, `imessage-brief`; weekly: `gate-rationalize`; daemon: `cc`.

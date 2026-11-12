@@ -1,0 +1,1 @@
+- `load-watch` now checks the Agent Mail server each tick and restarts it (at most once per 30 min) when its RSS passes 6 GB or its stderr log shows a fresh fatal memory-pressure line, so tracker and mail writes stop stalling on the upstream leak. Restarts are recorded with RSS and reason beside the load census.
