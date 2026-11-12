@@ -122,8 +122,9 @@ export function readLoopCloseConfig(home: string, env: NodeJS.ProcessEnv = proce
 /** LIFECYCLEMANIFEST1: new gap-bead filings per run; updates to filed beads are uncapped. */
 export const LIFECYCLE_FILE_CAP = 5;
 const DAY_MS = 24 * 60 * 60 * 1000;
-/** Bounded ledger read; gate-events stays small but never unbounded. */
-const MAX_LEDGER_BYTES = 8 * 1024 * 1024;
+/** Bounded ledger read. The ledger is not rotated (63 MB on 2026-11-12 holding every row since 10-25),
+ * and the 30-day silent-code rule needs its whole history, so the cap is large; past it the tail is read. */
+const MAX_LEDGER_BYTES = 512 * 1024 * 1024;
 /** Bounded state read; the dedup map is keys to bead ids. */
 const MAX_STATE_BYTES = 1024 * 1024;
 
@@ -146,6 +147,8 @@ export interface LoopCloseDeps {
 	nowMs?: number;
 	/** Overall live-readback budget; unset leaves the readback unbounded. */
 	capMs?: number;
+	/** Ledger read cap in bytes; default MAX_LEDGER_BYTES. Past it only the tail is read. */
+	ledgerMaxBytes?: number;
 	/** Advancing clock for the readback deadline; default Date.now. */
 	clockMs?: () => number;
 	/** REPORT mail recipient; unset skips the wake with a finding. */
@@ -190,7 +193,7 @@ function stableLabelFor(key: string): string {
 }
 
 /** Bounded ledger lines; an oversize ledger contributes its tail (recent rows win). */
-function readLedgerLines(ledgerPath: string, findings: string[]): { lines: string[]; truncated: boolean } {
+function readLedgerLines(ledgerPath: string, findings: string[], maxBytes = MAX_LEDGER_BYTES): { lines: string[]; truncated: boolean } {
 	try {
 		if (!existsSync(ledgerPath)) {
 			findings.push("LEDGER_UNAVAILABLE: gate-events ledger is absent; retire and new-code loops are skipped");
@@ -199,17 +202,17 @@ function readLedgerLines(ledgerPath: string, findings: string[]): { lines: strin
 		const size = statSync(ledgerPath).size;
 		let text: string;
 		let truncated = false;
-		if (size <= MAX_LEDGER_BYTES) {
+		if (size <= maxBytes) {
 			text = readFileSync(ledgerPath, "utf8");
 		} else {
 			truncated = true;
-			findings.push(`LEDGER_TRUNCATED: gate-events ledger exceeds ${MAX_LEDGER_BYTES} bytes; only the tail is read`);
+			findings.push(`LEDGER_TRUNCATED: gate-events ledger exceeds ${maxBytes} bytes; only the tail is read`);
 			const fd = openSync(ledgerPath, "r");
 			try {
-				const buf = Buffer.alloc(MAX_LEDGER_BYTES);
+				const buf = Buffer.alloc(maxBytes);
 				let read = 0;
-				while (read < MAX_LEDGER_BYTES) {
-					const n = readSync(fd, buf, read, MAX_LEDGER_BYTES - read, size - MAX_LEDGER_BYTES + read);
+				while (read < maxBytes) {
+					const n = readSync(fd, buf, read, maxBytes - read, size - maxBytes + read);
 					if (n <= 0) break;
 					read += n;
 				}
@@ -470,7 +473,7 @@ export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult
 		newCodes: [], mail: "SKIPPED-QUIET", liveReadback: null, deadlineMs: deadline, findings, summary: "",
 	};
 
-	const ledger = readLedgerLines(deps.ledgerPath, findings);
+	const ledger = readLedgerLines(deps.ledgerPath, findings, deps.ledgerMaxBytes);
 	const { silent, newCodes } = summarizeLedger(ledger.lines, nowMs);
 	result.newCodes = newCodes;
 

@@ -1,0 +1,1 @@
+- loop-close reads the whole gate-events ledger (up to 512 MiB), so codes silent for 30 days are actually found and new-code reports are sent; it used to read only the last 8 MiB, a few hours of history.

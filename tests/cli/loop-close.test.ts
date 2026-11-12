@@ -180,7 +180,7 @@ test("LOOPCLOSE1: a truncated ledger still retires silent codes but skips the ne
 	const live = quietLiveback();
 	const result = await runLoopClose({
 		ledgerPath, statePath: join(root, "kit-state", "loop-close.json"), home: root, repo: root, actor: "loop-close-test",
-		nowMs: NOW, mailTo: "lead-test", mailProjectKey: "proj-test",
+		nowMs: NOW, mailTo: "lead-test", mailProjectKey: "proj-test", ledgerMaxBytes: 8 * 1024 * 1024,
 		runBr: tracker.runBr, sendMail: mail.sendMail,
 		readServiceStatus: async () => [],
 		listLiveReadbacks: live.listLiveReadbacks,
@@ -192,6 +192,27 @@ test("LOOPCLOSE1: a truncated ledger still retires silent codes but skips the ne
 	expect(result.mail).toBe("SKIPPED-TRUNCATED");
 	expect(mail.sent).toEqual([]);
 	expect(result.findings.some(finding => finding.startsWith("MAIL_SKIPPED_TRUNCATED"))).toBe(true);
+});
+
+test("LOOPCLOSE1: a ledger past the old 8 MiB tail cap is read whole by default, so 30-day silence is judged on full history", async () => {
+	const root = ownedTmp("loop-close-test").path;
+	const ledgerPath = join(root, "gate-events.jsonl");
+	// The old silent code sits at the head, 9 MB before the tail a tail-only read would keep.
+	writeFileSync(ledgerPath, `${ledgerRow("SILENT-HEAD", 45)}\n${"{}\n".repeat(3_000_000)}${ledgerRow("NEW-HOT", 1)}\n`);
+	const tracker = makeTracker();
+	const mail = makeMail();
+	const live = quietLiveback();
+	const result = await runLoopClose({
+		ledgerPath, statePath: join(root, "kit-state", "loop-close.json"), home: root, repo: root, actor: "loop-close-test",
+		nowMs: NOW, mailTo: "lead-test", mailProjectKey: "proj-test",
+		runBr: tracker.runBr, sendMail: mail.sendMail,
+		readServiceStatus: async () => [],
+		listLiveReadbacks: live.listLiveReadbacks,
+		runLiveReadback: live.runLiveReadback,
+	});
+	expect(result.findings.some(finding => finding.startsWith("LEDGER_TRUNCATED"))).toBe(false);
+	expect(result.retiredFiled).toHaveLength(1);
+	expect(result.mail).not.toBe("SKIPPED-TRUNCATED");
 });
 
 test("LOOPCLOSE1: live readback stops at the cap and red services without an age are findings", async () => {
