@@ -4,6 +4,16 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.124] - 2026-11-12
+
+### Changed
+
+- `land` now removes every matching ovnfs checkout whose whole diff was published, without needing `--checkout`; a checkout with any further change is kept and named, and `--keep-checkout` keeps all checkouts.
+- `omp-kit update` no longer rolls back a release when its postcheck live stage was deferred (heavy admission) with no failed stage: the new version stays active as PENDING and names the deferred stage, so a later run or `omp-kit update --reconcile` can finish it.
+- A deferred-live PENDING is finished by a later tick, which re-runs the live ladder when heavy admission allows: a pass reconciles the receipt and completes the activation (plugin relink, service, hooks), an executed failure compensates back to the prior release, and another deferral stays PENDING without notifying again. Operator-file writes observed during the postcheck never block keeping a deferred install.
+- `pnpm install` (and `pnpm i` / `npm ci` / `bun install`) run inside an ovnfs checkout whose lockfile and `package.json` are both byte-identical to the source folder's, and whose source folder already has `node_modules` installed, now completes immediately (`dependencies already current through the source folder <src>; nothing installed`) instead of writing a private `node_modules` copy. A changed or missing lockfile or `package.json`, a source without `node_modules`, extra arguments, a compound command, or a cwd outside a checkout still runs the install.
+- `omp-kit send` to a seat whose pending record's journal was replaced settles the loss of proof itself (ledgered, never resent, with a recovery copy kept beside the drop folder) and delivers, instead of refusing `REPLACED_UNPROVEN` forever until a hand-run `--ack-pending`. A pending record whose journal file still exists keeps suppressing until it is proven or hand-acknowledged.
+
 ## [0.2.123] - 2026-11-12
 
 ### Changed

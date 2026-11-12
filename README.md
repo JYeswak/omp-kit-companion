@@ -13,7 +13,7 @@
 </div>
 
 <!-- kit-release:start -->
-Current release: v0.2.123
+Current release: v0.2.124
 <!-- kit-release:end -->
 
 A tested rule pack, 14 guard extensions, five skills, and a guarded CLI for an
