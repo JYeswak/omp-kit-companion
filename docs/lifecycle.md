@@ -12,17 +12,17 @@ row below (`lifecycle:<phase>:<facet>`) and comments when a gap closes.
 
 | Phase | Exit criterion | Verbs | Doc | Test | Metric |
 |---|---|---|---|---|---|
-| discover | A user need is recorded as checkable text. | `intake` | — | `src/intake-verb.test.ts` | `UNKNOWN` |
+| discover | A user need is recorded as checkable text. | `intake` | `docs/phases.md` | `src/intake-verb.test.ts` | `UNKNOWN` |
 | validate | The need survives a falsifiable proposition (problem, appetite, price). | — | — | — | `UNKNOWN` |
 | plan | Beads carry what, why and acceptance with no uncovered letters. | `planning score`, `planning convert`, `mission validate`, `mission anchor` | `docs/mission-anchor-mapping.md` | `tests/cli/planning-score.test.ts` | `creates_7d` |
 | build | Checked work lands on main through a gate. | `land`, `scratch new` | `docs/land.md` | `tests/cli/land.test.ts` | `closes_7d` |
-| verify | Shipped behavior is proven live, not just green in CI. | `verify`, `preflight commit` | — | `tests/cli/verify.test.ts` | `UNKNOWN` |
+| verify | Shipped behavior is proven live, not just green in CI. | `verify`, `preflight commit` | `docs/phases.md` | `tests/cli/verify.test.ts` | `UNKNOWN` |
 | release | A signed, reversible release reaches users. | — | `docs/release-procedure.md` | `tests/cli/release-local.test.ts` | `UNKNOWN` |
-| launch | Readiness (asset freeze, runbook, value metric, rollback) is pinned before users arrive. | `milestone launch` | — | `tests/cli/milestone-launch.test.ts` | `UNKNOWN` |
+| launch | Readiness (asset freeze, runbook, value metric, rollback) is pinned before users arrive. | `milestone launch` | `docs/phases.md` | `tests/cli/milestone-launch.test.ts` | `UNKNOWN` |
 | operate | Services stay green and support answers. | `service status`, `service run` | `docs/service-contract.md` | `tests/cli/service.test.ts` | `UNKNOWN` |
 | measure-value | Each managed project reports its user-value metric against target. | — | — | — | `UNKNOWN` |
 | revenue | Pricing and collection exist for the value delivered. | — | — | — | `UNKNOWN` |
-| learn | Every rung files lessons and the mine replays them. | `mine`, `lessons add` | — | `tests/cli/mine.test.ts` | `UNKNOWN` |
+| learn | Every rung files lessons and the mine replays them. | `mine`, `lessons add` | `docs/phases.md` | `tests/cli/mine.test.ts` | `UNKNOWN` |
 
 ## Row notes
 
@@ -30,12 +30,12 @@ row below (`lifecycle:<phase>:<facet>`) and comments when a gap closes.
 
 ## Open gaps
 
-- `discover`: doc, metric
+- `discover`: metric
 - `validate`: verbs, doc, test, metric
-- `verify`: doc, metric
+- `verify`: metric
 - `release`: verbs, metric
-- `launch`: doc, metric
+- `launch`: metric
 - `operate`: metric
 - `measure-value`: verbs, doc, test, metric
 - `revenue`: verbs, doc, test, metric
-- `learn`: doc, metric
+- `learn`: metric

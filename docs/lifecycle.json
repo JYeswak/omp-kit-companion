@@ -5,7 +5,7 @@
 			"phase": "discover",
 			"exit_criterion": "A user need is recorded as checkable text.",
 			"verbs": ["intake"],
-			"doc": null,
+			"doc": "docs/phases.md",
 			"test": "src/intake-verb.test.ts",
 			"metric": "UNKNOWN"
 		},
@@ -37,7 +37,7 @@
 			"phase": "verify",
 			"exit_criterion": "Shipped behavior is proven live, not just green in CI.",
 			"verbs": ["verify", "preflight commit"],
-			"doc": null,
+			"doc": "docs/phases.md",
 			"test": "tests/cli/verify.test.ts",
 			"metric": "UNKNOWN"
 		},
@@ -54,7 +54,7 @@
 			"phase": "launch",
 			"exit_criterion": "Readiness (asset freeze, runbook, value metric, rollback) is pinned before users arrive.",
 			"verbs": ["milestone launch"],
-			"doc": null,
+			"doc": "docs/phases.md",
 			"test": "tests/cli/milestone-launch.test.ts",
 			"metric": "UNKNOWN"
 		},
@@ -86,7 +86,7 @@
 			"phase": "learn",
 			"exit_criterion": "Every rung files lessons and the mine replays them.",
 			"verbs": ["mine", "lessons add"],
-			"doc": null,
+			"doc": "docs/phases.md",
 			"test": "tests/cli/mine.test.ts",
 			"metric": "UNKNOWN"
 		}

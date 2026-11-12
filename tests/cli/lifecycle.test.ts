@@ -102,7 +102,8 @@ test("LIFECYCLEMANIFEST1: a loop-close run files one lifecycle gap bead and a se
 test("LIFECYCLEMANIFEST1: the shipped manifest files at most 5 gap beads per run and completes across runs", async () => {
 	const manifest = shippedManifest();
 	const gaps = lifecycleGaps(manifest);
-	expect(gaps.length).toBe(23);
+	// More gaps than one run may file, so the cap and the drain across runs are both exercised.
+	expect(gaps.length).toBeGreaterThan(LIFECYCLE_FILE_CAP);
 	const root = ownedTmp("lifecycle-burst-test").path;
 	const calls: string[][] = [];
 	const beads: FixtureBead[] = [];
@@ -149,11 +150,6 @@ test("LIFECYCLEMANIFEST1: the shipped manifest files at most 5 gap beads per run
 		if (runs > 10) throw new Error("burst cap never drains the shipped gaps");
 	}
 	expect(seen.size).toBe(gaps.length);
-	expect(titles).toEqual([
-		"LIFECYCLE: discover missing doc",
-		"LIFECYCLE: discover missing metric",
-		"LIFECYCLE: validate missing verbs",
-		"LIFECYCLE: validate missing doc",
-		"LIFECYCLE: validate missing test",
-	]);
+	// The first run files the first CAP gaps in manifest order.
+	expect(titles).toEqual(gaps.slice(0, LIFECYCLE_FILE_CAP).map(gap => `LIFECYCLE: ${gap.phase} missing ${gap.facet}`));
 });
