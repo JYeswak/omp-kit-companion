@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { lifecycleGaps, loadLifecycleManifest, renderLifecycleDoc, validateLifecycleManifest, type LifecycleManifest } from "../../src/lifecycle.ts";
 import { LIFECYCLE_FILE_CAP, runLoopClose, type LoopCloseBrResult } from "../../src/loop-close.ts";
+import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 
 const ROOT = resolve(import.meta.dir, "../..");
 
@@ -51,6 +52,32 @@ function fixtureManifest(): LifecycleManifest {
 	}));
 	return { version: 1, rows };
 }
+
+test("LIFECYCLEGAPCHECK1: --gap exits 1 with LIFECYCLE_GAP_OPEN while the facet is missing and 0 once it is filled", () => {
+	const root = ownedTmp("lifecycle-gap-check").path;
+	try {
+		mkdirSync(join(root, "docs"), { recursive: true });
+		writeFileSync(join(root, "doc.md"), "fixture doc");
+		writeFileSync(join(root, "test.ts"), "fixture test");
+		const planted = fixtureManifest();
+		planted.rows.find(row => row.phase === "verify")!.doc = null;
+		writeFileSync(join(root, "docs", "lifecycle.json"), JSON.stringify(planted));
+		const script = join(ROOT, "scripts", "lifecycle-check.ts");
+		const gapCheck = (gap: string) => runFixture([process.execPath, script, "--root", root, "--gap", gap], { cwd: root });
+		// Planted negative: verify's doc is missing, so its gap stays open and the close is rejected.
+		const open = gapCheck("verify:doc");
+		expect(open.rc).toBe(1);
+		expect(Buffer.from(open.stderr).toString()).toContain("LIFECYCLE_GAP_OPEN: phase verify");
+		// Control: a filled facet on the same manifest reads closed.
+		const closed = gapCheck("plan:doc");
+		expect(closed.rc).toBe(0);
+		expect(Buffer.from(closed.stderr).toString()).toContain("LIFECYCLE_GAP_CLOSED: phase plan has its doc");
+		// A facet name outside verbs/doc/test/metric is a usage error, never a silent pass.
+		expect(gapCheck("verify:docs").rc).toBe(2);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+}, fixtureDeadlineS() * 1000);
 
 test("LIFECYCLEMANIFEST1: a loop-close run files one lifecycle gap bead and a second run files none", async () => {
 	const root = ownedTmp("lifecycle-test").path;

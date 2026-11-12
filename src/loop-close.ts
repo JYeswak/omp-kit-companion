@@ -477,7 +477,9 @@ function lifecycleGapDescription(gap: LifecycleGap, manifest: LifecycleManifest)
 }
 
 function lifecycleGapAcceptance(gap: LifecycleGap): string {
-	return `- [ ] [a] [build] Fill the ${gap.facet} for phase ${gap.phase} in docs/lifecycle.json; replay \`bun scripts/lifecycle-check.ts --check\` -> rc 0: check green\n- [ ] [b] [build] Planted negative refused: with the ${gap.facet} removed, replay \`bun scripts/lifecycle-check.ts --check\` -> rc 1; today's body is rejected`;
+	// Both boxes replay as written: [a] proves THIS gap filled (--gap exits 1 while it is open), and the
+	// planted negative lives in a test, since a verifier replays the closing tree where the facet exists.
+	return `- [ ] [a] [build] Fill the ${gap.facet} for phase ${gap.phase} in docs/lifecycle.json; replay \`bun scripts/lifecycle-check.ts --check --gap ${gap.phase}:${gap.facet}\` -> rc 0: this gap is closed and the manifest is green\n- [ ] [b] [build] Planted negative refused: replay \`bun test tests/cli/lifecycle.test.ts -t LIFECYCLEGAPCHECK1\` -> 0 fail: a manifest whose ${gap.facet} is missing makes --gap exit 1 with LIFECYCLE_GAP_OPEN`;
 }
 
 export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult> {
@@ -589,7 +591,7 @@ export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult
 	for (const entry of silent) {
 		await fileOrUpdate(`retire-code:${entry.code}`, `RETIRE: ${entry.code} silent ${LOOP_CLOSE_RETIRE_DAYS} d`,
  			retireDescription(entry.code, entry.lastFire, nowMs),
-			`- [ ] [a] [build] Retire the rule or hook behind ${entry.code} (source policy/gates.jsonl and its gate-events ledger row) or record why it stays; replay \`br list --status all --deferred --limit 0 --json\` -> rc 0: no ${entry.code} fire in the last ${LOOP_CLOSE_RETIRE_DAYS} d\n- [ ] [b] [build] Planted negative refused: with a fixture row firing ${entry.code} in-window, replay \`br list --status all --deferred --limit 0 --json\` -> rc 0: the code still lists, so the close is rejected`,
+			`- [ ] [a] [build] Retire the rule or hook behind ${entry.code} (source policy/gates.jsonl and its gate-events ledger row); replay \`grep -rlF -- '${entry.code}' extensions src scripts\` -> rc 1: no kit source still emits ${entry.code}\n- [ ] [b] [build] Planted negative refused: replay \`bun test tests/cli/loop-close.test.ts -t "29 d ago"\` -> 0 fail: a code that fired inside the window files no retire bead`,
  			result.retiredFiled, result.retiredUpdated);
 	}
 
@@ -661,7 +663,7 @@ export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult
 	for (const service of due) {
 		await fileOrUpdate(redIncidentKey(service.name, service.firstSeen), `RED ${LOOP_CLOSE_RED_HOURS} h: ${service.name} failing`,
  			redDescription(service.name, service.firstSeen),
-			`- [ ] [a] [build] Repair or reinstall ${service.name} and confirm green; replay \`omp-kit service status ${service.name}\` -> rc 0: status green\n- [ ] [b] [build] Planted negative refused: while the receipt still fails, replay \`omp-kit service status ${service.name}\` -> prints red; the close is rejected`,
+			`- [ ] [a] [build] Repair or reinstall ${service.name} and confirm green; replay \`omp-kit service status ${service.name}\` -> rc 0: status green\n- [ ] [b] [build] Planted negative refused: replay \`bun test tests/cli/loop-close.test.ts -t "red streak"\` -> 0 fail: a service still failing keeps its red bead open and refreshed`,
  			result.redFiled, result.redUpdated);
 	}
 	} catch (error) {
