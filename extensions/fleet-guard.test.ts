@@ -1,7 +1,7 @@
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import fleetGuard, { checkContention, handleToolCall, type GuardDeps } from "./fleet-guard.ts";
+import fleetGuard, { checkContention, handleToolCall, maybeInstallCheckout, type GuardDeps } from "./fleet-guard.ts";
 import { liveSeatEndDeps, type SeatEndDeps } from "../src/fleet-guard/seat-end.ts";
 import { clearReservationCache } from "../src/fleet-guard/reservations.ts";
 import type { FleetGuardBlock, FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
@@ -585,4 +585,90 @@ test("SCRATCHOWNERREPO1: every refusal names the physical path", async () => {
 		{ cwd: caller.cwd });
 	expect(packetRefused?.block).toBe(true);
 	expect(packetRefused?.reason).toContain(packet);
+});
+// INSTALLAMP1 (ompkit-1ra0d.203): inside an ovnfs checkout node_modules is a cache path, so a
+// plain install whose lockfile is byte-identical to the source folder's completes with a notice
+// and runs nothing. `ovnfs` is a PATH seam; the guard's spawn runs unchanged.
+function fakeOvnfs(bin: string): void {
+	writeFileSync(join(bin, "ovnfs"), "#!" + process.execPath + "\n" + [
+		"const rows = JSON.parse(process.env.OVNFS_FIXTURE_ROWS || '[]');",
+		"if (process.argv[2] === 'ls') {",
+		"  process.stdout.write(JSON.stringify({ checkouts: rows.map((r) => ({ name: 'fixture', dirty: false, created: null, touched: null, ...r })) }));",
+		"  process.exit(0);",
+		"}",
+		"console.error('unexpected ovnfs call: ' + process.argv.slice(2).join(' '));",
+		"process.exit(1);",
+	].join("\n") + "\n", { mode: 0o755 });
+}
+
+/** A source folder and a checkout folder, each carrying lockName; the fake ovnfs maps checkout -> source. */
+function installPair(lockName: string, checkoutLock: string | null, sourceLock: string | null, opts: { checkoutPkg?: string | null; sourcePkg?: string | null; sourceDeps?: boolean } = {}): { checkout: string; source: string } {
+	const source = freshDir(fleetBase, "fleet-install-source-");
+	roots.push(source);
+	const checkout = freshDir(fleetBase, "fleet-install-checkout-");
+	roots.push(checkout);
+	if (sourceLock !== null) writeFileSync(join(source, lockName), sourceLock);
+	if (checkoutLock !== null) writeFileSync(join(checkout, lockName), checkoutLock);
+	const checkoutPkg = opts.checkoutPkg === undefined ? "{}\n" : opts.checkoutPkg;
+	const sourcePkg = opts.sourcePkg === undefined ? "{}\n" : opts.sourcePkg;
+	if (sourcePkg !== null) writeFileSync(join(source, "package.json"), sourcePkg);
+	if (checkoutPkg !== null) writeFileSync(join(checkout, "package.json"), checkoutPkg);
+	if (opts.sourceDeps !== false) mkdirSync(join(source, "node_modules"));
+	const bin = freshDir(fleetBase, "fleet-install-bin-");
+	roots.push(bin);
+	fakeOvnfs(bin);
+	process.env.OVNFS_FIXTURE_ROWS = JSON.stringify([{ path: checkout, source }]);
+	process.env.PATH = `${bin}:${savedPath}`;
+	return { checkout, source };
+}
+
+const savedPath = process.env.PATH ?? "";
+afterEach(() => {
+	if (process.env.OVNFS_FIXTURE_ROWS !== undefined) delete process.env.OVNFS_FIXTURE_ROWS;
+	process.env.PATH = savedPath;
+});
+test.each([
+	["pnpm install", "pnpm-lock.yaml"],
+	["pnpm i", "pnpm-lock.yaml"],
+	["npm ci", "package-lock.json"],
+	["bun install", "bun.lock"],
+] as const)("INSTALLAMP1: an identical lockfile completes `%s` with the source notice and runs nothing", (command, lockName) => {
+	const { checkout, source } = installPair(lockName, "lock-A\n", "lock-A\n");
+	const completed = maybeInstallCheckout({ toolName: "bash", input: { command } }, { callingCwd: checkout });
+	expect(completed?.additionalContext).toContain("dependencies already current through the source folder");
+	expect(completed?.additionalContext).toContain(source);
+	expect(completed?.additionalContext).toContain("nothing installed");
+	expect(completed?.input).toMatchObject({ command: ":" });
+	expect(completed?.input?.command).not.toContain("install");
+});
+
+test("INSTALLAMP1: a changed or missing lockfile, extra args, a compound command, or no checkout runs", () => {
+	const changed = installPair("pnpm-lock.yaml", "lock-B\n", "lock-A\n");
+	expect(maybeInstallCheckout({ toolName: "bash", input: { command: "pnpm install" } }, { callingCwd: changed.checkout })).toBeUndefined();
+	const missing = installPair("pnpm-lock.yaml", "lock-A\n", null);
+	expect(maybeInstallCheckout({ toolName: "bash", input: { command: "pnpm install" } }, { callingCwd: missing.checkout })).toBeUndefined();
+	const same = installPair("pnpm-lock.yaml", "lock-A\n", "lock-A\n");
+	for (const command of ["pnpm add x", "pnpm install --frozen-lockfile", "pnpm install && pnpm test", "pnpm install > log.txt", "npm install", "bun add x"]) {
+		expect(maybeInstallCheckout({ toolName: "bash", input: { command } }, { callingCwd: same.checkout }), command).toBeUndefined();
+	}
+	expect(maybeInstallCheckout({ toolName: "bash", input: { command: "pnpm install" } }, { callingCwd: same.source })).toBeUndefined();
+});
+
+test("INSTALLAMP1: a source without node_modules runs the install", () => {
+	const { checkout } = installPair("pnpm-lock.yaml", "lock-A\n", "lock-A\n", { sourceDeps: false });
+	expect(maybeInstallCheckout({ toolName: "bash", input: { command: "pnpm install" } }, { callingCwd: checkout })).toBeUndefined();
+});
+
+test.each([
+	["changed source package.json", { sourcePkg: "{\"b\":1}\n" } as const],
+	["missing source package.json", { sourcePkg: null } as const],
+	["missing checkout package.json", { checkoutPkg: null } as const],
+] as const)("INSTALLAMP1: the same lockfile with a %s runs the install", (_label, opts) => {
+	const { checkout } = installPair("pnpm-lock.yaml", "lock-A\n", "lock-A\n", opts);
+	expect(maybeInstallCheckout({ toolName: "bash", input: { command: "pnpm install" } }, { callingCwd: checkout })).toBeUndefined();
+});
+
+test("INSTALLAMP1 planted negative: the current guard chain passes the identical-lockfile install through", async () => {
+	const { checkout } = installPair("pnpm-lock.yaml", "lock-A\n", "lock-A\n");
+	expect(await handleToolCall({ toolName: "bash", input: { command: "pnpm install" } }, { cwd: checkout })).toBeUndefined();
 });

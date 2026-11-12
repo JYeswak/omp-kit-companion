@@ -1,8 +1,9 @@
 import { cpus } from "node:os";
-import { resolve } from "node:path";
-import { check as checkGit } from "../src/fleet-guard/git.ts";
-import { commandFromEvent } from "../src/fleet-guard/git.ts";
+import { readFileSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import { check as checkGit, commandFromEvent, executedShellCommands } from "../src/fleet-guard/git.ts";
 import { check as checkReservations, exportAgentMailStorageRoot } from "../src/fleet-guard/reservations.ts";
+import { runSync } from "../src/kitlib/run.ts";
 import { adoptOwnerlessDir, applyScratchEnv, autoCompletedLine, check as checkScratch, checkSystemTemp, createdScratchTops, hostAgentName, rewriteShellCommand, rewriteToolInput, toolTargetPaths, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent, type RewriteMapping } from "../src/fleet-guard/scratch.ts";
 import { createSeatScratch, endSeat, liveSeatEndDeps, recordSeatOwner, type SeatEndDeps, type SeatScratchOpts } from "../src/fleet-guard/seat-end.ts";
 import { check as checkDurability } from "../src/fleet-guard/durability.ts";
@@ -153,6 +154,123 @@ export function maybeAdoptOwnerless(event: FleetGuardEvent, opts: { callingCwd: 
 	}
 	return adopted;
 }
+/**
+ * INSTALLAMP1 (ompkit-1ra0d.203): inside an ovnfs checkout node_modules is a cache path: the
+ * checkout reads the source folder's node_modules until it writes there, so a plain install
+ * whose lockfile is byte-identical to the source folder's same file installs nothing new. The
+ * guard completes that call (revised to a no-op, with a notice) instead of running it. The skip
+ * needs all three: an identical lockfile, an identical package.json (a changed package.json with
+ * an unchanged lockfile must still install), and a node_modules dir in the source (a
+ * never-installed source plus a skipped install means zero deps). A changed or missing lockfile
+ * or package.json, a missing source node_modules, extra arguments, a compound command, or a cwd
+ * outside any checkout passes through unchanged (undefined: the call runs).
+ *
+ * Checkout detection is `ovnfs ls --json` (path -> source rows). This ovnfs exposes no .ovnfs
+ * marker file inside checkouts, so the ls listing is the authority. ovnfs is a PATH seam, so a
+ * fixture binary can stand in; an absent or failing ovnfs passes the call through.
+ */
+const INSTALL_LOCKFILES: Record<string, string> = {
+	"pnpm install": "pnpm-lock.yaml",
+	"pnpm i": "pnpm-lock.yaml",
+	"npm ci": "package-lock.json",
+	"bun install": "bun.lock",
+};
+
+/**
+ * `ovnfs ls --json` rows (path -> source). Row parsing mirrors src/ovnfs-checkouts.ts. The env is
+ * passed explicitly because Bun's spawn resolves PATH from the given env and ignores a
+ * runtime-mutated process.env, which the fake-ovnfs-on-PATH seam relies on.
+ */
+function ovnfsCheckoutRows(cwd: string): Array<{ path: string; source: string }> {
+	const rows: Array<{ path: string; source: string }> = [];
+	let stdout: Uint8Array;
+	try {
+		const run = runSync(["ovnfs", "ls", "--json"], { cwd, deadline_s: 3, max_output_bytes: 1 << 20, env: { ...process.env } });
+		if (run.timed_out || run.killed || run.truncated || run.rc !== 0) return rows;
+		stdout = run.stdout;
+	} catch {
+		return rows;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(new TextDecoder().decode(stdout));
+	} catch {
+		return rows;
+	}
+	let list: unknown = parsed;
+	if (parsed !== null && typeof parsed === "object" && "checkouts" in parsed) list = parsed.checkouts;
+	if (!Array.isArray(list)) return rows;
+	for (const entry of list) {
+		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+		if (!("path" in entry) || !("source" in entry)) continue;
+		const { path, source } = entry;
+		if (typeof path !== "string" || typeof source !== "string") continue;
+		rows.push({ path, source });
+	}
+	return rows;
+}
+
+/** A shallow copy of a tool input object; anything else becomes an empty input. */
+function inputRecord(input: unknown): Record<string, unknown> {
+	if (input === null || typeof input !== "object" || Array.isArray(input)) return {};
+	const out: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(input)) out[key] = value;
+	return out;
+}
+
+/** Longest checkout path containing the cwd, with its source folder; undefined outside checkouts. */
+function checkoutSourceFor(cwd: string, rows: ReadonlyArray<{ path: string; source: string }>): { root: string; source: string } | undefined {
+	const here = resolve(cwd);
+	let hit: { root: string; source: string } | undefined;
+	for (const row of rows) {
+		const root = resolve(row.path);
+		if (here !== root && !here.startsWith(`${root}/`)) continue;
+		if (hit !== undefined && root.length <= hit.root.length) continue;
+		hit = { root, source: row.source };
+	}
+	return hit;
+}
+
+function sameFileBytes(first: string, second: string): boolean {
+	try {
+		return readFileSync(first).equals(readFileSync(second));
+	} catch {
+		return false;
+	}
+}
+
+export function maybeInstallCheckout(event: FleetGuardEvent, opts: { callingCwd: string }): GuardRewrite | undefined {
+	const tool = typeof event.toolName === "string" ? event.toolName : "";
+	if (tool !== "bash") return undefined;
+	const command = commandFromEvent(event);
+	if (!command) return undefined;
+	const inspection = executedShellCommands(command);
+	if ("refusal" in inspection) return undefined;
+	if (inspection.commands.length !== 1 || inspection.writes.length !== 0) return undefined;
+	const words = inspection.commands[0]?.words;
+	if (words === undefined) return undefined;
+	const lockName = INSTALL_LOCKFILES[words.join(" ")];
+	if (lockName === undefined) return undefined;
+	const hit = checkoutSourceFor(opts.callingCwd, ovnfsCheckoutRows(opts.callingCwd));
+	if (!hit) return undefined;
+	const rel = relative(hit.root, resolve(opts.callingCwd));
+	const checkoutDir = join(hit.root, rel);
+	const sourceDir = join(hit.source, rel);
+	if (!sameFileBytes(join(checkoutDir, lockName), join(sourceDir, lockName))) return undefined;
+	// The lockfile alone does not prove what would be installed: a changed package.json with an
+	// unchanged lockfile must still install, so it must match too; missing on either side runs.
+	if (!sameFileBytes(join(checkoutDir, "package.json"), join(sourceDir, "package.json"))) return undefined;
+	// The checkout reads the source folder's node_modules: only skip the install when the source
+	// actually has installed deps. A never-installed source plus a skipped install means zero deps.
+	try {
+		if (!statSync(join(sourceDir, "node_modules")).isDirectory()) return undefined;
+	} catch {
+		return undefined;
+	}
+	const notice = `fleet-guard INSTALLAMP1: dependencies already current through the source folder ${hit.source}; nothing installed`;
+	return { input: { ...inputRecord(event.input), command: ":" }, additionalContext: `AUTO_COMPLETED: ${command} completed without running (${notice})` };
+}
+
 /** Append the session scratch dir to a temp/scratch refusal so the agent can use it directly. */
 function withSessionHint(block: FleetGuardBlock | undefined, dir: string | null): FleetGuardBlock | undefined {
 	if (!block?.block || dir === null) return block;
@@ -161,9 +279,9 @@ function withSessionHint(block: FleetGuardBlock | undefined, dir: string | null)
 	return { block: true, reason: `${block.reason}\nSession scratch: ${dir} (a literal /tmp/<name> auto-completes there when it is a simple file; use this dir directly).` };
 }
 /** Best-effort completion ledger row; a ledger failure never changes the verdict. */
-async function recordCompletion(seatName: string | undefined, tool: string, notice: string, from: string): Promise<void> {
+async function recordCompletion(seatName: string | undefined, tool: string, notice: string, from: string, gate = "tmp-rewrite"): Promise<void> {
 	try {
-		await recordGateEvent({ seat: seatName ?? null, act: tool, target: from, gate: "tmp-rewrite", kind: "auto_complete", detail: notice.slice(0, 200) });
+		await recordGateEvent({ seat: seatName ?? null, act: tool, target: from, gate, kind: "auto_complete", detail: notice.slice(0, 200) });
 	} catch { /* the verdict stands; the ledger is best effort */ }
 }
 export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Promise<void> {
@@ -254,6 +372,15 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 				await recordCompletion(seatAgent, tool, rewritten.additionalContext ?? "", from);
 				context?.ui?.notify?.(rewritten.additionalContext ?? "", "info");
 				return rewritten;
+			}
+			const installed = maybeInstallCheckout(event, { callingCwd });
+			if (installed !== undefined) {
+				const recheck = await handleToolCall(event, guardContext);
+				if (recheck) return withSessionHint(recheck, hintDir);
+				trackCreated(false);
+				await recordCompletion(seatAgent, tool, installed.additionalContext ?? "", `install:${callingCwd}`, "install-checkout");
+				context?.ui?.notify?.(installed.additionalContext ?? "", "info");
+				return installed;
 			}
 		}
 		const verdict = await handleToolCall(event, guardContext);
