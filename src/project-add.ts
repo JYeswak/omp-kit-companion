@@ -5,7 +5,7 @@
 import { closeSync, existsSync, fdatasyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { buildNativeSendTurn, deliverFirstSeatGoal, deliverToTernSeat, ternCtlBin, type TernSendGate } from "./send.ts";
+import { buildNativeInterruptTurn, buildNativeSendTurn, deliverFirstSeatGoal, deliverToTernSeat, ternCtlBin, type TernSendGate } from "./send.ts";
 import type { TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
 import { defaultTernIo, identifyTernSeat, observeTernSeat, parseSessionView, readSessionView, ternPaneId } from "./plane-tern.ts";
 import { callAgentMail } from "./fleet-guard/reservations.ts";
@@ -683,6 +683,8 @@ export interface ProjectGoalInput {
 	session: string;
 	set?: string;
 	fromFile?: string;
+	pause?: boolean;
+	drop?: boolean;
 	env: NodeJS.ProcessEnv;
 	deps?: ProjectAddDeps;
 	pollMs?: number;
@@ -693,13 +695,13 @@ export interface ProjectGoalPlan {
 	session: string;
 	seat: string;
 	currentGoal: string | null;
-	newGoal: string;
-	deliveries: { seat: string; kind: "goal-resume" | "goal-set" }[];
+	newGoal: string | null;
+	deliveries: { seat: string; kind: "goal-resume" | "goal-set" | "goal-pause" | "goal-drop" }[];
 	gate: { paused: boolean; pullEnabled: boolean | null };
 }
 
 export interface ProjectGoalApplied {
-	status: "APPLIED";
+	status: "APPLIED" | "PAUSED" | "DROPPED";
 	session: string;
 	seat: string;
 	previousGoal: string | null;
@@ -762,6 +764,16 @@ export function resolveGoalText(input: { set?: string; fromFile?: string }): { o
 		}
 	}
 	return { ok: true, text };
+}
+export type ProjectGoalMode = "set" | "pause" | "drop";
+
+/** Exactly one goal action: replace (--set/--from-file), park (--pause) or drop (--drop). */
+export function resolveGoalMode(input: { set?: string; fromFile?: string; pause?: boolean; drop?: boolean }): { ok: true; mode: ProjectGoalMode } | { ok: false; code: string; detail: string; remediation: string } {
+	const sources = (input.set !== undefined ? 1 : 0) + (input.fromFile !== undefined ? 1 : 0) + (input.pause === true ? 1 : 0) + (input.drop === true ? 1 : 0);
+	if (sources !== 1) return failGoal("PROJECT_GOAL_INVALID", "goal needs exactly one action", "Pass exactly one of --set TEXT, --from-file FILE, --pause or --drop.");
+	if (input.pause === true) return { ok: true, mode: "pause" };
+	if (input.drop === true) return { ok: true, mode: "drop" };
+	return { ok: true, mode: "set" };
 }
 
 function locateGoalDirector(input: ProjectGoalInput, home: string): { ok: true; entry: FleetWatchSession; paths: ProjectAddPaths } | { ok: false; code: string; detail: string; remediation: string } {
@@ -861,20 +873,47 @@ export async function planProjectGoal(input: ProjectGoalInput): Promise<{ ok: tr
 	if (!home || !isAbsolute(home) || resolve(home) !== home) {
 		return failGoal("PROJECT_HOME_UNAVAILABLE", "a canonical absolute HOME is required", "Set HOME to an absolute path with no symlinks.");
 	}
-	const text = resolveGoalText(input);
-	if (!text.ok) return text;
+	const mode = resolveGoalMode(input);
+	if (!mode.ok) return mode;
+	const text = mode.mode === "set" ? resolveGoalText(input) : null;
+	if (text !== null && !text.ok) return text;
 	const located = locateGoalDirector(input, home);
 	if (!located.ok) return located;
 	const pane = located.entry.coordinatorPane;
 	const io = input.deps?.io ?? defaultTernIo();
 	const read = await readDirectorGoalState({ session: input.session, pane, repo: located.entry.repo, env: input.env, io });
 	if (!read.ok) return read;
+	if (mode.mode === "pause") {
+		return {
+			ok: true,
+			plan: {
+				session: input.session, seat: pane,
+				currentGoal: read.state.activeGoal === null ? null : read.state.activeGoal.objective,
+				newGoal: null,
+				deliveries: [{ seat: pane, kind: "goal-pause" as const }],
+				gate: { paused: read.state.paused, pullEnabled: located.entry.pullEnabled ?? null },
+			},
+		};
+	}
+	if (mode.mode === "drop") {
+		return {
+			ok: true,
+			plan: {
+				session: input.session, seat: pane,
+				currentGoal: read.state.activeGoal === null ? null : read.state.activeGoal.objective,
+				newGoal: null,
+				deliveries: [{ seat: pane, kind: "goal-drop" as const }],
+				gate: { paused: read.state.paused, pullEnabled: located.entry.pullEnabled ?? null },
+			},
+		};
+	}
+	const goalText = text !== null && text.ok ? text.text : "";
 	return {
 		ok: true,
 		plan: {
 			session: input.session, seat: pane,
 			currentGoal: read.state.activeGoal === null ? null : read.state.activeGoal.objective,
-			newGoal: text.text,
+			newGoal: goalText,
 			deliveries: read.state.paused
 				? [{ seat: pane, kind: "goal-resume" as const }, { seat: pane, kind: "goal-set" as const }]
 				: [{ seat: pane, kind: "goal-set" as const }],
@@ -1030,6 +1069,200 @@ export async function deliverGoalResume(input: {
 	return failed("PROJECT_GOAL_UNPROVEN", "resume unproven: no active goal mode_change after the resume send", "Inspect the seat journal; the goal was not changed.");
 }
 
+/** A post-cursor goal_paused mode_change proves a pause. */
+function isPausedModeChange(value: unknown): boolean {
+	const record = goalRecordOf(value);
+	return record !== null && record.mode === "goal_paused";
+}
+
+/**
+ * A post-cursor goal-less mode_change proves a drop: any mode_change that is
+ * neither an active goal nor a pause marker. The seat's own goal tool drops
+ * without a modal, so its journal effect is never the confirm-gated
+ * `/goal drop` text path; this predicate accepts whatever non-goal marker
+ * the tool journals (including a dropped-status goal record).
+ */
+function isGoallessModeChange(value: unknown): boolean {
+	const record = goalRecordOf(value);
+	if (record === null || record.mode === "goal_paused") return false;
+	if (record.mode === "goal") return record.goal === null || record.goal.status !== "active";
+	return true;
+}
+
+/**
+ * GOALPARK1 drop request: the seat drops its own goal through its own goal
+ * tool (op=drop, no modal). `/goal drop` text is never sent: it opens a
+ * showHookConfirm picker nobody answers over the native turn.
+ */
+export const GOAL_DROP_ASK = "Drop your current goal now by calling your own goal tool with op=drop. The tool needs no confirmation and opens no picker; do not send slash-command text.";
+
+/**
+ * GOALPARK1 park leg: interrupt the running agent (Esc), then send the park
+ * payload through the native turn, proven by a post-cursor park entry with
+ * the same ancestry walk the resume leg uses. Gate first (zero sends on
+ * refuse), then the same observe/identify/binding checks the proven send
+ * path performs. Pause sends `/goal pause` (no confirm, like resume);
+ * drop sends the tool-call ask (never `/goal drop` text).
+ */
+async function deliverGoalParkLeg(input: {
+	kind: "pause" | "drop";
+	seat: TernSeatBinding;
+	io: TernObserverIo;
+	gate?: TernSendGate;
+	env?: NodeJS.ProcessEnv;
+	pollMs?: number;
+	deadlineMs?: number;
+	wait?: (ms: number) => Promise<void>;
+}): Promise<{ ok: true; proof: GoalResumeProof } | { ok: false; code: string; detail: string; remediation: string }> {
+	const failed = (code: string, detail: string, remediation: string) => ({ ok: false as const, code, detail, remediation });
+	const gate = input.gate ?? {};
+	const verb = input.kind === "pause" ? "pause" : "drop";
+	if (gate.pullEnabled === false) return failed("GATE_PULL_DISABLED", "pullEnabled is false; zero sends", `Re-enable pulls for the project, then ${verb} the goal again.`);
+	const io = input.io;
+	const pollMs = input.pollMs ?? 50;
+	const deadlineMs = input.deadlineMs ?? 20_000;
+	const wait = input.wait ?? (async (ms: number) => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); });
+	const paneId = ternPaneId(input.seat.pane);
+	if (typeof input.seat.session !== "string" || !input.seat.session.trim() || paneId === null) {
+		return failed("PLANE_SEAT_UNBOUND", "seat needs a configured session and exact pane id; zero sends", "Repair the project registration; the goal was not changed.");
+	}
+	let observation;
+	try {
+		observation = await observeTernSeat(input.seat, io, {});
+	} catch (error) {
+		return failed("OBSERVATION_UNKNOWN", `seat observation failed: ${error instanceof Error ? error.message : String(error)}`, "Inspect the seat host; the goal was not changed.");
+	}
+	if (observation.state === "DEAD") return failed("SEAT_DEAD", "seat pane is dead; zero sends", `Restart the seat, then ${verb} the goal again.`);
+	if (observation.state !== "IDLE" || observation.runtimeBinding === null) {
+		return failed("OBSERVATION_UNKNOWN", `seat not provably idle (${observation.reason ?? "unknown"}); zero sends`, `Wait for the seat to settle, then ${verb} the goal again.`);
+	}
+	if (typeof input.seat.identityProject !== "string") {
+		return failed("PLANE_SEAT_UNBOUND", "caller Agent Mail project is unavailable; zero sends", "Repair the project registration; the goal was not changed.");
+	}
+	const identity = await identifyTernSeat({ ...input.seat, identityProject: input.seat.identityProject }, io, {});
+	if (identity.status !== "IDENTIFIED" || identity.runtimeBinding === null) {
+		return failed(identity.status === "REFUSED" ? identity.code : "IDENTITY_UNKNOWN", `seat identity not bound (${identity.reason}); zero sends`, "Inspect the seat and Agent Mail; the goal was not changed.");
+	}
+	const ob = observation.runtimeBinding;
+	const ib = identity.runtimeBinding;
+	if (ob.sessionFile !== ib.sessionFile || ob.sessionUuid !== ib.sessionUuid
+		|| ob.paneId !== ib.paneId || ob.sessionId !== ib.sessionId
+		|| ob.foregroundPid !== ib.foregroundPid || ob.foregroundStarted !== ib.foregroundStarted) {
+		return failed("SEAT_REBOUND", "observe/identify runtime bindings differ; seat moved, zero sends", `Wait for the seat to settle, then ${verb} the goal again.`);
+	}
+	const sessionFile = ob.sessionFile;
+	const journalView = readSessionView(io, sessionFile);
+	if (journalView === null) return failed("ELIGIBILITY_UNKNOWN", "session file unreadable; zero sends", "Inspect the seat host; the goal was not changed.");
+	const journal = parseSessionView(journalView);
+	if (journal.status !== "KNOWN") return failed("ELIGIBILITY_UNSETTLED", "turn not settled; zero sends", `Wait for the seat to settle, then ${verb} the goal again.`);
+	const cursorBytes = journalView.fileSize;
+	const knownIds = recordIdsOf(journalView.tail.toString("utf8"));
+	const interrupt = buildNativeInterruptTurn(paneId);
+	if (interrupt === null) return failed("BLOCK_UNWIREABLE", "block not a bare decimal pane id; zero sends", "Repair the project registration; the goal was not changed.");
+	let interrupted = false;
+	try {
+		interrupted = io.run([ternCtlBin(), "ctl", "carly", "lua", interrupt]).code === 0;
+	} catch {
+		interrupted = false;
+	}
+	if (!interrupted) return failed("SEND_AMBIGUOUS", `${verb} interrupt dispatch failed, effect unknown; proof never attempted`, "Inspect the seat; the goal was not changed.");
+	const payload = input.kind === "pause" ? "/goal pause" : GOAL_DROP_ASK;
+	const lua = buildNativeSendTurn(paneId, payload);
+	if (lua === null) return failed("BLOCK_UNWIREABLE", "block not a bare decimal pane id; zero sends", "Repair the project registration; the goal was not changed.");
+	let dispatched = false;
+	try {
+		dispatched = io.run([ternCtlBin(), "ctl", "carly", "lua", lua]).code === 0;
+	} catch {
+		dispatched = false;
+	}
+	if (!dispatched) return failed("SEND_AMBIGUOUS", `${verb} dispatch failed, effect unknown; proof never attempted`, "Inspect the seat; the goal was not changed.");
+	const isParked = input.kind === "pause" ? isPausedModeChange : isGoallessModeChange;
+	const unproven = input.kind === "pause"
+		? "pause unproven: no goal_paused mode_change after the pause send"
+		: "drop unproven: no goal-less mode_change after the drop request";
+	const polls = Math.max(1, Math.ceil(deadlineMs / pollMs));
+	for (let poll = 0; poll < polls; poll++) {
+		if (poll > 0) await wait(pollMs);
+		let size: number | null = null;
+		try {
+			size = statSync(sessionFile).size;
+		} catch {
+			size = null;
+		}
+		if (size === null || size < cursorBytes) {
+			return failed("PROJECT_GOAL_UNPROVEN", `journal shrank during ${verb} proof; the ${verb} is unproven`, "Inspect the seat journal; the goal was not changed.");
+		}
+		if (size === cursorBytes) continue;
+		const current = readSessionView(io, sessionFile);
+		if (current === null) continue;
+		const bytes = current.tail;
+		const base = current.tailStart;
+		const parents = new Map<string, string | null>();
+		const start = Math.max(0, cursorBytes - base);
+		let position = start;
+		while (position < bytes.length) {
+			const newline = bytes.indexOf(0x0a, position);
+			if (newline < 0) break;
+			if (newline > position) {
+				try {
+					const record = JSON.parse(bytes.subarray(position, newline).toString("utf8")) as { id?: unknown; parentId?: unknown };
+					if (typeof record === "object" && record !== null && typeof record.id === "string" && record.id !== "") {
+						parents.set(record.id, typeof record.parentId === "string" ? record.parentId : null);
+						if (isParked(record)) {
+							let ancestor: string | null = typeof record.parentId === "string" ? record.parentId : null;
+							for (let hops = 0; hops <= parents.size; hops++) {
+								if (ancestor === null) break;
+								if (knownIds.has(ancestor)) {
+									return { ok: true, proof: { sessionFile, offset: base + position, entryId: record.id } };
+								}
+								if (!parents.has(ancestor)) break;
+								ancestor = parents.get(ancestor) ?? null;
+							}
+						}
+					}
+				} catch {
+					/* Unparseable tail lines never prove. */
+				}
+			}
+			position = newline + 1;
+		}
+	}
+	return failed("PROJECT_GOAL_UNPROVEN", unproven, "Inspect the seat journal; the goal was not changed.");
+}
+
+/**
+ * GOALPARK1 pause leg: interrupt (Esc), then native `/goal pause`, proven by
+ * a post-cursor goal_paused mode_change.
+ */
+export async function deliverGoalPause(input: {
+	seat: TernSeatBinding;
+	io: TernObserverIo;
+	gate?: TernSendGate;
+	env?: NodeJS.ProcessEnv;
+	pollMs?: number;
+	deadlineMs?: number;
+	wait?: (ms: number) => Promise<void>;
+}): Promise<{ ok: true; proof: GoalResumeProof } | { ok: false; code: string; detail: string; remediation: string }> {
+	return deliverGoalParkLeg({ ...input, kind: "pause" });
+}
+
+/**
+ * GOALPARK1 drop leg: interrupt (Esc), then ask the seat to call its own
+ * goal tool with op=drop, proven by a post-cursor goal-less mode_change.
+ * `/goal drop` text is never sent.
+ */
+export async function deliverGoalDrop(input: {
+	seat: TernSeatBinding;
+	io: TernObserverIo;
+	gate?: TernSendGate;
+	env?: NodeJS.ProcessEnv;
+	pollMs?: number;
+	deadlineMs?: number;
+	wait?: (ms: number) => Promise<void>;
+}): Promise<{ ok: true; proof: GoalResumeProof } | { ok: false; code: string; detail: string; remediation: string }> {
+	return deliverGoalParkLeg({ ...input, kind: "drop" });
+}
+
 function readGoalIdAt(input: { io: TernObserverIo; sessionFile: string; offset: number }): string | null {
 	let text: string | null;
 	try {
@@ -1063,8 +1296,10 @@ export async function applyProjectGoal(input: ProjectGoalInput): Promise<{ ok: t
 	if (!home || !isAbsolute(home) || resolve(home) !== home) {
 		return failGoal("PROJECT_HOME_UNAVAILABLE", "a canonical absolute HOME is required", "Set HOME to an absolute path with no symlinks.");
 	}
-	const text = resolveGoalText(input);
-	if (!text.ok) return text;
+	const mode = resolveGoalMode(input);
+	if (!mode.ok) return mode;
+	const text = mode.mode === "set" ? resolveGoalText(input) : null;
+	if (text !== null && !text.ok) return text;
 	const located = locateGoalDirector(input, home);
 	if (!located.ok) return located;
 	const pane = located.entry.coordinatorPane;
@@ -1081,16 +1316,43 @@ export async function applyProjectGoal(input: ProjectGoalInput): Promise<{ ok: t
 	// first because `/goal set` on a paused goal only warns.
 	const sendGate: TernSendGate = located.entry.pullEnabled === false ? { pullEnabled: false } : {};
 	const previousGoal = read.state.activeGoal === null ? null : read.state.activeGoal.objective;
+	const seat = { session: input.session, pane, windowKey: "", cwd: located.entry.repo, identityProject: located.entry.repo };
+	// GOALPARK1: parking and dropping clear through the same gate the set
+	// leg uses, then interrupt (Esc) and prove the park entry. A paused
+	// marker in the gate never refuses here: pausing re-marks it, and the
+	// drop ask runs through the seat's own tool either way.
+	if (mode.mode === "pause") {
+		const paused = await deliverGoalPause({
+			seat, io, gate: sendGate, env: input.env, pollMs, deadlineMs, ...(wait === undefined ? {} : { wait }),
+		});
+		if (!paused.ok) {
+			return paused.code === "PROJECT_GOAL_UNPROVEN"
+				? { ...paused, partial: true }
+				: paused;
+		}
+		return { ok: true, result: { status: "PAUSED", session: input.session, seat: pane, previousGoal, goalId: paused.proof.entryId } };
+	}
+	if (mode.mode === "drop") {
+		const dropped = await deliverGoalDrop({
+			seat, io, gate: sendGate, env: input.env, pollMs, deadlineMs, ...(wait === undefined ? {} : { wait }),
+		});
+		if (!dropped.ok) {
+			return dropped.code === "PROJECT_GOAL_UNPROVEN"
+				? { ...dropped, partial: true }
+				: dropped;
+		}
+		return { ok: true, result: { status: "DROPPED", session: input.session, seat: pane, previousGoal, goalId: dropped.proof.entryId } };
+	}
 	if (read.state.paused) {
 		const resume = await deliverGoalResume({
-			seat: { session: input.session, pane, windowKey: "", cwd: located.entry.repo, identityProject: located.entry.repo },
+			seat,
 			io, gate: sendGate, env: input.env, pollMs, deadlineMs, ...(wait === undefined ? {} : { wait }),
 		});
 		if (!resume.ok) return resume;
 	}
-	const goalText = `/goal set ${text.text}`;
+	const goalText = `/goal set ${text !== null && text.ok ? text.text : ""}`;
 	const sent = await deliverToTernSeat({
-		seat: { session: input.session, pane, windowKey: "", cwd: located.entry.repo, identityProject: located.entry.repo }, text: goalText,
+		seat, text: goalText,
 		dropDir: located.paths.stateRoot, io, env: input.env,
 		pollMs, deadlineMs, untilDeliveredMs: deadlineMs, gate: sendGate, ...(wait === undefined ? {} : { wait }),
 	});

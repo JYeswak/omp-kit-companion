@@ -1762,7 +1762,7 @@ async function projectGoalCommand(request: ParsedCommand): Promise<CliResult> {
 		if (!session) return refusal("PROJECT_SESSION_MISSING", "A session name is required", "Pass project goal SESSION --set TEXT.");
 		const set = request.flags.get("--set");
 		const fromFile = request.flags.get("--from-file");
-		const goal = { session: session.trim(), set: typeof set === "string" ? set : undefined, fromFile: typeof fromFile === "string" ? fromFile : undefined, env: process.env };
+		const goal = { session: session.trim(), set: typeof set === "string" ? set : undefined, fromFile: typeof fromFile === "string" ? fromFile : undefined, pause: request.flags.has("--pause"), drop: request.flags.has("--drop"), env: process.env };
 		if (!request.flags.has("--apply")) {
 			const planned = await planProjectGoal(goal);
 			if (!planned.ok) {
@@ -1774,7 +1774,7 @@ async function projectGoalCommand(request: ParsedCommand): Promise<CliResult> {
 		if (!applied.ok) {
 			return { code: applied.partial === true ? 1 : 2, data: { overall: "FAIL", scope: "project", action: "APPLY" }, errors: [{ code: applied.code, message: applied.detail, remediation: applied.remediation }], verification: "UNVERIFIED" };
 		}
-		return { code: 0, data: { overall: "OK", scope: "project", action: "APPLIED", session: applied.result.session, seat: applied.result.seat, previous_goal: applied.result.previousGoal, goal_id: applied.result.goalId }, verification: "UNVERIFIED" };
+		return { code: 0, data: { overall: "OK", scope: "project", action: applied.result.status, session: applied.result.session, seat: applied.result.seat, previous_goal: applied.result.previousGoal, goal_id: applied.result.goalId }, verification: "UNVERIFIED" };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		const code = /^[A-Z][A-Z_0-9]+$/.test(message) ? message : "PROJECT_FAILED";

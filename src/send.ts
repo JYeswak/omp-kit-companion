@@ -838,6 +838,21 @@ export function buildNativeSendTurn(block: string, payload: string): string | nu
 		`cx.agents:ask(agent, table.concat(p))`,
 	].join("\n");
 }
+/**
+ * GOALPARK1: interrupt the seat's running agent (Esc) through the same
+ * Carly Lua control as the send turn. No payload rides along; the park leg
+ * that follows carries the pause or the drop request.
+ */
+export function buildNativeInterruptTurn(block: string): string | null {
+	if (!/^[0-9]+$/.test(block)) return null;
+	return [
+		`local b = {}`,
+		...luaCharInserts("b", block),
+		`local blk = table.concat(b)`,
+		`local agent = cx.agents:get(blk)`,
+		`cx.agents:interrupt(agent)`,
+	].join("\n");
+}
 
 export type TernDeliverStatus = "OK" | "PENDING_CONSUME" | "NOT_DELIVERED" | "REFUSED";
 export type TernQueueState = "QUEUED" | "DELIVERED" | "EXPIRED" | "PENDING_CONSUME" | "REFUSED";

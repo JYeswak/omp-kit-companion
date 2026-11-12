@@ -1,0 +1,2 @@
+- `omp-kit project goal SESSION --pause` parks the director's goal: it interrupts the seat, then sends native `/goal pause`, proven by a goal_paused journal entry.
+- `omp-kit project goal SESSION --drop` drops the director's goal without the confirm-gated `/goal drop` text: it interrupts the seat, then asks the seat to call its own goal tool with op=drop, proven by a goal-less journal entry.

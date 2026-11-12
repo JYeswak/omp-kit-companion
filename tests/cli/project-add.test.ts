@@ -193,12 +193,20 @@ if (args[0] === "ctl") {
 	// string.char(...) group carries the payload as UTF-8 bytes, the first
 	// the block id. An idle live seat adopts a goal synchronously.
 	const lua = args.slice(3).join(" ");
+	// GOALPARK1: the park legs interrupt (Esc) before they send. The turn
+	// carries only the block id, so it never reaches the payload parser.
+	if (lua.includes("cx.agents:interrupt")) {
+		fs.appendFileSync(dir + "/dispatched.log", JSON.stringify("interrupt") + "\\n");
+		process.exit(0);
+	}
 	const parts = lua.split("string.char(");
 	if (parts.length < 3) process.exit(1);
 	const first = parts[1].slice(0, parts[1].indexOf(")"));
-	const last = parts[parts.length - 1].slice(0, parts[parts.length - 1].indexOf(")"));
+	// The ask turn carries long text in <=100-byte string.char chunks; only
+	// reassembling every chunk restores the payload the seat would journal.
+	const rest = parts.slice(2).map((part) => part.slice(0, part.indexOf(")"))).join(",");
 	const block = Buffer.from(first.split(",").map((s) => Number(s.trim()))).toString("utf8");
-	const payload = Buffer.from(last.split(",").map((s) => Number(s.trim()))).toString("utf8");
+	const payload = Buffer.from(rest.split(",").map((s) => Number(s.trim()))).toString("utf8");
 	const file = dir + "/session-" + block + ".jsonl";
 	let parent = "m1";
 	let prev = null;
@@ -225,10 +233,28 @@ if (args[0] === "ctl") {
 		fs.appendFileSync(file, JSON.stringify(entry) + "\\n");
 		process.exit(0);
 	}
+	if (payload === "/goal pause") {
+		if (process.env.PROJECTGOAL_NO_PARK !== "1") {
+			const entry = { type: "mode_change", id: stamp, parentId: parent, mode: "goal_paused" };
+			fs.appendFileSync(file, JSON.stringify(entry) + "\\n");
+		}
+		process.exit(0);
+	}
 	if (payload === "/goal drop") {
 		const dropEntry = { type: "mode_change", id: stamp, parentId: parent, mode: "goal",
 		data: { goal: { id: prev === null ? "goal-none" : prev.id, objective: prev === null ? "" : prev.objective, status: "dropped" } } };
 		fs.appendFileSync(file, JSON.stringify(dropEntry) + "\\n");
+		process.exit(0);
+	}
+	// GOALPARK1: the drop leg never sends /goal drop text; it asks the
+	// seat to call its own goal tool with op=drop, and the seat journals a
+	// goal-less (dropped-status) entry the same way the modal path would.
+	if (payload.includes("op=drop")) {
+		if (process.env.PROJECTGOAL_NO_PARK !== "1") {
+			const toolDrop = { type: "mode_change", id: stamp, parentId: parent, mode: "goal",
+			data: { goal: { id: prev === null ? "goal-none" : prev.id, objective: prev === null ? "" : prev.objective, status: "dropped" } } };
+			fs.appendFileSync(file, JSON.stringify(toolDrop) + "\\n");
+		}
 		process.exit(0);
 	}
 	if (process.env.PROJECTGOAL_NO_SET === "1" && payload.startsWith("/goal set ")) process.exit(0);
@@ -801,6 +827,89 @@ test("GOALSENDLAND1-native: replacing an active goal dispatches one /goal set an
 		expect(dispatchedPayloads(f).slice(before.length)).toEqual(["/goal set Own skillgrowth: land the queue"]);
 		// Planted negative: an implementation that dispatches `/goal drop` fails here.
 		expect(dispatchedPayloads(f).filter((payload) => payload === "/goal drop")).toEqual([]);
+	} finally {
+		f.killDecoys();
+		f.mail.server.stop(true);
+	}
+}, fixtureDeadlineS(300) * 1000);
+
+test("GOALPARK1 pause: interrupt then /goal pause parks the goal, proven by goal_paused", async () => {
+	const f = await goalFixture();
+	try {
+		const before = dispatchedPayloads(f);
+		const planned = await cli(f, ["project", "goal", "skillgrowth", "--pause", "--plan", "--json"]);
+		expect(planned.code, planned.out + planned.err).toBe(0);
+		const plan = JSON.parse(planned.out).data;
+		expect(plan.action).toBe("PLAN");
+		expect(plan.current_goal).toBe("Grow the skill library");
+		expect(plan.new_goal).toBe(null);
+		expect(plan.deliveries).toEqual([{ seat: `tern:${f.directorBlock}`, kind: "goal-pause" }]);
+		expect(dispatchedPayloads(f)).toEqual(before);
+		const changed = await cli(f, ["project", "goal", "skillgrowth", "--pause", "--apply", "--yes", "--json"]);
+		expect(changed.code, changed.out + changed.err).toBe(0);
+		const done = JSON.parse(changed.out).data;
+		expect(done.action).toBe("PAUSED");
+		expect(done.previous_goal).toBe("Grow the skill library");
+		expect(typeof done.goal_id).toBe("string");
+		expect("dropped" in done).toBe(false);
+		expect(dispatchedPayloads(f).slice(before.length)).toEqual(["interrupt", "/goal pause"]);
+		expect(dispatchedPayloads(f).filter((payload) => payload === "/goal drop")).toEqual([]);
+		expect(readFileSync(f.sessionFile(f.directorBlock), "utf8")).toContain('"mode":"goal_paused"');
+		const replan = await cli(f, ["project", "goal", "skillgrowth", "--pause", "--plan", "--json"]);
+		expect(replan.code, replan.out + replan.err).toBe(0);
+		expect(JSON.parse(replan.out).data.current_goal).toBe(null);
+	} finally {
+		f.killDecoys();
+		f.mail.server.stop(true);
+	}
+}, fixtureDeadlineS(300) * 1000);
+
+test("GOALPARK1 drop: interrupt then a goal-tool ask drops the goal, never /goal drop text", async () => {
+	const f = await goalFixture();
+	try {
+		const before = dispatchedPayloads(f);
+		const planned = await cli(f, ["project", "goal", "skillgrowth", "--drop", "--plan", "--json"]);
+		expect(planned.code, planned.out + planned.err).toBe(0);
+		const plan = JSON.parse(planned.out).data;
+		expect(plan.action).toBe("PLAN");
+		expect(plan.current_goal).toBe("Grow the skill library");
+		expect(plan.new_goal).toBe(null);
+		expect(plan.deliveries).toEqual([{ seat: `tern:${f.directorBlock}`, kind: "goal-drop" }]);
+		expect(dispatchedPayloads(f)).toEqual(before);
+		const changed = await cli(f, ["project", "goal", "skillgrowth", "--drop", "--apply", "--yes", "--json"]);
+		expect(changed.code, changed.out + changed.err).toBe(0);
+		const done = JSON.parse(changed.out).data;
+		expect(done.action).toBe("DROPPED");
+		expect(done.previous_goal).toBe("Grow the skill library");
+		expect(typeof done.goal_id).toBe("string");
+		const fresh = dispatchedPayloads(f).slice(before.length);
+		expect(fresh.length).toBe(2);
+		expect(fresh[0]).toBe("interrupt");
+		expect(fresh[1]).toContain("op=drop");
+		expect(fresh.filter((payload) => payload === "/goal drop")).toEqual([]);
+		expect(fresh.filter((payload) => payload.includes("/goal drop"))).toEqual([]);
+		expect(readFileSync(f.sessionFile(f.directorBlock), "utf8")).toContain('"status":"dropped"');
+		const replan = await cli(f, ["project", "goal", "skillgrowth", "--drop", "--plan", "--json"]);
+		expect(replan.code, replan.out + replan.err).toBe(0);
+		expect(JSON.parse(replan.out).data.current_goal).toBe(null);
+	} finally {
+		f.killDecoys();
+		f.mail.server.stop(true);
+	}
+}, fixtureDeadlineS(300) * 1000);
+
+test("GOALPARK1 unproven: a seat whose journal never changes reports PROJECT_GOAL_UNPROVEN", async () => {
+	const f = await goalFixture();
+	try {
+		const before = dispatchedPayloads(f);
+		f.env.PROJECTGOAL_NO_PARK = "1";
+		const changed = await cli(f, ["project", "goal", "skillgrowth", "--pause", "--apply", "--yes", "--json"]);
+		expect(changed.code).toBe(1);
+		const errors = JSON.parse(changed.out).errors;
+		expect(errors[0].code).toBe("PROJECT_GOAL_UNPROVEN");
+		expect(errors[0].message).toContain("pause unproven");
+		expect(dispatchedPayloads(f).slice(before.length)).toEqual(["interrupt", "/goal pause"]);
+		expect(readFileSync(f.sessionFile(f.directorBlock), "utf8")).not.toContain('"mode":"goal_paused"');
 	} finally {
 		f.killDecoys();
 		f.mail.server.stop(true);
