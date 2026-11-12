@@ -212,6 +212,15 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 		[/"code"\s*:\s*"INVALID_ARGUMENTS"/, "invalid-arguments"],
 		// A JS eval cell that threw prints its stack frame inside the cell (js-cell-<id>).
 		[/(?:^|\s)at <anonymous> \(js-cell-[0-9a-f-]+/, "thrown-error"],
+		// RECLASS3: the 2026-11-12 24 h unclassified rows. Each is the agent's own call naming
+		// something that does not exist, or an edit that changed nothing.
+		[/^No such tool: xd:\/\/\S/, "unknown-reference"],
+		[/^Tool default\.\S+ not found/, "unknown-reference"],
+		[/^LSP error: Symbol "[^"]{1,200}" not found/, "unknown-reference"],
+		[/^LSP error: File not found: /, "path-not-found"],
+		[/^Errors: Task "[^"]{1,300}" not found/, "unknown-reference"],
+		[/parsed and applied cleanly, but produced no change/, "no-op-edit"],
+		[/^EACCES: permission denied, /, "permission-denied"],
 	];
 	for (const line of lines) for (const [pattern, cause] of agentText) {
 		if (pattern.test(line)) return finding(`agent-input:${toolName(tool)}:${cause}`, line);
@@ -221,7 +230,8 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 	const toolText: readonly [RegExp, string][] = [
 		[/No pages to adopt here/, "no-browser-target"],
 		[/relay .* is out of date/, "stale-relay"],
-		[/Tool execution was aborted:|^Command aborted$/, "aborted"],
+		[/Tool execution was aborted:|^Command aborted$|^Operation aborted$|^The operation was aborted\.$/, "aborted"],
+		[/^Previous OMP process exited before completing the turn\.$/, "seat-restarted"],
 		[/^\[Kernel died during execution\b/, "kernel-died"],
 		// diff exits 1 when inputs differ: its own answer, not a broken tool.
 		[/^Files \S+ and \S+ differ$|^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|^\d+(?:,\d+)?[acd]\d+(?:,\d+)?$/, "diff-differs"],
@@ -245,6 +255,16 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 	];
 	for (const line of lines) for (const [pattern, cause] of toolText) {
 		if (pattern.test(line)) return finding(`tool-error:${toolName(tool)}:${cause}`, line);
+	}
+	// RECLASS3: Agent Mail answers with {"error":{"type":"CODE",...}}, not "code". A backend
+	// database failure is the tool's; a rejected argument or a missing record is the caller's.
+	const amType = lines.map(line => line.match(/"error"\s*:\s*\{\s*"type"\s*:\s*"([A-Z][A-Z0-9_]{2,60})"/)).find(Boolean);
+	if (amType) {
+		const type = amType[1]!;
+		if (type === "DATABASE_ERROR") return finding(`tool-error:${toolName(tool)}:backend-db-error`, amType[0]);
+		if (type === "NOT_FOUND") return finding(`agent-input:${toolName(tool)}:unknown-reference`, amType[0]);
+		if (type.startsWith("INVALID_") || type === "SUSPICIOUS_PATTERN") return finding(`agent-input:${toolName(tool)}:invalid-arguments`, amType[0]);
+		return finding(`tool-error:${toolName(tool)}:${slug(type)}`, amType[0]);
 	}
 	const lastExc = (pattern: RegExp): string | null => {
 		let found: string | null = null;

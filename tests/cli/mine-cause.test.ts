@@ -264,6 +264,38 @@ test("LEDGERCLASS1 boundaries: generic errors, bare exits and redacted bodies st
 		expect(classifyMineResult({ tool: "bash", result: { isError: true, content } })?.class_id, content).toBe("tool-error:unclassified");
 });
 
+test("RECLASS3: the 2026-11-12 unclassified shapes name their cause; near misses stay unclassified", () => {
+	const cases: [string, string, string][] = [
+		["read", "No such tool: xd://bash. Mounted devices: ast_grep, ast_edit", "agent-input:read:unknown-reference"],
+		["run_cfs_native_fresh", "Tool default.run_cfs_native_fresh not found Tool default.run_cfs_native_fresh not found", "agent-input:run_cfs_native_fresh:unknown-reference"],
+		["lsp", 'LSP error: Symbol "parse_runtime_services" not found on line 273', "agent-input:lsp:unknown-reference"],
+		["lsp", "LSP error: File not found: /repo/fleet/router/route.py", "agent-input:lsp:path-not-found"],
+		["todo", 'Errors: Task "Inspect native handler" not found Remaining items (3):', "agent-input:todo:unknown-reference"],
+		["edit", "Edits to src/x.ts parsed and applied cleanly, but produced no change: your body row(s) are byte-identical", "agent-input:edit:no-op-edit"],
+		["write", "EACCES: permission denied, open '/x/checkouts/m.txt'", "agent-input:write:permission-denied"],
+		["wait", "Operation aborted", "tool-error:wait:aborted"],
+		["run_cfs_native_fresh", "The operation was aborted.", "tool-error:run_cfs_native_fresh:aborted"],
+		["run_cfs_native_fresh", "Previous OMP process exited before completing the turn.", "tool-error:run_cfs_native_fresh:seat-restarted"],
+		["mcp__mcp_agent_mail_whois", 'Error: {"error":{"type":"DATABASE_ERROR","message":"A database error occurred.","recoverable":true}}', "tool-error:mcp__mcp_agent_mail_whois:backend-db-error"],
+		["mcp__mcp_agent_mail_send_message", 'Error: {"error":{"type":"INVALID_THREAD_ID","message":"Invalid thread_id"}}', "agent-input:mcp__mcp_agent_mail_send_message:invalid-arguments"],
+		["mcp__mcp_agent_mail_file_reservation_paths", 'Error: {"error":{"type":"SUSPICIOUS_PATTERN","message":"absolute path"}}', "agent-input:mcp__mcp_agent_mail_file_reservation_paths:invalid-arguments"],
+		["mcp__mcp_agent_mail_acknowledge_message", 'Error: {"error":{"type":"NOT_FOUND","message":"MessageRecipient not found: 1206:81848"}}', "agent-input:mcp__mcp_agent_mail_acknowledge_message:unknown-reference"],
+		["mcp__mcp_agent_mail_force_release_file_reservation", 'Error: {"error":{"type":"RESERVATION_ACTIVE","message":"recent activity"}}', "tool-error:mcp__mcp_agent_mail_force_release_file_reservation:reservation-active"],
+	];
+	for (const [tool, content, id] of cases) {
+		expect(classifyMineResult({ tool, result: { isError: true, content } })?.class_id, content).toBe(id);
+	}
+	// Boundaries: the same words mid-sentence, an unterminated symbol and a lower-case type name nothing.
+	for (const content of ["the run said Operation aborted later", 'LSP error: Symbol "unterminated', "see No such tool: xd://bash above", '{"error":{"type":"database_error"}}'])
+		expect(classifyMineResult({ tool: "bash", result: { isError: true, content } })?.class_id, content).toBe("tool-error:unclassified");
+	// Timed long near miss: a huge almost-envelope and an unterminated quoted symbol finish promptly.
+	const started = performance.now();
+	for (const content of ['{"error":{' + " ".repeat(60_000) + '"type":"x', 'LSP error: Symbol "' + "a".repeat(60_000)])
+		expect(classifyMineResult({ tool: "bash", result: { isError: true, content } })?.class_id).toBe("tool-error:unclassified");
+	// Linear patterns on 60 KB inputs take milliseconds; 2 s is a backtracking alarm, not a latency target.
+	expect(performance.now() - started).toBeLessThan(2_000);
+});
+
 test("LEDGERCLASS1: a fully redacted body stays unclassified without leaking", () => {
 	const credential = "ghp_" + "a".repeat(40);
 	const mined = classifyMineResult({ tool: credential, result: { isError: true, content: `Extension /x timed out after 30000ms ${credential}` } });
