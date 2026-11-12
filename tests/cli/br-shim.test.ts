@@ -876,6 +876,22 @@ test("HANDOFFPUSHCHECK1 without .omp/push-check the refusal names committing the
 	} finally { g.scratch.cleanup(); }
 }, fixtureDeadlineS(180) * 1_000);
 
+test("HANDOFFDONELINE1 an in_review update with no DONE line names the missing --transition-comment, not only a gate run", async () => {
+	const g = await handoffRepo(true);
+	try {
+		g.ledger();
+		const refused = await g.shim(["update", "hh-owned", "--status", "in_review"]);
+		const err = decoder.decode(refused.stderr);
+		expect(refused.rc, err).toBe(4);
+		expect(err).toContain("HANDOFF_UNGATED in_review needs a DONE line");
+		expect(err).toContain("--transition-comment 'DONE ");
+		expect(await g.status()).toBe("in_progress");
+		// Control: the same update with the DONE line is admitted on the GREEN observation.
+		const admitted = await g.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", g.done]);
+		expect(admitted.rc, decoder.decode(admitted.stderr)).toBe(0);
+	} finally { g.scratch.cleanup(); }
+}, fixtureDeadlineS(180) * 1_000);
+
 test("HANDOFFREPO1 missing observations cannot admit an ambiguous multiple-bead update", async () => {
 	const f = await handoffRepo();
 	try {

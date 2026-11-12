@@ -603,7 +603,12 @@ def _handoff_check(required: bool, texts: Iterable[str], request: list[str]) -> 
     if not claims and not required:
         return 0
     if not claims:
-        claims.append((project, ""))
+        # No DONE line can never be admitted (there is no source sha to judge), so name the missing
+        # line itself rather than a fresh-gate run that would not help (2026-11-12: four retries).
+        print("br-shim: HANDOFF_UNGATED in_review needs a DONE line naming the exact source; add "
+              f"--transition-comment 'DONE {project}@<sha> <what landed>' after the GREEN gate for that "
+              f"sha ({_handoff_remedy(project, '<sha>')})", file=sys.stderr)
+        return 4
     for repo, subject in claims:
         refusal = _handoff_claim(repo, subject, request)
         if refusal:
