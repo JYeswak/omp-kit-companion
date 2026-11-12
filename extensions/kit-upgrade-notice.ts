@@ -5,10 +5,13 @@
  * busy): 'omp-kit <installed> is installed; this seat runs <loaded>; upgrade now', plus how to restart.
  * Every seat upgrades now, paused goal or stopped project included (J-2026-11-09-03; PAUSEDRESTART1 retired):
  * the restart keeps an owner-paused goal paused, so upgrading never resumes paused work.
- * Fleet mode (SELFRESTART1 ompkit-v66l.33, J-2026-10-20-08/09): the seat restarts ITSELF from the notice:
- * save work, run the self-restart helper (one command) and let it hold that tool call. The helper resolves the
- * seat, types omp's own /restart (which replaces the process, ending the helper's call) and resumes an active
- * goal once (NATIVERESTART1 ompkit-2un74); no sentinel or watcher is involved (retired by ompkit-1ra0d.37).
+ * Fleet mode (SELFRESTART1 ompkit-v66l.33, J-2026-10-20-08/09; SELFRESTARTBUSY1 ompkit-1ra0d.221): the seat
+ * restarts ITSELF from the notice: save work, run the self-restart helper (one command, which records the
+ * request and returns at once), then end the turn with no further tool call. A detached watcher waits for
+ * the pane's idle prompt and an empty composer, then types omp's own /restart (which replaces the process)
+ * and resumes an active goal once (NATIVERESTART1 ompkit-2un74); no sentinel or chief loop is involved
+ * (retired by ompkit-1ra0d.37). Parking the tool call instead would hold the turn, so the pane would never
+ * idle and the watcher could never send /restart.
  * Fleet mode means the helper is installed (the configured restart command, SELF_RESTART_SCRIPT under home).
  * Stock mode (no helper) names no fleet command: it says how to restart omp.
  *
@@ -144,10 +147,11 @@ export function upgradeNoticeMessage(installed: string, loaded: string, fleet = 
 			`omp, first collect each running agent's result (or message it to wrap up and wait for its report): the ` +
 			`helper refuses while one still runs there (REFUSED_LIVE_AGENTS). Then save your work: ` +
 			`\`git commit --only -m "<msg>" -- <your reserved paths>\` and publish, or a \`[pending]\` commit.\n` +
-			`2. Run the self-restart helper: \`${SELF_RESTART_COMMAND}\`\n` +
-			`3. Leave that command running: it holds this tool call while omp's own \`/restart\` replaces this ` +
-			`process in place (same session and launch flags) on omp-kit ${installed}, and your goal resumes once if ` +
-			`it was active. If it prints RESTART_NOT_OBSERVED instead, nothing restarted: carry on and report it.\n` +
+		`2. Run the self-restart helper: \`${SELF_RESTART_COMMAND}\` — it records the request and returns at once.\n` +
+		`3. End your turn with no further tool call: a detached watcher sends omp's own \`/restart\` once this ` +
+		`pane is idle with an empty composer (same session and launch flags) on omp-kit ${installed}, and your ` +
+		`goal resumes once if it was active. If no restart happens, read the watcher's log path the helper ` +
+		`printed and report it.\n` +
 			`A background task subagent is not the seat: ignore this notice and finish your task. Only the seat ` +
 			`restarts the seat, and the helper refuses a subagent (REFUSED_SUBAGENT).`;
 	}

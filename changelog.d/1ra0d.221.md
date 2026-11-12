@@ -1,0 +1,1 @@
+- The upgrade notice no longer tells the seat to park in the helper's tool call: `self_restart.py` records the request and returns at once, and a detached watcher sends `/restart` only after the pane idles with an empty composer. A pane that never idles reports `RESTART_NOT_OBSERVED` without typing anything.

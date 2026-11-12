@@ -106,12 +106,18 @@ test("message (fleet): the three self-restart steps in order, each with its exac
 	expect(msg).toContain("omp-kit 0.2.58 is installed; this seat runs 0.2.57; upgrade now");
 	const save = msg.indexOf("Then save your work: `git commit --only");
 	const run = msg.indexOf("2. Run the self-restart helper: `python3 ~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py`");
-	const end = msg.indexOf("3. Leave that command running:");
+	const end = msg.indexOf("3. End your turn with no further tool call:");
 	expect(save).toBeGreaterThan(-1);
 	expect(run).toBeGreaterThan(save);
 	expect(end).toBeGreaterThan(run);
 	expect(SELF_RESTART_COMMAND).toBe("python3 ~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py");
 	expect(msg).toContain("`[pending]` commit");
+	expect(msg).toContain("it records the request and returns at once");
+	expect(msg).toContain("once this pane is idle with an empty composer");
+	// SELFRESTARTBUSY1 (ompkit-1ra0d.221): parking the tool call holds the turn, so the pane never
+	// idles and the watcher can never send /restart. The old "leave it running" text retired with that.
+	expect(msg).not.toContain("Leave that command running");
+	expect(msg).not.toContain("holds this tool call");
 	// SUBAGENTRESTART1 (ompkit-o2iif): a task subagent that read this notice restarted its parent seat mid-work.
 	const sub = msg.indexOf("A background task subagent is not the seat: ignore this notice and finish your task.");
 	expect(sub).toBeGreaterThan(end);
