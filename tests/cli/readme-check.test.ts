@@ -522,3 +522,19 @@ test("export tree planted negatives: a stale count and a missing path are RED", 
 	expect(stalePath.code).toBe(1);
 	expect(stalePath.out).toContain("README.md names `scripts/no-such-file-xyz.sh`");
 });
+
+test("export tree: a README path present only in the canonical --repo checkout is still RED for the candidate root", () => {
+	// The candidate export lacks scripts/canonical-only.sh; a canonical checkout tracks it.
+	const root = exportTree("export-divergent-root", 3, 2, "\n`scripts/canonical-only.sh` runs here.\n");
+	const repo = join(workspace, "export-divergent-repo");
+	mkdirSync(join(repo, "scripts"), { recursive: true });
+	writeFileSync(join(repo, "scripts/canonical-only.sh"), "#!/bin/sh\n");
+	const git = (...args: string[]) => runFixture(["git", "-C", repo, ...args], { cwd: repo, env: ceilingEnv, floor_s: 30 });
+	expect(git("init", "-q").rc).toBe(0);
+	expect(git("add", "scripts/canonical-only.sh").rc).toBe(0);
+	const result = runFixture(["bun", "run", "--no-env-file", "--config=/dev/null", script, "--root", root, "--repo", repo, "--no-readme-gate"],
+		{ cwd: root, env: ceilingEnv, floor_s: 30 });
+	const out = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
+	expect(result.rc).toBe(1);
+	expect(out).toContain("README.md names `scripts/canonical-only.sh`");
+});

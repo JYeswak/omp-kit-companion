@@ -556,23 +556,20 @@ async function main(argv: string[]): Promise<number> {
 		if (ruleRows === null) console.log("NOT_APPLICABLE doc-counts: a count input (AGENTS.md, docs/usage.md, tests/live/scenarios.json or MANIFEST.tsv/rules/) is unreadable here; generated counts are not judged");
 		else if (scenarios === null) findings.push("tests/live/scenarios.json is not a JSON array; the AGENTS.md live-scenario count is unverifiable");
 		else findings.push(...checkDocCounts(docTexts["AGENTS.md"]!, docTexts["docs/usage.md"]!, scenarios, ruleRows, ruleSource));
-		// The file list comes from the judged tree (--root); fresh-gate judges a
-		// git-less archive, so fall back to the canonical repo (--repo), whose
-		// tags already resolve there. When git lists nothing (an unborn index,
-		// or no .git at all in an export), resolve against the filesystem under
-		// the root instead, so the lint still runs. Only a tree with no files
-		// at all stays NOT_APPLICABLE, and only a tree neither git nor the
-		// filesystem can list fails closed.
-		let listed = spawnText(["git", "-C", root, "ls-files"], root);
-		if (!listed.ok) listed = spawnText(["git", "-C", repo, "ls-files"], repo);
+		// The file list comes from the judged tree (--root) only: `git ls-files`
+		// when the root is a checkout, else a filesystem walk of the root (a
+		// git-less export or an unborn index). The canonical repo (--repo) is for
+		// tags, never for path existence: a path present only there must not pass
+		// for a candidate tree that lacks it. Only a tree with no files at all
+		// stays NOT_APPLICABLE.
+		const listed = spawnText(["git", "-C", root, "ls-files"], root);
 		let tracked = listed.ok ? new Set(listed.stdout.split("\n").filter(line => line.length > 0)) : new Set<string>();
 		let lintSource = "git ls-files";
 		if (tracked.size === 0) {
 			tracked = listTreeFiles(root);
 			if (tracked.size > 0) lintSource = "the tree";
 		}
-		if (tracked.size === 0 && !listed.ok) findings.push("path lint: neither `git ls-files` nor the filesystem lists the root or the repo; failing closed — run where the tree can be listed");
-		else if (tracked.size === 0) console.log("NOT_APPLICABLE path-lint: neither `git ls-files` nor the filesystem lists files here; backticked repo paths are not judged");
+		if (tracked.size === 0) console.log("NOT_APPLICABLE path-lint: neither `git ls-files` nor the filesystem lists files here; backticked repo paths are not judged");
 		else {
 			const docNames = existsSync(join(root, "docs")) ? readdirSync(join(root, "docs")).filter(name => name.endsWith(".md")) : [];
 			const lintFiles = [{ name: "README.md", text: readme },
