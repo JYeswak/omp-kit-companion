@@ -20,7 +20,7 @@ row below (`lifecycle:<phase>:<facet>`) and comments when a gap closes.
 | release | A signed, reversible release reaches users. | — | `docs/release-procedure.md` | `tests/cli/release-local.test.ts` | `UNKNOWN` |
 | launch | Readiness (asset freeze, runbook, value metric, rollback) is pinned before users arrive. | `milestone launch` | `docs/phases.md` | `tests/cli/milestone-launch.test.ts` | `UNKNOWN` |
 | operate | Services stay green and support answers. | `service status`, `service run` | `docs/service-contract.md` | `tests/cli/service.test.ts` | `UNKNOWN` |
-| measure-value | Each managed project reports its user-value metric against target. | — | — | — | `UNKNOWN` |
+| measure-value | Each managed project reports its user-value metric against target. | `value` | `docs/phases.md` | `tests/cli/value.test.ts` | `UNKNOWN` |
 | revenue | Pricing and collection exist for the value delivered. | — | — | — | `UNKNOWN` |
 | learn | Every rung files lessons and the mine replays them. | `mine`, `lessons add` | `docs/phases.md` | `tests/cli/mine.test.ts` | `UNKNOWN` |
 
@@ -36,6 +36,6 @@ row below (`lifecycle:<phase>:<facet>`) and comments when a gap closes.
 - `release`: verbs, metric
 - `launch`: metric
 - `operate`: metric
-- `measure-value`: verbs, doc, test, metric
+- `measure-value`: metric
 - `revenue`: verbs, doc, test, metric
 - `learn`: metric

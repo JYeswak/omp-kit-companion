@@ -69,9 +69,9 @@
 		{
 			"phase": "measure-value",
 			"exit_criterion": "Each managed project reports its user-value metric against target.",
-			"verbs": [],
-			"doc": null,
-			"test": null,
+			"verbs": ["value"],
+			"doc": "docs/phases.md",
+			"test": "tests/cli/value.test.ts",
 			"metric": "UNKNOWN"
 		},
 		{

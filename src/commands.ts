@@ -67,6 +67,12 @@ const testData: DataSchema = { type: "object", required: ["overall"], properties
 	repeat: { type: "object" },
 	metamorphic: { type: "object" },
 } };
+const valueData: DataSchema = { type: "object", required: ["overall", "name", "verdict", "command"], properties: {
+	overall: { enum: ["MET", "BELOW", "UNDECLARED", "UNKNOWN"] }, schema: { type: "string" }, name: { type: "string" },
+	value: { type: ["number", "null"] }, target: { type: ["number", "null"] },
+	verdict: { enum: ["MET", "BELOW", "UNDECLARED", "UNKNOWN"] },
+	command: { type: "array" }, reason: { type: "string" }, remediation: { type: "string" }, text: { type: "string" },
+} };
 const drainData: DataSchema = { type: "object", required: ["overall", "rows"], properties: {
 	overall: { enum: ["OK"] },
 	rows: { type: "array" },
@@ -710,6 +716,9 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--live-readback", description: "Run an open LIVEREADBACK child's boxes on the installed kit, no export: a pass ticks them and closes the child, a failure reopens the parent with REWORK naming the box" },
 		{ name: "--all", description: "With --live-readback: every open live-readback child, in id order" },
 	], example: "omp-kit verify BEAD --export SHA --lesson TEXT", runnable: false },
+	{ name: "value", description: "Measure one project's declared user-value metric against its target from .omp/value.json", usage: "value [--project PATH] [--json]", flags: [
+		{ name: "--project", value: "PATH", description: "Repository root holding .omp/value.json; defaults to the current directory" },
+	], example: "omp-kit value --project ~/Developer/cfs --json", runnable: false, dataSchema: valueData },
 	{ name: "slice-verify", description: "Test one overlay against a clean export of HEAD: base vs overlay counts per test file, failures classified pre-existing or introduced; foreign dirt never copied; setup failures are errors, never verdicts", usage: "slice-verify --overlay PATH [--overlay PATH...] [--test FILE...] [--changed-file F...] [--base SHA] [--project PATH] [--json]", flags: [
 		{ name: "--overlay", value: "PATH", repeatable: true, description: "Worktree path to overlay onto the export (repeatable, at least one)" },
 		{ name: "--test", value: "FILE", repeatable: true, description: "Test file to run; omit to select with the push-gate selector" },

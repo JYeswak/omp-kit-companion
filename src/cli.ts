@@ -119,6 +119,7 @@ import { runMilestone } from "./milestone.ts";
 import { ccSpool, type CcSpool } from "./cc-spool.ts";
 import { custodyCheckCommand } from "./custody.ts";
 import { intakeCommand } from "./intake-verb.ts";
+import { valueCommand } from "./value.ts";
 import { createImsgRunner, findImsgBin, notifyBlocked, pollBridge, probeSelfChatMode, readBridgeConfig, resolveBridgeSendTarget, runBrief, sendReply, type BridgeConfig } from "./imessage-bridge.ts";
 import { looksSecret } from "./mcp-sources.ts";
 import { formatNext, next } from "./next.ts";
@@ -1341,6 +1342,7 @@ registerCommandHandler("converge", convergeCommand);
 registerCommandHandler("full-suite verdict", fullSuiteVerdictCommand);
 registerCommandHandler("custody check", custodyCheckCommand);
 registerCommandHandler("intake", intakeCommand);
+registerCommandHandler("value", valueCommand);
 registerCommandHandler("beads migrate", request => {
 	const root = kitIdentity().release.root;
 	if (root === null) return { code: 3, data: { overall: "UNAVAILABLE" },
