@@ -22,7 +22,8 @@ import { run } from "../src/kitlib/run.ts";
  * The cursor is kept per (agent, project) under ~/.local/state/omp-kit/inbox-wake/, so mail that arrives while the
  * seat is restarting is delivered on its next start; the first start ever takes the current tail (no backlog flood).
  * Each delivery appends one WOKEN_INPROCESS row to mail-wake.jsonl, the ledger the sender side already writes.
- * Inert without AGENT_NAME, outside a fleet-opted-in project, or when `am` is unavailable.
+ * Inert without AGENT_NAME, outside a fleet-opted-in project, when `am` is unavailable, or outside an
+ * interactive TUI / RPC session (CHILDWAKE1: a finite print-mode child never polls nor wakes).
  */
 
 /** `am inbox-events` costs about 2.25 s per call (5 runs, 2026-10-26); 30 s keeps the read under 8% of a seat's time. */
@@ -48,6 +49,10 @@ export interface InboxRead {
 
 export interface InboxWakeContext {
 	cwd: string;
+	/** Session mode and UI presence, same fields kit-composer-state gates on. */
+	mode?: string;
+	hasUI?: boolean;
+	ui?: { getEditorText?: () => string };
 	setInterval?: (callback: () => unknown, ms: number) => unknown;
 	clearTimer?: (timer: unknown) => void;
 }
@@ -230,6 +235,14 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		// CHILDWAKE1 (ompkit-1ra0d.225): a finite `omp -p` child inherits the parent's AGENT_NAME and
+		// TERN_PANE, so an ungated wake polls the parent's inbox and injects the parent's mail into the
+		// child, which abandons its task and consumes the parent's unread cursor. The wake runs only in
+		// an interactive TUI session (same predicate as kit-composer-state) or an RPC seat, which wakes
+		// today and keeps doing so; a print-mode / no-UI child neither polls, reads the cursor, writes
+		// it, nor receives wakes.
+		if (ctx.mode !== "tui" && ctx.mode !== "rpc") return;
+		if (ctx.mode === "tui" && (ctx.hasUI !== true || typeof ctx.ui?.getEditorText !== "function")) return;
 		cwd = ctx.cwd;
 		await tick();
 		if (timer === null && typeof ctx.setInterval === "function") timer = ctx.setInterval(() => tick(), INBOX_POLL_MS);

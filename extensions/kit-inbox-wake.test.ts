@@ -17,7 +17,8 @@ function harness(deps: InboxWakeDeps, entries: unknown[] = []) {
 			sent.push({ customType: message.customType, content: message.content, deliverAs: options?.deliverAs, triggerTurn: options?.triggerTurn });
 		},
 	};
-	const ctx = { cwd: "/repo", sessionManager: { getEntries: () => entries }, setInterval: (cb: () => unknown) => { intervals.push(cb); return intervals.length; }, clearTimer: () => {} };
+	// CHILDWAKE1: the wake runs only in an interactive TUI / RPC session, so the harness declares one.
+	const ctx = { cwd: "/repo", mode: "tui", hasUI: true, ui: { getEditorText: () => "" }, sessionManager: { getEntries: () => entries }, setInterval: (cb: () => unknown) => { intervals.push(cb); return intervals.length; }, clearTimer: () => {} };
 	return {
 		sent, intervals,
 		start: async () => { await kitInboxWake(pi, deps); await (handlers.get("session_start") as (e: never, c: never) => Promise<void>)({} as never, ctx as never); },
