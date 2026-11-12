@@ -16,7 +16,7 @@ import type { OwnedScratchRow } from "./scratch.ts";
 import { parseReservationRead } from "./fleet-guard/git.ts";
 import { reapLandedCheckouts, listOvnfsCheckouts, diffOvnfsCheckout } from "./ovnfs-checkouts.ts";
 import { commandOf, expectedOf, judge, parseBoxes, unreplayableReason } from "./verify.ts";
-import { scrubText } from "../extensions/secret-output-guard.ts";
+import { previewText, scrubText } from "../extensions/secret-output-guard.ts";
 import { appendReapReceipt, defaultGitLockLedgerPath, reapStaleAfterMs, reapStaleIndexLock } from "./index-lock.ts";
 
 
@@ -38,10 +38,11 @@ function git(repo: string, args: string[], reflogAction?: string, timeoutMs = 30
 	return { code: run.rc, out: new TextDecoder().decode(run.stdout), err: new TextDecoder().decode(run.stderr), interrupted: run.timed_out || run.killed, timedOut: run.timed_out };
 }
 
-/** Git's own first stderr line for a refusal, bounded and scrubbed; "no git output" when it printed nothing. */
+/** Git's own first stderr line for a refusal, scrubbed then bounded (previewText scrubs first, so a token
+ * crossing the bound never leaks its prefix); "no git output" when it printed nothing. */
 export function landGitDetail(result: GitResult): string {
 	const line = result.err.split("\n").map(text => text.trim()).find(text => text !== "") ?? "";
-	return line === "" ? `git exited ${String(result.code)} with no output` : scrubText(line.slice(0, 300));
+	return line === "" ? `git exited ${String(result.code)} with no output` : previewText(line, 300);
 }
 
 /**

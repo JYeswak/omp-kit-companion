@@ -1,1 +1,1 @@
-- `omp-kit land` moves a stale, empty, unheld `.git/index.lock` aside before staging, using the same guarded mover as `omp-kit scratch index-lock --reap --yes`, and records it in the lock ledger. If it still cannot prepare a path, the refusal now includes git's own error message instead of a bare `LAND_PATH_UNAVAILABLE`.
+- The git error text in `land`'s path-preparation refusal is now scrubbed for token shapes before it is cut to 300 characters, so a token that crosses the cut can't leak its prefix.

@@ -57,3 +57,13 @@ test("LANDLOCKREAP1: no lock reads NOT_FOUND and git without stderr still names 
 		expect(landGitDetail({ code: 128, out: "", err: "", interrupted: false, timedOut: false })).toBe("git exited 128 with no output");
 	} finally { rmSync(f.root, { recursive: true, force: true }); }
 }, fixtureDeadlineS() * 1000);
+
+test("LANDLOCKREAP1: a token-shaped value crossing the 300-char bound never leaks its prefix", () => {
+	// Synthetic gh-shaped value placed so the 300-char cut falls inside it; truncating first would leave a
+	// shorter ghp_ prefix the shape matcher no longer recognises.
+	const token = "ghp_" + "A".repeat(36);
+	const err = "x".repeat(289) + " " + token + " trailing\n";
+	const detail = landGitDetail({ code: 1, out: "", err, interrupted: false, timedOut: false });
+	expect(detail).not.toContain("ghp_AAAA");
+	expect(detail.length).toBeLessThanOrEqual(300);
+});
