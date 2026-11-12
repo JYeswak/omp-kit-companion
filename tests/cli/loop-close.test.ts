@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { run } from "../../src/kitlib/run.ts";
+import { run, runSync } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 import { resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 import { RUN_TIME_CAPS_MS } from "../../src/service-run.ts";
-import { canonicalCode, isNonRefusalGate, parseGateTs, runLoopClose, type LoopCloseBrResult, type LoopCloseMail } from "../../src/loop-close.ts";
+import { canonicalCode, isNonRefusalGate, parseGateTs, readLoopCloseConfig, runLoopClose, type LoopCloseBrResult, type LoopCloseMail } from "../../src/loop-close.ts";
 
 const NOW = Date.parse("2026-11-12T00:00:00Z");
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -374,3 +374,120 @@ test("LOOPCLOSE1: refusal-code canonicalisation matches turnline", () => {
 	expect(parseGateTs("")).toBeNull();
 	expect(parseGateTs(null)).toBeNull();
 });
+
+// LOOPCLOSEWIRE1 (ompkit-1ra0d.224): the installed daily job files into the kit tracker
+// instead of $HOME because the repo and mailbox were env-only. The loopClose key in
+// fleet-watch.json configures {repo, mailTo, mailProject} with env override; an absent
+// key is UNCONFIGURED in status/doctor/run instead of a run against $HOME.
+test("LOOPCLOSEWIRE1: readLoopCloseConfig reads the loopClose key with env override; absent is UNCONFIGURED", () => {
+	const root = ownedTmp("loop-close-wire").path;
+	const configPath = join(root, ".config", "omp-kit", "fleet-watch.json");
+	mkdirSync(dirname(configPath), { recursive: true });
+	const read = (config: unknown, env: Record<string, string> = {}) => {
+		if (config !== null) writeFileSync(configPath, typeof config === "string" ? config : JSON.stringify(config));
+		return readLoopCloseConfig(root, { OMP_KIT_FLEET_WATCH_CONFIG: configPath, ...env });
+	};
+	const configured = read({ loopClose: { repo: "/repo", mailTo: "lead", mailProject: "proj" } });
+	expect(configured.ok).toBe(true);
+	if (configured.ok) expect(configured.config).toEqual({ repo: "/repo", configPath, mailTo: "lead", mailProjectKey: "proj" });
+	const overridden = read({ loopClose: { repo: "/repo", mailTo: "lead", mailProject: "proj" } },
+		{ LOOP_CLOSE_REPO: "/env/repo", LOOP_CLOSE_MAIL_TO: "env-lead" });
+	expect(overridden.ok).toBe(true);
+	if (overridden.ok) expect(overridden.config).toEqual({ repo: "/env/repo", configPath, mailTo: "env-lead", mailProjectKey: "proj" });
+	const envOnly = read({ sessions: [] }, { LOOP_CLOSE_REPO: "/env/repo" });
+	expect(envOnly.ok).toBe(true);
+	if (envOnly.ok) expect(envOnly.config.repo).toBe("/env/repo");
+	expect(read({ sessions: [] })).toMatchObject({ ok: false, code: "LOOP_CLOSE_UNCONFIGURED" });
+	expect(read(null)).toMatchObject({ ok: false, code: "LOOP_CLOSE_UNCONFIGURED" });
+	rmSync(configPath);
+	expect(read(null)).toMatchObject({ ok: false, code: "LOOP_CLOSE_UNCONFIGURED" });
+	for (const bad of ["{not json", "[1]", `"str"`, { loopClose: "/repo" }, { loopClose: { repo: "relative" } },
+		{ loopClose: { repo: "/repo", mailTo: "" } }, { loopClose: { repo: "/repo", mailProject: "a\nb" } }]) {
+		expect(read(bad)).toMatchObject({ ok: false, code: "LOOP_CLOSE_CONFIG_INVALID" });
+	}
+});
+
+function wireServiceEnv(home: string, configPath: string, extra: Record<string, string> = {}): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (typeof value === "string") env[key] = value;
+	}
+	for (const key of ["BEADS_DIR", "BEADS_JSONL", "BEADS_CACHE_DIR", "BD_DB", "BD_DATABASE", "BR_REAL", "BR_BIN", "BR_ACTOR", "BR_AGENT_NAME", "BR_OUTPUT_FORMAT",
+		"LOOP_CLOSE_REPO", "LOOP_CLOSE_MAIL_TO", "LOOP_CLOSE_MAIL_PROJECT", "LOOP_CLOSE_LEDGER"]) delete env[key];
+	return { ...env, HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), TMPDIR: join(home, "tmp"),
+		OMP_KIT_FLEET_WATCH_CONFIG: configPath, OMP_KIT_LOAD_OVERRIDE: "0/8",
+		OMP_KIT_TEST_LABEL_NAMESPACE: `com.omp-kit.test.loopwire${Math.random().toString(36).slice(2, 8)}`, ...extra };
+}
+
+function wireServiceHome(): { home: string; bin: string } {
+	const home = ownedTmp("loop-close-wire", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
+	const bin = join(home, ".local", "bin");
+	mkdirSync(bin, { recursive: true });
+	mkdirSync(join(home, "tmp"), { recursive: true });
+	writeFileSync(join(bin, "omp-kit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+	return { home, bin };
+}
+
+// Planted negative: today's code defaults the repo to $HOME, so a keyless run files
+// into the seat instead of refusing. The run/status/doctor/install assertions below
+// all fail on that code (no LOOP_CLOSE_UNCONFIGURED, no UNCONFIGURED row).
+test("LOOPCLOSEWIRE1: keyless service run refuses UNCONFIGURED and files nothing; status and doctor show it", () => {
+	const { home } = wireServiceHome();
+	const configPath = join(home, ".config", "omp-kit", "fleet-watch.json");
+	mkdirSync(dirname(configPath), { recursive: true });
+	writeFileSync(configPath, JSON.stringify({ sessions: [] }));
+	const env = wireServiceEnv(home, configPath);
+	const cli = [process.execPath, resolve(import.meta.dir, "..", "..", "src", "cli.ts")];
+	const runKeyless = runSync([...cli, "service", "run", "loop-close", "--json"], { deadline_s: fixtureDeadlineS(30), cwd: home, env });
+	expect(runKeyless.rc).toBe(2);
+	const runEnvelope = JSON.parse(new TextDecoder().decode(runKeyless.stdout));
+	expect(runEnvelope.errors[0].code).toBe("LOOP_CLOSE_UNCONFIGURED");
+	expect(runEnvelope.errors[0].remediation).toContain('"loopClose"');
+	expect(existsSync(join(home, ".beads"))).toBe(false);
+	const status = runSync([...cli, "service", "status", "loop-close", "--json"], { deadline_s: fixtureDeadlineS(30), cwd: home, env });
+	expect(status.rc).toBe(0);
+	const statusRow = JSON.parse(new TextDecoder().decode(status.stdout)).data.status[0];
+	expect(statusRow).toMatchObject({ name: "loop-close", state: "UNCONFIGURED", configured: "UNCONFIGURED" });
+	const doctor = runSync([...cli, "service", "doctor", "loop-close", "--json"], { deadline_s: fixtureDeadlineS(30), cwd: home, env });
+	const doctorEnvelope = JSON.parse(new TextDecoder().decode(doctor.stdout));
+	expect(doctor.rc).toBe(1);
+	expect(doctorEnvelope.data.checks.some((check: { id: string; status: string }) => check.id === "configured" && check.status === "WARN")).toBe(true);
+	const install = runSync([...cli, "service", "install", "loop-close", "--plan", "--json"], { deadline_s: fixtureDeadlineS(30), cwd: home, env });
+	expect(install.rc).toBe(2);
+	expect(JSON.parse(new TextDecoder().decode(install.stdout)).errors[0].code).toBe("LOOP_CLOSE_UNCONFIGURED");
+});
+
+test("LOOPCLOSEWIRE1: configured service run files into the loopClose repo and addresses its mailbox", async () => {
+	expect(RUN_TIME_CAPS_MS["loop-close"]).toBe(1_800_000);
+	const root = ownedTmp("loop-close-wire").path;
+	const repo = join(root, "repo");
+	mkdirSync(repo, { recursive: true });
+	const real = resolveRealBr(process.env.PATH);
+	if (!real.ok) throw new Error(real.reason);
+	const bin = join(root, "bin");
+	mkdirSync(bin, { recursive: true });
+	symlinkSync(real.path, join(bin, "br"));
+	const configPath = join(root, ".config", "omp-kit", "fleet-watch.json");
+	mkdirSync(dirname(configPath), { recursive: true });
+	writeFileSync(configPath, JSON.stringify({ loopClose: { repo, mailTo: "lead-test", mailProject: "proj-test" } }));
+	const ledgerPath = join(root, "gate-events.jsonl");
+	writeFileSync(ledgerPath, [ledgerRow("SILENT-SVC", 45), ledgerRow("NEW-HOT", 1)].join("\n"));
+	const childEnv = wireServiceEnv(root, configPath, {
+		PATH: `${bin}:${process.env.PATH ?? ""}`, AGENT_NAME: "LoopCloseWireFixture",
+		BEADS_DB: join(repo, ".beads", "beads.db"), LOOP_CLOSE_LEDGER: ledgerPath,
+	});
+	mkdirSync(childEnv.TMPDIR, { recursive: true });
+	const init = await run(["br", "init", "--db", join(repo, ".beads", "beads.db")], { cwd: repo, deadline_s: fixtureDeadlineS(60), env: childEnv });
+	expect(init.rc).toBe(0);
+	const child = await runFixtureAsync([process.execPath, resolve(import.meta.dir, "..", "..", "src", "cli.ts"), "service", "run", "loop-close", "--json"], {
+		cwd: root, env: childEnv, floor_s: 60, label: "service run loop-close wire",
+	});
+	const envelope = JSON.parse(new TextDecoder().decode(child.stdout));
+	// The retire bead files into the configured repo; the REPORT is attempted at the
+	// configured mailbox and fails inside the fixture (no sender token), never skipped.
+	expect(envelope.data.retiredFiled).toHaveLength(1);
+	expect(envelope.data.mail).toBe("FAILED");
+	expect(envelope.data.findings.some((finding: string) => finding.startsWith("MAIL_FAILED"))).toBe(true);
+	expect(existsSync(join(repo, ".beads", "beads.db"))).toBe(true);
+	expect(existsSync(join(root, ".beads"))).toBe(false);
+}, fixtureDeadlineS(120) * 1_000);

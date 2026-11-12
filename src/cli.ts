@@ -2,7 +2,7 @@
 import { preflightBead, preflightCommit } from "./preflight.ts";
 import { sliceVerify } from "./slice-verify.ts";
 import { liveReadback, liveReadbackAll, verifyBead, verifyProject } from "./verify.ts";
-import { runLoopClose } from "./loop-close.ts";
+import { readLoopCloseConfig, runLoopClose, type LoopCloseConfig } from "./loop-close.ts";
 import { gateEventsPath } from "../extensions/gate-events.ts";
 import { renderEnvelope } from "./kitlib/findings.ts";
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
@@ -2986,6 +2986,21 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		return refusal("TEST_LABEL_NAMESPACE_INVALID", `OMP_KIT_TEST_LABEL_NAMESPACE=${process.env.OMP_KIT_TEST_LABEL_NAMESPACE ?? "(unset)"} is not a test namespace`,
 			"Set OMP_KIT_TEST_LABEL_NAMESPACE=com.omp-kit.test.<random> in tests and smoke runs only; production leaves it unset.");
 	}
+	// LOOPCLOSEWIRE1: loop-close is operator-configured like the commandConfigKey jobs, but its
+	// config is {repo, mailTo, mailProject} rather than {argv, cwd}, so it resolves here in parallel.
+	const loopCloseUnset: Record<string, { status: "UNCONFIGURED" | "INVALID"; reason: string; configPath: string }> = {};
+	const loopCloseReady: Record<string, LoopCloseConfig> = {};
+	for (const name of names) {
+		if (name !== "loop-close") continue;
+		const resolved = readLoopCloseConfig(home);
+		if (resolved.ok) loopCloseReady[name] = resolved.config;
+		else loopCloseUnset[name] = { status: resolved.code === "LOOP_CLOSE_CONFIG_INVALID" ? "INVALID" : "UNCONFIGURED", reason: resolved.message, configPath: resolved.configPath };
+	}
+	const loopCloseRefusal = (name: string): CliResult => {
+		const unset = loopCloseUnset[name]!;
+		return refusal(`LOOP_CLOSE_${unset.status === "INVALID" ? "CONFIG_INVALID" : "UNCONFIGURED"}`, `loop-close has no usable config: ${unset.reason}`,
+			`Add "loopClose": {"repo": "/absolute/dir", "mailTo": "...", "mailProject": "..."} to ${unset.configPath} (or set LOOP_CLOSE_REPO/LOOP_CLOSE_MAIL_TO/LOOP_CLOSE_MAIL_PROJECT); nothing was changed.`);
+	};
 	const unconfiguredRefusal = (name: string): CliResult => {
 		const command = operator[name]!;
 		const def = KNOWN_JOBS[name]!;
@@ -3023,6 +3038,9 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		// SENTINELLIVE1: an operator-configured job without its command refuses before any
 		// render, backup or bootstrap, so nothing is written.
 		if (operator[job.name] !== undefined) return unconfiguredRefusal(job.name);
+		// LOOPCLOSEWIRE1: installing an unconfigured loop-close would schedule a job that
+		// files into the wrong tracker; refuse before any render, backup or bootstrap.
+		if (loopCloseUnset[job.name] !== undefined) return loopCloseRefusal(job.name);
 		// CC14: the cc daemon is only offered when its fleet adapter
 		// resolves; otherwise the shipped companion stays inert. This gate
 		// runs before any plan render so `service install cc --plan` refuses
@@ -3107,18 +3125,30 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					state: print.state, pid: print.pid, runs: print.runs, lastExit: print.lastExit, loaded_plist: print.path, last_run_at: readJobFinishedAt(home, name) };
 				liveness = daemonLiveness({ loaded, pid: print.pid, query_error: print.query_error });
 			}
-			const unconfigured = operator[name];
-			if (unconfigured !== undefined) {
-				row.configured = unconfigured.status;
-				row.config_reason = unconfigured.reason;
-				// Never installed and not running: there is nothing to supervise. A sentinel run outside
-				// the supervisor is invisible here, so liveness is UNKNOWN, not DEAD.
+			const loopUnset = loopCloseUnset[name];
+			if (loopUnset !== undefined) {
+				row.configured = loopUnset.status;
+				row.config_reason = loopUnset.reason;
 				if (!row.installed && row.loaded !== true) {
 					row.state = "UNCONFIGURED";
 					liveness = "UNKNOWN";
 				}
-			} else if (job.commandConfigKey !== undefined) {
+			} else if (name === "loop-close") {
 				row.configured = "CONFIGURED";
+			} else {
+				const unconfigured = operator[name];
+				if (unconfigured !== undefined) {
+					row.configured = unconfigured.status;
+					row.config_reason = unconfigured.reason;
+					// Never installed and not running: there is nothing to supervise. A sentinel run outside
+					// the supervisor is invisible here, so liveness is UNKNOWN, not DEAD.
+					if (!row.installed && row.loaded !== true) {
+						row.state = "UNCONFIGURED";
+						liveness = "UNKNOWN";
+					}
+				} else if (job.commandConfigKey !== undefined) {
+					row.configured = "CONFIGURED";
+				}
 			}
 			if (job.kind === "daemon") row.liveness = liveness;
 			return row;
@@ -3140,6 +3170,14 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		let fixed = 0;
 		for (const name of names) {
 			const job = scoped[name!]!;
+			const loopUnset = loopCloseUnset[name!];
+			if (loopUnset !== undefined) {
+				// No repo to run in; --fix never installs an unconfigured job.
+				allChecks.push({ id: "configured", status: "WARN", job: name,
+					message: `${name} is ${loopUnset.status}: ${loopUnset.reason}`,
+					remediation: `Add "loopClose": {"repo": "/absolute/dir", "mailTo": "...", "mailProject": "..."} to ${loopUnset.configPath}, then run omp-kit service install ${name} --apply --yes.` });
+				continue;
+			}
 			const unconfigured = operator[name!];
 			if (unconfigured !== undefined) {
 				// No command to render or compare; --fix never installs an unconfigured job.
@@ -3542,14 +3580,21 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			} finally { lock.release(); }
 		}
 		if (job.name === "loop-close") {
+			// LOOPCLOSEWIRE1: the consumer repo and mailbox come from the loopClose key
+			// (env overrides); without a repo the run refuses instead of filing into $HOME.
+			const configured = loopCloseReady[job.name];
+			if (configured === undefined) {
+				lock.release();
+				return loopCloseRefusal(job.name);
+			}
 			const started = new Date().toISOString();
 			let result;
 			try {
 				result = await runLoopClose({
 					ledgerPath: process.env.LOOP_CLOSE_LEDGER ?? gateEventsPath(process.env, home),
-					statePath: join(root, "loop-close.json"), home, repo: process.env.LOOP_CLOSE_REPO ?? home,
+					statePath: join(root, "loop-close.json"), home, repo: configured.repo,
 					actor: process.env.AGENT_NAME ?? "loop-close", env: childEnv, capMs,
-					mailTo: process.env.LOOP_CLOSE_MAIL_TO, mailProjectKey: process.env.LOOP_CLOSE_MAIL_PROJECT,
+					mailTo: configured.mailTo, mailProjectKey: configured.mailProjectKey,
 				});
 			} catch (error) {
 				lock.release();

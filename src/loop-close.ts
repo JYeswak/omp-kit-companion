@@ -1,9 +1,9 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { run } from "./kitlib/run.ts";
 import { callAgentMail } from "./fleet-guard/reservations.ts";
-import { jobReceiptPath, KNOWN_JOBS } from "./service.ts";
+import { fleetWatchConfigPath, jobReceiptPath, KNOWN_JOBS } from "./service.ts";
 import { lifecycleGaps, lifecycleManifestPath, loadLifecycleManifest, validateLifecycleManifest, type LifecycleGap, type LifecycleManifest } from "./lifecycle.ts";
 import { LIVE_READBACK_LABEL, liveReadback } from "./verify.ts";
 
@@ -65,6 +65,59 @@ export function parseGateTs(value: unknown): number | null {
 export const LOOP_CLOSE_LABEL = "loop-close";
 export const LOOP_CLOSE_RETIRE_DAYS = 30;
 export const LOOP_CLOSE_RED_HOURS = 24;
+
+export interface LoopCloseConfig {
+	repo: string;
+	configPath: string;
+	mailTo?: string;
+	mailProjectKey?: string;
+}
+
+export type LoopCloseConfigResult =
+	| { ok: true; config: LoopCloseConfig }
+	| { ok: false; code: "LOOP_CLOSE_UNCONFIGURED" | "LOOP_CLOSE_CONFIG_INVALID"; message: string; remediation: string; configPath: string };
+
+function cleanLoopCloseLine(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const trimmed = value.trim();
+	if (trimmed === "" || trimmed.length > 4096 || /[\r\n]/.test(trimmed)) return null;
+	return trimmed;
+}
+
+/**
+ * LOOPCLOSEWIRE1 (ompkit-1ra0d.224): resolve the loop-close consumer config the way
+ * readBridgeConfig resolves the bridge: fleet-watch.json `loopClose`
+ * ({repo, mailTo, mailProject}) with LOOP_CLOSE_REPO/_MAIL_TO/_MAIL_PROJECT
+ * overrides. No repo is configured by default; without one the job reports
+ * UNCONFIGURED instead of running br in $HOME.
+ */
+export function readLoopCloseConfig(home: string, env: NodeJS.ProcessEnv = process.env): LoopCloseConfigResult {
+	const configPath = env.OMP_KIT_FLEET_WATCH_CONFIG ?? fleetWatchConfigPath(home);
+	const unconfigured = (message: string): LoopCloseConfigResult => ({ ok: false, code: "LOOP_CLOSE_UNCONFIGURED", message, configPath,
+		remediation: `Set "loopClose": {"repo": "/absolute/dir", "mailTo": "...", "mailProject": "..."} in ${configPath} (or LOOP_CLOSE_REPO/LOOP_CLOSE_MAIL_TO/LOOP_CLOSE_MAIL_PROJECT); nothing was filed.` });
+	const invalid = (message: string): LoopCloseConfigResult => ({ ok: false, code: "LOOP_CLOSE_CONFIG_INVALID", message, configPath,
+		remediation: `Fix "loopClose" in ${configPath} so it is {"repo": "/absolute/dir", ...} with single-line values (or unset it and use LOOP_CLOSE_REPO/LOOP_CLOSE_MAIL_TO/LOOP_CLOSE_MAIL_PROJECT); nothing was filed.` });
+	let section: Record<string, unknown> = {};
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(configPath, "utf8"));
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return invalid(`${configPath} is not a JSON object`);
+		const loopClose = (parsed as Record<string, unknown>).loopClose ?? {};
+		if (loopClose === undefined) return unconfigured(`${configPath} has no loopClose key`);
+		if (typeof loopClose !== "object" || loopClose === null || Array.isArray(loopClose)) return invalid(`${configPath} loopClose must be an object`);
+		section = loopClose as Record<string, unknown>;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") return invalid(`${configPath} is unreadable`);
+	}
+	const repo = cleanLoopCloseLine(env.LOOP_CLOSE_REPO ?? section.repo);
+	if (repo === null) return unconfigured(`${configPath} sets no loop-close repo (loopClose.repo or LOOP_CLOSE_REPO)`);
+	if (!isAbsolute(repo)) return invalid(`loopClose.repo must be an absolute path`);
+	const config: LoopCloseConfig = { repo, configPath };
+	const mailTo = cleanLoopCloseLine(env.LOOP_CLOSE_MAIL_TO ?? section.mailTo);
+	if ((env.LOOP_CLOSE_MAIL_TO ?? section.mailTo) !== undefined && mailTo === null) return invalid(`loopClose.mailTo must be a non-empty single-line string`);
+	const mailProjectKey = cleanLoopCloseLine(env.LOOP_CLOSE_MAIL_PROJECT ?? section.mailProject);
+	if ((env.LOOP_CLOSE_MAIL_PROJECT ?? section.mailProject) !== undefined && mailProjectKey === null) return invalid(`loopClose.mailProject must be a non-empty single-line string`);
+	return { ok: true, config: { ...config, ...(mailTo === null ? {} : { mailTo }), ...(mailProjectKey === null ? {} : { mailProjectKey }) } };
+}
 
 /** LIFECYCLEMANIFEST1: new gap-bead filings per run; updates to filed beads are uncapped. */
 export const LIFECYCLE_FILE_CAP = 5;
