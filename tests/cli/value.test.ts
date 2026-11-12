@@ -117,3 +117,12 @@ test("VALUEVERB1 a token-shaped value in failing stderr or non-number stdout nev
 		expect(String(result.data.reason)).not.toContain("ghp_BBBB");
 	}
 });
+
+test("VALUEVERB1 an rc-0 probe whose output is cut by the capture bound is UNKNOWN, never MET", async () => {
+	// "5" then more than the 64 KiB capture of blank lines then garbage: the cut keeps a parseable "5".
+	const root = projectDir({ name: "oversized", command: ["sh", "-c", "echo 5; i=0; while [ $i -lt 70000 ]; do echo; i=$((i+1)); done; echo garbage"], target: 3 });
+	const result = await valueCommand(request(root));
+	expect(result.code, JSON.stringify(result)).toBe(3);
+	expect(result.data).toMatchObject({ overall: "UNKNOWN", value: null });
+	expect(String(result.data.reason)).toContain("was cut");
+}, fixtureDeadlineS(30) * 1000);

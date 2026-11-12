@@ -124,6 +124,12 @@ export async function runValueVerb(project: string): Promise<ValueOutcome> {
 			reason: `The value command timed out after ${VALUE_COMMAND_TIMEOUT_S} s.`,
 			remediation: "Make the probe finish inside its deadline; nothing was measured." };
 	}
+	// A cut capture may keep a valid-looking numeric prefix of output the probe never meant as its answer.
+	if (result.truncated || result.total_truncated) {
+		return { verdict: "UNKNOWN", name: decl.name, value: null, target: decl.target, command: decl.command,
+			reason: `The value command printed more than ${VALUE_MAX_OUTPUT_BYTES} bytes, so its output was cut and is not judged.`,
+			remediation: "Make the declared command print exactly one finite number; nothing was measured." };
+	}
 	if (result.rc !== 0) {
 		// Scrub before truncating: probes like cfs-infisical-run are credential-adjacent, and a cut first can hide a token shape.
 		const stderr = previewText(new TextDecoder().decode(result.stderr).trim(), VALUE_PREVIEW_CHARS);
