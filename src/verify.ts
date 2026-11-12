@@ -288,16 +288,18 @@ export function judge(expected: string, rc: number | null, out: string): { pass:
 	// behavior (a needle like `prints "status: ok"` must keep working), so the
 	// head strip runs after the prints branch below matches the full clause.
 	// A bun run with 0 fail exits 0, so `N fail` with N 0 also requires rc 0.
-	const hm = /^(?:rc\s+[0-9]+|exit\s+[0-9]+|[0-9]+\s+pass(?:\s+[0-9]+\s+fail)?|[0-9]+\s+fail)\s*:(?=\s*\S)/i.exec(e);
+	// VERIFYFAILURESHEAD1 (ompkit-1ra0d.219): turnline selftests summarize as
+	// `N failures` / `N failure`, never `N fail`; judge those heads the same way.
+	const hm = /^(?:rc\s+[0-9]+|exit\s+[0-9]+|[0-9]+\s+pass(?:\s+[0-9]+\s+fail(?:ure)?s?)?|[0-9]+\s+fail(?:ure)?s?)\s*:(?=\s*\S)/i.exec(e);
 	const exp = hm !== null ? e.slice(0, hm[0].length - 1).trim() : e;
 	if ((m = /^rc\s+(\d+)$/i.exec(exp)) || (m = /^exit\s+(\d+)$/i.exec(exp))) return { pass: rc === Number(m[1]), detail: `rc ${rc}, expected ${m[1]}` };
-	if ((m = /^(\d+)\s+pass(?:\s+(\d+)\s+fail)?$/i.exec(exp))) {
-		const pass = new RegExp(`\\b${m[1]}\\s+pass\\b`).test(out) && (m[2] === undefined || new RegExp(`\\b${m[2]}\\s+fail\\b`).test(out));
+	if ((m = /^(\d+)\s+pass(?:\s+(\d+)\s+fail(?:ure)?s?)?$/i.exec(exp))) {
+		const pass = new RegExp(`\\b${m[1]}\\s+pass\\b`).test(out) && (m[2] === undefined || new RegExp(`\\b${m[2]}\\s+fail(?:ure)?s?\\b`).test(out));
 		return { pass, detail: `summary ${m[1]} pass${m[2] !== undefined ? ` ${m[2]} fail` : ""}: ${pass ? "found" : "not found"}` };
 	}
-	if ((m = /^(\d+)\s+fail$/i.exec(exp))) {
+	if ((m = /^(\d+)\s+fail(?:ure)?s?$/i.exec(exp))) {
 		const n = Number(m[1]);
-		const found = new RegExp(`\\b${m[1]}\\s+fail\\b`).test(out);
+		const found = new RegExp(`\\b${m[1]}\\s+fail(?:ure)?s?\\b`).test(out);
 		const pass = found && (n !== 0 || rc === 0);
 		return { pass, detail: `summary ${m[1]} fail: ${pass ? "found" : "not found"}` };
 	}

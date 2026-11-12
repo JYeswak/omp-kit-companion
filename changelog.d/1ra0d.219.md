@@ -1,0 +1,1 @@
+- `verify` judges turnline selftest summaries: `N failures` / `N failure` heads (with an optional `: prose` suffix) pass and fail exactly like `N fail`, keeping the exact-count and rc 0 rules.
