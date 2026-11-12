@@ -1,0 +1,1 @@
+- `omp-kit send` to a seat whose pending record's journal was replaced settles the loss of proof itself (ledgered, never resent, with a recovery copy kept beside the drop folder) and delivers, instead of refusing `REPLACED_UNPROVEN` forever until a hand-run `--ack-pending`. A pending record whose journal file still exists keeps suppressing until it is proven or hand-acknowledged.

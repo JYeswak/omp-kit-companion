@@ -909,8 +909,12 @@ test("SENDSTUCK1 planted: absent, substring-only and assistant echo replacement 
 		expect(result.detail).toContain("omp-kit send --ack-pending");
 		expect(fx.fake.sent).toEqual([]);
 		expect(JSON.parse(readFileSync(fx.path, "utf8")).status).toBe("REPLACED_UNPROVEN");
-		const again = await deliverTern(fx.fake, "new again", { dropDir: fx.dir, io: fx.io });
+		// SENDREPLACED1: the pinned journal file is back, so the record's journal still exists and the hold stays honoured.
+		const restoredIo: TernObserverIo = { ...fx.io,
+			readSessionTail: () => ({ ...sessionViewOfText(fx.fake.journal.text), identity: "1:old" }) };
+		const again = await deliverTern(fx.fake, "new again", { dropDir: fx.dir, io: restoredIo });
 		expect(again.code).toBe("REPLACED_UNPROVEN");
+		expect(again.detail).not.toContain("auto-acknowledged");
 		expect(fx.fake.sent).toEqual([]);
 		expect(readFileSync(join(fx.dir, "..", "tern-pending", "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)))
 			.toMatchObject([{ status: "REPLACED_UNPROVEN", marker: fx.marker }]);
@@ -1168,11 +1172,54 @@ test("WAKEREPLACED1: a pending record whose journal was replaced is auto-acknowl
 test("WAKEREPLACED1 planted: a pending record whose journal still exists keeps suppressing", async () => {
 	const fx = replacedPending(settledJournal);
 	expect((await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io })).code).toBe("REPLACED_UNPROVEN");
-	const again = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io, untilDeliveredMs: 60_000,
+	// SENDREPLACED1: the pinned journal file is back, so the record's journal still exists and the hold stays honoured.
+	const restoredIo: TernObserverIo = { ...fx.io,
+		readSessionTail: () => ({ ...sessionViewOfText(fx.fake.journal.text), identity: "1:old" }) };
+	const again = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: restoredIo, untilDeliveredMs: 60_000,
 		wait: async () => { throw new Error("replaced-unproven must not wait out the bound"); } });
 	expect(again.status).toBe("REFUSED");
 	expect(again.code).toBe("REPLACED_UNPROVEN");
 	expect(again.detail).not.toContain("auto-acknowledged");
+	expect(fx.fake.sent).toEqual([]);
+	expect(existsSync(fx.path)).toBe(true);
+	expect(readdirSync(fx.dir).filter((name) => name.endsWith(`-${fx.marker}.md`))).toEqual([]);
+	expect(readFileSync(join(fx.dir, "..", "tern-pending", "ledger.jsonl"), "utf8")).not.toContain(`"status":"ACKNOWLEDGED"`);
+});
+
+test("SENDREPLACED1: a plain send settles a same-session replaced-journal record with a ledger note and delivers", async () => {
+	const fx = replacedPending(settledJournal);
+	expect((await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io })).code).toBe("REPLACED_UNPROVEN");
+	expect(existsSync(fx.path)).toBe(true);
+	// Same session, but the pinned file is gone (replaced under the seat): the plain send settles the loss
+	// of proof itself and delivers instead of suppressing forever.
+	const result = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io });
+	expect(result.status).toBe("OK");
+	expect(result.marker).not.toBe(fx.marker);
+	expect(result.detail).toContain(`auto-acknowledged stale replaced-unproven attempt ${fx.marker}`);
+	expect(result.detail).toContain("SENDREPLACED1");
+	expect(fx.fake.sent).toEqual([`[from agent GoldenStone via omp-kit send]\nnew\n[${result.marker}]`]);
+	expect(existsSync(fx.path)).toBe(false);
+	const ledger = readFileSync(join(fx.dir, "..", "tern-pending", "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	expect(ledger).toMatchObject([{ status: "REPLACED_UNPROVEN", marker: fx.marker }, { status: "ACKNOWLEDGED", marker: fx.marker }]);
+	const drops = readdirSync(fx.dir).filter((name) => name.endsWith(`-${fx.marker}.md`));
+	expect(drops.length).toBe(1);
+	expect(readFileSync(join(fx.dir, drops[0]!), "utf8")).toContain(fx.marker);
+});
+
+test("SENDREPLACED1 planted: a replaced-unproven record whose journal still exists is honoured and refuses", async () => {
+	const fx = replacedPending(settledJournal);
+	expect((await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io })).code).toBe("REPLACED_UNPROVEN");
+	// The pinned journal file is back: the record's journal still exists, so the plain send honours the
+	// hold instead of settling it away. Today's send still refuses REPLACED_UNPROVEN.
+	const restoredIo: TernObserverIo = { ...fx.io,
+		readSessionTail: () => ({ ...sessionViewOfText(fx.fake.journal.text), identity: "1:old" }) };
+	const again = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: restoredIo, untilDeliveredMs: 60_000,
+		wait: async () => { throw new Error("honoured replaced-unproven must not wait out the bound"); } });
+	expect(again.status).toBe("REFUSED");
+	expect(again.code).toBe("REPLACED_UNPROVEN");
+	expect(again.detail).not.toContain("auto-acknowledged");
+	expect(again.detail).toContain(fx.path);
+	expect(again.detail).toContain("omp-kit send --ack-pending");
 	expect(fx.fake.sent).toEqual([]);
 	expect(existsSync(fx.path)).toBe(true);
 	expect(readdirSync(fx.dir).filter((name) => name.endsWith(`-${fx.marker}.md`))).toEqual([]);

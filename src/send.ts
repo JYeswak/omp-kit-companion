@@ -1528,6 +1528,31 @@ export async function deliverToTernSeat(input: {
 	const refuseReplaced = (path: string, rec: TernPendingRecord): TernDeliverResult =>
 		fail("REPLACED_UNPROVEN", `Journal replaced; consumption of ${path} (${rec.marker}) is unproven; no resend. `
 			+ `To acknowledge this loss of proof without sending, run: ${ackPendingCommand(path, input.dropDir)}`);
+	// SENDREPLACED1: the pinned journal counts as gone only when both reads
+	// report a file identity and they differ; a matching identity means the
+	// pinned file still exists, and a missing identity on either side leaves
+	// the loss unproven. Either way the record keeps its hold and stays honoured.
+	// SENDREPLACED1: the shared loss-of-proof settlement the stale-record sweep
+	// (WAKEREPLACED1) and a plain send both use: a pending record whose pinned
+	// journal is gone can never be proven, so ledger the loss first (never a
+	// resend), keep a recovery copy beside the drop folder, and note it so the
+	// new send proceeds with the acknowledgement in its result. Null settles;
+	// otherwise the refusal to return (nothing sent).
+	const settleStaleReplaced = (name: string, rec: TernPendingRecord, origin: string, loss: string): TernDeliverResult | null => {
+		const stalePath = join(pendingDir, name);
+		let dropPath: string;
+		try {
+			dropPath = dropMessage(input.dropDir, input.seat.session, input.seat.pane, rec.marker,
+				`stale replaced-unproven attempt auto-acknowledged (${origin}); consumption can never be proven.\n\n- marker: ${rec.marker}\n- seatKey: ${rec.seatKey}\n- journal session: ${rec.sessionId}\n- textSha256: ${rec.textSha256}\n- createdAt: ${rec.createdAt}\n- pending record: ${stalePath}`);
+		} catch {
+			return fail("PENDING_SETTLEMENT_FAILED", `Could not write a recovery copy for stale replaced-unproven record ${stalePath}; nothing sent.`);
+		}
+		if (!settleTernPending(pendingDir, name, rec, "ACKNOWLEDGED", null)) {
+			return fail("PENDING_SETTLEMENT_FAILED", `Could not settle stale replaced-unproven record ${stalePath}; nothing sent.`);
+		}
+		staleAcks.push(`auto-acknowledged stale replaced-unproven attempt ${rec.marker} (${origin}: ${loss}; recovery copy at ${dropPath})`);
+		return null;
+	};
 	// GOALSENDLAND1-stale: an attempt pinned to an older foreground start belongs to a previous runtime
 	// incarnation (the seat restarted since). It can never suppress a new send, and it is reported at once
 	// with its path and the ack command instead of waiting out any bound. Records without a pinned start
@@ -1550,25 +1575,23 @@ export async function deliverToTernSeat(input: {
 		if (!name.startsWith(`${seatKey}.`) || !name.endsWith(".json")) continue;
 		const rec = readTernPending(join(pendingDir, name));
 		if (rec === null) continue;
-		if (rec.status === "REPLACED_UNPROVEN" && rec.sessionId === journal.sessionId) return refuseReplaced(join(pendingDir, name), rec);
-		if (rec.status === "REPLACED_UNPROVEN") {
+		if (rec.status === "REPLACED_UNPROVEN"
+			&& (rec.sessionId !== journal.sessionId
+				|| (rec.fileIdentity !== null && journalView.identity !== null && journalView.identity !== rec.fileIdentity))) {
 			// WAKEREPLACED1: the seat journals a new session file now, so the replaced journal is gone and
-			// consumption can never be proven. Ack the stale record itself (ledgered, never resent), keep a
-			// recovery copy, note it in the result, and proceed with the new send instead of suppressing it.
-			const stalePath = join(pendingDir, name);
-			let dropPath: string;
-			try {
-				dropPath = dropMessage(input.dropDir, input.seat.session, input.seat.pane, rec.marker,
-					`stale replaced-unproven attempt auto-acknowledged (WAKEREPLACED1); consumption can never be proven.\n\n- marker: ${rec.marker}\n- seatKey: ${rec.seatKey}\n- journal session: ${rec.sessionId}\n- textSha256: ${rec.textSha256}\n- createdAt: ${rec.createdAt}\n- pending record: ${stalePath}`);
-			} catch {
-				return fail("PENDING_SETTLEMENT_FAILED", `Could not write a recovery copy for stale replaced-unproven record ${stalePath}; nothing sent.`);
-			}
-			if (!settleTernPending(pendingDir, name, rec, "ACKNOWLEDGED", null)) {
-				return fail("PENDING_SETTLEMENT_FAILED", `Could not settle stale replaced-unproven record ${stalePath}; nothing sent.`);
-			}
-			staleAcks.push(`auto-acknowledged stale replaced-unproven attempt ${rec.marker} (journal session ${rec.sessionId} gone; recovery copy at ${dropPath})`);
+			// consumption can never be proven. SENDREPLACED1: the same holds when the session is unchanged
+			// but the pinned file is gone (replaced under the seat). Ack the stale record itself (ledgered,
+			// never resent), keep a recovery copy, note it in the result, and proceed with the new send
+			// instead of suppressing it. A record whose journal still exists keeps its hold below.
+			const settled = settleStaleReplaced(name, rec,
+				rec.sessionId !== journal.sessionId ? "WAKEREPLACED1" : "SENDREPLACED1",
+				rec.sessionId !== journal.sessionId
+					? `journal session ${rec.sessionId} gone`
+					: `pinned journal ${rec.fileIdentity} replaced`);
+			if (settled !== null) return settled;
 			continue;
 		}
+		if (rec.status === "REPLACED_UNPROVEN") return refuseReplaced(join(pendingDir, name), rec);
 		if (rec.sessionId !== journal.sessionId) {
 			settleTernPending(pendingDir, name, rec, "INCARNATION_GONE", null);
 			continue;
@@ -1591,19 +1614,31 @@ export async function deliverToTernSeat(input: {
 			if (status === "REPLACED_UNPROVEN") return refuseReplaced(join(pendingDir, name), rec);
 		}
 	}
-	const pendingPath = resolve(join(pendingDir, `${seatKey}.${sha256Hex(journal.sessionId).slice(0, 16)}.json`));
+	const pendingName = `${seatKey}.${sha256Hex(journal.sessionId).slice(0, 16)}.json`;
+	const pendingPath = resolve(join(pendingDir, pendingName));
 	const pending = readTernPending(pendingPath);
 	if (pending !== null && pending.sessionId === journal.sessionId) {
-		if (pending.status === "REPLACED_UNPROVEN") return refuseReplaced(pendingPath, pending);
-		const staleSamePath = refuseStaleIncarnation(pendingPath, pending);
-		if (staleSamePath !== null) return staleSamePath;
-		const ackableAt = pendingAckableAt(pending);
-		const how = ackableAt === null ? "" : Date.now() >= ackableAt
-			? `; if it never landed, acknowledge the loss of proof without resending: ${ackPendingCommand(pendingPath, input.dropDir)}`
-			: `; acknowledgeable from ${new Date(ackableAt).toISOString()} if it never lands`;
-		return { status: "PENDING_CONSUME", marker: pending.marker, sends: 0, sessionFile, offset: null, drop_path: null,
-			detail: noted(`earlier attempt unproven on this runtime incarnation; new send suppressed${how}`), code: "SUPPRESSED_PENDING",
-			...(queued ? { queue_states: ["QUEUED", "PENDING_CONSUME"] as const } : {}) };
+		if (pending.status === "REPLACED_UNPROVEN") {
+			// SENDREPLACED1: the sweep above already settles a replaced-journal record it can list;
+			// when only this exact record remains, settle it the same way and send instead of refusing
+			// forever. A record whose journal still exists keeps its hold.
+			if (pending.fileIdentity === null || journalView.identity === null || journalView.identity === pending.fileIdentity) {
+				return refuseReplaced(pendingPath, pending);
+			}
+			const settled = settleStaleReplaced(pendingName, pending, "SENDREPLACED1",
+				`pinned journal ${pending.fileIdentity} replaced`);
+			if (settled !== null) return settled;
+		} else {
+			const staleSamePath = refuseStaleIncarnation(pendingPath, pending);
+			if (staleSamePath !== null) return staleSamePath;
+			const ackableAt = pendingAckableAt(pending);
+			const how = ackableAt === null ? "" : Date.now() >= ackableAt
+				? `; if it never landed, acknowledge the loss of proof without resending: ${ackPendingCommand(pendingPath, input.dropDir)}`
+				: `; acknowledgeable from ${new Date(ackableAt).toISOString()} if it never lands`;
+			return { status: "PENDING_CONSUME", marker: pending.marker, sends: 0, sessionFile, offset: null, drop_path: null,
+				detail: noted(`earlier attempt unproven on this runtime incarnation; new send suppressed${how}`), code: "SUPPRESSED_PENDING",
+				...(queued ? { queue_states: ["QUEUED", "PENDING_CONSUME"] as const } : {}) };
+		}
 	}
 	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
 	const payload = payloadKind.kind === "goal-set" ? input.text.trim() : `${provenance.text}\n[${marker}]`;
