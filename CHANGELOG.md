@@ -4,6 +4,46 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.125] - 2026-11-12
+
+### Added
+
+- The kit-upgrade-notice now appends the installed release's `CHANGELOG.md` bullets newer than the seat's release (`What changed since <loaded>:`, newest section first, capped at about 40 lines / 6 KB with an `and N more; full notes: <path>` line), so a restarting agent knows which behaviours changed under it. `CHANGELOG.md` now ships inside every release tree.
+- Synthetic update candidates in the test fixtures now include CHANGELOG.md, matching the packaged tree.
+- The daily `loop-close` service job now consumes every measured signal: it runs the gate-events ledger through the turnline refusal-code rules, files one retire bead per code silent 30 d, sends one REPORT mail when new codes appear in 7 d, runs `verify --live-readback --all`, and files one bead per service red for 24 h. Re-runs update, never duplicate (ompkit-1ra0d.211).
+- The loop-close state file is registered in the ownership registry, so the release's writer audit accepts it.
+- `omp-kit verify` now appends the close lesson to the verified repo's `.omp/lessons.jsonl` on every CLOSED verdict (export and live-readback), deduplicated by bead, so the learn loop is fed by default. REWORK, PENDING, dry-run, and failed closes write nothing.
+- The idea-to-happy-product lifecycle is now a checked manifest (`docs/lifecycle.json`): one row per phase with its exit criterion, verbs, doc, test and turnline metric. `bun scripts/lifecycle-check.ts` validates the manifest and renders `docs/lifecycle.md` (CI fails on drift), and the daily loop-close job files or updates one bead per gap (`lifecycle:<phase>:<facet>`) and comments when a gap closes (ompkit-1ra0d.217).
+- The generated lifecycle page no longer names a path from the private repo, so the README path lint stays green.
+
+### Changed
+
+- `omp-kit project goal SESSION --pause` parks the director's goal: it interrupts the seat, then sends native `/goal pause`, proven by a goal_paused journal entry.
+- `omp-kit project goal SESSION --drop` drops the director's goal without the confirm-gated `/goal drop` text: it interrupts the seat, then asks the seat to call its own goal tool with op=drop, proven by a goal-less journal entry.
+- Kit hook updates no longer rewrite a product repo's tracked `.githooks` files: when the hooks dir is git-tracked, managed members and helpers install into the `$GIT_DIR`-local mirror instead, which git never lists, and one ignored dispatcher per hook kind runs them through the tracked runner. Tracked files are left untouched and `git status` stays clean; tracked kit copies left for the owner are reported so the owner can commit their deletion once and rerun.
+- `omp-kit milestone launch SESSION [--set KEY=VALUE]` stores asset_freeze, runbook, value_metric and rollback pins on the existing milestone record and reports READY only when the freeze bead is closed, the runbook file exists, the metric reader knows the value, and the rollback command's `--help` exits 0.
+- The command registry defines `preflight` exactly once; shell completion and grammar listings no longer carry the shadowed duplicate entry.
+- `land --checkout NAME --bead ID --review auto` closes the build -> land loop without the lead: one act replays the acceptance, runs an independent-session review, reserves, and lands.
+- A `FIX` verdict or a refused land routes every finding to the checkout's author (checkout file plus author mail), never the lead; an unparseable verdict lands nothing. The non-author gate stays `omp-kit verify` at close.
+- `verify` judges turnline selftest summaries: `N failures` / `N failure` heads (with an optional `: prose` suffix) pass and fail exactly like `N fail`, keeping the exact-count and rc 0 rules.
+
+### Fixed
+
+- `sh scripts/doc-status-check.sh .` now runs in CI's core job, and every
+  status-bearing doc carries its front-matter (`README.md` is exempt:
+  readme-check already guards its freshness, and the readme skill requires
+  its first non-blank line to be the H1 title). `docs/INDEX.md` regenerated.
+- readme-check enforces generated counts: `AGENTS.md` live scenarios against
+  `tests/live/scenarios.json`'s length (70 -> 151), `docs/usage.md` install
+  rules against `MANIFEST.tsv` rows (18 -> 26).
+- readme-check path-lints every backticked repo-relative path in `README.md`
+  and `docs/*.md` via `git ls-files`, with a reasoned allowlist; fixed the
+  two dead `README` skill paths, three stale example args and one
+  example path.
+- readme-check tests extended with planted negatives for counts, spans,
+  globs, the CLI wiring and load-bearing mutants; the staged-readme
+  fixture carries the count inputs.
+
 ## [0.2.124] - 2026-11-12
 
 ### Changed

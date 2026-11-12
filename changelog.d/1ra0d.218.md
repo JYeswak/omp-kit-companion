@@ -1,2 +1,0 @@
-- `land --checkout NAME --bead ID --review auto` closes the build -> land loop without the lead: one act replays the acceptance, runs an independent-session review, reserves, and lands.
-- A `FIX` verdict or a refused land routes every finding to the checkout's author (checkout file plus author mail), never the lead; an unparseable verdict lands nothing. The non-author gate stays `omp-kit verify` at close.
