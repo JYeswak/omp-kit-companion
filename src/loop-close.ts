@@ -591,7 +591,9 @@ export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult
 	for (const entry of silent) {
 		await fileOrUpdate(`retire-code:${entry.code}`, `RETIRE: ${entry.code} silent ${LOOP_CLOSE_RETIRE_DAYS} d`,
  			retireDescription(entry.code, entry.lastFire, nowMs),
-			`- [ ] [a] [build] Retire the rule or hook behind ${entry.code} (source policy/gates.jsonl and its gate-events ledger row); replay \`grep -rlF -- '${entry.code}' extensions src scripts\` -> rc 1: no kit source still emits ${entry.code}\n- [ ] [b] [build] Planted negative refused: replay \`bun test tests/cli/loop-close.test.ts -t "29 d ago"\` -> 0 fail: a code that fired inside the window files no retire bead`,
+			// Two honest outcomes: retire (verify replays [a]), or keep with a reason (close as Keep:, no replay).
+			// [a] judges emission only: classifier tables (mine-cause) and tests may keep naming a retired code.
+			`- [ ] [a] [build] Retire the rule or hook behind ${entry.code} (policy/gates.jsonl and its gate-events ledger row); replay \`grep -rlF --exclude='mine-cause*' --exclude='*.test.ts' -- '${entry.code}' extensions src scripts\` -> rc 1: no kit source still emits ${entry.code}. If it stays (for example a silent safety guard), record why in a Keep: comment and close this bead with that reason instead of verifying\n- [ ] [b] [build] Planted negative refused: replay \`bun test tests/cli/loop-close.test.ts -t "29 d ago"\` -> 0 fail: a code that fired inside the window files no retire bead`,
  			result.retiredFiled, result.retiredUpdated);
 	}
 

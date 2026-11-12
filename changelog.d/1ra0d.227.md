@@ -1,0 +1,1 @@
+- Retire beads filed by the daily loop-close job again allow keeping a silent code with a recorded reason. Their retire check now looks only at code that still emits it, so classifier tables and tests that name the code don't block the close.
