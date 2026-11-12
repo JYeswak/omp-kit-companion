@@ -1,0 +1,1 @@
+- `omp-kit verify --live-readback` now uses the lesson recorded on the verified bead when the readback child has none. All 25 open readback children had been refused `LESSON_MISSING`, so the daily readback could close none of them.

@@ -1025,8 +1025,12 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 	// exactly as the export path does, before anything is replayed or ticked.
 	const buildJudgements = boxes.filter(b => !b.checked && b.letter === "v" && b.phase === "build");
 	if (buildJudgements.length > 0) return refuse("PENDING", `pending: ${buildJudgements.map(tag).join(" ")} build judgement remains on the bead; it cannot be replayed or deferred as rollout debt`);
-	const lesson = await closeLesson(input.lesson, child, input.repo, env);
-	if (lesson === null) return refuse("LESSON_MISSING", "LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment; no replay or tracker act ran");
+	// LIVELESSON1: a readback child is created by verify, so its author is the verifier, who never writes a
+	// Lesson: on it. Every one of 25 open children refused LESSON_MISSING (2026-11-12), so the daily
+	// loop-close readback closed none. The verified bead's author already recorded the lesson; use it.
+	const lesson = await closeLesson(input.lesson, child, input.repo, env)
+		?? (parent.id === child.id ? null : await closeLesson(undefined, parent, input.repo, env));
+	if (lesson === null) return refuse("LESSON_MISSING", "LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment on this bead or the bead it reads back; no replay or tracker act ran");
 	const harnessRoot = process.env.GRADE_WAVE_SCRATCH || undefined;
 	const scratch = ownedTmp("verify-live", { bead: input.bead, ...(harnessRoot === undefined ? {} : { root: harnessRoot }) });
 	const realBr = resolveRealBr(env.PATH);

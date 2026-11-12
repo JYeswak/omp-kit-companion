@@ -2,7 +2,7 @@
  * verify.test.ts, exported here so verify-lessons.test.ts does not duplicate the big blocks.
  * verify.test.ts keeps its own copies and stays byte-identical to main.
  */
-import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
