@@ -72,7 +72,12 @@
 # repo's info/exclude naming every path it wrote, so `git add -A` never stages
 # kit bytes and the repo's staged gates never judge them; --check verifies the
 # block. git ignores exclude rules for tracked paths, so a tracked repo-owned
-# member or adaptation stays staged and judged byte for byte.
+# member or adaptation stays staged and judged byte for byte. KITHOOKDIRT1: when
+# that in-tree hooks dir is itself git-tracked, kit-managed members and helpers
+# are installed to the $GIT_DIR-local mirror <git-dir>/omp-kit-hooks instead,
+# which git never lists, and one ignored dispatcher per kind runs them through
+# the tracked runner. Tracked files are never written; tracked kit copies left
+# for the owner are reported (the owner commits their deletion once and reruns).
 # Optional reviewed template projections: --template-import-map FILE
 # --template-import-map-sha256 SHA installs digest-bound data, never candidate
 # policy. With no options, existing reviewed data is retained.
@@ -127,6 +132,31 @@ case "$HOOKS" in
 	/*) ;;
 	*) HOOKS="$TARGET/$HOOKS" ;;
 esac
+# KITHOOKDIRT1: a hooks dir git tracks (core.hooksPath=.githooks with committed
+# files) must never receive kit bytes: info/exclude rules cannot hide tracked
+# paths, so every overwrite re-dirties the product tree. In that layout the
+# kit-managed members and their helpers live in the $GIT_DIR-local mirror
+# <git-dir>/omp-kit-hooks/hooks.d/<kind>/, which git never lists, and one
+# ignored dispatcher per kind (hooks.d/<kind>/99-omp-kit-managed) runs them
+# through the tracked runner's existing member glob. An untracked hooks dir
+# (.git/hooks) keeps today's layout under $HOOKS.
+TRACKED_HOOKS=0
+KITHOOKS=""
+KIT_MAP_DIR="$HOOKS/hooks.d/pre-commit"
+MIGRATION_TRACKED=""
+# is_tracked <path>: the path names a file git already tracks in $TARGET.
+is_tracked() {
+	git -C "$TARGET" ls-files --error-unmatch -- "$1" >/dev/null 2>&1
+}
+if [ -n "$(git -C "$TARGET" ls-files -- "$HOOKS")" ]; then
+	TRACKED_HOOKS=1
+	KITHOOKS=$(git -C "$TARGET" rev-parse --absolute-git-dir) || { echo "install-commit-msg-bead: cannot resolve the git dir of $TARGET" >&2; exit 2; }
+	KITHOOKS="$KITHOOKS/omp-kit-hooks"
+	KIT_MAP_DIR="$KITHOOKS/hooks.d/pre-commit"
+	fi
+# AUTH_HOOKS: the hooks root the authority checks inspect. A plain variable keeps
+# the python heredoc ownership unambiguous for the staged-pysafe gate.
+AUTH_HOOKS="${KITHOOKS:-$HOOKS}"
 
 # The import gate requires a trusted host Node/TypeScript parser at runtime.
 # Admit that dependency before installing anything; never install project
@@ -170,11 +200,11 @@ fi
 # lstat before any installer effect, including dangling destination links.
 # Scope ownership checks to the managed hook-directory ancestry.
 if [ -n "$TEMPLATE_IMPORT_MAP" ] ||
-	[ -e "$HOOKS/hooks.d/pre-commit/template-import-map.json" ] ||
-	[ -L "$HOOKS/hooks.d/pre-commit/template-import-map.json" ] ||
-	[ -e "$HOOKS/hooks.d/pre-commit/template-import-map.sha256" ] ||
-	[ -L "$HOOKS/hooks.d/pre-commit/template-import-map.sha256" ]; then
-python3 - "$HOOKS" "$TEMPLATE_IMPORT_MAP" <<'PY' || exit 2
+	[ -e "$KIT_MAP_DIR/template-import-map.json" ] ||
+	[ -L "$KIT_MAP_DIR/template-import-map.json" ] ||
+	[ -e "$KIT_MAP_DIR/template-import-map.sha256" ] ||
+	[ -L "$KIT_MAP_DIR/template-import-map.sha256" ]; then
+if ! python3 - "$AUTH_HOOKS" "$TEMPLATE_IMPORT_MAP" <<'PY'; then
 import os, pathlib, stat, sys
 hooks = pathlib.Path(sys.argv[1])
 managed = hooks / "hooks.d" / "pre-commit"
@@ -204,10 +234,12 @@ for path in files:
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
         refuse()
 PY
+	exit 2
+fi
 fi
 
 check_template_import_map() {
-	map_dir="$HOOKS/hooks.d/pre-commit"
+	map_dir="$KIT_MAP_DIR"
 	if [ -n "$TEMPLATE_IMPORT_MAP" ] || [ -e "$map_dir/template-import-map.json" ] || [ -e "$map_dir/template-import-map.sha256" ]; then
 		[ -f "$map_dir/template-import-map.json" ] && [ -f "$map_dir/template-import-map.sha256" ] || return 1
 		installed_sha=$(cat "$map_dir/template-import-map.sha256") || return 1
@@ -357,25 +389,35 @@ exclude_hooks_rel() {
 }
 
 # exclude_block REL: the marked block, one anchored line per path this installer
-# writes under REL: the manifest rows of this mode, the generated wrappers, and
-# every hook entry that is a kit chain runner (a bespoke runner is never listed).
+# writes under REL: in a tracked hooks dir only the ignored dispatchers (and an
+# entry runner the installer created itself); otherwise the manifest rows of
+# this mode, the generated wrappers, and every hook entry that is a kit chain
+# runner (a bespoke runner is never listed). Tracked entries are never listed:
+# listing cannot hide them and the installer never writes them.
 exclude_block() {
 	rel_pattern=$(printf '%s' "$1" | sed 's/[][*?\\]/\\&/g')
 	printf '%s\n' "$EXCLUDE_BEGIN"
 	{
-		while IFS=' ' read -r file_group file_chain file_dest file_source file_mode; do
-			case "$file_group" in
-				pre_push) [ "$PUSHED_BEADS" = 1 ] || continue ;;
-				native_preservation) [ "$NATIVE_PRESERVATION" = 1 ] || continue ;;
-			esac
-			printf 'hooks.d/%s/%s\n' "$file_chain" "$file_dest"
-		done <<EOF
+		if [ "$TRACKED_HOOKS" = 1 ]; then
+			for dispatcher_kind in commit-msg post-commit pre-commit pre-push reference-transaction; do
+				printf 'hooks.d/%s/99-omp-kit-managed\n' "$dispatcher_kind"
+			done
+		else
+			while IFS=' ' read -r file_group file_chain file_dest file_source file_mode; do
+				case "$file_group" in
+					pre_push) [ "$PUSHED_BEADS" = 1 ] || continue ;;
+					native_preservation) [ "$NATIVE_PRESERVATION" = 1 ] || continue ;;
+				esac
+				printf 'hooks.d/%s/%s\n' "$file_chain" "$file_dest"
+			done <<EOF
 $(installation_manifest)
 EOF
-		[ "$PUSHED_BEADS" = 0 ] || printf '%s\n' hooks.d/pre-push/40-omp-kit-pushed-beads
-		[ "$NATIVE_PRESERVATION" = 0 ] || printf '%s\n' hooks.d/pre-commit/40-omp-kit-native-preserve
+			[ "$PUSHED_BEADS" = 0 ] || printf '%s\n' hooks.d/pre-push/40-omp-kit-pushed-beads
+			[ "$NATIVE_PRESERVATION" = 0 ] || printf '%s\n' hooks.d/pre-commit/40-omp-kit-native-preserve
+		fi
 		for runner_type in commit-msg post-commit pre-commit pre-push reference-transaction; do
-			if grep -q 'chain runner: run every executable' "$HOOKS/$runner_type" 2>/dev/null; then
+			if grep -q 'chain runner: run every executable' "$HOOKS/$runner_type" 2>/dev/null &&
+				! is_tracked "$HOOKS/$runner_type"; then
 				printf '%s\n' "$runner_type"
 			fi
 		done
@@ -428,7 +470,11 @@ write_exclude_block() {
 }
 
 chain_dir() {
-	printf '%s/hooks.d/%s' "$HOOKS" "$1"
+	if [ "$TRACKED_HOOKS" = 1 ]; then
+		printf '%s/hooks.d/%s' "$KITHOOKS" "$1"
+	else
+		printf '%s/hooks.d/%s' "$HOOKS" "$1"
+	fi
 }
 
 # Only byte-identical kit copies are retired; an owner-adapted member must be
@@ -444,6 +490,19 @@ retired_hook_members() {
 		[ -e "$retired" ] || [ -L "$retired" ] || continue
 		printf '%s\n' "$retired"
 	done
+	# In a tracked hooks dir the mirror holds the same retired names from
+	# earlier mirror installs; the $HOOKS globs above cover the worktree side.
+	if [ "$TRACKED_HOOKS" = 1 ]; then
+		for retired in "$KITHOOKS/hooks.d/commit-msg/"[0-9][0-9]-omp-kit-gap-mention \
+			"$KITHOOKS/hooks.d/pre-commit/"[0-9][0-9]-omp-kit-staged-sources \
+			"$KITHOOKS/hooks.d/commit-msg/"[0-9][0-9]-omp-kit-commit-msg-bead \
+			"$KITHOOKS/hooks.d/commit-msg/"[0-9][0-9]-omp-kit-commit-msg-vlevel \
+			"$KITHOOKS/hooks.d/commit-msg/"[0-9][0-9]-omp-kit-commit-notes \
+			"$KITHOOKS/hooks.d/commit-msg/"[0-9][0-9]-omp-kit-deploy-step; do
+			[ -e "$retired" ] || [ -L "$retired" ] || continue
+			printf '%s\n' "$retired"
+		done
+	fi
 	# The pre-canonical stamp pair lives in the bespoke slot, so it is listed
 	# only when its bytes match the retired pin: a live bespoke entry moved to
 	# the same 10- slot by ensure_chain is never touched or flagged.
@@ -522,6 +581,11 @@ $(retired_hook_members)
 EOF
 	while IFS= read -r retired; do
 		[ -n "$retired" ] || continue
+		if [ "$TRACKED_HOOKS" = 1 ] && is_tracked "$retired"; then
+			printf 'left tracked retired kit copy for the owner migration: %s\n' "$retired"
+			MIGRATION_TRACKED="$MIGRATION_TRACKED $retired"
+			continue
+		fi
 		backup "$retired"
 		rm -f -- "$retired" || rollback "cannot retire $retired"
 		printf 'retired kit hook member: %s\n' "$retired"
@@ -555,7 +619,16 @@ backup() {
 }
 
 # place <src> <dest> <mode>: install a file, recording how to undo it.
+# KITHOOKDIRT1: in a tracked hooks dir, never write a tracked file. Mirror
+# destinations live under $GIT_DIR (never tracked); dispatcher and entry
+# destinations under a tracked $HOOKS are allowed only while untracked, so the
+# marked info/exclude block keeps `git add -A` from staging them.
 place() {
+	if [ "$TRACKED_HOOKS" = 1 ]; then
+		case "$2" in
+			"$HOOKS"/*) is_tracked "$2" && { echo "install-commit-msg-bead: REFUSED tracked file, owner migration required: $2" >&2; return 1; } ;;
+		esac
+	fi
 	if [ -e "$2" ]; then backup "$2"; else UNDO_RM="$UNDO_RM $2"; fi
 	# Same-directory publication staging preserves running readers' inode.
 	staged="$2.install.$$"
@@ -707,9 +780,100 @@ runner_stale() {
 		{ ! has_line_with "$1" 'replay one buffered copy' || ! has_line_with "$1" "$RUNNER_GENERATION:"; }
 }
 
+# managed_dispatcher_body: the ignored shim a tracked hook chain executes to
+# reach the $GIT_DIR-local mirror. It runs every executable NN-* member in
+# <git-dir>/omp-kit-hooks/hooks.d/<kind> with the hook's arguments, replaying
+# stdin for the stdin-fed kinds, and exits with the first refusal code, so the
+# tracked runner judges the current kit rules without tracking kit bytes.
+managed_dispatcher_body() {
+	emit_heredoc <<'EOF'
+#!/bin/sh
+# omp-kit managed-mirror dispatcher (KITHOOKDIRT1): run the $GIT_DIR-local kit
+# members for this hook kind. Installed ignored-beside a tracked hook chain;
+# never committed. The tracked runner executes this file.
+set -u
+dispatcher_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 0
+kind=$(basename -- "$dispatcher_dir")
+gitdir=$(git rev-parse --absolute-git-dir 2>/dev/null || printf '%s' "${GIT_DIR:-}") || exit 0
+[ -n "$gitdir" ] || exit 0
+mirror="$gitdir/omp-kit-hooks/hooks.d/$kind"
+[ -d "$mirror" ] || exit 0
+input=""
+case "$kind" in
+	pre-push | reference-transaction | post-rewrite)
+		input=$(mktemp "${TMPDIR:-/tmp}/kit-mirror-input.XXXXXX") || exit 1
+		cat > "$input" || exit 1
+		;;
+esac
+rc=0
+run_mirror_member() {
+	if [ -n "$input" ]; then
+		"$@" < "$input"
+	else
+		"$@"
+	fi
+}
+for member in "$mirror"/[0-9][0-9]-*; do
+	[ -e "$member" ] || continue
+	[ -x "$member" ] || continue
+	first=''
+	IFS= read -r first < "$member" || :
+	member_rc=0
+	case "$first" in
+		'#!'*) run_mirror_member "$member" "$@" || member_rc=$? ;;
+		*) run_mirror_member sh "$member" "$@" || member_rc=$? ;;
+	esac
+	if [ "$member_rc" -ne 0 ] && [ "$rc" -eq 0 ]; then rc=$member_rc; fi
+done
+[ -z "$input" ] || rm -f "$input"
+exit "$rc"
+EOF
+}
+# collect_tracked_migration: every kit-managed path under a tracked $HOOKS that
+# git tracks is left in place and reported, so the owner can commit the
+# deletion once and rerun. Never fatal: the mirror already runs the current
+# rules beside the tracked copies.
+collect_tracked_migration() {
+	[ "$TRACKED_HOOKS" = 1 ] || return 0
+	while IFS=' ' read -r _file_group file_chain file_dest _file_source _file_mode; do
+		candidate="$HOOKS/hooks.d/$file_chain/$file_dest"
+		if is_tracked "$candidate"; then
+			case "$MIGRATION_TRACKED" in
+				*"$candidate"*) ;;
+				*) MIGRATION_TRACKED="$MIGRATION_TRACKED $candidate" ;;
+			esac
+		fi
+	done <<EOF
+$(installation_manifest)
+EOF
+	# Mode-independent: a tracked kit-managed wrapper the owner left behind needs
+	# the same one-time migration even when this install runs without that group.
+	if is_tracked "$HOOKS/hooks.d/pre-push/40-omp-kit-pushed-beads"; then
+		MIGRATION_TRACKED="$MIGRATION_TRACKED $HOOKS/hooks.d/pre-push/40-omp-kit-pushed-beads"
+	fi
+	if is_tracked "$HOOKS/hooks.d/pre-commit/40-omp-kit-native-preserve"; then
+		MIGRATION_TRACKED="$MIGRATION_TRACKED $HOOKS/hooks.d/pre-commit/40-omp-kit-native-preserve"
+	fi
+	for _map in "$HOOKS/hooks.d/pre-commit/template-import-map.json" "$HOOKS/hooks.d/pre-commit/template-import-map.sha256"; do
+		if is_tracked "$_map"; then
+			case "$MIGRATION_TRACKED" in
+				*"$_map"*) ;;
+				*) MIGRATION_TRACKED="$MIGRATION_TRACKED $_map" ;;
+			esac
+		fi
+	done
+}
+
 # write_runner <path>: install runner_body as the chain runner.
 write_runner() {
 	path=$1
+	# KITHOOKDIRT1: never rewrite a tracked product file (ensure_chain keeps
+	# tracked entries; this is the backstop).
+	if [ "$TRACKED_HOOKS" = 1 ]; then
+		case "$path" in
+			"$HOOKS"/*) is_tracked "$path" && { echo "install-commit-msg-bead: REFUSED tracked file, owner migration required: $path" >&2; return 1; } ;;
+		esac
+	fi
 	if [ -e "$path" ]; then backup "$path"; else UNDO_RM="$UNDO_RM $path"; fi
 	# Stage beside the hook; rename publishes it without truncating running readers.
 	staged="$path.install.$$"
@@ -722,14 +886,22 @@ write_runner() {
 
 # ensure_chain <type>: make $HOOKS/<type> a chain runner, preserving any
 # bespoke entry by moving it to 10-<type>. Prints what it did.
+# KITHOOKDIRT1: a tracked entry is never moved or rewritten; the managed
+# dispatchers below reach the mirror through its existing member glob.
 ensure_chain() {
 	type=$1
 	entry="$HOOKS/$type"
 	dir=$(chain_dir "$type")
+	entrydir="$HOOKS/hooks.d/$type"
 	mkdir -p "$dir"
 	if [ ! -e "$entry" ]; then
+		mkdir -p "$entrydir"
 		write_runner "$entry"
 		printf 'created chain runner: %s\n' "$entry"
+		return 0
+	fi
+	if [ "$TRACKED_HOOKS" = 1 ] && is_tracked "$entry"; then
+		printf 'tracked chain runner left in place: %s\n' "$entry"
 		return 0
 	fi
 	if [ -x "$entry" ] && grep -q 'hooks\.d' "$entry" 2>/dev/null; then
@@ -744,21 +916,28 @@ ensure_chain() {
 	fi
 	# Record every mutation for rollback (globals: appended across both hook
 	# types, consumed only when a probe fails below).
-	if [ -e "$dir/10-$type" ]; then
-		printf 'install-commit-msg-bead: %s already staged in chain: %s/10-%s\n' "$type" "$dir" "$type" >&2
+	if [ -e "$entrydir/10-$type" ]; then
+		printf 'install-commit-msg-bead: %s already staged in chain: %s/10-%s\n' "$type" "$entrydir" "$type" >&2
 		return 0
 	fi
-	mv "$entry" "$dir/10-$type"
-	UNDO_MOVES="$UNDO_MOVES $entry:$dir/10-$type"
+	mv "$entry" "$entrydir/10-$type"
+	UNDO_MOVES="$UNDO_MOVES $entry:$entrydir/10-$type"
 	# Sibling impls resolve by dirname of the moved entry (fail-closed
 	# wrappers); move "<type>-*" siblings alongside so they keep resolving.
+	# Tracked siblings stay for the owner (migration note); only untracked
+	# files move.
 	for sibling in "$HOOKS/$type"-*; do
 		[ -e "$sibling" ] || continue
-		UNDO_MOVES="$UNDO_MOVES $sibling:$dir/$(basename -- "$sibling")"
-		mv -- "$sibling" "$dir/"
+		if [ "$TRACKED_HOOKS" = 1 ] && is_tracked "$sibling"; then
+			printf 'left tracked hook sibling for the owner migration: %s\n' "$sibling"
+			MIGRATION_TRACKED="$MIGRATION_TRACKED $sibling"
+			continue
+		fi
+		UNDO_MOVES="$UNDO_MOVES $sibling:$entrydir/$(basename -- "$sibling")"
+		mv -- "$sibling" "$entrydir/"
 	done
 	write_runner "$entry"
-	printf 'moved bespoke %s to %s/10-%s and created chain runner\n' "$type" "$dir" "$type"
+	printf 'moved bespoke %s to %s/10-%s and created chain runner\n' "$type" "$entrydir" "$type"
 }
 
 # rollback: undo every recorded mutation, then exit 1 with the reason.
@@ -822,7 +1001,11 @@ if [ "$MODE" = "check" ]; then
 	stale=0
 	while IFS= read -r retired; do
 		[ -n "$retired" ] || continue
-		printf 'install-commit-msg-bead: RETIRED installed member: %s; rerun %s\n' "$retired" "$0" >&2
+		if [ "$TRACKED_HOOKS" = 1 ] && is_tracked "$retired"; then
+			printf 'install-commit-msg-bead: TRACKED retired kit copy: %s; owner migration required (git rm, commit, rerun %s)\n' "$retired" "$0" >&2
+		else
+			printf 'install-commit-msg-bead: RETIRED installed member: %s; rerun %s\n' "$retired" "$0" >&2
+		fi
 		stale=1
 	done <<EOF
 $(retired_hook_members)
@@ -832,7 +1015,7 @@ EOF
 			pre_push) [ "$PUSHED_BEADS" = 1 ] || continue ;;
 			native_preservation) [ "$NATIVE_PRESERVATION" = 1 ] || continue ;;
 		esac
-		dest="$HOOKS/hooks.d/$file_chain/$file_dest"
+		dest="$(chain_dir "$file_chain")/$file_dest"
 		src="$KITROOT/$file_source"
 		if [ ! -f "$dest" ]; then
 			printf 'install-commit-msg-bead: MISSING installed member: %s\n' "$dest" >&2
@@ -844,13 +1027,13 @@ EOF
 	done <<EOF
 $(installation_manifest)
 EOF
-	parser="$HOOKS/hooks.d/pre-commit/check-commit-imports.sh"
+	parser="$(chain_dir pre-commit)/check-commit-imports.sh"
 	if [ ! -f "$parser" ] || ! sh "$parser" --parser-info --repo "$TARGET"; then
 		printf 'install-commit-msg-bead: MISSING or STALE installed import parser in %s\n' "$TARGET" >&2
 		stale=1
 	fi
 	if [ "$NATIVE_PRESERVATION" = 1 ]; then
-		dir="$HOOKS/hooks.d/pre-commit"
+		dir="$KIT_MAP_DIR"
 		if ! native_member | cmp -s "$dir/40-omp-kit-native-preserve" -; then
 			printf 'install-commit-msg-bead: MISSING or STALE native-preservation member in %s\n' "$TARGET" >&2
 			stale=1
@@ -870,15 +1053,37 @@ EOF
 		fi
 	fi
 	# Chain runners judged by the installer's own upgrade predicate; bespoke runners are skipped.
+	# In a tracked hooks dir a tracked runner is never rewritten: a stale kit
+	# runner is reported for the owner migration instead.
 	for runner_type in post-commit pre-commit commit-msg pre-push reference-transaction; do
 		if runner_stale "$HOOKS/$runner_type"; then
-			printf 'install-commit-msg-bead: STALE chain runner: %s lacks %s; rerun %s\n' "$HOOKS/$runner_type" "$RUNNER_GENERATION" "$0" >&2
+			if [ "$TRACKED_HOOKS" = 1 ] && is_tracked "$HOOKS/$runner_type"; then
+				printf 'install-commit-msg-bead: TRACKED chain runner: %s lacks %s; owner migration required (commit the runner update once)\n' "$HOOKS/$runner_type" "$RUNNER_GENERATION" >&2
+			else
+				printf 'install-commit-msg-bead: STALE chain runner: %s lacks %s; rerun %s\n' "$HOOKS/$runner_type" "$RUNNER_GENERATION" "$0" >&2
+			fi
 			stale=1
 		fi
 	done
-	if [ "$PUSHED_BEADS" = 1 ] && ! pushed_beads_wrapper | cmp -s - "$HOOKS/hooks.d/pre-push/40-omp-kit-pushed-beads"; then
-		printf 'install-commit-msg-bead: MISSING or STALE pushed-beads member: %s; rerun %s\n' "$HOOKS/hooks.d/pre-push/40-omp-kit-pushed-beads" "$0" >&2
+	if [ "$PUSHED_BEADS" = 1 ] && ! pushed_beads_wrapper | cmp -s - "$(chain_dir pre-push)/40-omp-kit-pushed-beads"; then
+		printf 'install-commit-msg-bead: MISSING or STALE pushed-beads member: %s; rerun %s\n' "$(chain_dir pre-push)/40-omp-kit-pushed-beads" "$0" >&2
 		stale=1
+	fi
+	if [ "$TRACKED_HOOKS" = 1 ]; then
+		for dispatcher_kind in commit-msg post-commit pre-commit pre-push reference-transaction; do
+			if ! managed_dispatcher_body | cmp -s - "$HOOKS/hooks.d/$dispatcher_kind/99-omp-kit-managed" 2>/dev/null; then
+				printf 'install-commit-msg-bead: MISSING or STALE managed dispatcher: %s; rerun %s\n' "$HOOKS/hooks.d/$dispatcher_kind/99-omp-kit-managed" "$0" >&2
+				stale=1
+			fi
+		done
+		collect_tracked_migration
+		if [ -n "$MIGRATION_TRACKED" ]; then
+			# shellcheck disable=SC2086
+			for _migrated in $MIGRATION_TRACKED; do
+				printf 'install-commit-msg-bead: TRACKED installed member: %s; owner migration required (git rm, commit, rerun %s)\n' "$_migrated" "$0" >&2
+			done
+			stale=1
+		fi
 	fi
 	if [ "$stale" = 0 ]; then printf 'install-commit-msg-bead: hooks fresh in %s\n' "$TARGET"; exit 0; fi
 	exit 3
@@ -935,6 +1140,103 @@ install_bead_record() {
 	member="$dir/50-omp-kit-bead-record"
 	install_manifest_group bead_record
 	printf 'installed post-commit bead recorder: %s\n' "$member"
+}
+
+# validate_tracked_layout: refuse before any mutation when the tracked layout
+# cannot host the mirror (a tracked bespoke entry that cannot be moved, or a
+# tracked file blocking the dispatcher path). The owner migrates those by hand,
+# commits, and reruns; nothing is moved or rewritten for them here.
+validate_tracked_layout() {
+	[ "$TRACKED_HOOKS" = 1 ] || return 0
+	for kind in commit-msg post-commit pre-commit pre-push reference-transaction; do
+		entry="$HOOKS/$kind"
+		dispatcher="$HOOKS/hooks.d/$kind/99-omp-kit-managed"
+		if is_tracked "$dispatcher"; then
+			echo "install-commit-msg-bead: REFUSED tracked file blocks the managed dispatcher (rename it, commit the rename, rerun): $dispatcher" >&2
+			return 1
+		fi
+		if [ -e "$entry" ] || [ -L "$entry" ]; then
+			if is_tracked "$entry" && ! grep -q 'hooks\.d' "$entry" 2>/dev/null; then
+				echo "install-commit-msg-bead: REFUSED tracked bespoke hook (move it to $HOOKS/hooks.d/$kind/10-$kind, commit the move, rerun): $entry" >&2
+				return 1
+			fi
+		fi
+	done
+}
+
+# ensure_mirror_dirs: the mirror lives under $GIT_DIR; create its kind dirs.
+ensure_mirror_dirs() {
+	[ "$TRACKED_HOOKS" = 1 ] || return 0
+	for kind in commit-msg post-commit pre-commit pre-push reference-transaction; do
+		mkdir -p "$KITHOOKS/hooks.d/$kind" || return 1
+	done
+}
+
+# install_managed_dispatchers: in a tracked hooks dir, one ignored dispatcher
+# per kind so the tracked runner reaches the $GIT_DIR-local mirror. place()
+# refuses a tracked-occupied dispatcher path; validate_tracked_layout already
+# refused that case before any mutation, so reaching the guard is a bug.
+install_managed_dispatchers() {
+	[ "$TRACKED_HOOKS" = 1 ] || return 0
+	for dispatcher_kind in commit-msg post-commit pre-commit pre-push reference-transaction; do
+		dest="$HOOKS/hooks.d/$dispatcher_kind/99-omp-kit-managed"
+		mkdir -p "$(dirname -- "$dest")" || return 1
+		wrapper=$(mktemp "${TMPDIR:-/tmp}/kit-dispatcher.XXXXXX") || return 1 # tempsafe: installer-owned staged file beside the target hooks dir, removed on success or rollback
+		managed_dispatcher_body > "$wrapper" || { rm -f "$wrapper"; return 1; }
+		place "$wrapper" "$dest" +x || { rm -f "$wrapper"; return 1; }
+		rm -f "$wrapper"
+		printf 'installed managed-mirror dispatcher: %s\n' "$dest"
+	done
+}
+
+# sweep_untracked_shadow_copies: a hooks dir that became tracked can still hold
+# untracked copies of current member names from a previous same-path install.
+# They would run twice (here and via the dispatcher); remove the untracked
+# ones. Tracked files are never touched (the owner migration covers them).
+sweep_untracked_shadow_copies() {
+	[ "$TRACKED_HOOKS" = 1 ] || return 0
+	while IFS=' ' read -r _file_group file_chain file_dest _file_source _file_mode; do
+		shadow="$HOOKS/hooks.d/$file_chain/$file_dest"
+		if [ -e "$shadow" ] && ! is_tracked "$shadow"; then
+			backup "$shadow"
+			rm -f -- "$shadow" || rollback "cannot sweep shadow copy $shadow"
+			printf 'swept untracked shadow copy: %s\n' "$shadow"
+		fi
+	done <<EOF
+$(installation_manifest)
+EOF
+	if [ "$PUSHED_BEADS" = 1 ]; then
+		shadow="$HOOKS/hooks.d/pre-push/40-omp-kit-pushed-beads"
+		if [ -e "$shadow" ] && ! is_tracked "$shadow"; then
+			backup "$shadow"
+			rm -f -- "$shadow" || rollback "cannot sweep shadow copy $shadow"
+			printf 'swept untracked shadow copy: %s\n' "$shadow"
+		fi
+	fi
+	if [ "$NATIVE_PRESERVATION" = 1 ]; then
+		shadow="$HOOKS/hooks.d/pre-commit/40-omp-kit-native-preserve"
+		if [ -e "$shadow" ] && ! is_tracked "$shadow"; then
+			backup "$shadow"
+			rm -f -- "$shadow" || rollback "cannot sweep shadow copy $shadow"
+			printf 'swept untracked shadow copy: %s\n' "$shadow"
+		fi
+	fi
+}
+
+
+# print_tracked_migration: the one documented migration. The owner commits the
+# deletion of the listed tracked copies once and reruns this installer; until
+# then the mirror runs the current rules beside them.
+print_tracked_migration() {
+	[ -n "$MIGRATION_TRACKED" ] || return 0
+	# shellcheck disable=SC2086
+	count=0; for _path in $MIGRATION_TRACKED; do count=$((count + 1)); done
+	printf 'install-commit-msg-bead: TRACKED kit copies remain under %s (%s file(s)); the current rules run from %s via ignored dispatchers.\n' "$HOOKS" "$count" "$KITHOOKS" >&2
+	printf 'install-commit-msg-bead: migration (owner commits the deletion once, then reruns this installer):\n' >&2
+	printf '  git -C %s rm -- ' "$TARGET" >&2
+	# shellcheck disable=SC2086
+	for _path in $MIGRATION_TRACKED; do printf '%s ' "$_path" >&2; done
+	printf '\n' >&2
 }
 
 # install_staged_imports: the pre-commit member judges the staged tree; its
@@ -1144,6 +1446,8 @@ if [ "$PUSHED_BEADS" = 1 ] && git -C "$TARGET" rev-parse -q --verify HEAD > /dev
 	fi
 fi
 
+validate_tracked_layout || exit 2
+ensure_mirror_dirs || exit 2
 retire_hook_members
 ensure_chain commit-msg
 install_commit_msg
@@ -1163,6 +1467,9 @@ install_ref_txn
 ensure_chain post-commit
 install_bead_record
 ensure_chain pre-commit
+install_managed_dispatchers || rollback "cannot install the managed-mirror dispatchers in $TARGET"
+sweep_untracked_shadow_copies
+collect_tracked_migration
 install_kitlib_tmp
 install_gate_event
 install_staged_imports
@@ -1207,10 +1514,10 @@ esac
 # update line directly, so no bespoke hook in the chain sees a synthetic
 # update; nothing is moved and the probe commit is a dangling object.
 if HEAD_SHA=$(git -C "$TARGET" rev-parse HEAD 2>/dev/null); then
-	if [ "$PUSHED_BEADS" = 1 ] && ! printf 'refs/heads/main %s refs/heads/main %s\n' "$HEAD_SHA" "$HEAD_SHA" | (CDPATH='' cd -- "$TARGET" && sh "$HOOKS/hooks.d/pre-push/40-omp-kit-pushed-beads") >/dev/null 2>&1; then
+	if [ "$PUSHED_BEADS" = 1 ] && ! printf 'refs/heads/main %s refs/heads/main %s\n' "$HEAD_SHA" "$HEAD_SHA" | (CDPATH='' cd -- "$TARGET" && sh "$(chain_dir pre-push)/40-omp-kit-pushed-beads") >/dev/null 2>&1; then
 		rollback "pre-push member rejects the current range in $TARGET"
 	fi
-	GUARD="$HOOKS/hooks.d/reference-transaction/40-omp-kit-ref-txn-bead"
+	GUARD="$(chain_dir reference-transaction)/40-omp-kit-ref-txn-bead"
 	PLANT=$(printf 'probe: id-less ref-guard plant\n' | GIT_AUTHOR_NAME=probe GIT_AUTHOR_EMAIL=probe@invalid GIT_COMMITTER_NAME=probe GIT_COMMITTER_EMAIL=probe@invalid \
 		git -C "$TARGET" commit-tree "$HEAD_SHA^{tree}" -p "$HEAD_SHA") || rollback "cannot write the ref-guard probe commit in $TARGET"
 	if REF_OUT=$(printf '%s %s refs/heads/main\n' "$HEAD_SHA" "$PLANT" | (CDPATH='' cd -- "$TARGET" && BEADS_DB="$PROBE_DB" sh "$GUARD" prepared) 2>&1); then
@@ -1225,7 +1532,7 @@ if HEAD_SHA=$(git -C "$TARGET" rev-parse HEAD 2>/dev/null); then
 	fi
 	# Leg 5: the shared-main member must pass local main and refuse the probe
 	# commit (a child of HEAD that main does not hold) pushed to the remote main.
-	ONMAIN="$HOOKS/hooks.d/pre-push/30-omp-kit-on-main"
+	ONMAIN="$(chain_dir pre-push)/30-omp-kit-on-main"
 	if MAIN_SHA=$(git -C "$TARGET" rev-parse -q --verify 'refs/heads/main^{commit}'); then
 		if ! printf 'refs/heads/main %s refs/heads/main %s\n' "$MAIN_SHA" "$MAIN_SHA" | (CDPATH='' cd -- "$TARGET" && sh "$ONMAIN") >/dev/null 2>&1; then
 			rollback "shared-main member refused local main in $TARGET"
@@ -1247,7 +1554,7 @@ fi
 # A SKIPPED result is not acceptance of a snapshot; normal-commit qualification
 # still requires a real candidate and the owner's unchanged upstream chain.
 if [ "$NATIVE_PRESERVATION" = 1 ]; then
-	if ! (CDPATH='' cd -- "$TARGET" && sh "$HOOKS/hooks.d/pre-commit/40-omp-kit-native-preserve"); then
+	if ! (CDPATH='' cd -- "$TARGET" && sh "$(chain_dir pre-commit)/40-omp-kit-native-preserve"); then
 		rollback "native-preservation member refused the actual candidate in $TARGET"
 	fi
 fi
@@ -1256,6 +1563,7 @@ fi
 # install passes its own --check. Member 41 enforces the same rule with the same text.
 retire_hook_members
 write_exclude_block || rollback "cannot list the installer-owned hook members in $TARGET's info/exclude"
+print_tracked_migration
 # shellcheck disable=SC2086
 for path in $UNDO_RESTORE; do rm -f -- "$(dirname -- "$path")/.undo.$$.$(basename -- "$path")" "$(dirname -- "$path")/.undo.$$.$(basename -- "$path").mode"; done
 printf 'verified active in %s\n' "$TARGET"

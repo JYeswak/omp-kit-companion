@@ -417,6 +417,17 @@ case "$HOOKS" in
 esac
 MAP_FILE="$HOOKS/hooks.d/pre-commit/template-import-map.json"
 MAP_PIN="$HOOKS/hooks.d/pre-commit/template-import-map.sha256"
+# KITHOOKDIRT1: a tracked hooks dir keeps its template map in the $GIT_DIR-local
+# mirror the installer prefers; a copy beside the tracked hooks still activates
+# when the mirror holds none, and validation below is unchanged either way.
+if MIRROR_HOOKS=$(git -C "$REPO" rev-parse --absolute-git-dir 2>/dev/null) && [ -n "$MIRROR_HOOKS" ]; then
+	MIRROR_MAP_FILE="$MIRROR_HOOKS/omp-kit-hooks/hooks.d/pre-commit/template-import-map.json"
+	MIRROR_MAP_PIN="$MIRROR_HOOKS/omp-kit-hooks/hooks.d/pre-commit/template-import-map.sha256"
+	if [ -e "$MIRROR_MAP_FILE" ] || [ -L "$MIRROR_MAP_FILE" ] || [ -e "$MIRROR_MAP_PIN" ] || [ -L "$MIRROR_MAP_PIN" ]; then
+		MAP_FILE="$MIRROR_MAP_FILE"
+		MAP_PIN="$MIRROR_MAP_PIN"
+	fi
+fi
 if [ -n "$HOOKS" ] && { [ -e "$MAP_FILE" ] || [ -L "$MAP_FILE" ] || [ -e "$MAP_PIN" ] || [ -L "$MAP_PIN" ]; }; then
 	if ! template_import_map active "$MAP_FILE" "$MAP_PIN" "$REPO" "$TIP" "" ""; then
 		printf '%s invalid template import map %s (digest %s)\n' "$TIP" "$MAP_FILE" "$MAP_PIN" >&2

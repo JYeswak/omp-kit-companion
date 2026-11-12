@@ -70,7 +70,10 @@ sh "$INSTALLER" "$A" > "$TMP/install-a.out" 2>&1
 ok $? "(a) install rc: $(tail -3 "$TMP/install-a.out")"
 dirt=$(git -C "$A" status --porcelain --untracked-files=all)
 if [ -z "$dirt" ]; then ok 0 "(a) clean"; else ok 1 "(a) install left no git-visible path: $dirt"; fi
-grep -qx '/.githooks/hooks.d/pre-commit/kitlib_tmp.py' "$(exclude_of "$A")"; ok $? "(a) block lists a copied helper"
+for kind in commit-msg post-commit pre-commit pre-push reference-transaction; do
+	grep -qx "/.githooks/hooks.d/$kind/99-omp-kit-managed" "$(exclude_of "$A")"; ok $? "(a) block lists the $kind dispatcher"
+done
+if grep -q '/.githooks/hooks.d/pre-commit/kitlib_tmp.py' "$(exclude_of "$A")"; then ok 1 "(a) mirror members stay out of the block"; else ok 0 "(a) mirror members stay out of the block"; fi
 grep -qx '/.githooks/pre-push' "$(exclude_of "$A")"; ok $? "(a) block lists the kit runner it created"
 if grep -qx '/.githooks/pre-commit' "$(exclude_of "$A")"; then ok 1 "(a) a repo-owned runner must not be listed"; else ok 0 "(a) repo-owned runner unlisted"; fi
 grep -qx 'keep-me' "$(exclude_of "$A")"; ok $? "(a) other exclude lines kept"
@@ -96,13 +99,13 @@ rc=$?
 [ "$rc" = 3 ] && grep -q 'STALE installer-owned block' "$TMP/check-a2.out"; ok $? "(d) --check names a gutted block (rc=$rc)"
 cp "$TMP/exclude-a.first" "$(exclude_of "$A")"
 
-# (b) Negatives: ignore never hides judged bytes. A force-added released copy and an edited tracked kit-member path
-# (an adaptation) are both staged and judged; the tracked edit stays visible to git status.
-git -C "$A" add -f .githooks/hooks.d/pre-commit/kitlib_tmp.py
+# (b) Negatives: ignore never hides judged bytes. A force-added dispatcher and an edited tracked kit-member path
+# (an adaptation) are both staged and judged; the tracked file itself is never rewritten (KITHOOKDIRT1).
+git -C "$A" add -f .githooks/hooks.d/pre-commit/99-omp-kit-managed
 (CDPATH='' cd -- "$A" && sh .githooks/pre-commit) > "$TMP/forced.out" 2>&1
 rc=$?
-[ "$rc" != 0 ] && grep -q 'kitlib_tmp.py' "$TMP/forced.out"; ok $? "(b) force-added kit copy is judged and refused (rc=$rc)"
-git -C "$A" rm -q --cached .githooks/hooks.d/pre-commit/kitlib_tmp.py
+[ "$rc" != 0 ] && grep -q '99-omp-kit-managed' "$TMP/forced.out"; ok $? "(b) force-added dispatcher is judged and refused (rc=$rc)"
+git -C "$A" rm -q --cached .githooks/hooks.d/pre-commit/99-omp-kit-managed
 B=$(in_tree_repo b) || exit 1
 member=.githooks/hooks.d/commit-msg/49-omp-kit-stale-worktree
 cp "$KITREPO/scripts/check-stale-worktree.sh" "$B/$member"
@@ -114,7 +117,8 @@ commit_msg "[test] adapt the stale-worktree member fixture-1"
 git -C "$B" commit -q -F "$TMP/msg" > "$TMP/adapt-b.out" 2>&1 || { cat "$TMP/adapt-b.out"; exit 1; }
 sh "$INSTALLER" "$B" > "$TMP/install-b.out" 2>&1
 ok $? "(b) install over a tracked adaptation: $(tail -3 "$TMP/install-b.out")"
-git -C "$B" status --porcelain | grep -q " M $member"; ok $? "(b) tracked kit-member path stays visible to git status"
+if [ -z "$(git -C "$B" status --porcelain)" ]; then ok 0 "(b) tracked kit-member path left unmodified"; else ok 1 "(b) tracked kit-member path left unmodified: $(git -C "$B" status --porcelain)"; fi
+grep -q 'TRACKED kit copies remain' "$TMP/install-b.out"; ok $? "(b) install reports the owner migration"
 git -C "$B" show "HEAD:$member" > "$B/$member"
 # shellcheck disable=SC2016 # the planted line is literal shell for the gate to judge
 printf 'scratch=$(mktemp)\n' >> "$B/$member" # tempsafe: planted fixture text the gate under test must refuse; never run here
@@ -123,7 +127,7 @@ git -C "$B" add "$member"
 rc=$?
 [ "$rc" != 0 ] && grep -q '49-omp-kit-stale-worktree' "$TMP/edited.out"; ok $? "(b) edited tracked kit-member path is judged and refused (rc=$rc)"
 
-# (c) Mutant: the installer without its exclude write leaves the copies for `git add -A`, and the staged gates refuse.
+# (c) Mutant: the installer without its exclude write leaves the dispatchers for `git add -A`, and the staged gates refuse.
 if [ -z "${INSTALLER_UNDER_TEST:-}" ]; then
 	mutkit="$TMP/mutkit"
 	mkdir -p "$mutkit/scripts"
@@ -138,11 +142,11 @@ if [ -z "${INSTALLER_UNDER_TEST:-}" ]; then
 		sh "$mutkit/scripts/install-commit-msg-bead.sh" "$C" > "$TMP/install-c.out" 2>&1
 		ok $? "(c) mutant install rc: $(tail -3 "$TMP/install-c.out")"
 		git -C "$C" add -A
-		git -C "$C" diff --cached --name-only | grep -q '^.githooks/hooks.d/pre-commit/kitlib_tmp.py$'
-		ok $? "(c) mutant: git add -A stages kit copies"
+		git -C "$C" diff --cached --name-only | grep -q '^.githooks/hooks.d/pre-commit/99-omp-kit-managed$'
+		ok $? "(c) mutant: git add -A stages the dispatcher"
 		(CDPATH='' cd -- "$C" && sh .githooks/pre-commit) > "$TMP/mutant.out" 2>&1
 		rc=$?
-		# The repo runner stops at the first refusing staged gate (pysafe, tempsafe or kitlib, by order).
+		# The repo runner stops at the first refusing staged gate (the dispatcher buffers stdin with mktemp, so tempsafe fires).
 		[ "$rc" != 0 ] && grep -Eq 'staged-[a-z-]+: REFUSED' "$TMP/mutant.out" && grep -q '\.githooks/hooks\.d/' "$TMP/mutant.out"
 		ok $? "(c) mutant: a staged gate refuses the kit copies (rc=$rc): $(grep -E 'REFUSED' "$TMP/mutant.out" | head -3)"
 	fi
@@ -161,8 +165,9 @@ sh "$INSTALLER" --check "$D" > "$TMP/check-d.out" 2>&1
 ok $? "(d) .git/hooks --check rc 0: $(cat "$TMP/check-d.out")"
 if grep -q 'omp-kit installer-owned' "$(exclude_of "$D")" 2>/dev/null; then ok 1 "(d) .git/hooks layout got a block"; else ok 0 "(d) .git/hooks layout has no block"; fi
 
-# (e) The owner's untrack step for tracked plain kit copies (clutterfreespaces.ios table A): `git rm --cached` the
-# released bytes, after which the block ignores them. The commit runs the installed chain; record what it needs.
+# (e) The owner's migration for tracked plain kit copies (clutterfreespaces.ios table A): install leaves them
+# untouched and reports the migration; the owner commits their deletion once (the mirror already runs the current
+# rules), then the tree is clean. The deletion commit runs the installed chain; record what it needs.
 E=$(in_tree_repo e) || exit 1
 for pair in commit-msg/40-omp-kit-commit-msg-bead:scripts/commit-msg-bead.sh pre-commit/check-commit-imports.sh:scripts/check-commit-imports.sh; do
 	cp "$KITREPO/${pair#*:}" "$E/.githooks/hooks.d/${pair%%:*}"
@@ -172,7 +177,9 @@ commit_msg "[test] track kit copies fixture-1"
 git -C "$E" commit -q -F "$TMP/msg" || exit 1
 sh "$INSTALLER" "$E" > "$TMP/install-e.out" 2>&1
 ok $? "(e) install rc: $(tail -3 "$TMP/install-e.out")"
-git -C "$E" rm -q --cached .githooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead .githooks/hooks.d/pre-commit/check-commit-imports.sh
+if [ -z "$(git -C "$E" status --porcelain)" ]; then ok 0 "(e) install leaves tracked kit copies unmodified"; else ok 1 "(e) install leaves tracked kit copies unmodified: $(git -C "$E" status --porcelain)"; fi
+grep -q 'TRACKED kit copies remain' "$TMP/install-e.out"; ok $? "(e) install reports the owner migration"
+git -C "$E" rm -q -- .githooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead .githooks/hooks.d/pre-commit/check-commit-imports.sh
 commit_msg "[test] untrack installer-owned kit copies fixture-1"
 (CDPATH='' cd -- "$E" && git commit -q -F "$TMP/msg") > "$TMP/untrack-bare.out" 2>&1
 printf 'untrack-bare rc=%s\n' "$?" > "$TMP/recipe"
