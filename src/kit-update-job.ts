@@ -5,9 +5,10 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { parseReleaseIndexJson } from "./kit-release.ts";
-import { applyKitUpdate, kitPostcheckDetail, planKitUpdate, selectUpdateOmp, undoKitUpdate, type KitPostcheck, type KitPostcheckDetail, type KitUndoResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult, type UpdateOmpSelection } from "./kit-update.ts";
+import { applyKitUpdate, isLiveDeferredOnly, judgeKitPostcheck, kitPostcheckDetail, planKitUpdate, reconcilePendingUpdate, runKitPostcheck, selectUpdateOmp, undoKitUpdate, type KitPostcheck, type KitPostcheckDetail, type KitUndoResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult, type LiveDeferredOnlyDetail, type UpdateOmpSelection } from "./kit-update.ts";
+import type { FullTestReport } from "./full-test-runner.ts";
 import { refreshFleetHooksLive, type HookRefreshReport } from "./hook-refresh.ts";
-import { acquireKitUpdateLock, inspectPendingKitUpdate, type UpdateLockToken } from "./mutations.ts";
+import { acquireKitUpdateLock, inspectPendingKitUpdate, type PendingKitUpdate, type UpdateLockToken } from "./mutations.ts";
 import { makeDirsWritable } from "./kitlib/tmp.ts";
 
 /** The job installs the kit for the whole machine: it has no project, and its service cwd (HOME) is never watched as one. */
@@ -40,6 +41,12 @@ export type KitUpdateJobDependencies = {
 	refreshHooks?: (store: string, home: string) => Promise<HookRefreshReport>;
 	/** The omp the postcheck judges; production resolves the seat's omp. Tests inject a fixed selection. */
 	omp?: () => UpdateOmpSelection | null;
+	/**
+	 * KITLIVEDEFER1 test seam for finishing a deferred-live PENDING receipt: re-runs
+	 * the live ladder against the active install. Production runs the candidate
+	 * binary's own `test --full --json`.
+	 */
+	recheckLive?: (input: { executablePath: string; home: string; stateRoot: string }) => Promise<FullTestReport>;
 };
 export type KitUpdateJobResult = {
 	status: "DISABLED" | "CURRENT" | "UPDATED" | "UNDONE" | "REFUSED" | "PENDING" | "FAILED" | "SKIPPED"; receiptId: string | null; activeVersion: string | null; notification: boolean; reason?: string;
@@ -354,6 +361,9 @@ function newestRepeatForOmp(stateRoot: string, targetVersion: string, ompVersion
 			if (!parsed || typeof parsed !== "object") continue;
 			const rec = parsed as Record<string, unknown>;
 			if ((rec.status !== "UNDONE" && rec.status !== "SKIPPED") || rec.targetVersion !== targetVersion || rec.ompVersion !== ompVersion) continue;
+			// KITLIVEDEFER1: a deferred-only live never suppresses its retry. It should have stayed
+			// PENDING, not UNDONE, so an old UNDONE with the same deferred detail must not block the fix.
+			if ("postcheckDetail" in rec && isLiveDeferredOnly(rec.postcheckDetail)) continue;
 			best = { mtime,
 				...(typeof rec.postcheckReason === "string" ? { postcheckReason: rec.postcheckReason } : {}),
 				...("postcheckDetail" in rec ? { postcheckDetail: rec.postcheckDetail } : {}) };
@@ -383,6 +393,53 @@ function repeatSuppressesForever(postcheckReason: string | undefined, postcheckD
 	return repeatCauseText(postcheckDetail).includes(ompVersion);
 }
 
+/** A PENDING run record already exists for this receipt: later ticks stay silent. */
+function pendingReceiptRecorded(stateRoot: string, receiptId: string): boolean {
+	let names: string[];
+	try { names = readdirSync(stateRoot); } catch { return false; }
+	for (const name of names) {
+		if (!RUN_RECORD_NAME.test(name)) continue;
+		try {
+			const parsed: unknown = JSON.parse(readFileSync(join(stateRoot, name), "utf8"));
+			if (!parsed || typeof parsed !== "object") continue;
+			if (!("receiptId" in parsed) || parsed.receiptId !== receiptId) continue;
+			if (!("status" in parsed) || parsed.status !== "PENDING") continue;
+			return true;
+		} catch { continue; }
+	}
+	return false;
+}
+
+/**
+ * KITLIVEDEFER1: the newest PENDING run record for this receipt whose detail is
+ * deferred-only live. Its deferred_stages ride on the PENDING record so a later
+ * tick (or `update --reconcile`) can finish what heavy admission deferred.
+ * A matcher FAIL is not deferred-only context: without a trustworthy matcher
+ * the install still compensates, so only matcher-verified PENDING records qualify.
+ */
+function deferredPendingDetail(stateRoot: string, receiptId: string): LiveDeferredOnlyDetail | null {
+	let names: string[];
+	try { names = readdirSync(stateRoot); } catch { return null; }
+	let best: { mtime: number; detail: LiveDeferredOnlyDetail } | null = null;
+	for (const name of names) {
+		if (!RUN_RECORD_NAME.test(name)) continue;
+		try {
+			const mtime = lstatSync(join(stateRoot, name)).mtimeMs;
+			const parsed: unknown = JSON.parse(readFileSync(join(stateRoot, name), "utf8"));
+			if (!parsed || typeof parsed !== "object") continue;
+			if (!("receiptId" in parsed) || parsed.receiptId !== receiptId) continue;
+			if (!("status" in parsed) || parsed.status !== "PENDING") continue;
+			if (!("reason" in parsed) || parsed.reason !== "KIT_POSTCHECK_DEFERRED") continue;
+			if (!("postcheckDetail" in parsed)) continue;
+			const detail: unknown = parsed.postcheckDetail;
+			if (!isLiveDeferredOnly(detail)) continue;
+			if (best && mtime <= best.mtime) continue;
+			best = { mtime, detail };
+		} catch { continue; }
+	}
+	return best?.detail ?? null;
+}
+
  /** One opt-in poll/apply cycle. No network or service installation occurs unless the caller enables it. */
 export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: KitUpdateJobDependencies = {}): Promise<KitUpdateJobResult> {
 	if (!config.enabled) return { status: "DISABLED", receiptId: null, activeVersion: null, notification: false };
@@ -396,19 +453,191 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		return ran.exit === 0 ? { ok: true, detail: out } : { ok: false, detail: `exit ${ran.exit}: ${out}` };
 	});
 	let runId = randomUUID();
+	type PostcheckPick = Pick<KitUpdateJobResult, "postcheck" | "postcheckReason" | "postcheckDetail">;
+	// Unattended compensation for a failed kit-only postcheck: restore the prior
+	// release under manual undo's locked postimage/prior-binary checks. Never
+	// reconciles first: automatic compensation requires an audit PENDING.
+	const compensateFailure = async (args: {
+		receiptId: string | null; automatic: KitPostcheck; postcheck: PostcheckPick;
+		activeVersion: string | null; targetVersion: string; omp: UpdateOmpSelection | null;
+		runningVersion: string | null;
+	}): Promise<KitUpdateJobResult> => {
+		let restored: KitUndoResult | null = null, refusal = "KIT_RECEIPT_INVALID";
+		try {
+			if (args.receiptId) restored = undoKitUpdate({ stateRoot: config.stateRoot, prefix: config.prefix,
+				receiptId: args.receiptId, automatic: args.automatic });
+		} catch (error) { refusal = error instanceof Error ? error.message : String(error); }
+		if (!restored) {
+			await dependencies.notify?.(`omp-kit update PENDING: recovery refused (${refusal}); kit receipt ${args.receiptId}. Inspect OMP and \`omp-kit audit --json\` before choosing manual recovery.`);
+			return record(config.stateRoot, runId, { status: "PENDING", receiptId: args.receiptId, activeVersion: args.activeVersion,
+				notification: true, reason: refusal, receipt: "PENDING", ...args.postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
+		}
+		if (restored.updatePending) {
+			await dependencies.notify?.(`omp-kit update PENDING: prior release ${restored.activeVersion} restored but kit receipt ${args.receiptId} still needs recovery finalization; inspect \`omp-kit audit --json\`.`);
+			return record(config.stateRoot, runId, { status: "PENDING", receiptId: args.receiptId, activeVersion: restored.activeVersion,
+				notification: true, reason: "KIT_UNDO_FINALIZATION_PENDING", receipt: "PENDING", ...args.postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
+		}
+		await dependencies.notify?.(`omp-kit update UNDONE: restored ${restored.activeVersion}; kit receipt ${args.receiptId} compensated after ${args.postcheck.postcheckReason}; postcheck failure retained in the job record.`);
+		// STATERETAIN1: the compensated restore is itself a successful activation of
+		// the prior release, so retain on it too; otherwise a failing postcheck loops
+		// forever (apply, fail, undo) while the state root keeps growing. The undone
+		// new release is newer than active, so it survives as a rollback target.
+		const undoneRetention = restored.activeVersion !== null
+			? retainReleases(config.prefix, config.stateRoot, restored.activeVersion, [args.runningVersion])
+			: undefined;
+		return record(config.stateRoot, runId, { status: "UNDONE", receiptId: args.receiptId, activeVersion: restored.activeVersion,
+			notification: true, receipt: "ABORTED_AFTER_COMPENSATION", ...args.postcheck, relink: "NOT_RUN", service: "NOT_RUN",
+			targetVersion: args.targetVersion,
+			...(args.omp ? { ompResolvedFrom: args.omp.resolvedFrom, ompVersion: args.omp.version, ompLauncher: args.omp.launcher } : {}),
+			...(undoneRetention ? { retention: undoneRetention } : {}) });
+	};
+	// The kit symlink points at the new release; relink every covered OMP
+	// profile to that exact store and retain the plugin receipt for recovery.
+	const finishActivation = async (args: {
+		receiptId: string | null; activeVersion: string | null; omp: UpdateOmpSelection | null;
+		postcheck: PostcheckPick; targetVersion: string; runningVersion: string | null;
+	}): Promise<KitUpdateJobResult> => {
+		const binary = join(config.prefix, "bin", "omp-kit");
+		const store = args.activeVersion && SEMVER.test(args.activeVersion)
+			? join(config.prefix, "releases", args.activeVersion)
+			: null;
+		const link: PluginRelinkResult = store
+			? await relink(binary, store)
+			: { ok: false, detail: "updated release version is missing or invalid" };
+		const pluginReceipt = link.receiptId
+			? { pluginReceiptId: link.receiptId, ...(link.undoCommand ? { pluginUndoCommand: link.undoCommand } : {}) }
+			: {};
+		const activated = { status: "UPDATED" as const, receiptId: args.receiptId, activeVersion: args.activeVersion, notification: true, receipt: "RECONCILED" as const, ...args.postcheck,
+			targetVersion: args.targetVersion,
+			...(args.omp ? { ompResolvedFrom: args.omp.resolvedFrom, ompVersion: args.omp.version, ompLauncher: args.omp.launcher } : {}) };
+		if (!link.ok) {
+			const recovery = link.receiptId && link.undoCommand
+				? `; plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\``
+				: "";
+			await dependencies.notify?.(`omp-kit update BLOCKED: plugin relink failed for ${args.activeVersion ?? "unknown version"} (kit receipt ${args.receiptId})${recovery}; run \`omp-kit apply plugin --plan --store <release-root> --profiles all --include-default\` before retrying: ${link.detail}`);
+			return record(config.stateRoot, runId, { ...activated, reason: "PLUGIN_RELINK_FAILED", relink: "FAILED", ...pluginReceipt });
+		}
+		// The new release may carry a new tick interval: re-render the installed
+		// plist with the new binary itself so StartInterval tracks the code.
+		const reconciled = await reconcile(binary);
+		if (!reconciled.ok) {
+			await dependencies.notify?.(`omp-kit update BLOCKED: service reconcile failed for ${args.activeVersion} (kit receipt ${args.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; kit is on ${args.activeVersion}, rerun \`omp-kit service install kit-update --apply --yes\`: ${reconciled.detail}`);
+			return record(config.stateRoot, runId, { ...activated, reason: "SERVICE_RECONCILE_FAILED", relink: "APPLIED", service: "FAILED", ...pluginReceipt });
+		}
+		// HOOKREFRESH1: the kit symlink points at the new release, so re-run the
+		// hook installer for every pull-enabled fleet repo. Tracked-hooks repos
+		// stay PENDING_COMMIT for their director; a refresh failure never un-does
+		// the update but marks the job FINDINGS. Hermetic in tests: a fixture
+		// HOME names no fleet config, so zero repos refresh.
+		const refresh = dependencies.refreshHooks ?? refreshFleetHooksLive;
+		let hooks: KitUpdateJobResult["hooks"];
+		try {
+			const report = store ? await refresh(store, config.home) : null;
+			hooks = report === null
+				? { status: "NOT_RUN" as const, repos: 0, refreshed: 0, fresh: 0, pending_commit: 0, failed: 0 }
+				: {
+					status: report.failed > 0 ? "FAILED" as const : report.pending_commit > 0 ? "PENDING_COMMIT" as const : "APPLIED" as const,
+					repos: report.repos, refreshed: report.refreshed, fresh: report.fresh, pending_commit: report.pending_commit, failed: report.failed,
+				};
+		} catch {
+			hooks = { status: "FAILED" as const, repos: 0, refreshed: 0, fresh: 0, pending_commit: 0, failed: 1 };
+		}
+		// STATERETAIN1: retention runs after every successful activation, even when
+		// the postcheck fails: the gate that caused the deadlock (retention only on
+		// postcheck PASS) let the state root grow until the postcheck could never
+		// pass. Rollback targets survive: active, the five before it, pinned and
+		// running releases are kept, and newer-than-active versions are untouched.
+		const retention = hooks.failed === 0 && args.activeVersion !== null
+			? retainReleases(config.prefix, config.stateRoot, args.activeVersion, [args.runningVersion])
+			: undefined;
+		const hookNote = hooks.repos === 0 ? "; no fleet repos to refresh hooks in"
+			: `; hooks ${hooks.status}: ${hooks.refreshed} refreshed, ${hooks.fresh} fresh, ${hooks.pending_commit} pending director commit, ${hooks.failed} failed over ${hooks.repos} repo(s)`;
+		const retentionNote = retention?.status === "FAILED" ? "; release retention FAILED (see job record)" : "";
+		await dependencies.notify?.(`omp-kit updated to ${args.activeVersion} (kit receipt ${args.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; plugin relink applied${hookNote}${retentionNote}`);
+		return record(config.stateRoot, runId, { ...activated, relink: "APPLIED", service: "APPLIED", ...pluginReceipt, hooks, ...(retention ? { retention } : {}) });
+	};
+	/**
+	 * KITLIVEDEFER1: finish a deferred-live PENDING receipt. When heavy admission
+	 * allows, the tick re-runs the live ladder against the active install: PASS
+	 * reconciles the receipt and completes the activation; an executed failure
+	 * compensates exactly as a failed postcheck; another deferral stays PENDING.
+	 */
+	const finishDeferredLive = async (
+		receipt: Pick<PendingKitUpdate, "id" | "kitVersion">,
+		deferred: LiveDeferredOnlyDetail,
+		recorded: boolean,
+	): Promise<KitUpdateJobResult> => {
+		const liveVersion = installedVersion(config.prefix);
+		const runningVersion = runningReleaseVersion(config.prefix);
+		const ompResolver = dependencies.omp ?? (() => selectUpdateOmp({ ...process.env, HOME: config.home }));
+		const judgedOmp = ompResolver();
+		const recheck = dependencies.recheckLive ?? runKitPostcheck;
+		let report: FullTestReport | null = null;
+		try {
+			report = await recheck({ executablePath: join(config.prefix, "bin", "omp-kit"), home: config.home, stateRoot: config.stateRoot });
+		} catch { report = null; }
+		const stages = deferred.deferred_stages.join(",");
+		if (report === null || judgedOmp === null) {
+			if (!recorded) await dependencies.notify?.(`omp-kit update PENDING: live postcheck deferred (${stages}); kit ${receipt.id} stays on ${liveVersion}; run \`omp-kit update --reconcile ${receipt.id} --yes\` when load allows.`);
+			return record(config.stateRoot, runId, { status: "PENDING", receiptId: receipt.id, activeVersion: liveVersion,
+				notification: !recorded, reason: "KIT_POSTCHECK_DEFERRED", receipt: "PENDING",
+				postcheck: "FAIL", postcheckReason: "KIT_LIVE_TEST_FAILED",
+				postcheckDetail: {
+					status: "FAIL", omp_version: judgedOmp?.version ?? null,
+					live: { status: "NOT_RUN", expected_scenarios: typeof deferred.live.expected_scenarios === "number" ? deferred.live.expected_scenarios : 0, observed_scenarios: 0, plant: "NOT_RUN" },
+					failed_stages: [], deferred_stages: [...deferred.deferred_stages], current_stage: null, cause: null,
+					changed_operator_paths: [], live_state_paths: [],
+					failures: [`Live recheck for kit ${receipt.id} did not run; still deferred: ${stages}`],
+				}, relink: "NOT_RUN", service: "NOT_RUN" });
+		}
+		const afterOmp = ompResolver();
+		const identityKnown = afterOmp !== null && report.omp_version !== null && report.omp_version === judgedOmp.version;
+		const changed = afterOmp === null || afterOmp.version !== judgedOmp.version || afterOmp.launcher !== judgedOmp.launcher ||
+			(report.omp_version !== null && report.omp_version !== judgedOmp.version);
+		const judged = judgeKitPostcheck(report, { identityKnown, changed });
+		const detail = kitPostcheckDetail(judged, [config.home, config.stateRoot, config.prefix]);
+		const check: PostcheckPick = { postcheck: judged.status, postcheckReason: judged.reason ?? "KIT_POSTCHECK_FAILED", postcheckDetail: detail };
+		if (judged.status === "PASS" && judged.matcher === "PASS") {
+			try {
+				const reconciled = reconcilePendingUpdate({ stateRoot: config.stateRoot, prefix: config.prefix, id: receipt.id });
+				return await finishActivation({ receiptId: receipt.id, activeVersion: reconciled.activeVersion, omp: judgedOmp,
+					postcheck: { postcheck: "PASS" }, targetVersion: receipt.kitVersion, runningVersion });
+			} catch (error) {
+				const refusal = error instanceof Error ? error.message : String(error);
+				return record(config.stateRoot, runId, { status: "PENDING", receiptId: receipt.id, activeVersion: liveVersion,
+					notification: true, reason: refusal, receipt: "PENDING", ...check, relink: "NOT_RUN", service: "NOT_RUN" });
+			}
+		}
+		if (judged.matcher === "PASS" && detail !== null && isLiveDeferredOnly(detail)) {
+			if (!recorded) await dependencies.notify?.(`omp-kit update PENDING: live postcheck deferred (${detail.deferred_stages.join(",")}); kit ${receipt.id} stays on ${liveVersion}; run \`omp-kit update --reconcile ${receipt.id} --yes\` when load allows.`);
+			return record(config.stateRoot, runId, { status: "PENDING", receiptId: receipt.id, activeVersion: liveVersion,
+				notification: !recorded, reason: "KIT_POSTCHECK_DEFERRED", receipt: "PENDING", ...check, relink: "NOT_RUN", service: "NOT_RUN" });
+		}
+		return await compensateFailure({ receiptId: receipt.id, automatic: judged, postcheck: check,
+			activeVersion: liveVersion, targetVersion: receipt.kitVersion, omp: judgedOmp, runningVersion });
+	};
 	try {
 		// A restart has no trustworthy postcheck/OMP identity witness. Never guess an undo reason or
 		// hide the receipt behind CURRENT when polling finds no newer release.
 		const pending = inspectPendingKitUpdate(config.stateRoot);
 		if (pending) {
+			const recorded = pendingReceiptRecorded(config.stateRoot, pending.id);
+			const deferred = deferredPendingDetail(config.stateRoot, pending.id);
+			if (deferred !== null) {
+				// KITLIVEDEFER1: a deferred-live PENDING carries its stages on the
+				// record; the tick re-runs the live ladder when admission allows
+				// instead of waiting blindly. reconcilePendingUpdate alone only
+				// checks the symlink and postimage, so it never blesses this path.
+				return await finishDeferredLive(pending, deferred, recorded);
+			}
 			const activeVersion = installedVersion(config.prefix);
 			const reason = activeVersion === null ? "KIT_ACTIVATION_UNVERIFIED" : "KIT_RECOVERY_UNVERIFIED";
 			const guidance = activeVersion === null
 				? "Use a known-good release binary to inspect the activation receipt and repair the stable link; keep the pending receipt until its postimage is verified."
 				: `Inspect OMP and \`omp-kit audit --json\`; after verifying the recorded postimage, run \`omp-kit update --reconcile ${pending.id} --yes\`.`;
-			await dependencies.notify?.(`omp-kit update PENDING: ${reason}; kit receipt ${pending.id}. ${guidance}`);
+			if (!recorded) await dependencies.notify?.(`omp-kit update PENDING: ${reason}; kit receipt ${pending.id}. ${guidance}`);
 			return record(config.stateRoot, runId, { status: "PENDING", receiptId: pending.id, activeVersion,
-				notification: true, reason, receipt: "PENDING", relink: "NOT_RUN", service: "NOT_RUN" });
+				notification: !recorded, reason, receipt: "PENDING", relink: "NOT_RUN", service: "NOT_RUN" });
 		}
 		// Install-on-publish: a newer published release replaces the static tuple.
 		// Anything else (disabled poll, nothing newer) keeps today's static path.
@@ -448,6 +677,18 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 				postcheckDetail: kitPostcheckDetail(result.postcheck, [config.home, config.stateRoot, config.prefix]) };
 		const activeVersion = result.activeVersion;
 		if (result.status === "PARTIAL") {
+			// KITLIVEDEFER1: a matcher-verified postcheck with no failed stage and only
+			// NOT_RUN/deferred live keeps the new version active as PENDING, naming the
+			// deferred stage for the later tick that re-runs the ladder. A matcher FAIL
+			// (installed bytes do not match the receipt) is not a deferral: it falls
+			// through and compensates exactly as today, as does an executed failure.
+			const detail = postcheck.postcheckDetail;
+			if (result.postcheck.matcher === "PASS" && detail !== undefined && detail !== null && isLiveDeferredOnly(detail)) {
+				const stages = detail.deferred_stages.join(",");
+				await dependencies.notify?.(`omp-kit update PENDING: live postcheck deferred (${stages}); kit ${result.receiptId} stays on ${activeVersion}; run \`omp-kit update --reconcile ${result.receiptId} --yes\` when load allows.`);
+				return record(config.stateRoot, runId, { status: "PENDING", receiptId: result.receiptId, activeVersion,
+					notification: true, reason: "KIT_POSTCHECK_DEFERRED", receipt: "PENDING", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
+			}
 			// Neither a missing activation nor an OMP mutation is a kit-only, revert-safe failure.
 			if (activeVersion === null || result.postcheck.reason === "OMP_CHANGED_DURING_KIT_UPDATE") {
 				const reason = activeVersion === null ? "KIT_ACTIVATION_UNVERIFIED" : "OMP_CHANGED_DURING_KIT_UPDATE";
@@ -458,97 +699,11 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 				return record(config.stateRoot, runId, { status: "PENDING", receiptId: result.receiptId, activeVersion,
 					notification: true, reason, receipt: "PENDING", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
 			}
-			// Reuse manual undo's locked postimage/prior-binary checks, adding stricter unattended
-			// admission. Never reconcile first: automatic compensation requires an audit PENDING.
-			let restored: KitUndoResult | null = null, refusal = "KIT_RECEIPT_INVALID";
-			try {
-				if (result.receiptId) restored = undoKitUpdate({ stateRoot: config.stateRoot, prefix: config.prefix,
-					receiptId: result.receiptId, automatic: result.postcheck });
-			} catch (error) { refusal = error instanceof Error ? error.message : String(error); }
-			if (!restored) {
-				await dependencies.notify?.(`omp-kit update PENDING: recovery refused (${refusal}); kit receipt ${result.receiptId}. Inspect OMP and \`omp-kit audit --json\` before choosing manual recovery.`);
-				return record(config.stateRoot, runId, { status: "PENDING", receiptId: result.receiptId, activeVersion,
-					notification: true, reason: refusal, receipt: "PENDING", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
-			}
-			if (restored.updatePending) {
-				await dependencies.notify?.(`omp-kit update PENDING: prior release ${restored.activeVersion} restored but kit receipt ${result.receiptId} still needs recovery finalization; inspect \`omp-kit audit --json\`.`);
-				return record(config.stateRoot, runId, { status: "PENDING", receiptId: result.receiptId, activeVersion: restored.activeVersion,
-					notification: true, reason: "KIT_UNDO_FINALIZATION_PENDING", receipt: "PENDING", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
-			}
-		await dependencies.notify?.(`omp-kit update UNDONE: restored ${restored.activeVersion}; kit receipt ${result.receiptId} compensated after ${postcheck.postcheckReason}; postcheck failure retained in the job record.`);
-		// STATERETAIN1: the compensated restore is itself a successful activation of
-		// the prior release, so retain on it too; otherwise a failing postcheck loops
-		// forever (apply, fail, undo) while the state root keeps growing. The undone
-		// new release is newer than active, so it survives as a rollback target.
-		const undoneRetention = restored.activeVersion !== null
-			? retainReleases(config.prefix, config.stateRoot, restored.activeVersion, [runningVersion])
-			: undefined;
-		return record(config.stateRoot, runId, { status: "UNDONE", receiptId: result.receiptId, activeVersion: restored.activeVersion,
-			notification: true, receipt: "ABORTED_AFTER_COMPENSATION", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN",
-			targetVersion: source.version,
-			...(result.omp ? { ompResolvedFrom: result.omp.resolvedFrom, ompVersion: result.omp.version, ompLauncher: result.omp.launcher } : {}),
-			...(undoneRetention ? { retention: undoneRetention } : {}) });
+			return await compensateFailure({ receiptId: result.receiptId, automatic: result.postcheck, postcheck,
+				activeVersion, targetVersion: source.version, omp: result.omp ?? null, runningVersion });
 		}
-		// The kit symlink now points at the new release; relink every covered OMP
-		// profile to that exact store and retain the plugin receipt for recovery.
-		const binary = join(config.prefix, "bin", "omp-kit");
-		const store = activeVersion && SEMVER.test(activeVersion)
-			? join(config.prefix, "releases", activeVersion)
-			: null;
-		const link: PluginRelinkResult = store
-			? await relink(binary, store)
-			: { ok: false, detail: "updated release version is missing or invalid" };
-		const pluginReceipt = link.receiptId
-			? { pluginReceiptId: link.receiptId, ...(link.undoCommand ? { pluginUndoCommand: link.undoCommand } : {}) }
-			: {};
-		const activated = { status: "UPDATED" as const, receiptId: result.receiptId, activeVersion, notification: true, receipt: "RECONCILED" as const, ...postcheck,
-			targetVersion: source.version,
-			...(result.omp ? { ompResolvedFrom: result.omp.resolvedFrom, ompVersion: result.omp.version, ompLauncher: result.omp.launcher } : {}) };
-		if (!link.ok) {
-			const recovery = link.receiptId && link.undoCommand
-				? `; plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\``
-				: "";
-			await dependencies.notify?.(`omp-kit update BLOCKED: plugin relink failed for ${activeVersion ?? "unknown version"} (kit receipt ${result.receiptId})${recovery}; run \`omp-kit apply plugin --plan --store <release-root> --profiles all --include-default\` before retrying: ${link.detail}`);
-			return record(config.stateRoot, runId, { ...activated, reason: "PLUGIN_RELINK_FAILED", relink: "FAILED", ...pluginReceipt });
-		}
-		// The new release may carry a new tick interval: re-render the installed
-		// plist with the new binary itself so StartInterval tracks the code.
-		const reconciled = await reconcile(binary);
-		if (!reconciled.ok) {
-			await dependencies.notify?.(`omp-kit update BLOCKED: service reconcile failed for ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; kit is on ${activeVersion}, rerun \`omp-kit service install kit-update --apply --yes\`: ${reconciled.detail}`);
-			return record(config.stateRoot, runId, { ...activated, reason: "SERVICE_RECONCILE_FAILED", relink: "APPLIED", service: "FAILED", ...pluginReceipt });
-		}
-		// HOOKREFRESH1: the kit symlink points at the new release, so re-run the
-		// hook installer for every pull-enabled fleet repo. Tracked-hooks repos
-		// stay PENDING_COMMIT for their director; a refresh failure never un-does
-		// the update but marks the job FINDINGS. Hermetic in tests: a fixture
-		// HOME names no fleet config, so zero repos refresh.
-		const refresh = dependencies.refreshHooks ?? refreshFleetHooksLive;
-		let hooks: KitUpdateJobResult["hooks"];
-		try {
-			const report = store ? await refresh(store, config.home) : null;
-			hooks = report === null
-				? { status: "NOT_RUN" as const, repos: 0, refreshed: 0, fresh: 0, pending_commit: 0, failed: 0 }
-				: {
-					status: report.failed > 0 ? "FAILED" as const : report.pending_commit > 0 ? "PENDING_COMMIT" as const : "APPLIED" as const,
-					repos: report.repos, refreshed: report.refreshed, fresh: report.fresh, pending_commit: report.pending_commit, failed: report.failed,
-				};
-		} catch {
-			hooks = { status: "FAILED" as const, repos: 0, refreshed: 0, fresh: 0, pending_commit: 0, failed: 1 };
-		}
-		// STATERETAIN1: retention runs after every successful activation, even when
-		// the postcheck fails: the gate that caused the deadlock (retention only on
-		// postcheck PASS) let the state root grow until the postcheck could never
-		// pass. Rollback targets survive: active, the five before it, pinned and
-		// running releases are kept, and newer-than-active versions are untouched.
-		const retention = result.status === "UPDATED" && hooks.failed === 0 && activeVersion !== null
-			? retainReleases(config.prefix, config.stateRoot, activeVersion, [runningVersion])
-			: undefined;
-		const hookNote = hooks.repos === 0 ? "; no fleet repos to refresh hooks in"
-			: `; hooks ${hooks.status}: ${hooks.refreshed} refreshed, ${hooks.fresh} fresh, ${hooks.pending_commit} pending director commit, ${hooks.failed} failed over ${hooks.repos} repo(s)`;
-		const retentionNote = retention?.status === "FAILED" ? "; release retention FAILED (see job record)" : "";
-		await dependencies.notify?.(`omp-kit updated to ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; plugin relink applied${hookNote}${retentionNote}`);
-		return record(config.stateRoot, runId, { ...activated, relink: "APPLIED", service: "APPLIED", ...pluginReceipt, hooks, ...(retention ? { retention } : {}) });
+		return await finishActivation({ receiptId: result.receiptId, activeVersion, omp: result.omp ?? null,
+			postcheck, targetVersion: source.version, runningVersion });
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		await dependencies.notify?.("omp-kit update job failed: " + reason);

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { kitUpdateJobOverall, pollPublishedRelease, runKitUpdateJob, type KitUpdateJobConfig, type KitUpdateJobDependencies, type KitUpdateJobResult } from "../../src/kit-update-job.ts";
-import { reconcilePendingUpdate, type KitUpdateResult } from "../../src/kit-update.ts";
+import { isLiveDeferredOnly, judgeKitPostcheck, reconcilePendingUpdate, type KitUpdateResult } from "../../src/kit-update.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import type { PluginReceipt } from "../../src/apply-plugin.ts";
 import { resolveOmpLauncher } from "../../src/paths.ts";
@@ -888,5 +888,282 @@ test("KITUPDATEOMP1-once: transient causes retry after six hours, deterministic 
 		expect(namedSkipped).toMatchObject({ status: "SKIPPED", postcheckReason: "KIT_POSTCHECK_FAILED" });
 	});
 });
+
+
+/** KITLIVEDEFER1: run ec8c4268 shaped as a fixture: harness-gate deferred, live NOT_RUN, no failed stage. */
+function deferredOnlyReport(): never {
+	const deferral = "Stage harness-gate deferred by heavy admission (producer_rc=75): queue timeout";
+	return { status: "FAIL", exitCode: 1, omp_version: "18.18.9",
+		fast: { status: "PASS", proofs: { G1_registration: { status: "PASS" }, G2_payload: { status: "PASS" }, G3_quiet_prefix: { status: "PASS" } } }, fast_duration_ms: 1,
+		stages: {
+			manifest: { status: "PASS", producer_rc: 0, duration_ms: 1 },
+			"harness-gate": { status: "DEFERRED", producer_rc: 75, duration_ms: 1, reason: "omp-kit heavy deferred the stage before it ran: queue timeout" },
+			"e2e-live": { status: "NOT_RUN", producer_rc: null, duration_ms: null },
+			"e2e-plant": { status: "NOT_RUN", producer_rc: null, duration_ms: null },
+		},
+		current_stage: null, cause: null,
+		proofs: { G4_live: { status: "NOT_RUN", expected_scenarios: 149, observed_scenarios: 0, plant: "NOT_RUN" } },
+		live_scenarios: { expected_ids: [], observed_ids: [], status: "NOT_RUN" },
+		snapshots: { release: { unchanged: true, complete: true }, home: { changed_paths: ["~/state/send-drop/cfsios-1.json"], complete: true }, project: { changed_paths: [], complete: true } },
+		failures: [deferral, "Operator file changed during isolated test: ~/state/send-drop/cfsios-1.json"],
+	} as never;
+}
+
+function deferredOnlyPostcheck(): KitUpdateResult["postcheck"] {
+	return { status: "FAIL", matcher: "PASS", live: "FAIL", reason: "KIT_LIVE_TEST_FAILED", report: deferredOnlyReport() } as never;
+}
+
+function executedLivePostcheck(): KitUpdateResult["postcheck"] {
+	return { status: "FAIL", matcher: "PASS", live: "FAIL", reason: "KIT_LIVE_TEST_FAILED", report: {
+		status: "FAIL", exitCode: 1, omp_version: "18.18.9",
+		fast: { status: "PASS", proofs: { G1_registration: { status: "PASS" }, G2_payload: { status: "PASS" }, G3_quiet_prefix: { status: "PASS" } } }, fast_duration_ms: 1,
+		stages: {
+			manifest: { status: "PASS", producer_rc: 0, duration_ms: 1 },
+			"harness-gate": { status: "PASS", producer_rc: 0, duration_ms: 1 },
+			"e2e-live": { status: "FAIL", producer_rc: 1, duration_ms: 1, reason: "scenario failed" },
+			"e2e-plant": { status: "PASS", producer_rc: 0, duration_ms: 1 },
+		},
+		current_stage: null, cause: null,
+		proofs: { G4_live: { status: "FAIL", expected_scenarios: 149, observed_scenarios: 149, plant: "PASS" } },
+		live_scenarios: { expected_ids: [], observed_ids: [], status: "FAIL" },
+		snapshots: { release: { unchanged: true, complete: true }, home: { changed_paths: [], complete: true }, project: { changed_paths: [], complete: true } },
+		failures: ["FAIL  close-bare-fire :: expected RED"],
+	} } as never;
+}
+
+test("KITLIVEDEFER1: deferred live with no failed stage keeps the new version active as PENDING", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		preparePluginUpdate(value);
+		let receiptId = "";
+		const notes: string[] = [];
+		const result = await runKitUpdateJob(value, {
+			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+			apply: async () => {
+				receiptId = activate(value);
+				return { status: "PARTIAL", exitCode: 1, receiptId, activeVersion: "1.2.4", postcheck: deferredOnlyPostcheck(), provenance: "SIGSTORE_VERIFIED" };
+			},
+			relink: async () => { throw new Error("PARTIAL must not change plugin links"); },
+			reconcile: async () => { throw new Error("PARTIAL must not change the service"); },
+			notify: message => { notes.push(String(message)); },
+		});
+		expect(result).toMatchObject({ status: "PENDING", receiptId, activeVersion: "1.2.4", receipt: "PENDING", reason: "KIT_POSTCHECK_DEFERRED", relink: "NOT_RUN", service: "NOT_RUN" });
+		expect(result.postcheckDetail).toMatchObject({ failed_stages: [], deferred_stages: ["harness-gate"] });
+		expect(isLiveDeferredOnly(result.postcheckDetail)).toBe(true);
+		expect(readlinkSync(join(value.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.4/bin/omp-kit");
+		expect(inspectPendingKitUpdate(value.stateRoot)?.id).toBe(receiptId);
+		expect(notes[0]).toContain("harness-gate");
+		expect(notes[0]).toContain(`omp-kit update --reconcile ${receiptId} --yes`);
+		expect(kitUpdateJobOverall(result)).toBe("FINDINGS");
+	});
+}, fixtureDeadlineS() * 1000);
+
+test("KITLIVEDEFER1: one executed failing scenario still compensates to UNDONE", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		preparePluginUpdate(value);
+		let receiptId = "";
+		const result = await runKitUpdateJob(value, {
+			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+			apply: async () => {
+				receiptId = activate(value);
+				return { status: "PARTIAL", exitCode: 1, receiptId, activeVersion: "1.2.4", postcheck: executedLivePostcheck(), provenance: "SIGSTORE_VERIFIED" };
+			},
+			relink: async () => { throw new Error("PARTIAL must not change plugin links"); },
+			reconcile: async () => { throw new Error("PARTIAL must not change the service"); },
+			notify: () => {},
+		});
+		expect(result).toMatchObject({ status: "UNDONE", receiptId, activeVersion: "1.2.3", receipt: "ABORTED_AFTER_COMPENSATION", postcheck: "FAIL", postcheckReason: "KIT_LIVE_TEST_FAILED", relink: "NOT_RUN", service: "NOT_RUN" });
+		expect(isLiveDeferredOnly(result.postcheckDetail)).toBe(false);
+		expect(readlinkSync(join(value.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.3/bin/omp-kit");
+		expect(inspectPendingKitUpdate(value.stateRoot)).toBeNull();
+	});
+}, fixtureDeadlineS() * 1000);
+
+test("KITLIVEDEFER1 planted: current scoring still marks deferred-plus-noise as FAIL KIT_LIVE_TEST_FAILED", async () => {
+	const postcheck = judgeKitPostcheck(deferredOnlyReport(), { identityKnown: true, changed: false });
+	expect(postcheck).toMatchObject({ status: "FAIL", live: "FAIL", reason: "KIT_LIVE_TEST_FAILED" });
+	expect(isLiveDeferredOnly({ status: "FAIL", omp_version: "18.18.9",
+		live: { status: "NOT_RUN", expected_scenarios: 149, observed_scenarios: 0, plant: "NOT_RUN" },
+		failed_stages: [], deferred_stages: ["harness-gate"], current_stage: null, cause: null,
+		changed_operator_paths: [], live_state_paths: [],
+		failures: ["Stage harness-gate deferred by heavy admission (producer_rc=75): queue timeout"] })).toBe(true);
+	expect(isLiveDeferredOnly({ status: "FAIL", omp_version: "18.18.9",
+		live: { status: "FAIL", expected_scenarios: 149, observed_scenarios: 149, plant: "PASS" },
+		failed_stages: ["e2e-live"], deferred_stages: [], current_stage: null, cause: null,
+		changed_operator_paths: [], live_state_paths: [], failures: ["FAIL  close-bare-fire :: expected RED"] })).toBe(false);
+}, fixtureDeadlineS() * 1000);
+
+test("KITLIVEDEFER1: a deferred-only UNDONE does not suppress the retry", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		mkdirSync(value.stateRoot, { recursive: true, mode: 0o700 });
+		writeFileSync(join(value.stateRoot, "kit-update-job-33333333-3333-4333-8333-333333333333.json"), JSON.stringify({
+			schema_version: 1, run_id: "33333333-3333-4333-8333-333333333333", status: "UNDONE", receiptId: "r-old", activeVersion: "1.2.3",
+			notification: true, receipt: "ABORTED_AFTER_COMPENSATION", postcheck: "FAIL", postcheckReason: "KIT_LIVE_TEST_FAILED",
+			postcheckDetail: { status: "FAIL", omp_version: "18.10.3",
+				live: { status: "NOT_RUN", expected_scenarios: 149, observed_scenarios: 0, plant: "NOT_RUN" },
+				failed_stages: [], deferred_stages: ["harness-gate"], current_stage: null,
+				cause: { cause_code: "Error", cause_name: "Error", cause_message: "KIT_LIVE_TEST_FAILED", cause_stack_head: null },
+				changed_operator_paths: [], live_state_paths: [],
+				failures: ["Stage harness-gate deferred by heavy admission (producer_rc=75): queue timeout"] },
+			targetVersion: "1.2.4", ompResolvedFrom: "path", ompVersion: "18.10.3", ompLauncher: "/service/omp", relink: "NOT_RUN", service: "NOT_RUN",
+		}));
+		const staleOmp = { launcher: "/service/omp", version: "18.10.3", resolvedFrom: "path" as const };
+		let applied = 0;
+		const result = await runKitUpdateJob(value, {
+			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+			apply: async () => { applied++; return { status: "UPDATED", exitCode: 0, receiptId: "r-new", activeVersion: "1.2.4", postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY", omp: staleOmp }; },
+			relink: async () => ({ ok: true, detail: "", receiptId: "plugin-new", undoCommand: "omp-kit undo plugin-new --yes" }),
+			reconcile: async () => ({ ok: true, detail: "" }),
+			omp: () => staleOmp,
+			notify: () => {},
+		});
+		expect(applied).toBe(1);
+		expect(result).toMatchObject({ status: "UPDATED", targetVersion: "1.2.4" });
+	});
+}, fixtureDeadlineS() * 1000);
+
+function passedLiveReport(): never {
+	return { status: "PASS", exitCode: 0, omp_version: "18.18.9",
+		fast: { status: "PASS", proofs: { G1_registration: { status: "PASS" }, G2_payload: { status: "PASS" }, G3_quiet_prefix: { status: "PASS" } } }, fast_duration_ms: 1,
+		stages: {
+			manifest: { status: "PASS", producer_rc: 0, duration_ms: 1 },
+			"harness-gate": { status: "PASS", producer_rc: 0, duration_ms: 1 },
+		},
+		current_stage: null, cause: null,
+		proofs: { G4_live: { status: "PASS", expected_scenarios: 149, observed_scenarios: 149, plant: "PASS" } },
+		live_scenarios: { expected_ids: [], observed_ids: [], status: "PASS" },
+		snapshots: { release: { unchanged: true, complete: true }, home: { changed_paths: [], complete: true }, project: { changed_paths: [], complete: true } },
+		failures: [],
+	} as never;
+}
+
+/** A deferred-live PENDING run record for this receipt, as the deferred PARTIAL tick writes it. */
+function seedPendingDeferred(value: KitUpdateJobConfig, receiptId: string): void {
+	mkdirSync(value.stateRoot, { recursive: true, mode: 0o700 });
+	writeFileSync(join(value.stateRoot, "kit-update-job-44444444-4444-4434-8444-444444444444.json"), JSON.stringify({
+		schema_version: 1, run_id: "44444444-4444-4434-8444-444444444444", status: "PENDING", receiptId, activeVersion: "1.2.4",
+		notification: true, reason: "KIT_POSTCHECK_DEFERRED", receipt: "PENDING", postcheck: "FAIL", postcheckReason: "KIT_LIVE_TEST_FAILED",
+		postcheckDetail: { status: "FAIL", omp_version: "18.18.9",
+			live: { status: "NOT_RUN", expected_scenarios: 149, observed_scenarios: 0, plant: "NOT_RUN" },
+			failed_stages: [], deferred_stages: ["harness-gate"], current_stage: null, cause: null,
+			changed_operator_paths: [], live_state_paths: [],
+			failures: ["Stage harness-gate deferred by heavy admission (producer_rc=75): queue timeout"] },
+		relink: "NOT_RUN", service: "NOT_RUN",
+	}));
+}
+
+test("KITLIVEDEFER1: matcher FAIL with deferred-only detail still compensates to UNDONE", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		preparePluginUpdate(value);
+		let receiptId = "";
+		const result = await runKitUpdateJob(value, {
+			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+			apply: async () => {
+				receiptId = activate(value);
+				return { status: "PARTIAL", exitCode: 1, receiptId, activeVersion: "1.2.4",
+					postcheck: { ...deferredOnlyPostcheck(), matcher: "FAIL", reason: "KIT_FAST_TEST_FAILED" }, provenance: "SIGSTORE_VERIFIED" };
+			},
+			relink: async () => { throw new Error("PARTIAL must not change plugin links"); },
+			reconcile: async () => { throw new Error("PARTIAL must not change the service"); },
+			notify: () => {},
+		});
+		expect(result).toMatchObject({ status: "UNDONE", receiptId, activeVersion: "1.2.3", receipt: "ABORTED_AFTER_COMPENSATION",
+			postcheck: "FAIL", postcheckReason: "KIT_FAST_TEST_FAILED", relink: "NOT_RUN", service: "NOT_RUN" });
+		// The detail is still deferred-only: the matcher gate, not the detail, forced compensation.
+		expect(isLiveDeferredOnly(result.postcheckDetail)).toBe(true);
+		expect(readlinkSync(join(value.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.3/bin/omp-kit");
+		expect(inspectPendingKitUpdate(value.stateRoot)).toBeNull();
+	});
+}, fixtureDeadlineS() * 1000);
+
+test("KITLIVEDEFER1 finish: a passing live recheck reconciles and completes the activation", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		preparePluginUpdate(value);
+		const receiptId = activate(value);
+		seedPendingDeferred(value, receiptId);
+		const notes: string[] = [];
+		const seatOmp = { launcher: "/seat/omp", version: "18.18.9", resolvedFrom: "tern-bundle" as const };
+		const result = await runKitUpdateJob(value, {
+			plan: async () => { throw new Error("a deferred-live PENDING must recheck, never re-plan"); },
+			apply: async () => { throw new Error("a deferred-live PENDING must recheck, never re-apply"); },
+			recheckLive: async () => passedLiveReport(),
+			relink: async () => ({ ok: true, detail: "", receiptId: "plugin-finish", undoCommand: "omp-kit undo plugin-finish --yes" }),
+			reconcile: async () => ({ ok: true, detail: "" }),
+			omp: () => seatOmp,
+			notify: message => { notes.push(String(message)); },
+		});
+		expect(result).toMatchObject({ status: "UPDATED", receiptId, activeVersion: "1.2.4", receipt: "RECONCILED",
+			postcheck: "PASS", relink: "APPLIED", service: "APPLIED", pluginReceiptId: "plugin-finish" });
+		expect(inspectPendingKitUpdate(value.stateRoot)).toBeNull();
+		expect(readlinkSync(join(value.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.4/bin/omp-kit");
+		expect(notes.some(note => note.includes("updated to 1.2.4"))).toBe(true);
+		expect(kitUpdateJobOverall(result)).toBe("OK");
+	});
+}, fixtureDeadlineS() * 1000);
+
+test("KITLIVEDEFER1 finish: another deferral stays PENDING without re-notifying", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		preparePluginUpdate(value);
+		const receiptId = activate(value);
+		seedPendingDeferred(value, receiptId);
+		const notes: string[] = [];
+		const seatOmp = { launcher: "/seat/omp", version: "18.18.9", resolvedFrom: "tern-bundle" as const };
+		const result = await runKitUpdateJob(value, {
+			plan: async () => { throw new Error("a deferred-live PENDING must recheck, never re-plan"); },
+			apply: async () => { throw new Error("a deferred-live PENDING must recheck, never re-apply"); },
+			recheckLive: async () => deferredOnlyReport(),
+			omp: () => seatOmp,
+			notify: message => { notes.push(String(message)); },
+		});
+		expect(result).toMatchObject({ status: "PENDING", receiptId, activeVersion: "1.2.4", receipt: "PENDING",
+			reason: "KIT_POSTCHECK_DEFERRED", notification: false, relink: "NOT_RUN", service: "NOT_RUN" });
+		expect(result.postcheckDetail).toMatchObject({ failed_stages: [], deferred_stages: ["harness-gate"] });
+		expect(notes).toHaveLength(0);
+		expect(readlinkSync(join(value.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.4/bin/omp-kit");
+		expect(inspectPendingKitUpdate(value.stateRoot)?.id).toBe(receiptId);
+	});
+}, fixtureDeadlineS() * 1000);
+
+test("KITLIVEDEFER1 finish: an executed live failure compensates to UNDONE", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		preparePluginUpdate(value);
+		const receiptId = activate(value);
+		seedPendingDeferred(value, receiptId);
+		const seatOmp = { launcher: "/seat/omp", version: "18.18.9", resolvedFrom: "tern-bundle" as const };
+		const result = await runKitUpdateJob(value, {
+			plan: async () => { throw new Error("a deferred-live PENDING must recheck, never re-plan"); },
+			apply: async () => { throw new Error("a deferred-live PENDING must recheck, never re-apply"); },
+			recheckLive: async () => (executedLivePostcheck().report as never),
+			omp: () => seatOmp,
+			notify: () => {},
+		});
+		expect(result).toMatchObject({ status: "UNDONE", receiptId, activeVersion: "1.2.3", receipt: "ABORTED_AFTER_COMPENSATION",
+			postcheck: "FAIL", postcheckReason: "KIT_LIVE_TEST_FAILED", relink: "NOT_RUN", service: "NOT_RUN" });
+		expect(readlinkSync(join(value.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.3/bin/omp-kit");
+		expect(inspectPendingKitUpdate(value.stateRoot)).toBeNull();
+	});
+}, fixtureDeadlineS() * 1000);
+
+test("KITLIVEDEFER1: a recorded PENDING is not notified again", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		preparePluginUpdate(value);
+		activate(value);
+		const notes: string[] = [];
+		const first = await runKitUpdateJob(value, { notify: message => { notes.push(String(message)); } });
+		expect(first).toMatchObject({ status: "PENDING", reason: "KIT_RECOVERY_UNVERIFIED", notification: true });
+		expect(notes).toHaveLength(1);
+		const second = await runKitUpdateJob(value, { notify: message => { notes.push(String(message)); } });
+		expect(second).toMatchObject({ status: "PENDING", reason: "KIT_RECOVERY_UNVERIFIED", notification: false });
+		expect(notes).toHaveLength(1);
+	});
+}, fixtureDeadlineS() * 1000);
+
 
 afterAll(() => cleanupAllOwnedTmp());

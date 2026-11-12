@@ -441,6 +441,48 @@ export function judgeKitPostcheck(report: FullTestReport, omp: { identityKnown: 
  return { status, matcher, live, report, ...(reason ? { reason } : {}) };
 }
 
+/**
+ * KITLIVEDEFER1: the validated shape of a postcheck whose only problem is live
+ * scenarios that never ran. failed_stages is empty, deferred_stages names the
+ * deferred stages, and live is NOT_RUN with zero observed scenarios.
+ */
+export type LiveDeferredOnlyDetail = {
+ failed_stages: unknown[];
+ deferred_stages: string[];
+ live: { status: string; observed_scenarios?: unknown; plant?: unknown; expected_scenarios?: unknown };
+};
+
+/**
+ * KITLIVEDEFER1: a postcheck whose only problem is live scenarios that never ran.
+ * True when no stage failed, at least one stage deferred, live is NOT_RUN with
+ * zero observed scenarios and no planted failure. Concurrent operator writes
+ * beside the deferral are not an executed verdict, so they do not disqualify.
+ * An executed failure (a FAIL stage, a FAIL/observed live, a planted FAIL, or a
+ * FAIL scenario row) is false and still compensates exactly as today. The
+ * matcher is NOT consulted here: callers gate the PENDING path on matcher PASS.
+ */
+export function isLiveDeferredOnly(detail: unknown): detail is LiveDeferredOnlyDetail {
+ if (!detail || typeof detail !== "object") return false;
+ if (!("failed_stages" in detail) || !("deferred_stages" in detail) || !("live" in detail)) return false;
+ const failed: unknown = detail.failed_stages;
+ const deferred: unknown = detail.deferred_stages;
+ if (!Array.isArray(failed) || failed.length !== 0) return false;
+ if (!Array.isArray(deferred) || deferred.length === 0 ||
+  !deferred.every((entry): entry is string => typeof entry === "string")) return false;
+ const live: unknown = detail.live;
+ if (!live || typeof live !== "object") return false;
+ if (!("status" in live) || live.status !== "NOT_RUN") return false;
+ if ("observed_scenarios" in live && typeof live.observed_scenarios === "number" && live.observed_scenarios !== 0) return false;
+ if ("plant" in live && live.plant === "FAIL") return false;
+ const failures: unknown = "failures" in detail ? detail.failures : [];
+ const rows = Array.isArray(failures) ? failures : [];
+ for (const failure of rows) {
+  if (typeof failure !== "string") continue;
+  if (failure.startsWith("FAIL  ") || failure.startsWith("Live scenario rows") || failure.startsWith("Planted negative")) return false;
+ }
+ return true;
+}
+
 /** Retains the update lock across staged activation, the real matcher, and the isolated P09 ladder. */
 export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResult> {
  if (plan.exitCode !== 0 || plan.provenance !== "INTEGRITY_ONLY") throw new Error("STALE_KIT_PLAN");
