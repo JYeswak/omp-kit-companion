@@ -2999,7 +2999,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	const loopCloseRefusal = (name: string): CliResult => {
 		const unset = loopCloseUnset[name]!;
 		return refusal(`LOOP_CLOSE_${unset.status === "INVALID" ? "CONFIG_INVALID" : "UNCONFIGURED"}`, `loop-close has no usable config: ${unset.reason}`,
-			`Add "loopClose": {"repo": "/absolute/dir", "mailTo": "...", "mailProject": "..."} to ${unset.configPath} (or set LOOP_CLOSE_REPO/LOOP_CLOSE_MAIL_TO/LOOP_CLOSE_MAIL_PROJECT); nothing was changed.`);
+			`Add "loopClose": {"repo": "/absolute/dir", "mailTo": "...", "mailProject": "..."} to ${unset.configPath} (or set LOOP_CLOSE_REPO/LOOP_CLOSE_MAIL_TO/LOOP_CLOSE_MAIL_PROJECT/LOOP_CLOSE_MAIL_FROM); nothing was changed.`);
 	};
 	const unconfiguredRefusal = (name: string): CliResult => {
 		const command = operator[name]!;
@@ -3595,6 +3595,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					statePath: join(root, "loop-close.json"), home, repo: configured.repo,
 					actor: process.env.AGENT_NAME ?? "loop-close", env: childEnv, capMs,
 					mailTo: configured.mailTo, mailProjectKey: configured.mailProjectKey,
+					mailFrom: configured.mailFrom,
 				});
 			} catch (error) {
 				lock.release();

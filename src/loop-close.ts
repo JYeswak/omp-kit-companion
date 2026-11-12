@@ -2,7 +2,6 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSyn
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
 import { run } from "./kitlib/run.ts";
-import { callAgentMail } from "./fleet-guard/reservations.ts";
 import { fleetWatchConfigPath, jobReceiptPath, KNOWN_JOBS } from "./service.ts";
 import { lifecycleGaps, lifecycleManifestPath, loadLifecycleManifest, validateLifecycleManifest, type LifecycleGap, type LifecycleManifest } from "./lifecycle.ts";
 import { LIVE_READBACK_LABEL, liveReadback } from "./verify.ts";
@@ -13,7 +12,7 @@ import { LIVE_READBACK_LABEL, liveReadback } from "./verify.ts";
 //
 // Every external input is injectable (LoopCloseDeps): the gate-events ledger path, the
 // tracker (br through kitlib run, the way verify.ts files live-readback beads), the
-// Agent Mail send (callAgentMail, the way release-verdict-mail.ts sends), the service
+// Agent Mail send (`am mail send`, the way intake-deliver.ts and land.ts send), the service
 // status reader, and the live-readback list/visit pair (the bounded form of
 // verify --live-readback --all: liveReadbackAll's discovery plus its per-bead
 // liveReadback, with an overall deadline). Production defaults wire each seam;
@@ -71,6 +70,8 @@ export interface LoopCloseConfig {
 	configPath: string;
 	mailTo?: string;
 	mailProjectKey?: string;
+	/** REPORT sender seat; default AGENT_NAME, then mailTo. */
+	mailFrom?: string;
 }
 
 export type LoopCloseConfigResult =
@@ -87,16 +88,16 @@ function cleanLoopCloseLine(value: unknown): string | null {
 /**
  * LOOPCLOSEWIRE1 (ompkit-1ra0d.224): resolve the loop-close consumer config the way
  * readBridgeConfig resolves the bridge: fleet-watch.json `loopClose`
- * ({repo, mailTo, mailProject}) with LOOP_CLOSE_REPO/_MAIL_TO/_MAIL_PROJECT
+ * ({repo, mailTo, mailProject, mailFrom}) with LOOP_CLOSE_REPO/_MAIL_TO/_MAIL_PROJECT/_MAIL_FROM
  * overrides. No repo is configured by default; without one the job reports
  * UNCONFIGURED instead of running br in $HOME.
  */
 export function readLoopCloseConfig(home: string, env: NodeJS.ProcessEnv = process.env): LoopCloseConfigResult {
 	const configPath = env.OMP_KIT_FLEET_WATCH_CONFIG ?? fleetWatchConfigPath(home);
 	const unconfigured = (message: string): LoopCloseConfigResult => ({ ok: false, code: "LOOP_CLOSE_UNCONFIGURED", message, configPath,
-		remediation: `Set "loopClose": {"repo": "/absolute/dir", "mailTo": "...", "mailProject": "..."} in ${configPath} (or LOOP_CLOSE_REPO/LOOP_CLOSE_MAIL_TO/LOOP_CLOSE_MAIL_PROJECT); nothing was filed.` });
+		remediation: `Set "loopClose": {"repo": "/absolute/dir", "mailTo": "...", "mailProject": "..."} in ${configPath} (or LOOP_CLOSE_REPO/LOOP_CLOSE_MAIL_TO/LOOP_CLOSE_MAIL_PROJECT/LOOP_CLOSE_MAIL_FROM); nothing was filed.` });
 	const invalid = (message: string): LoopCloseConfigResult => ({ ok: false, code: "LOOP_CLOSE_CONFIG_INVALID", message, configPath,
-		remediation: `Fix "loopClose" in ${configPath} so it is {"repo": "/absolute/dir", ...} with single-line values (or unset it and use LOOP_CLOSE_REPO/LOOP_CLOSE_MAIL_TO/LOOP_CLOSE_MAIL_PROJECT); nothing was filed.` });
+		remediation: `Fix "loopClose" in ${configPath} so it is {"repo": "/absolute/dir", ...} with single-line values (or unset it and use LOOP_CLOSE_REPO/LOOP_CLOSE_MAIL_TO/LOOP_CLOSE_MAIL_PROJECT/LOOP_CLOSE_MAIL_FROM); nothing was filed.` });
 	let section: Record<string, unknown> = {};
 	try {
 		const parsed: unknown = JSON.parse(readFileSync(configPath, "utf8"));
@@ -116,7 +117,9 @@ export function readLoopCloseConfig(home: string, env: NodeJS.ProcessEnv = proce
 	if ((env.LOOP_CLOSE_MAIL_TO ?? section.mailTo) !== undefined && mailTo === null) return invalid(`loopClose.mailTo must be a non-empty single-line string`);
 	const mailProjectKey = cleanLoopCloseLine(env.LOOP_CLOSE_MAIL_PROJECT ?? section.mailProject);
 	if ((env.LOOP_CLOSE_MAIL_PROJECT ?? section.mailProject) !== undefined && mailProjectKey === null) return invalid(`loopClose.mailProject must be a non-empty single-line string`);
-	return { ok: true, config: { ...config, ...(mailTo === null ? {} : { mailTo }), ...(mailProjectKey === null ? {} : { mailProjectKey }) } };
+	const mailFrom = cleanLoopCloseLine(env.LOOP_CLOSE_MAIL_FROM ?? section.mailFrom);
+	if ((env.LOOP_CLOSE_MAIL_FROM ?? section.mailFrom) !== undefined && mailFrom === null) return invalid(`loopClose.mailFrom must be a non-empty single-line string`);
+	return { ok: true, config: { ...config, ...(mailTo === null ? {} : { mailTo }), ...(mailProjectKey === null ? {} : { mailProjectKey }), ...(mailFrom === null ? {} : { mailFrom }) } };
 }
 
 /** LIFECYCLEMANIFEST1: new gap-bead filings per run; updates to filed beads are uncapped. */
@@ -154,6 +157,8 @@ export interface LoopCloseDeps {
 	/** REPORT mail recipient; unset skips the wake with a finding. */
 	mailTo?: string;
 	mailProjectKey?: string;
+	/** REPORT sender seat; default AGENT_NAME, then mailTo. */
+	mailFrom?: string;
 	/** Tracker seam; argv excludes the `br` binary name (the production seam prepends it). */
 	runBr?: (argv: string[]) => Promise<LoopCloseBrResult>;
 	sendMail?: (mail: LoopCloseMail) => Promise<LoopCloseMailResult>;
@@ -364,21 +369,24 @@ async function defaultRunBr(argv: string[], deps: LoopCloseDeps): Promise<LoopCl
 	return { rc: result.rc, stdout: text.decode(result.stdout), stderr: text.decode(result.stderr) };
 }
 
-/** Production mail seam: Agent Mail send_message (release-verdict-mail.ts sends this way). */
+/** Production mail seam: the token-free `am mail send` route (src/intake-deliver.ts,
+ * src/land.ts). `am` reuses the registered identity's persisted token, so the
+ * launchd job needs no AGENT_MAIL_SENDER_TOKEN. No token is read or printed. */
 async function defaultSendMail(mail: LoopCloseMail, deps: LoopCloseDeps): Promise<LoopCloseMailResult> {
-	const sender = process.env.AGENT_NAME;
-	const senderToken = process.env.AGENT_MAIL_SENDER_TOKEN;
-	if (!sender || !senderToken || !deps.mailTo || !deps.mailProjectKey) {
+	const sender = deps.mailFrom ?? cleanLoopCloseLine(process.env.AGENT_NAME) ?? deps.mailTo;
+	if (!sender || !deps.mailTo || !deps.mailProjectKey) {
 		throw new Error("loop-close mail sender or recipient is unconfigured");
 	}
-	const key = createHash("sha256").update(JSON.stringify([deps.mailProjectKey, deps.mailTo.toLowerCase(), mail.subject, mail.bodyMd])).digest("hex");
-	const result = await callAgentMail("send_message", {
-		project_key: deps.mailProjectKey, sender_name: sender, sender_token: senderToken, to: [deps.mailTo],
-		subject: mail.subject, body_md: mail.bodyMd, ack_required: false,
-		idempotency_key: `loop-close-${key}`,
-	}, AbortSignal.timeout(20_000));
-	if (typeof result !== "object" || result === null || !("count" in result) || result.count !== 1) {
-		throw new Error("loop-close mail delivery unconfirmed");
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(deps.env ?? process.env)) {
+		if (typeof value === "string") env[key] = value;
+	}
+	const result = await run(["am", "mail", "send", "--project", deps.mailProjectKey,
+		"--from", sender, "--to", deps.mailTo,
+		"--subject", mail.subject, "--body", mail.bodyMd],
+		{ cwd: deps.repo, deadline_s: 60, env });
+	if (result.rc !== 0) {
+		throw new Error(`am mail send rc ${String(result.rc)}: ${new TextDecoder().decode(result.stderr).slice(0, 300)}`);
 	}
 	return { delivered: true, detail: "delivered" };
 }
@@ -455,7 +463,7 @@ function lifecycleGapDescription(gap: LifecycleGap, manifest: LifecycleManifest)
 }
 
 function lifecycleGapAcceptance(gap: LifecycleGap): string {
-	return `- [ ] Fill the ${gap.facet} for phase \`${gap.phase}\` in docs/lifecycle.json\n- [ ] Run \`bun scripts/lifecycle-check.ts --check\` green\n- [ ] Close this bead when the gap row is complete`;
+	return `- [ ] [a] [build] Fill the ${gap.facet} for phase ${gap.phase} in docs/lifecycle.json; replay \`bun scripts/lifecycle-check.ts --check\` -> rc 0: check green\n- [ ] [b] [build] Planted negative refused: with the ${gap.facet} removed, replay \`bun scripts/lifecycle-check.ts --check\` -> rc 1; today's body is rejected`;
 }
 
 export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult> {
@@ -556,9 +564,9 @@ export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult
 
 	for (const entry of silent) {
 		await fileOrUpdate(`retire-code:${entry.code}`, `RETIRE: ${entry.code} silent ${LOOP_CLOSE_RETIRE_DAYS} d`,
-			retireDescription(entry.code, entry.lastFire, nowMs),
-			`- [ ] Retire the rule or hook behind \`${entry.code}\`, or record why it stays\n- [ ] Close this bead when the retirement lands`,
-			result.retiredFiled, result.retiredUpdated);
+ 			retireDescription(entry.code, entry.lastFire, nowMs),
+			`- [ ] [a] [build] Retire the rule or hook behind ${entry.code} (source policy/gates.jsonl and its gate-events ledger row) or record why it stays; replay \`br list --status all --deferred --limit 0 --json\` -> rc 0: no ${entry.code} fire in the last ${LOOP_CLOSE_RETIRE_DAYS} d\n- [ ] [b] [build] Planted negative refused: with a fixture row firing ${entry.code} in-window, replay \`br list --status all --deferred --limit 0 --json\` -> rc 0: the code still lists, so the close is rejected`,
+ 			result.retiredFiled, result.retiredUpdated);
 	}
 
 	if (newCodes.length > 0) {
@@ -626,12 +634,12 @@ export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult
 			.filter(([, firstSeen]) => nowMs - firstSeen >= LOOP_CLOSE_RED_HOURS * 60 * 60 * 1000)
 			.map(([name, firstSeen]) => ({ name, firstSeen }))
 			.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-		for (const service of due) {
-			await fileOrUpdate(redIncidentKey(service.name, service.firstSeen), `RED ${LOOP_CLOSE_RED_HOURS} h: ${service.name} failing`,
-				redDescription(service.name, service.firstSeen),
-				`- [ ] Repair or reinstall \`${service.name}\` and confirm a green receipt\n- [ ] Close this bead when the service holds green`,
-				result.redFiled, result.redUpdated);
-		}
+	for (const service of due) {
+		await fileOrUpdate(redIncidentKey(service.name, service.firstSeen), `RED ${LOOP_CLOSE_RED_HOURS} h: ${service.name} failing`,
+ 			redDescription(service.name, service.firstSeen),
+			`- [ ] [a] [build] Repair or reinstall ${service.name} and confirm green; replay \`omp-kit service status ${service.name}\` -> rc 0: status green\n- [ ] [b] [build] Planted negative refused: while the receipt still fails, replay \`omp-kit service status ${service.name}\` -> prints red; the close is rejected`,
+ 			result.redFiled, result.redUpdated);
+	}
 	} catch (error) {
 		findings.push(`STATUS_FAILED: service status unreadable: ${error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300)}`);
 	}

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run, runSync } from "../../src/kitlib/run.ts";
@@ -7,6 +7,7 @@ import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 import { resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 import { RUN_TIME_CAPS_MS } from "../../src/service-run.ts";
 import { canonicalCode, isNonRefusalGate, parseGateTs, readLoopCloseConfig, runLoopClose, type LoopCloseBrResult, type LoopCloseMail } from "../../src/loop-close.ts";
+import { LIFECYCLE_PHASES } from "../../src/lifecycle.ts";
 
 const NOW = Date.parse("2026-11-12T00:00:00Z");
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -411,6 +412,12 @@ test("LOOPCLOSEWIRE1: readLoopCloseConfig reads the loopClose key with env overr
 	const configured = read({ loopClose: { repo: "/repo", mailTo: "lead", mailProject: "proj" } });
 	expect(configured.ok).toBe(true);
 	if (configured.ok) expect(configured.config).toEqual({ repo: "/repo", configPath, mailTo: "lead", mailProjectKey: "proj" });
+	const withFrom = read({ loopClose: { repo: "/repo", mailTo: "lead", mailProject: "proj", mailFrom: "sender" } });
+	expect(withFrom.ok).toBe(true);
+	if (withFrom.ok) expect(withFrom.config).toEqual({ repo: "/repo", configPath, mailTo: "lead", mailProjectKey: "proj", mailFrom: "sender" });
+	const envFrom = read({ loopClose: { repo: "/repo", mailTo: "lead", mailProject: "proj" } }, { LOOP_CLOSE_MAIL_FROM: "env-sender" });
+	expect(envFrom.ok).toBe(true);
+	if (envFrom.ok) expect(envFrom.config.mailFrom).toBe("env-sender");
 	const overridden = read({ loopClose: { repo: "/repo", mailTo: "lead", mailProject: "proj" } },
 		{ LOOP_CLOSE_REPO: "/env/repo", LOOP_CLOSE_MAIL_TO: "env-lead" });
 	expect(overridden.ok).toBe(true);
@@ -423,7 +430,8 @@ test("LOOPCLOSEWIRE1: readLoopCloseConfig reads the loopClose key with env overr
 	rmSync(configPath);
 	expect(read(null)).toMatchObject({ ok: false, code: "LOOP_CLOSE_UNCONFIGURED" });
 	for (const bad of ["{not json", "[1]", `"str"`, { loopClose: "/repo" }, { loopClose: { repo: "relative" } },
-		{ loopClose: { repo: "/repo", mailTo: "" } }, { loopClose: { repo: "/repo", mailProject: "a\nb" } }]) {
+		{ loopClose: { repo: "/repo", mailTo: "" } }, { loopClose: { repo: "/repo", mailProject: "a\nb" } },
+		{ loopClose: { repo: "/repo", mailFrom: "" } }, { loopClose: { repo: "/repo", mailFrom: "a\nb" } }]) {
 		expect(read(bad)).toMatchObject({ ok: false, code: "LOOP_CLOSE_CONFIG_INVALID" });
 	}
 });
@@ -434,7 +442,7 @@ function wireServiceEnv(home: string, configPath: string, extra: Record<string, 
 		if (typeof value === "string") env[key] = value;
 	}
 	for (const key of ["BEADS_DIR", "BEADS_JSONL", "BEADS_CACHE_DIR", "BD_DB", "BD_DATABASE", "BR_REAL", "BR_BIN", "BR_ACTOR", "BR_AGENT_NAME", "BR_OUTPUT_FORMAT",
-		"LOOP_CLOSE_REPO", "LOOP_CLOSE_MAIL_TO", "LOOP_CLOSE_MAIL_PROJECT", "LOOP_CLOSE_LEDGER"]) delete env[key];
+		"LOOP_CLOSE_REPO", "LOOP_CLOSE_MAIL_TO", "LOOP_CLOSE_MAIL_PROJECT", "LOOP_CLOSE_MAIL_FROM", "LOOP_CLOSE_LEDGER"]) delete env[key];
 	return { ...env, HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), TMPDIR: join(home, "tmp"),
 		OMP_KIT_FLEET_WATCH_CONFIG: configPath, OMP_KIT_LOAD_OVERRIDE: "0/8",
 		OMP_KIT_TEST_LABEL_NAMESPACE: `com.omp-kit.test.loopwire${Math.random().toString(36).slice(2, 8)}`, ...extra };
@@ -505,10 +513,127 @@ test("LOOPCLOSEWIRE1: configured service run files into the loopClose repo and a
 	});
 	const envelope = JSON.parse(new TextDecoder().decode(child.stdout));
 	// The retire bead files into the configured repo; the REPORT is attempted at the
-	// configured mailbox and fails inside the fixture (no sender token), never skipped.
+	// configured mailbox and fails inside the fixture (no am route there), never skipped.
 	expect(envelope.data.retiredFiled).toHaveLength(1);
 	expect(envelope.data.mail).toBe("FAILED");
 	expect(envelope.data.findings.some((finding: string) => finding.startsWith("MAIL_FAILED"))).toBe(true);
 	expect(existsSync(join(repo, ".beads", "beads.db"))).toBe(true);
 	expect(existsSync(join(root, ".beads"))).toBe(false);
 }, fixtureDeadlineS(120) * 1_000);
+// LOOPCLOSEFIX1 (ompkit-1ra0d.224 follow-up): the first live run filed nothing —
+// every generated bead was refused by the tracker's create lint
+// (d-negative-specimen, l-ac-phase:AC_PHASE_UNTAGGED) and the REPORT mail needed a
+// launchd-absent AGENT_MAIL_SENDER_TOKEN. The bodies below go through the REAL
+// scripts/br-create-lint.py the way the shim invokes it (br argv after the binary,
+// BR_CREATE_REAL/PROJECT/DB from the guard contract); the planted negatives are
+// today's refused bodies verbatim.
+test("LOOPCLOSEFIX1: generated creates pass the real br-create-lint; today's bodies are refused", async () => {
+	const root = ownedTmp("loop-close-fix").path;
+	const ledgerPath = join(root, "gate-events.jsonl");
+	writeFileSync(ledgerPath, [
+		ledgerRow("SILENT-OLD", 45),
+		ledgerRow("SILENT-OLD", 31),
+		ledgerRow("NEW-HOT", 1),
+	].join("\n"));
+	const redSince = NOW - 25 * 60 * 60 * 1000;
+	const tracker = makeTracker();
+	const mail = makeMail();
+	const docsDir = join(root, "docs");
+	mkdirSync(docsDir, { recursive: true });
+	writeFileSync(join(docsDir, "lifecycle.json"), JSON.stringify({
+		version: 1,
+		rows: LIFECYCLE_PHASES.map(phase => ({ phase, exit_criterion: "criterion holds", metric: "open" })),
+	}));
+	const statePath = join(root, "kit-state", "loop-close.json");
+	const result = await runLoopClose({
+		ledgerPath, statePath, home: root, repo: root, actor: "loop-close-fix",
+		nowMs: NOW, mailTo: "lead-test", mailProjectKey: "proj-test",
+		runBr: tracker.runBr, sendMail: mail.sendMail,
+		readServiceStatus: async () => [{ name: "cc", red: true, redSinceMs: redSince }],
+		listLiveReadbacks: async () => [],
+	});
+	expect(result.retiredFiled).toHaveLength(1);
+	expect(result.redFiled).toHaveLength(1);
+	expect(result.lifecycleFiled.length).toBeGreaterThan(0);
+	const creates = tracker.created();
+	expect(creates.length).toBe(result.retiredFiled.length + result.redFiled.length + result.lifecycleFiled.length);
+
+	const real = resolveRealBr(process.env.PATH);
+	if (!real.ok) throw new Error(real.reason);
+	const bin = join(root, "bin");
+	mkdirSync(bin, { recursive: true });
+	symlinkSync(real.path, join(bin, "br"));
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (typeof value === "string") env[key] = value;
+	}
+	env.PATH = `${bin}:${env.PATH ?? ""}`;
+	const trackerDir = join(root, "lint-tracker");
+	mkdirSync(trackerDir, { recursive: true });
+	const db = join(trackerDir, ".beads", "beads.db");
+	const init = await runFixtureAsync(["br", "init", "--db", db], {
+		cwd: trackerDir, floor_s: 60, label: "lint tracker init", env,
+	});
+	expect(init.rc).toBe(0);
+	const lint = resolve(import.meta.dir, "..", "..", "scripts", "br-create-lint.py");
+	const lintEnv = { ...env, BR_CREATE_REAL: real.path, BR_CREATE_PROJECT: trackerDir, BR_CREATE_DB: db };
+	for (const create of creates) {
+		const checked = await runFixtureAsync(["python3", lint, ...create], {
+			cwd: trackerDir, floor_s: 60, label: "br-create-lint generated", env: lintEnv,
+		});
+		expect(checked.rc).toBe(0);
+	}
+	const refusedBodies = [
+		'- [ ] Fill the doc for phase `discover` in docs/lifecycle.json\n- [ ] Run `bun scripts/lifecycle-check.ts --check` green\n- [ ] Close this bead when the gap row is complete',
+		'- [ ] Retire the rule or hook behind `SILENT-OLD`, or record why it stays\n- [ ] Close this bead when the retirement lands',
+		'- [ ] Repair or reinstall `cc` and confirm a green receipt\n- [ ] Close this bead when the service holds green',
+	];
+	for (const acceptance of refusedBodies) {
+		const refused = await runFixtureAsync(["python3", lint, "create", "TODAY BODY", "-t", "task",
+			"--description", "WHAT: today\n\nWHY: today",
+			"--acceptance-criteria", acceptance, "--json", "--actor", "loop-close-fix"], {
+			cwd: trackerDir, floor_s: 60, label: "br-create-lint planted negative", env: lintEnv,
+		});
+		expect(refused.rc).toBe(4);
+		const stderr = new TextDecoder().decode(refused.stderr);
+		expect(stderr).toContain("d-negative-specimen");
+		expect(stderr).toContain("l-ac-phase");
+	}
+}, fixtureDeadlineS(120) * 1_000);
+
+// LOOPCLOSEFIX1: the REPORT mail goes through the token-free `am mail send` route
+// (the kit's existing CLI pattern), never AGENT_MAIL_SENDER_TOKEN. A fake `am`
+// on PATH records the argv; the test asserts the shape and the absence of any
+// token flag.
+test("LOOPCLOSEFIX1: default mail sends through the token-free am CLI", async () => {
+	const root = ownedTmp("loop-close-mail").path;
+	const ledgerPath = join(root, "gate-events.jsonl");
+	writeFileSync(ledgerPath, [ledgerRow("NEW-HOT", 1)].join("\n"));
+	const bin = join(root, "bin");
+	mkdirSync(bin, { recursive: true });
+	const argvLog = join(root, "am-argv.txt");
+	writeFileSync(join(bin, "am"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argvLog + "\nexit 0\n");
+	chmodSync(join(bin, "am"), 0o755);
+	const tracker = makeTracker();
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (typeof value === "string") env[key] = value;
+	}
+	env.PATH = `${bin}:${env.PATH ?? ""}`;
+	const result = await runLoopClose({
+		ledgerPath, statePath: join(root, "kit-state", "loop-close.json"), home: root, repo: root,
+		actor: "loop-close-mail", nowMs: NOW, env,
+		mailTo: "lead-test", mailProjectKey: "proj-test", mailFrom: "sender-test",
+		runBr: tracker.runBr,
+		readServiceStatus: async () => [],
+		listLiveReadbacks: async () => [],
+		lifecycleManifestPath: join(root, "no-manifest.json"),
+	});
+	expect(result.mail).toBe("SENT");
+	expect(result.findings).toHaveLength(0);
+	const argv = readFileSync(argvLog, "utf8").trim().split("\n");
+	expect(argv.slice(0, 8)).toEqual(["mail", "send", "--project", "proj-test", "--from", "sender-test", "--to", "lead-test"]);
+	expect(argv).toContain("--subject");
+	expect(argv).toContain("--body");
+	expect(argv.some(part => part.toLowerCase().includes("token"))).toBe(false);
+}, fixtureDeadlineS(60) * 1_000);
