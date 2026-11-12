@@ -1400,6 +1400,146 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 	}
 }
 
+function landedBaseTimeMs(repo: string, base: string): number | null {
+	try {
+		const run = git(repo, ["show", "-s", "--format=%ct", `${base}^{commit}`]);
+		if (run.code !== 0 || run.interrupted) return null;
+		const seconds = Number(run.out.trim());
+		if (!Number.isFinite(seconds) || seconds <= 0) return null;
+		return seconds * 1000;
+	} catch {
+		return null;
+	}
+}
+
+// LANDSTRANDED1 (ompkit-1ra0d.220): a custody lapse after the local commit used
+// to refuse LAND_CUSTODY_EXPIRED with "nothing was published" and no mention of
+// the saved commit, and the retry refused LAND_NO_CHANGES because the worktree
+// already matched HEAD. The commit sat stranded on shared local main until the
+// lead published it by hand. Both entry points funnel through this single
+// publisher: the commit path hands it the fresh candidate, the retry path hands
+// it the stranded tip it re-verifies before publishing.
+async function publishQualifiedCandidate(
+	repo: string,
+	input: { candidate: string; base: string; paths: string[]; owner: string; message: string; qualifiedBlobs: Record<string, WorktreeBlob>; checkPreflight: PushCheckPlan; pushDeadlineS?: number; keepCheckout?: boolean; namedCheckout?: string | null; patchFile?: string | null; spawnEnv?: Record<string, string> },
+): Promise<CliResult> {
+	const { candidate, base, paths, owner, message, qualifiedBlobs, checkPreflight } = input;
+	// Actual-parent/custody qualification (ompkit-rhy9.10): the candidate must
+	// be parented on exactly the qualified base, carry exactly the qualified
+	// bytes without restoring superseded history, touch only owned paths, and
+	// hold current custody. Anything else publishes nothing.
+	const qualified = qualifyPublicationCandidate(repo, {
+		candidate, base, paths, owner,
+		publicationRef: LAND_PUBLICATION_REF, qualifiedBlobs, message,
+	}, input.spawnEnv);
+	if ("refusal" in qualified) {
+		const phases = landPhaseEvidence(repo, candidate, false);
+		const first = qualified.refusal.errors[0];
+		if (first?.code === "LAND_CUSTODY_EXPIRED") {
+			// Rung (a): name the saved commit and give a remediation that works.
+			// Re-reserving the same paths and re-running land publishes the saved
+			// commit through the retry path below instead of committing again.
+			const rerun = `omp-kit land ${paths.map((path) => `--paths ${path}`).join(" ")} --message MSG --apply --yes`;
+			return {
+				code: 1,
+				data: { overall: "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, stranded_commit: candidate, owner, paths, base, check: qualified.guardCheck, phases },
+				errors: [{ code: "LAND_CUSTODY_EXPIRED", message: `Live custody lapsed after the candidate ${candidate} was saved on local main; nothing was published`, remediation: `The candidate ${candidate} is saved on local main and was not published. Reacquire the exact exclusive reservations for: ${paths.join(", ")}, then re-run \`${rerun}\`, which publishes the saved commit instead of committing again (the new --message is required but its content is not committed). Do not reset local main.` }],
+				verification: "PERFORMED",
+			};
+		}
+		return {
+			code: 1,
+			data: { overall: "REFUSED", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner, paths, base, check: qualified.guardCheck, phases },
+			errors: qualified.refusal.errors,
+			verification: "PERFORMED",
+		};
+	}
+	let convergenceStarted = false;
+	let convergenceResult: ConvergeResult | undefined;
+	let checkResult = checkPreflight.kind === "skip"
+		? checkPreflight.result
+		: pushCheckResult("UNRUN", "not_run", checkPreflight.result.sha256);
+	let fullSuiteVerdict: FullSuiteVerdict | undefined;
+	let checkedCandidateSha: string | null = null;
+	let scratchNotice: string | null = null;
+	try {
+		convergenceStarted = true;
+		const convergence = await convergeRepository({
+			repo, apply: true, push: true, pushDeadlineS: input.pushDeadlineS,
+			beforePush: async (candidateSha, baseSha) => {
+				checkedCandidateSha = candidateSha;
+				checkResult = await runPushCheck(repo, baseSha, candidateSha);
+				const admission = pushCheckAdmission(checkResult);
+				if (!admission.allow) return admission;
+				fullSuiteVerdict = await runFullSuiteVerdict(repo, baseSha, candidateSha);
+				if (fullSuiteVerdict !== "PASS")
+					return { allow: false, reason: fullSuiteVerdict === "FAIL" ? "CHECK_FAILED" : "CHECK_UNRUN" };
+				// SCRATCHBIN1 (ompkit-774u.15, Joshua scope 2026-10-20): note undisposed scratch at the push
+				// instead of refusing it. Handing the push off with unbinned dirs is reversible (the dirs stay
+				// listed by `omp-kit scratch mine`), so the push proceeds with a one-line notice (GATEDEMOTE1).
+				// Refuse on positive evidence only; an unlistable census is fail-open, never a
+				// block, so a broken measuring tool cannot strand a landing.
+				try {
+					const gate = disposalGate(homedir(), "push", { liveness: defaultLiveness(), run: defaultRunner });
+					// LANDFINDINGS1: publication judges only scratch under the landing repo. Unreleased dirs
+					// inside other checkouts of the same repository are that checkout's business, never this push's.
+					const owed = gate.unproven ? [] : scratchOwedUnderRepo(gate.owed, repo);
+					if (owed.length > 0) {
+						const first = owed.slice(0, 3).map(row => `${row.dir} (${row.state}, bin ${row.bin})`).join("; ");
+						scratchNotice = `SCRATCH_DISPOSAL_NOTICE: ${owed.length} undisposed scratch dir(s) under the landing repo: ${first}${owed.length > 3 ? "…" : ""}. The push proceeded; release each with omp-kit scratch release DIR --bin throwaway|evidence|promote.`;
+					}
+				} catch { /* fail-open: the push check already passed */ }
+				return admission;
+			},
+		});
+		convergenceResult = convergence;
+		const candidateSha = checkResult.candidate_sha ?? checkedCandidateSha ?? convergence.new_head ?? candidate;
+		const pushedSha = convergence.pushed ? convergence.remote_after ?? null : null;
+		checkResult = { ...checkResult, pushed_sha: pushedSha };
+		// HANDOFFPUSHCHECK1: every completed push-check verdict lands in the
+		// <git-dir>/omp-kit/push-check-runs.jsonl ledger the handoff gate reads.
+		recordLandPushCheck(repo, checkResult);
+		const checkUnavailable = checkResult.status === "UNRUN" && checkResult.reason !== "not_run";
+		const fullSuiteUnavailable = fullSuiteVerdict === "UNRUN";
+		const pushUnverified = convergence.reason === "PUSH_UNVERIFIED";
+		const checkAllowed = checkResult.status === "PASS" || checkResult.status === "SKIP";
+		const published = convergence.pushed && pushedSha === candidateSha && checkAllowed && fullSuiteVerdict === "PASS";
+		const overall = published ? "PUSHED" : checkUnavailable || fullSuiteUnavailable || pushUnverified ? "UNRUN" : "REFUSED";
+		const phases = landPhaseEvidence(repo, candidate, convergenceStarted, convergence);
+		const suiteFailure = fullSuiteVerdict === "FAIL" || fullSuiteVerdict === "UNRUN" ? fullSuiteError(fullSuiteVerdict) : undefined;
+		const convergenceData: ConvergeResult = { ...convergence };
+		delete convergenceData.push_output;
+		const failure = published ? undefined : suiteFailure ?? (checkResult.status === "FAIL"
+			? { code: "LAND_CHECK_FAILED", message: `The registered repo check failed for the exact publication candidate${checkResult.diagnostic_path ? `; diagnostics: ${checkResult.diagnostic_path}` : ""}`, remediation: checkResult.diagnostic_path ? `Inspect diagnostics at ${checkResult.diagnostic_path}, then repair the check or candidate; it was not published.` : "Repair the check or candidate; it was not published." }
+			: checkUnavailable
+				? { code: "LAND_CHECK_UNRUN", message: `The registered repo check did not complete: ${checkResult.reason ?? "unknown"}`, remediation: "Restore the registered check tooling and retry; no publication was authorized." }
+				: convergence.reason === "PUSH_REJECTED"
+					? { code: "LAND_PUSH_REJECTED", message: "origin/main advanced after candidate check; the exact checked candidate was refused without retry or force", remediation: "Reconcile with current origin/main and run land again so the new candidate is checked." }
+					: pushUnverified
+						? pushUnverifiedFailure(repo, input.pushDeadlineS ?? landPushDeadlineSeconds(), convergence)
+						: { code: "LAND_PUBLICATION_REFUSED", message: `The exact checked candidate was not published: ${convergence.reason ?? "publication was not verified"}`, remediation: "Preserve the candidate and resolve the typed refusal before another landing." });
+		let checkoutFields: Record<string, unknown> = {};
+		if (published && pushedSha !== null) {
+			try {
+				const reap = reapLandedCheckouts({ repo, landedPaths: paths, landedRev: pushedSha, landedBaseTimeMs: landedBaseTimeMs(repo, base), namedCheckout: input.namedCheckout ?? null, patchFile: input.patchFile ?? null, keepCheckout: input.keepCheckout === true });
+				checkoutFields = { ovnfs: reap.ovnfs, checkoutScan: reap.checkoutScan, checkoutsRemoved: reap.checkoutsRemoved, checkoutsKept: reap.checkoutsKept, checkoutsMatching: reap.checkoutsMatching, checkout_text: reap.checkout_text, text: reap.checkout_text };
+			} catch {
+				checkoutFields = { ovnfs: "unavailable", checkoutScan: "UNAVAILABLE", checkoutsRemoved: [], checkoutsKept: [], checkoutsMatching: [], checkout_text: "Checkout scan unavailable; land published, nothing removed.", text: "Checkout scan unavailable; land published, nothing removed." };
+			}
+		}
+		return {
+			code: published ? 0 : overall === "UNRUN" ? 77 : 1,
+			data: { overall, commit: candidate, candidate_sha: candidateSha, pushed_sha: pushedSha, owner, paths, base, localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence: convergenceData, check: checkResult, phases, ...(scratchNotice !== null ? { scratch_disposal_notice: scratchNotice } : {}), ...checkoutFields },
+			...(failure ? { errors: [failure] } : {}),
+			verification: overall === "UNRUN" ? "UNVERIFIED" : "PERFORMED",
+		};
+	} catch (error) {
+		const phases = landPhaseEvidence(repo, candidate, convergenceStarted, convergenceResult);
+		const check = { ...checkResult, pushed_sha: null };
+		return { code: 77, data: { overall: "UNRUN", commit: candidate, candidate_sha: checkedCandidateSha ?? candidate, pushed_sha: null, owner, paths, base, check, phases }, errors: [{ code: "LAND_PUBLICATION_UNVERIFIED", message: `The candidate was saved but publication could not be verified: ${error instanceof Error ? error.message : String(error)}`, remediation: "Inspect local main and origin/main before retrying; no force-push or fallback was attempted." }], verification: "UNVERIFIED" };
+	}
+}
+
 /** Commit exactly the owned worktree paths on local main and publish main
  * through owner-resolved convergence (LANDPATCH1, ompkit-1ra0d.69). Path mode
  * calls this with its reserved worktree bytes; patch mode calls it after
@@ -1412,17 +1552,6 @@ async function commitOwnedPathsAndPublish(
 	input: { paths: string[]; message: string; owner: string; base: string; pushDeadlineS?: number; keepCheckout?: boolean; namedCheckout?: string | null; patchFile?: string | null; spawnEnv?: Record<string, string> },
 ): Promise<CliResult> {
 	const { paths, message, owner, base } = input;
-function landedBaseTimeMs(repo: string, base: string): number | null {
-	try {
-		const run = git(repo, ["show", "-s", "--format=%ct", `${base}^{commit}`]);
-		if (run.code !== 0 || run.interrupted) return null;
-		const seconds = Number(run.out.trim());
-		if (!Number.isFinite(seconds) || seconds <= 0) return null;
-		return seconds * 1000;
-	} catch {
-		return null;
-	}
-}
 	let checkPreflight = preparePushCheck(repo, base);
 	if (checkReplaceable(checkPreflight) && paths.includes(PUSH_CHECK_PATH)) {
 		const checkDiff = git(repo, ["diff", "--quiet", "HEAD", "--", `:(literal)${PUSH_CHECK_PATH}`]);
@@ -1535,107 +1664,10 @@ function landedBaseTimeMs(repo: string, base: string): number | null {
 		const phases = landPhaseEvidence(repo, sha, false);
 		return { code: 77, data: { overall: "UNRUN", commit: sha, owner, paths, base, check, phases }, errors: [{ code: "LAND_COMMIT_INTERRUPTED", message: "Git saved the owned commit, but the commit command did not finish successfully", remediation: "Inspect the interrupted hook and saved commit before publication; no hooks were bypassed and no rollback was attempted." }], verification: "UNVERIFIED" };
 	}
-	// Actual-parent/custody qualification (ompkit-rhy9.10): the constructed
-	// candidate must be parented on exactly the qualified base, carry exactly
-	// the qualified bytes without restoring superseded history, touch only
-	// owned paths, and hold current custody. Anything else publishes nothing.
-	const qualified = qualifyPublicationCandidate(repo, {
-		candidate: sha, base, paths, owner,
-		publicationRef: LAND_PUBLICATION_REF, qualifiedBlobs, message,
-	}, input.spawnEnv);
-	if ("refusal" in qualified) {
-		const phases = landPhaseEvidence(repo, sha, false);
-		return {
-			code: 1,
-			data: { overall: "REFUSED", commit: sha, candidate_sha: sha, pushed_sha: null, owner, paths, base, check: qualified.guardCheck, phases },
-			errors: qualified.refusal.errors,
-			verification: "PERFORMED",
-		};
-	}
-	let convergenceStarted = false;
-	let convergenceResult: ConvergeResult | undefined;
-	let checkResult = checkPreflight.kind === "skip"
-		? checkPreflight.result
-		: pushCheckResult("UNRUN", "not_run", checkPreflight.result.sha256);
-	let fullSuiteVerdict: FullSuiteVerdict | undefined;
-	let checkedCandidateSha: string | null = null;
-	let scratchNotice: string | null = null;
-	try {
-		convergenceStarted = true;
-		const convergence = await convergeRepository({
-			repo, apply: true, push: true, pushDeadlineS: input.pushDeadlineS,
-			beforePush: async (candidateSha, baseSha) => {
-				checkedCandidateSha = candidateSha;
-				checkResult = await runPushCheck(repo, baseSha, candidateSha);
-				const admission = pushCheckAdmission(checkResult);
-				if (!admission.allow) return admission;
-				fullSuiteVerdict = await runFullSuiteVerdict(repo, baseSha, candidateSha);
-				if (fullSuiteVerdict !== "PASS")
-					return { allow: false, reason: fullSuiteVerdict === "FAIL" ? "CHECK_FAILED" : "CHECK_UNRUN" };
-				// SCRATCHBIN1 (ompkit-774u.15, Joshua scope 2026-10-20): note undisposed scratch at the push
-				// instead of refusing it. Handing the push off with unbinned dirs is reversible (the dirs stay
-				// listed by `omp-kit scratch mine`), so the push proceeds with a one-line notice (GATEDEMOTE1).
-				// Refuse on positive evidence only; an unlistable census is fail-open, never a
-				// block, so a broken measuring tool cannot strand a landing.
-				try {
-					const gate = disposalGate(homedir(), "push", { liveness: defaultLiveness(), run: defaultRunner });
-					// LANDFINDINGS1: publication judges only scratch under the landing repo. Unreleased dirs
-					// inside other checkouts of the same repository are that checkout's business, never this push's.
-					const owed = gate.unproven ? [] : scratchOwedUnderRepo(gate.owed, repo);
-					if (owed.length > 0) {
-						const first = owed.slice(0, 3).map(row => `${row.dir} (${row.state}, bin ${row.bin})`).join("; ");
-						scratchNotice = `SCRATCH_DISPOSAL_NOTICE: ${owed.length} undisposed scratch dir(s) under the landing repo: ${first}${owed.length > 3 ? "…" : ""}. The push proceeded; release each with omp-kit scratch release DIR --bin throwaway|evidence|promote.`;
-					}
-				} catch { /* fail-open: the push check already passed */ }
-				return admission;
-			},
-		});
-		convergenceResult = convergence;
-		const candidateSha = checkResult.candidate_sha ?? checkedCandidateSha ?? convergence.new_head ?? sha;
-		const pushedSha = convergence.pushed ? convergence.remote_after ?? null : null;
-		checkResult = { ...checkResult, pushed_sha: pushedSha };
-		// HANDOFFPUSHCHECK1: every completed push-check verdict lands in the
-		// <git-dir>/omp-kit/push-check-runs.jsonl ledger the handoff gate reads.
-		recordLandPushCheck(repo, checkResult);
-		const checkUnavailable = checkResult.status === "UNRUN" && checkResult.reason !== "not_run";
-		const fullSuiteUnavailable = fullSuiteVerdict === "UNRUN";
-		const pushUnverified = convergence.reason === "PUSH_UNVERIFIED";
-		const checkAllowed = checkResult.status === "PASS" || checkResult.status === "SKIP";
-		const published = convergence.pushed && pushedSha === candidateSha && checkAllowed && fullSuiteVerdict === "PASS";
-		const overall = published ? "PUSHED" : checkUnavailable || fullSuiteUnavailable || pushUnverified ? "UNRUN" : "REFUSED";
-		const phases = landPhaseEvidence(repo, sha, convergenceStarted, convergence);
-		const suiteFailure = fullSuiteVerdict === "FAIL" || fullSuiteVerdict === "UNRUN" ? fullSuiteError(fullSuiteVerdict) : undefined;
-		const convergenceData: ConvergeResult = { ...convergence };
-		delete convergenceData.push_output;
-		const failure = published ? undefined : suiteFailure ?? (checkResult.status === "FAIL"
-			? { code: "LAND_CHECK_FAILED", message: `The registered repo check failed for the exact publication candidate${checkResult.diagnostic_path ? `; diagnostics: ${checkResult.diagnostic_path}` : ""}`, remediation: checkResult.diagnostic_path ? `Inspect diagnostics at ${checkResult.diagnostic_path}, then repair the check or candidate; it was not published.` : "Repair the check or candidate; it was not published." }
-			: checkUnavailable
-				? { code: "LAND_CHECK_UNRUN", message: `The registered repo check did not complete: ${checkResult.reason ?? "unknown"}`, remediation: "Restore the registered check tooling and retry; no publication was authorized." }
-				: convergence.reason === "PUSH_REJECTED"
-					? { code: "LAND_PUSH_REJECTED", message: "origin/main advanced after candidate check; the exact checked candidate was refused without retry or force", remediation: "Reconcile with current origin/main and run land again so the new candidate is checked." }
-					: pushUnverified
-						? pushUnverifiedFailure(repo, input.pushDeadlineS ?? landPushDeadlineSeconds(), convergence)
-						: { code: "LAND_PUBLICATION_REFUSED", message: `The exact checked candidate was not published: ${convergence.reason ?? "publication was not verified"}`, remediation: "Preserve the candidate and resolve the typed refusal before another landing." });
-		let checkoutFields: Record<string, unknown> = {};
-		if (published && pushedSha !== null) {
-			try {
-				const reap = reapLandedCheckouts({ repo, landedPaths: paths, landedRev: pushedSha, landedBaseTimeMs: landedBaseTimeMs(repo, base), namedCheckout: input.namedCheckout ?? null, patchFile: input.patchFile ?? null, keepCheckout: input.keepCheckout === true });
-				checkoutFields = { ovnfs: reap.ovnfs, checkoutScan: reap.checkoutScan, checkoutsRemoved: reap.checkoutsRemoved, checkoutsKept: reap.checkoutsKept, checkoutsMatching: reap.checkoutsMatching, checkout_text: reap.checkout_text, text: reap.checkout_text };
-			} catch {
-				checkoutFields = { ovnfs: "unavailable", checkoutScan: "UNAVAILABLE", checkoutsRemoved: [], checkoutsKept: [], checkoutsMatching: [], checkout_text: "Checkout scan unavailable; land published, nothing removed.", text: "Checkout scan unavailable; land published, nothing removed." };
-			}
-		}
-		return {
-			code: published ? 0 : overall === "UNRUN" ? 77 : 1,
-			data: { overall, commit: sha, candidate_sha: candidateSha, pushed_sha: pushedSha, owner, paths, base, localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence: convergenceData, check: checkResult, phases, ...(scratchNotice !== null ? { scratch_disposal_notice: scratchNotice } : {}), ...checkoutFields },
-			...(failure ? { errors: [failure] } : {}),
-			verification: overall === "UNRUN" ? "UNVERIFIED" : "PERFORMED",
-		};
-	} catch (error) {
-		const phases = landPhaseEvidence(repo, sha, convergenceStarted, convergenceResult);
-		const check = { ...checkResult, pushed_sha: null };
-		return { code: 77, data: { overall: "UNRUN", commit: sha, candidate_sha: checkedCandidateSha ?? sha, pushed_sha: null, owner, paths, base, check, phases }, errors: [{ code: "LAND_PUBLICATION_UNVERIFIED", message: `The candidate was saved but publication could not be verified: ${error instanceof Error ? error.message : String(error)}`, remediation: "Inspect local main and origin/main before retrying; no force-push or fallback was attempted." }], verification: "UNVERIFIED" };
-	}
+	return publishQualifiedCandidate(repo, {
+		candidate: sha, base, paths, owner, message, qualifiedBlobs, checkPreflight,
+		pushDeadlineS: input.pushDeadlineS, keepCheckout: input.keepCheckout, namedCheckout: input.namedCheckout, patchFile: input.patchFile, spawnEnv: input.spawnEnv,
+	});
 }
 
 
@@ -2033,6 +2065,47 @@ export async function landReviewAutoCommand(repo: string, request: ParsedCommand
 	return result;
 }
 
+// LANDSTRANDED1 (ompkit-1ra0d.220): a `Bead:` trailer line on a landed commit,
+// the same line-start shape the deliberate-restore trailers use.
+const STRANDED_BEAD_TRAILER = /^[ \t]*Bead:[ \t]*(\S+)/m;
+
+type StrandedTip = { candidate: string; base: string; message: string };
+
+/** The stranded tip a retry may publish: exactly one commit ahead of
+ * origin/main, touching only the caller's reserved paths and carrying its own
+ * `Bead:` trailer. Anything else (no tip, a peer-advanced or diverged main, a
+ * multi-commit range, a foreign path, a merge, no trailer) is null: the retry
+ * keeps its LAND_NO_CHANGES refusal and the lead reconciles by hand. Shape
+ * alone does not authorize: the publisher re-verifies the caller's live
+ * custody for exactly these paths and re-runs the full gate (parentage,
+ * bytes, trailers, push check, suite) before any push, the same carriage
+ * `converge --push` would give the tip.
+ */
+function findAdoptableStrandedTip(repo: string, paths: string[]): StrandedTip | null {
+	const origin = git(repo, ["rev-parse", "--verify", "refs/remotes/origin/main"]);
+	if (origin.code !== 0 || origin.interrupted) return null;
+	const originTip = origin.out.trim();
+	if (originTip.length === 0) return null;
+	const head = git(repo, ["rev-parse", "--verify", "HEAD"]);
+	if (head.code !== 0 || head.interrupted) return null;
+	const tip = head.out.trim();
+	if (tip === originTip) return null;
+	if (git(repo, ["merge-base", "--is-ancestor", originTip, tip]).code !== 0) return null;
+	const count = git(repo, ["rev-list", "--count", `${originTip}..${tip}`]);
+	if (count.code !== 0 || count.interrupted || count.out.trim() !== "1") return null;
+	const touched = candidateTouchedPaths(repo, tip);
+	if (!touched || touched.length === 0) return null;
+	if (touched.some((entry) => !paths.includes(entry))) return null;
+	const parents = git(repo, ["show", "-s", "--format=%P", tip]);
+	if (parents.code !== 0 || parents.interrupted) return null;
+	const parentList = parents.out.trim().split(" ").map((parent) => parent.trim()).filter((parent) => parent.length > 0);
+	if (parentList.length !== 1 || !parentList[0]) return null;
+	const message = git(repo, ["show", "-s", "--format=%B", tip]);
+	if (message.code !== 0 || message.interrupted) return null;
+	if (!STRANDED_BEAD_TRAILER.test(message.out)) return null;
+	return { candidate: tip, base: parentList[0], message: message.out };
+}
+
 export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 	if (!request.flags.has("--apply")) return refused("LAND_APPLY_REQUIRED", "land is a mutation and requires --apply", "Review the exact owner, paths, base and candidate, then pass --apply --yes.");
 	const root = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
@@ -2067,7 +2140,30 @@ export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 	if (head.code !== 0) return refused("BASELINE_UNAVAILABLE", "Local main has no readable commit", "Repair the Git repository before landing.");
 	const changed = git(repo, ["diff", "--quiet", "HEAD", "--", ...paths.map((path) => `:(literal)${path}`)]);
 	const hasNewPath = paths.some((path) => trackedPaths(repo, path)?.length === 0);
-	if (changed.code === 0 && !hasNewPath) return refused("LAND_NO_CHANGES", "The owned paths have no changes to save", "Make the reserved worktree changes before landing.");
+	if (changed.code === 0 && !hasNewPath) {
+		// LANDSTRANDED1 rung (b): the previous run may have saved the commit and then
+		// lost custody before publication. Adopt the stranded tip instead of refusing,
+		// but only when it carries exactly the reserved paths; the publisher re-verifies
+		// live custody, parentage, bytes and trailers before any push.
+		const stranded = findAdoptableStrandedTip(repo, paths);
+		if (stranded !== null) {
+			let checkPreflight = preparePushCheck(repo, stranded.base);
+			if (checkReplaceable(checkPreflight) && paths.includes(PUSH_CHECK_PATH)) {
+				const checkDiff = git(repo, ["diff", "--quiet", stranded.base, stranded.candidate, "--", `:(literal)${PUSH_CHECK_PATH}`]);
+				if (checkDiff.code === 1)
+					checkPreflight = { kind: "skip", result: pushCheckResult("SKIP", "hash_changed", checkPreflight.result.sha256) };
+			}
+			const qualifiedBlobs: Record<string, WorktreeBlob> = {};
+			for (const path of paths) qualifiedBlobs[path] = hashWorktreeBlob(repo, path);
+			const checkoutFlag = request.flags.get("--checkout");
+			return publishQualifiedCandidate(repo, {
+				candidate: stranded.candidate, base: stranded.base, paths, owner: owner.owner, message: stranded.message,
+				qualifiedBlobs, checkPreflight, keepCheckout: request.flags.has("--keep-checkout"),
+				namedCheckout: typeof checkoutFlag === "string" ? checkoutFlag : null, patchFile: null,
+			});
+		}
+		return refused("LAND_NO_CHANGES", "The owned paths have no changes to save", "Make the reserved worktree changes before landing.");
+	}
 	if (changed.code !== 0 && changed.code !== 1) return refused("STAGED_INDEX_UNREADABLE", "The owned changes could not be checked", "Repair the Git index before landing.");
 	for (const path of paths) {
 		const tracked = trackedPaths(repo, path);

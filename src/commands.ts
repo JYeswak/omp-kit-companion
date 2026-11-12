@@ -446,7 +446,7 @@ const landCheckData = { type: "object", required: ["status", "path", "sha256", "
 // A refusal before anything was committed carries only overall and check; the rest appears once the land got that far.
 const landData: DataSchema = { type: "object", required: ["overall", "check"], properties: {
 	overall: { enum: ["PUSHED", "REFUSED", "UNRUN"] },
-	commit: { type: ["string", "null"] }, candidate_sha: { type: ["string", "null"] }, pushed_sha: { type: ["string", "null"] }, owner: { type: "string" },
+	commit: { type: ["string", "null"] }, candidate_sha: { type: ["string", "null"] }, pushed_sha: { type: ["string", "null"] }, stranded_commit: { type: ["string", "null"] }, owner: { type: "string" },
 	paths: { type: "array", items: { type: "string" } }, base: { type: "string" },
 	localMain: { type: "string" }, convergence: convergeData, check: landCheckData, phases: { type: "object" },
 	ovnfs: { enum: ["present", "absent", "unavailable"] }, checkoutScan: { enum: ["OK", "TIMED_OUT", "SKIPPED", "UNAVAILABLE"] },
