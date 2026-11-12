@@ -1,0 +1,1 @@
+- `omp-kit milestone launch SESSION [--set KEY=VALUE]` stores asset_freeze, runbook, value_metric and rollback pins on the existing milestone record and reports READY only when the freeze bead is closed, the runbook file exists, the metric reader knows the value, and the rollback command's `--help` exits 0.
