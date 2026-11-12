@@ -193,6 +193,20 @@ export interface LoopCloseResult {
 interface CodeStats { minTs: number; maxTs: number; inWindow: boolean }
 
 /** A stable per-key label lets a later run adopt the bead even when the state file is lost. */
+/** Bead ids the tracker's BR_CREATE_POSSIBLE_DUPLICATE refusal lists, one per `  <id> (<score>): <title>` line. */
+export function duplicateMatchIds(stderr: string): string[] {
+	const ids: string[] = [];
+	for (const line of stderr.split("\n")) {
+		const trimmed = line.trimStart();
+		if (trimmed === line) continue;
+		const space = trimmed.indexOf(" (");
+		if (space <= 0) continue;
+		const id = trimmed.slice(0, space);
+		if (!id.includes(" ") && id.includes("-")) ids.push(id);
+	}
+	return ids;
+}
+
 function stableLabelFor(key: string): string {
 	return `loop-close:${key.split(",").join("_")}`;
 }
@@ -546,8 +560,18 @@ export async function runLoopClose(deps: LoopCloseDeps): Promise<LoopCloseResult
 			}
 			return;
 		}
-		const created = await runBr(["create", title, "-t", "task", "-l", `${LOOP_CLOSE_LABEL},${label}`,
-			"--description", description, "--acceptance-criteria", acceptance, "--json", "--actor", deps.actor]);
+		const createArgv = ["create", title, "-t", "task", "-l", `${LOOP_CLOSE_LABEL},${label}`,
+			"--description", description, "--acceptance-criteria", acceptance, "--json", "--actor", deps.actor];
+		let created = await runBr(createArgv);
+		// The tracker's duplicate check matches sibling loop-close beads (titles share a template).
+		// When every match is a bead this job filed, confirm distinct work and retry once; a match
+		// anyone else filed stays a finding, since that bead may already cover the gap.
+		if (created.rc !== 0 && created.stderr.includes("BR_CREATE_POSSIBLE_DUPLICATE")) {
+			const ours = new Set(Object.values(state.filed));
+			const matched = duplicateMatchIds(created.stderr);
+			if (matched.length > 0 && matched.every(id => ours.has(id)))
+				created = await runBr([...createArgv, "--not-duplicate", matched[0]!]);
+		}
 		if (created.rc !== 0) {
 			findings.push(`TRACKER_FILE_FAILED: ${key} not filed (rc ${String(created.rc)}): ${created.stderr.slice(0, 300)}`);
 			return;

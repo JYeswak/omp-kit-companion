@@ -6,7 +6,7 @@ import { run, runSync } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 import { resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 import { RUN_TIME_CAPS_MS } from "../../src/service-run.ts";
-import { canonicalCode, isNonRefusalGate, parseGateTs, readLoopCloseConfig, runLoopClose, type LoopCloseBrResult, type LoopCloseMail } from "../../src/loop-close.ts";
+import { canonicalCode, duplicateMatchIds, isNonRefusalGate, parseGateTs, readLoopCloseConfig, runLoopClose, type LoopCloseBrResult, type LoopCloseMail } from "../../src/loop-close.ts";
 import { LIFECYCLE_PHASES } from "../../src/lifecycle.ts";
 
 const NOW = Date.parse("2026-11-12T00:00:00Z");
@@ -637,3 +637,10 @@ test("LOOPCLOSEFIX1: default mail sends through the token-free am CLI", async ()
 	expect(argv).toContain("--body");
 	expect(argv.some(part => part.toLowerCase().includes("token"))).toBe(false);
 }, fixtureDeadlineS(60) * 1_000);
+
+test("LOOPCLOSE1: a duplicate refusal naming only this job's own beads is retried as distinct; anyone else's match is not", () => {
+	const stderr = "br-shim: BR_CREATE_POSSIBLE_DUPLICATE; review the open matches:\n  ompkit-k6m3b (0.60): LIFECYCLE: discover doc\n  ompkit-ksfc0 (0.55): LIFECYCLE: validate verbs\nUse --not-duplicate <id> to confirm distinct work, or --comment-target <id> to add context.\n";
+	expect(duplicateMatchIds(stderr)).toEqual(["ompkit-k6m3b", "ompkit-ksfc0"]);
+	// Planted negative: the trailing usage line and the header are not ids.
+	expect(duplicateMatchIds("br-shim: BR_CREATE_POSSIBLE_DUPLICATE; review the open matches:\nUse --not-duplicate <id> to confirm\n")).toEqual([]);
+});
