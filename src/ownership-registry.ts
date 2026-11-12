@@ -301,6 +301,16 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 		terminal: { outcome: "self-heals", producer: "subscribeReleaseVerdicts rewrites or removes the subscription; notifyReleaseVerdict writes a digest-keyed sent marker after confirmed mail delivery" },
 		census: null, noCensus: "per-repo subscriptions and sent markers have no doctor census; sent markers are keyed by project, agent, sha and verdict statuses, not pid", ownerBead: "ompkit-fp72.120.16.307",
 	},
+	{
+		id: "loop-close-state", title: "Loop-close dedup state <state root>/loop-close.json (filed and updated gap-bead ids) and loop-close-runs.jsonl, written through <record>.tmp-<pid>",
+		rows: [], class: "REHOME", ownerKey: "pid", scope: "service", survivesRespawn: true,
+		writers: ["src/loop-close.ts"],
+		cancel: "no cancel: the daily run rewrites loop-close.json in place; deleting it only loses dedup and may refile gaps",
+		crash: "a crash between writeFileSync and renameSync leaves loop-close.json.tmp-<pid>; the durable file keeps its last renamed value and the next run writes its own tmp name",
+		respawn: "the state is keyed by the state-root path, not pid or session, so the next daily run resumes the same dedup map; the pid names only the atomic-write temp",
+		terminal: { outcome: "self-heals", producer: "src/loop-close.ts saveState on every run, plus loop-close-runs.jsonl appends" },
+		census: null, noCensus: "one small dedup map plus one appended run row per state root, rewritten in place; nothing accumulates to count", ownerBead: "ompkit-1ra0d.211",
+	},
 ];
 
 /** Entries that account for an inventory row, for the coverage test and the doctor's row lookup. */
