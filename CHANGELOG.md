@@ -4,6 +4,15 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.131] - 2026-11-13
+
+### Changed
+
+- After a host restart, the iMessage bridge sends you one message only if the restart itself paused working seats (seats you paused before the restart are left alone), naming them and asking you to reply "resume all" or name the seats. Nothing is sent when nothing needs your action.
+- `omp-kit verify` now judges numeric acceptance phrasings by the output's first integer: `prints a count`, `prints a number`, `prints a count above N` / `below N`, and `<= N`, `>= N`, `< N`, `> N`, `= N`. Before, it searched the output for the prose literally, so a live readback whose output met the expectation still failed.
+- The hook installer now retires older kit-shipped copies of the retired gap-mention and staged-sources members instead of calling them owner-modified and aborting the whole refresh, so repos installed from older releases (localbench, zestroku) stop running retired gates. (RETIRESHIPPED1, ompkit-1ra0d.243)
+- `omp-kit project add` starts seats again: it now sends the program and seat model that Agent Mail 0.3.39 requires when minting each seat identity. (MINTFIELDS1, ompkit-1ra0d.249)
+
 ## [0.2.130] - 2026-11-13
 
 ### Changed

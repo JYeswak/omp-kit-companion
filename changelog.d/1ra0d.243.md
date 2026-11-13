@@ -1,1 +1,0 @@
-- The hook installer now retires older kit-shipped copies of the retired gap-mention and staged-sources members instead of calling them owner-modified and aborting the whole refresh, so repos installed from older releases (localbench, zestroku) stop running retired gates. (RETIRESHIPPED1, ompkit-1ra0d.243)

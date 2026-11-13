@@ -1,1 +1,0 @@
-- After a host restart, the iMessage bridge sends you one message only if the restart itself paused working seats (seats you paused before the restart are left alone), naming them and asking you to reply "resume all" or name the seats. Nothing is sent when nothing needs your action.
