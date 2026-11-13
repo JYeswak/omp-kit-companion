@@ -539,6 +539,11 @@ folded_is_shipped() {
 		vlevel:07b3208b91f8b01f2966abeb1faf2493b5e4c938ae262d781da278c57a161b98) return 0 ;;
 		notes:32b934256c560325bb66d6d23821bcb8d0d14efbec251be2f3af017bb60afffe|notes:782034c2b88329b6fd75f5b388bf137c24d8d64719e0368167ef2da8dcf98b33|notes:7311d32b1131fc8a7d9fe117a45371fd892624fbdd66574f07923ce12e21150f) return 0 ;;
 		deploy:3394d20967b47019dc1775ace0f51e62b1e2b86f2f28294d924a964accb747a1) return 0 ;;
+		# RETIRESHIPPED1 (ompkit-1ra0d.243): RETIREHOOKS1's standalone members, every shipped blob.
+		# A repo installed from an older release holds the older bytes; that copy is the kit's, not
+		# the owner's, so it retires instead of refusing the whole refresh.
+		gap:8aa0bc9c7404110f27a5b9fdd84efdb028d8d3a84e0cb996dd9661bf6b008762|gap:e6e80d85fdd24b675d51c7fb10ea45b9862b6d6ad03fb16a03a76c812d05f278) return 0 ;;
+		sources:0d971b18f6a686b7993d3eb6a6445d100802e9a53e032f763a67e184856b2d30|sources:0c9812625671c2eeda324e981571ade394be03aac92a5fe226dd8fae945cc279) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -548,8 +553,7 @@ retire_hook_members() {
 	while IFS= read -r retired; do
 		[ -n "$retired" ] || continue
 		case "$retired" in
-			*-omp-kit-gap-mention) expected=8aa0bc9c7404110f27a5b9fdd84efdb028d8d3a84e0cb996dd9661bf6b008762 ;;
-			*-omp-kit-staged-sources) expected=0d971b18f6a686b7993d3eb6a6445d100802e9a53e032f763a67e184856b2d30 ;;
+			*-omp-kit-gap-mention|*-omp-kit-staged-sources) expected="" ;;
 			*/10-commit-msg) expected=$(legacy_stamp_sha "$retired") ;;
 			*/commit-msg-verification-level.sh) expected=$(legacy_stamp_sha "$retired") ;;
 			*-omp-kit-commit-msg-bead|*-omp-kit-commit-msg-vlevel|*-omp-kit-commit-notes|*-omp-kit-deploy-step) expected="" ;;
@@ -564,6 +568,8 @@ retire_hook_members() {
 			*-omp-kit-commit-msg-vlevel) key=vlevel ;;
 			*-omp-kit-commit-notes) key=notes ;;
 			*-omp-kit-deploy-step) key=deploy ;;
+			*-omp-kit-gap-mention) key=gap ;;
+			*-omp-kit-staged-sources) key=sources ;;
 			*) key="" ;;
 		esac
 		if [ -n "$key" ]; then

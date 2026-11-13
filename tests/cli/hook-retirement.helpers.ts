@@ -102,3 +102,32 @@ export function ownerModifiedCases(): void {
 		}, fixtureDeadlineS(120) * 1000);
 	}
 }
+
+// RETIRESHIPPED1 (ompkit-1ra0d.243): a repo installed from an older release holds an older
+// kit-shipped copy of a retired member (localbench and zestroku held gap-mention e6e80d85). That
+// copy is the kit's, so the installer retires it; only a hand edit refuses (ownerModifiedCases).
+export function shippedOlderCases(): void {
+	for (const [chain, name] of [
+		["commit-msg", "47-omp-kit-gap-mention"],
+		["pre-commit", "52-omp-kit-staged-sources"],
+	]) {
+		test(`RETIRESHIPPED1 retires an older kit-shipped ${chain} member`, async () => {
+			const scratch = ownedTmp("retire-shipped");
+			const root = resolve(import.meta.dir, "../..");
+			const exec = (argv: string[]) => runFixtureAsync(argv, { cwd: scratch.path, floor_s: 60 });
+			try {
+				expect((await exec(["git", "init", "-q", "--template="])).rc).toBe(0);
+				expect((await exec(["sh", join(root, "scripts/install-commit-msg-bead.sh"), "--no-pushed-beads", scratch.path])).rc).toBe(0);
+				const retired = join(scratch.path, ".git/hooks/hooks.d", chain!, name!);
+				writeFileSync(retired, readFileSync(join(import.meta.dir, "fixtures/retired-shipped", name!)));
+				chmodSync(retired, 0o755);
+				const rerun = await exec(["sh", join(root, "scripts/install-commit-msg-bead.sh"), "--no-pushed-beads", scratch.path]);
+				expect(rerun.rc, Buffer.from(rerun.stderr).toString()).toBe(0);
+				expect(Buffer.from(rerun.stdout).toString()).toContain(`retired kit hook member: ${retired}`);
+				expect(() => readFileSync(retired)).toThrow();
+			} finally {
+				scratch.cleanup();
+			}
+		}, fixtureDeadlineS(120) * 1000);
+	}
+}
