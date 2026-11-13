@@ -550,6 +550,34 @@ const statusCounts = (sub: string[]): StatusRun => sub[0] === "ready"
 	? { code: 0, out: JSON.stringify([{ id: "a" }]), err: "" }
 	: { code: 0, out: JSON.stringify([{ id: "b" }, { id: "c" }]), err: "" };
 
+test("PROJECTGOALTRUTH1 latest pause or drop clears historical active goals", async () => {
+	const panes = [{ pane: 5, exited: null, omp_session_file: "" }, { pane: 6, exited: null }];
+	const h = statusHarness({ blocks: [5, 6], panes, am: statusNames, br: statusCounts });
+	const journal = join(h.env.HOME!, "director.jsonl");
+	panes[0]!.omp_session_file = journal;
+	const active = { type: "mode_change", id: "active", mode: "goal",
+		data: { goal: { id: "goal-1", status: "active", objective: "Do owned work" } } };
+	const paused = { type: "mode_change", id: "paused", mode: "goal_paused",
+		data: { goal: { id: "goal-1", status: "paused", objective: "Do owned work" } } };
+	const dropped = { type: "mode_change", id: "dropped", mode: "none" };
+	try {
+		for (const [tail, expected] of [
+			[[], "Do owned work"],
+			[[paused], null],
+			[[dropped], null],
+			[[paused, { ...active, id: "resumed" }], "Do owned work"],
+		] as const) {
+			writeFileSync(journal, [active, ...tail].map(row => JSON.stringify(row)).join("\n")
+				+ '\n{"unfinished":');
+			const reported = await projectStatus({ session: "skillgrowth", env: h.env, deps: { exec: h.exec } });
+			if (!reported.ok) throw new Error(reported.detail);
+			expect(reported.status.seats[0]!.activeGoal).toBe(expected);
+		}
+	} finally {
+		h.cleanup();
+	}
+});
+
 test("PROJECTSTATUS108 bare-number blocks with present panes read alive", async () => {
 	const h = statusHarness({ blocks: [5, 6],
 		panes: [{ pane: 5, exited: null }, { pane: 6, exited: null }],

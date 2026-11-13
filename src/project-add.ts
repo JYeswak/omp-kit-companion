@@ -814,7 +814,7 @@ function goalRecordOf(value: unknown): { mode: unknown; goal: { id?: unknown; ob
 	return { mode: record.mode, goal: goal === null ? null : { id: goal.id, objective: goal.objective, status: goal.status } };
 }
 
-/** Latest goal-mode record wins: an active goal, or a paused marker. */
+/** Latest session mode wins; ordinary messages do not change goal state. */
 function scanGoalState(text: string): { activeGoal: { id: string; objective: string } | null; paused: boolean } {
 	let last: { mode: string; id: string; objective: string; status: string } | null = null;
 	for (const line of text.split("\n")) {
@@ -826,10 +826,14 @@ function scanGoalState(text: string): { activeGoal: { id: string; objective: str
 			continue;
 		}
 		const record = goalRecordOf(value);
-		if (record === null || (record.mode !== "goal" && record.mode !== "goal_paused")) continue;
+		if (record === null) continue;
 		if (typeof value !== "object" || value === null) continue;
 		const id = (value as Record<string, unknown>).id;
 		if (typeof id !== "string" || id === "") continue;
+		if (record.mode !== "goal" && record.mode !== "goal_paused") {
+			last = null;
+			continue;
+		}
 		if (record.mode === "goal_paused") {
 			last = { mode: "goal_paused", id, objective: "", status: "paused" };
 			continue;
@@ -1525,13 +1529,7 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 				lastActivity = new Date(stat.mtimeMs).toISOString();
 			} catch { lastActivity = null; }
 			try {
-				const lines = readFileSync(file, "utf8").split("\n");
-				for (let line = lines.length - 1; line >= 0; line--) {
-					const record = tryParseJson(lines[line]!) as { type?: unknown; mode?: unknown; data?: unknown } | null;
-					const goal = record !== null && record.type === "mode_change" && record.mode === "goal"
-						? (record.data as { goal?: { status?: unknown; objective?: unknown } } | null)?.goal ?? null : null;
-					if (goal !== null && goal.status === "active" && typeof goal.objective === "string") { activeGoal = goal.objective; break; }
-				}
+				activeGoal = scanGoalState(readFileSync(file, "utf8")).activeGoal?.objective ?? null;
 			} catch { activeGoal = null; }
 		}
 		return {
