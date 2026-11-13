@@ -3269,7 +3269,10 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		// this job exists to end), so it is refused; the supervisor is the only runner.
 		// CLOSEPASS1b: a lockedRun job is the exception; its supervisor runs this path, and the run lock
 		// held here is what keeps a hand run or an overlapping tick from starting a second copy.
-		if (job.lockedRun === true) {
+		// IMSGRUN1 (ompkit-1ra0d.240): only a configured-command job (commandConfigKey) runs here. A
+		// lockedRun job with a native body (imessage-bridge, imessage-brief) has no program and falls
+		// through to its body below; sending it here crashed every tick on job.program.argv.
+		if (job.lockedRun === true && job.commandConfigKey !== undefined) {
 			if (operator[job.name] !== undefined) return unconfiguredRefusal(job.name);
 			return runLockedConfiguredJob(home, jobsDir, { ...job, program: job.program! });
 		}

@@ -723,3 +723,18 @@ test("IMSGLIVE1 ternSteerQueued admits only dispatched pendings", () => {
 	expect(ternSteerQueued("NOT_DELIVERED", "UNTIL_DELIVERED_EXHAUSTED")).toBe(false);
 	expect(ternSteerQueued("REFUSED", "TERN_WINDOW_UNBOUND")).toBe(false);
 });
+
+// IMSGRUN1 (ompkit-1ra0d.240): the scheduled tick is `service run imessage-bridge`. Its job is
+// lockedRun with a native body and no configured program; routing it to the configured-command
+// runner crashed every tick with HANDLER_FAILED on job.program.argv (planted negative: pre-fix).
+test("IMSGRUN1 service run imessage-bridge reaches the native bridge body and records its receipt", async () => {
+	const { home, state, env } = makeHome("svc-run", allowedRows);
+	chmodSync(join(home, ".local", "state", "omp-kit"), 0o700);
+	const { result, json, out, err } = await runCli(env, "service", "run", "imessage-bridge");
+	expect(`${out}\n${err}`).not.toContain("job.program.argv");
+	expect(`${result.rc} ${out} ${err}`).toContain('"overall":"OK"');
+	expect(json?.data).toMatchObject({ job: "imessage-bridge", delivered: 1 });
+	expect(lines(join(state, "sends.log")).length).toBe(1);
+	const receipt = JSON.parse(readFileSync(join(home, ".local", "state", "omp-kit", "jobs", "imessage-bridge.json"), "utf8")) as Record<string, unknown>;
+	expect(receipt.exit).toBe(0);
+});
