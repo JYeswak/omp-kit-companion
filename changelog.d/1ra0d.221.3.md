@@ -1,0 +1,1 @@
+- The iMessage bridge tick now sends one notice per boot when a managed seat's goal is paused after a host restart, naming the paused seats and how to resume them.

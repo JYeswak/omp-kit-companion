@@ -1384,6 +1384,7 @@ export interface ProjectSeatStatus {
 	nameError: string | null;
 	lastActivity: string | null;
 	activeGoal: string | null;
+	goalPaused: boolean;
 	wake: { outcome: string; at: string | null };
 }
 
@@ -1523,18 +1524,21 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 		const file = paneFile(id);
 		let lastActivity: string | null = null;
 		let activeGoal: string | null = null;
+		let goalPaused = false;
 		if (file !== null) {
 			try {
 				const stat = statSync(file);
 				lastActivity = new Date(stat.mtimeMs).toISOString();
 			} catch { lastActivity = null; }
 			try {
-				activeGoal = scanGoalState(readFileSync(file, "utf8")).activeGoal?.objective ?? null;
-			} catch { activeGoal = null; }
+				const scanned = scanGoalState(readFileSync(file, "utf8"));
+				activeGoal = scanned.activeGoal?.objective ?? null;
+				goalPaused = scanned.paused;
+			} catch { activeGoal = null; goalPaused = false; }
 		}
 		return {
 			role: index === 0 ? "director" : "worker", name: seatName, pane: `tern:${id}`,
-			alive: blockLive(id), named: seatName !== null, nameError, lastActivity, activeGoal,
+			alive: blockLive(id), named: seatName !== null, nameError, lastActivity, activeGoal, goalPaused,
 			wake: wakes.get(seatName ?? "") ?? { outcome: "no wake recorded", at: null },
 		};
 	});

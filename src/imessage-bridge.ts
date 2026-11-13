@@ -730,6 +730,88 @@ export function notifyBlocked(options: NotifyOptions): NotifyResult {
 	return { deduped: false, sent: true, receipt: { ...reply.receipt, key } };
 }
 
+/** One managed seat as the restore notice reads it: only the paused flag matters. */
+export interface RestoreSeat {
+	session: string;
+	seat: string;
+	goalPaused: boolean;
+}
+
+export interface RestoreNoticeOptions {
+	home: string;
+	env?: NodeJS.ProcessEnv;
+	config: BridgeConfig;
+	imsgBin: string;
+	runImsg?: ImsgRunner;
+	/** kern.boottime seconds: the dedupe key is `restore-<bootTimeS>`, one notice per boot. */
+	bootTimeS: number;
+	seats: readonly RestoreSeat[];
+	/**
+	 * IMSGSELF1: prefix the notice like any other self-chat outbound text.
+	 * Ordinary mode sends the text unchanged.
+	 */
+	selfChat?: boolean;
+	deadlineS?: number;
+	now?: () => Date;
+}
+
+export interface RestoreNoticeResult {
+	status: "SENT" | "DEDUPED" | "SKIPPED" | "SEND_FAILED";
+	key: string;
+}
+
+/** Boot-time shape for the restore dedupe key: decimal seconds only. */
+const BOOT_TIME_PATTERN = /^[0-9]+$/;
+
+/** A cold restore pauses seats within minutes of boot (2026-11-13: Tern restored 36 min after boot). */
+export const RESTORE_NOTICE_WINDOW_S = 2 * 3600;
+
+/**
+ * RESTORENOTICE1: whether this tick should read project status at all. The bridge ticks every
+ * 60 s, so the status read (Tern, Agent Mail, tracker) runs only inside the post-boot window and
+ * only until this boot's notice key is recorded; afterwards a tick costs one small file read.
+ */
+export function restoreNoticeDue(home: string, bootTimeS: number, nowS: number): boolean {
+	if (!Number.isSafeInteger(bootTimeS) || bootTimeS < 0 || nowS - bootTimeS > RESTORE_NOTICE_WINDOW_S) return false;
+	return !readDedupeKeys(home).includes(`restore-${String(bootTimeS)}`);
+}
+
+/**
+ * RESTORENOTICE1: after a cold host restore every seat's goal sits paused and
+ * no agent turn asks the owner for a go. When at least one managed seat is
+ * paused, send one iMessage through the existing notifyBlocked dedupe, keyed
+ * `restore-<bootTimeS>`, naming each paused seat and the owner command that
+ * resumes it. No paused seat sends nothing; no goal is ever changed.
+ */
+export function restoreNotice(options: RestoreNoticeOptions): RestoreNoticeResult {
+	const key = `restore-${String(options.bootTimeS)}`;
+	if (!Number.isSafeInteger(options.bootTimeS) || options.bootTimeS < 0 || !BOOT_TIME_PATTERN.test(String(options.bootTimeS))) {
+		return { status: "SKIPPED", key };
+	}
+	const paused = options.seats.filter((seat) => seat.goalPaused);
+	if (paused.length === 0) return { status: "SKIPPED", key };
+	const names = paused.map((seat) => `${seat.session}/${seat.seat}`);
+	const sessions = [...new Set(paused.map((seat) => seat.session))];
+	// A paused goal resumes first when a new goal is set: there is no
+	// standalone resume verb, so the owner re-sets the goal to resume it.
+	const resume = sessions.map((session) => `omp-kit project goal ${session} --set TEXT --apply`).join("; ");
+	const text = `Host restarted; these seats are paused and wait for your go: ${names.join(", ")}. Resume each with: ${resume}`;
+	const notified = notifyBlocked({
+		home: options.home,
+		...(options.env === undefined ? {} : { env: options.env }),
+		config: options.config,
+		imsgBin: options.imsgBin,
+		...(options.runImsg === undefined ? {} : { runImsg: options.runImsg }),
+		...(options.selfChat === undefined ? {} : { selfChat: options.selfChat }),
+		...(options.deadlineS === undefined ? {} : { deadlineS: options.deadlineS }),
+		...(options.now === undefined ? {} : { now: options.now }),
+		key,
+		text,
+	});
+	if (notified.deduped) return { status: "DEDUPED", key };
+	return { status: notified.sent ? "SENT" : "SEND_FAILED", key };
+}
+
 export interface BriefOptions {
 	home: string;
 	env?: NodeJS.ProcessEnv;

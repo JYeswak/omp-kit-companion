@@ -120,7 +120,8 @@ import { ccSpool, type CcSpool } from "./cc-spool.ts";
 import { custodyCheckCommand } from "./custody.ts";
 import { intakeCommand } from "./intake-verb.ts";
 import { valueCommand } from "./value.ts";
-import { createImsgRunner, findImsgBin, notifyBlocked, pollBridge, probeSelfChatMode, readBridgeConfig, resolveBridgeSendTarget, runBrief, sendReply, type BridgeConfig } from "./imessage-bridge.ts";
+import { createImsgRunner, findImsgBin, notifyBlocked, pollBridge, probeSelfChatMode, readBridgeConfig, resolveBridgeSendTarget, restoreNotice, restoreNoticeDue, runBrief, sendReply, type BridgeConfig } from "./imessage-bridge.ts";
+import { loadFleetWatchConfig } from "./fleet-watch.ts";
 import { looksSecret } from "./mcp-sources.ts";
 import { formatNext, next } from "./next.ts";
 import { agentMailRetentionRoot, retainAgentMailRotations } from "./am-retain.ts";
@@ -3464,7 +3465,9 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				return fail(1, "FINDINGS", { started_at: started, finished_at: new Date().toISOString(), exit: 1, omp_version: null, ...poll.receipt },
 					[{ code: poll.status, message: `imessage-bridge tick ended ${poll.status}`, remediation: "Read the receipt; the cursor still guards redelivery." }]);
 			}
-			return fail(0, "OK", { started_at: started, finished_at: new Date().toISOString(), exit: 0, omp_version: null, ...poll.receipt, markers: poll.markers });
+			// RESTORENOTICE1: the notice never changes the tick's exit status; only the receipt records it.
+			const restore = await readRestoreNotice(home, resolved.config, bin);
+			return fail(0, "OK", { started_at: started, finished_at: new Date().toISOString(), exit: 0, omp_version: null, ...poll.receipt, markers: poll.markers, restore_notice: restore });
 		}
 		if (job.name === "imessage-brief") {
 			const started = new Date().toISOString();
@@ -4261,6 +4264,38 @@ function bridgeDeliver(dropDir: string, config: BridgeConfig): (text: string) =>
 			noBeadReason: "imessage-bridge relay of Joshua's iMessage text; not a work dispatch", env: process.env });
 		return { ok: proved.status === "OK" || proved.status === "DELIVERED", marker: proved.marker, code: proved.status };
 	};
+}
+
+/** kern.boottime shape: `{ sec = 1763046157, usec = 0 } ...`; anchored, digits only. */
+const BOOT_TIME_PATTERN = /^[^{]*\{\s*sec = ([0-9]+),/;
+
+/**
+ * RESTORENOTICE1: one notice per boot when any managed seat's latest goal
+ * state is paused. Portable by skipping: a non-darwin host, an unreadable
+ * boot time, or an unreadable project status skips the notice. Never throws
+ * and never resumes a goal; the outcome only lands in the job receipt.
+ */
+async function readRestoreNotice(home: string, config: BridgeConfig, imsgBin: string): Promise<{ status: string; key?: string }> {
+	try {
+		if (process.platform !== "darwin") return { status: "SKIPPED" };
+		const booted = await runBounded(["sysctl", "-n", "kern.boottime"], { deadline_s: 10 });
+		const match = BOOT_TIME_PATTERN.exec(new TextDecoder().decode(booted.stdout));
+		if (booted.rc !== 0 || match === null || match[1] === undefined) return { status: "SKIPPED" };
+		const bootTimeS = Number(match[1]);
+		if (!restoreNoticeDue(home, bootTimeS, Math.floor(Date.now() / 1000))) return { status: "NOT_DUE" };
+		const fleet = loadFleetWatchConfig(process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? fleetWatchConfigPath(home));
+		const seats: { session: string; seat: string; goalPaused: boolean }[] = [];
+		for (const entry of fleet.sessions) {
+			if (typeof entry.session !== "string" || entry.session === "") return { status: "SKIPPED" };
+			const status = await projectStatus({ session: entry.session, env: process.env });
+			if (!status.ok) return { status: "SKIPPED" };
+			for (const seat of status.status.seats) seats.push({ session: status.status.session, seat: seat.name ?? seat.pane, goalPaused: seat.goalPaused });
+		}
+		const noticed = restoreNotice({ home, config, imsgBin, bootTimeS, seats });
+		return { status: noticed.status, key: noticed.key };
+	} catch {
+		return { status: "SKIPPED" };
+	}
 }
 
 async function imessagePollCommand(request: ParsedCommand): Promise<CliResult> {
