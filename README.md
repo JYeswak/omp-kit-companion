@@ -377,19 +377,14 @@ verified release (see [Limitations](#limitations)). Contributor checks are in
 
 ### Release and update flow
 
-Every green commit on `main` that carries release notes becomes the next patch
-release: each change adds a fragment under `changelog.d/` (or a `[no-changelog]`
-reason), enforced by the pre-push gate and the release workflow. When CI passes,
-the train folds the fragments into `CHANGELOG.md`, sets the `package.json`
-version and the README release line on `main`, and tags that green commit
-`vX.Y.Z` (no separate bump commit). `release.yml` then builds and certifies the
-ship set (`darwin-arm64-none`, `linux-arm64-gnu`, `linux-x64-gnu`) and publishes
-a GitHub release whose body is that CHANGELOG section. A green commit with no
-notes is not released; red CI is never tagged. On machines running the
-`kit-update` service with `OMP_KIT_UPDATE_POLL=github`, each 300-second tick
-asks GitHub (through `gh`) for the newest release, downloads it only when
-newer, applies it under an update receipt, and relinks the plugin
-(`apply plugin --apply`). A failed postcheck keeps the prior version.
+Every green `main` commit with release notes (a `changelog.d/` fragment, or a
+`[no-changelog]` reason, enforced at push) becomes the next patch release: CI
+folds the fragments into `CHANGELOG.md`, sets the version and README release
+line, and tags that commit `vX.Y.Z`. `release.yml` builds and certifies the ship
+set (`darwin-arm64-none`, `linux-arm64-gnu`, `linux-x64-gnu`) and publishes the
+release; red CI is never tagged. The `kit-update` service
+(`OMP_KIT_UPDATE_POLL=github`) checks every 300 s, applies a newer release under
+a receipt and relinks the plugin; a failed postcheck keeps the prior version.
 
 The manual cut and rehearsal are documented in
 [docs/release-procedure.md](docs/release-procedure.md).
@@ -434,6 +429,15 @@ KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
 `apply rules` writes only `~/.agents/rules/`; `audit` lists each file; `overall`
 may stay `UNVERIFIED`. On `RULE_COLLISION` nothing changed: run
 `"$KIT" migrate --plan`, move edited copies to the overlay, replan.
+
+6. Link the plugin into your profile, then check it:
+
+```sh
+"$KIT" apply plugin --apply --yes
+"$KIT" doctor --scope plugin_release --json
+```
+
+Without this link, `doctor` stays `DEGRADED`; its `recommended_action` names the command.
 
 ## Command reference
 
