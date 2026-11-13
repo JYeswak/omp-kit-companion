@@ -2103,6 +2103,15 @@ function policyCommand(request: ParsedCommand): CliResult {
 		const code = message.split(":")[0] ?? "";
 		if (code === "PROFILE_LIST_UNVERIFIED") return refusal(code, "Optional TTSR profile list is invalid or unsafe",
 			"Fix XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json (default: $HOME/.config/omp-kit/ttsr-profiles.json), or pass explicit --profiles.");
+		if (code === "UNVERIFIED_PROFILE") {
+			const detail = message.startsWith(`${code}:`) ? message.slice(code.length + 1).trim().slice(0, 200) : "";
+			const [rawName, rawIssue] = detail.split(",");
+			const name = (rawName ?? "").trim(), issue = (rawIssue ?? "").trim();
+			const command = name && name !== "default" ? `omp --profile ${name} config get ttsr.enabled --json` : "omp config get ttsr.enabled --json";
+			const who = name ? `"${name}"${issue ? ` (${issue})` : ""}` : "the selected profile";
+			return refusal(code, `Native OMP config get could not verify profile ${who}`,
+				`Run ${command} to reproduce the native read, fix what it reports, then replan.`);
+		}
 
 		if (code === "POLICY_APPLY_PARTIAL") {
 			const [, backupId, profile, key] = message.split(":");

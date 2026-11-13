@@ -138,7 +138,7 @@ function selectedProfiles(input: PolicyInput, allowMissing = false): PolicyConfi
 	});
 }
 
-type NativePolicyRead = { profile: string; status: "OK" | "UNVERIFIED"; values?: Partial<PolicySettings>; issue?: string };
+type NativePolicyRead = { profile: string; status: "OK" | "UNVERIFIED"; values?: Partial<PolicySettings>; issue?: string; file?: FileImage | null };
 type NativeConfigResult = { exitCode: number | null; stdout: string; stderr: string };
 function validPolicyValue(key: PolicyKey, value: unknown): value is PolicyValue {
 	switch (key) {
@@ -221,6 +221,20 @@ function nativePolicyRead(ompPath: string, home: string, profiles: readonly Poli
 		}
 		return profiles.map(profile => {
 			if (profile.issue || clonePaths.get(profile.name) === "") return { profile: profile.name, status: "UNVERIFIED", issue: profile.issue ?? "PROFILE_PATH_UNSAFE" };
+			let file = profile.file, resnapshotted = false;
+			if (!file) {
+				// A first native access can itself materialize the profile files (first-run defaults written while the kit is
+				// reading). Prime one key, then re-snapshot so the verified read below is checked against the files it actually
+				// observes; without this the guards mistake the just-created files for a mid-read change and the first plan
+				// refuses UNVERIFIED_PROFILE while an immediate retry succeeds.
+				readNativeValue(runNativeConfig(ompPath, cloneHome, profile.name, "get", policyKeys[0], undefined, scratch), policyKeys[0]);
+				try { file = optionalFile(profile.path); }
+				catch (error) { return { profile: profile.name, status: "UNVERIFIED", issue: error instanceof Error ? error.message.split(":")[0] ?? "NATIVE_CONFIG_UNAVAILABLE" : "NATIVE_CONFIG_UNAVAILABLE" }; }
+				resnapshotted = true;
+				const clonePath = clonePaths.get(profile.name)!;
+				if (file) { mkdirSync(dirname(clonePath), { recursive: true, mode: 0o700 }); writeFileSync(clonePath, file.bytes, { mode: 0o600 }); }
+				else rmSync(clonePath, { force: true });
+			}
 			const values: Partial<Record<PolicyKey, PolicyValue>> = {};
 			for (const key of policyKeys) {
 				const read = readNativeValue(runNativeConfig(ompPath, cloneHome, profile.name, "get", key, undefined, scratch), key);
@@ -229,9 +243,9 @@ function nativePolicyRead(ompPath: string, home: string, profiles: readonly Poli
 			}
 			const clonePath = clonePaths.get(profile.name)!;
 			const cloned = optionalFile(clonePath);
-			if (!sameFileContents(cloned, profile.file)) return { profile: profile.name, status: "UNVERIFIED", values, issue: "NATIVE_CONFIG_READ_CHANGED_CLONE" };
-			if (!sameFileImage(optionalFile(profile.path), profile.file)) return { profile: profile.name, status: "UNVERIFIED", values, issue: "PROFILE_CHANGED_DURING_READ" };
-			return { profile: profile.name, status: "OK", values: values as PolicySettings };
+			if (!sameFileContents(cloned, file)) return { profile: profile.name, status: "UNVERIFIED", values, issue: "NATIVE_CONFIG_READ_CHANGED_CLONE" };
+			if (!sameFileImage(optionalFile(profile.path), file)) return { profile: profile.name, status: "UNVERIFIED", values, issue: "PROFILE_CHANGED_DURING_READ" };
+			return { profile: profile.name, status: "OK", values: values as PolicySettings, ...(resnapshotted ? { file } : {}) };
 		});
 	} catch { return profiles.map(profile => ({ profile: profile.name, status: "UNVERIFIED", issue: "NATIVE_CONFIG_UNAVAILABLE" })); }
 	finally { rmSync(scratch, { recursive: true, force: true }); }
@@ -299,7 +313,7 @@ function persistPolicyBackup(stateRoot: string, home: string, profiles: readonly
 }
 /** Read-only. Without evidence for every effective project and builtin provider, no disabled name is re-enabled. */
 function planProfilePolicy(home: string, profile: PolicyConfig, read: NativePolicyRead | undefined, policy: PolicySettings): { steps: PolicyStep[]; blockedProfile?: Readonly<{ profile: string; names: readonly string[] }> } {
-	if (!read || read.status !== "OK" || !read.values || policyKeys.some(key => !Object.hasOwn(read.values!, key))) fail("UNVERIFIED_PROFILE", [profile.name]);
+	if (!read || read.status !== "OK" || !read.values || policyKeys.some(key => !Object.hasOwn(read.values!, key))) fail("UNVERIFIED_PROFILE", [`${profile.name}, ${read?.issue ?? "NATIVE_CONFIG_UNREADABLE"}`]);
 	const values = read.values as PolicySettings;
 	const leaving = (values.disabledRules as string[]).filter(name => !(policy.disabledRules as string[]).includes(name));
 	if (leaving.length) return { steps: [], blockedProfile: Object.freeze({ profile: profile.name, names: Object.freeze([...new Set(leaving)].sort()) }) };
@@ -332,15 +346,22 @@ export function planPolicy(input: PolicyInput): PolicyPlan {
 	const settings = nativePolicyRead(ompPath, home, profiles);
 	const settingsByProfile = new Map(settings.map(entry => [entry.profile, entry]));
 	const steps: PolicyStep[] = [], blockedProfiles: Readonly<{ profile: string; names: readonly string[] }>[] = [];
-	for (const profile of profiles) {
+	// A profile whose files the native layer materialized mid-read is planned against the re-snapshotted files the read
+	// was verified against; otherwise the plan's before-images describe files that no longer match and its own
+	// fresh-plan revalidation refuses at apply time.
+	const effective = profiles.map(profile => {
+		const read = settingsByProfile.get(profile.name);
+		return read?.file !== undefined ? { ...profile, file: read.file } : profile;
+	});
+	for (const profile of effective) {
 		const result = planProfilePolicy(home, profile, settingsByProfile.get(profile.name), source.value);
 		steps.push(...result.steps);
 		if (result.blockedProfile) blockedProfiles.push(result.blockedProfile);
 	}
-	const plan: PolicyPlan = Object.freeze({ scope: "policy", profiles: Object.freeze(profiles.map(profile => profile.name)), steps: Object.freeze(steps), blockedProfiles: Object.freeze(blockedProfiles) });
+	const plan: PolicyPlan = Object.freeze({ scope: "policy", profiles: Object.freeze(effective.map(profile => profile.name)), steps: Object.freeze(steps), blockedProfiles: Object.freeze(blockedProfiles) });
 	const signature = hash(Buffer.from(JSON.stringify({ source: source.digest, settings,
-		profiles: profiles.map(profile => [profile.name, profile.path, profile.file?.image ?? null]) })));
-	privatePlans.set(plan, { input: { ...input, ompPath, stateRoot }, signature, profiles });
+		profiles: effective.map(profile => [profile.name, profile.path, profile.file?.image ?? null]) })));
+	privatePlans.set(plan, { input: { ...input, ompPath, stateRoot }, signature, profiles: effective });
 	return plan;
 }
 
