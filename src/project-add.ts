@@ -814,9 +814,10 @@ function goalRecordOf(value: unknown): { mode: unknown; goal: { id?: unknown; ob
 	return { mode: record.mode, goal: goal === null ? null : { id: goal.id, objective: goal.objective, status: goal.status } };
 }
 
-/** Latest session mode wins; ordinary messages do not change goal state. */
-function scanGoalState(text: string): { activeGoal: { id: string; objective: string } | null; paused: boolean } {
-	let last: { mode: string; id: string; objective: string; status: string } | null = null;
+/** Latest session mode wins; ordinary messages do not change goal state. A pause also reports its
+ * record timestamp (pausedAt) so a reader can tell a restore-caused pause from one made before boot. */
+function scanGoalState(text: string): { activeGoal: { id: string; objective: string } | null; paused: boolean; pausedAt?: string } {
+	let last: { mode: string; id: string; objective: string; status: string; at?: string } | null = null;
 	for (const line of text.split("\n")) {
 		if (line.trim() === "") continue;
 		let value: unknown;
@@ -835,7 +836,8 @@ function scanGoalState(text: string): { activeGoal: { id: string; objective: str
 			continue;
 		}
 		if (record.mode === "goal_paused") {
-			last = { mode: "goal_paused", id, objective: "", status: "paused" };
+			const at = (value as Record<string, unknown>).timestamp;
+			last = { mode: "goal_paused", id, objective: "", status: "paused", ...(typeof at === "string" ? { at } : {}) };
 			continue;
 		}
 		const goal = record.goal;
@@ -843,7 +845,7 @@ function scanGoalState(text: string): { activeGoal: { id: string; objective: str
 		last = { mode: "goal", id: goal.id, objective: goal.objective, status: goal.status };
 	}
 	if (last === null) return { activeGoal: null, paused: false };
-	if (last.mode === "goal_paused") return { activeGoal: null, paused: true };
+	if (last.mode === "goal_paused") return { activeGoal: null, paused: true, ...(last.at === undefined ? {} : { pausedAt: last.at }) };
 	return last.status === "active" ? { activeGoal: { id: last.id, objective: last.objective }, paused: false } : { activeGoal: null, paused: false };
 }
 
@@ -1385,6 +1387,8 @@ export interface ProjectSeatStatus {
 	lastActivity: string | null;
 	activeGoal: string | null;
 	goalPaused: boolean;
+	/** Timestamp of the pause record when goalPaused, else null. */
+	goalPausedAt: string | null;
 	wake: { outcome: string; at: string | null };
 }
 
@@ -1525,6 +1529,7 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 		let lastActivity: string | null = null;
 		let activeGoal: string | null = null;
 		let goalPaused = false;
+		let goalPausedAt: string | null = null;
 		if (file !== null) {
 			try {
 				const stat = statSync(file);
@@ -1534,11 +1539,12 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 				const scanned = scanGoalState(readFileSync(file, "utf8"));
 				activeGoal = scanned.activeGoal?.objective ?? null;
 				goalPaused = scanned.paused;
-			} catch { activeGoal = null; goalPaused = false; }
+				goalPausedAt = scanned.pausedAt ?? null;
+			} catch { activeGoal = null; goalPaused = false; goalPausedAt = null; }
 		}
 		return {
 			role: index === 0 ? "director" : "worker", name: seatName, pane: `tern:${id}`,
-			alive: blockLive(id), named: seatName !== null, nameError, lastActivity, activeGoal, goalPaused,
+			alive: blockLive(id), named: seatName !== null, nameError, lastActivity, activeGoal, goalPaused, goalPausedAt,
 			wake: wakes.get(seatName ?? "") ?? { outcome: "no wake recorded", at: null },
 		};
 	});

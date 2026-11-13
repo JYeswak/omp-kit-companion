@@ -730,11 +730,13 @@ export function notifyBlocked(options: NotifyOptions): NotifyResult {
 	return { deduped: false, sent: true, receipt: { ...reply.receipt, key } };
 }
 
-/** One managed seat as the restore notice reads it: only the paused flag matters. */
+/** One managed seat as the restore notice reads it. */
 export interface RestoreSeat {
 	session: string;
 	seat: string;
 	goalPaused: boolean;
+	/** The pause record's timestamp; a pause older than this boot was the owner's choice, not the restore's. */
+	goalPausedAt: string | null;
 }
 
 export interface RestoreNoticeOptions {
@@ -778,24 +780,27 @@ export function restoreNoticeDue(home: string, bootTimeS: number, nowS: number):
 
 /**
  * RESTORENOTICE1: after a cold host restore every seat's goal sits paused and
- * no agent turn asks the owner for a go. When at least one managed seat is
- * paused, send one iMessage through the existing notifyBlocked dedupe, keyed
- * `restore-<bootTimeS>`, naming each paused seat and the owner command that
- * resumes it. No paused seat sends nothing; no goal is ever changed.
+ * no agent turn asks the owner for a go. Joshua wants a message only when he has
+ * to act (2026-11-13), so this counts only seats the restore paused: paused, with
+ * a pause record at or after boot. A seat paused before the reboot was a decision,
+ * not news, and sends nothing. One iMessage per boot through the existing
+ * notifyBlocked dedupe (key `restore-<bootTimeS>`); his reply reaches the lead
+ * seat through the bridge. No goal is ever changed here.
  */
 export function restoreNotice(options: RestoreNoticeOptions): RestoreNoticeResult {
 	const key = `restore-${String(options.bootTimeS)}`;
 	if (!Number.isSafeInteger(options.bootTimeS) || options.bootTimeS < 0 || !BOOT_TIME_PATTERN.test(String(options.bootTimeS))) {
 		return { status: "SKIPPED", key };
 	}
-	const paused = options.seats.filter((seat) => seat.goalPaused);
+	const bootMs = options.bootTimeS * 1000;
+	const paused = options.seats.filter((seat) => {
+		if (!seat.goalPaused || seat.goalPausedAt === null) return false;
+		const at = Date.parse(seat.goalPausedAt);
+		return Number.isFinite(at) && at >= bootMs;
+	});
 	if (paused.length === 0) return { status: "SKIPPED", key };
 	const names = paused.map((seat) => `${seat.session}/${seat.seat}`);
-	const sessions = [...new Set(paused.map((seat) => seat.session))];
-	// A paused goal resumes first when a new goal is set: there is no
-	// standalone resume verb, so the owner re-sets the goal to resume it.
-	const resume = sessions.map((session) => `omp-kit project goal ${session} --set TEXT --apply`).join("; ");
-	const text = `Host restarted; these seats are paused and wait for your go: ${names.join(", ")}. Resume each with: ${resume}`;
+	const text = `The Mac restarted and paused ${String(paused.length)} working seat${paused.length === 1 ? "" : "s"}: ${names.join(", ")}. Reply "resume all", or name the seats to resume.`;
 	const notified = notifyBlocked({
 		home: options.home,
 		...(options.env === undefined ? {} : { env: options.env }),

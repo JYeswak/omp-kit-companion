@@ -120,7 +120,7 @@ import { ccSpool, type CcSpool } from "./cc-spool.ts";
 import { custodyCheckCommand } from "./custody.ts";
 import { intakeCommand } from "./intake-verb.ts";
 import { valueCommand } from "./value.ts";
-import { createImsgRunner, findImsgBin, notifyBlocked, pollBridge, probeSelfChatMode, readBridgeConfig, resolveBridgeSendTarget, restoreNotice, restoreNoticeDue, runBrief, sendReply, type BridgeConfig } from "./imessage-bridge.ts";
+import { createImsgRunner, findImsgBin, notifyBlocked, pollBridge, probeSelfChatMode, readBridgeConfig, resolveBridgeSendTarget, restoreNotice, restoreNoticeDue, runBrief, sendReply, type BridgeConfig, type RestoreSeat } from "./imessage-bridge.ts";
 import { loadFleetWatchConfig } from "./fleet-watch.ts";
 import { looksSecret } from "./mcp-sources.ts";
 import { formatNext, next } from "./next.ts";
@@ -4284,12 +4284,12 @@ async function readRestoreNotice(home: string, config: BridgeConfig, imsgBin: st
 		const bootTimeS = Number(match[1]);
 		if (!restoreNoticeDue(home, bootTimeS, Math.floor(Date.now() / 1000))) return { status: "NOT_DUE" };
 		const fleet = loadFleetWatchConfig(process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? fleetWatchConfigPath(home));
-		const seats: { session: string; seat: string; goalPaused: boolean }[] = [];
+		const seats: RestoreSeat[] = [];
 		for (const entry of fleet.sessions) {
 			if (typeof entry.session !== "string" || entry.session === "") return { status: "SKIPPED" };
 			const status = await projectStatus({ session: entry.session, env: process.env });
 			if (!status.ok) return { status: "SKIPPED" };
-			for (const seat of status.status.seats) seats.push({ session: status.status.session, seat: seat.name ?? seat.pane, goalPaused: seat.goalPaused });
+			for (const seat of status.status.seats) seats.push({ session: status.status.session, seat: seat.name ?? seat.pane, goalPaused: seat.goalPaused, goalPausedAt: seat.goalPausedAt });
 		}
 		const noticed = restoreNotice({ home, config, imsgBin, bootTimeS, seats });
 		return { status: noticed.status, key: noticed.key };
