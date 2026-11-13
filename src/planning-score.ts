@@ -59,6 +59,8 @@ export type PlanningScoreSnapshot = {
 	mission: string;
 	planPath: string | null;
 	planExists: boolean | null;
+	/** Absent uses draft tags; null means a configured but invalid reference. */
+	planFirstCommit?: string | null;
 	repoCommits: readonly PlanningCommit[] | null;
 	trackerCommits: readonly PlanningCommit[] | null;
 	beads: readonly PlanningBead[] | null;
@@ -87,7 +89,7 @@ type FleetRepo = { name: string; path: string; tracker?: string; planConfig?: st
 /** Review rounds read from a plan config's review dir (round<label>-*.md files and findings.jsonl `round`). */
 export type ReviewRounds = { labels: string[]; files: number; last_commit: string | null; last_diff: number | null };
 /** The repo's comprehensive plan, from <repo>/.omp/plan.toml [plan] (omp-kit scripts/plan_config.py schema). */
-type PlanConfigEntry = { mission: string; planPath: string; reviews: string | null; source: string };
+type PlanConfigEntry = { mission: string; planPath: string; reviews: string | null; source: string; firstCommit?: string | null };
 export type LoadedPlanningScoreConfig = {
 	raw: Record<string, unknown>;
 	tuning: PlanningScoreTuning;
@@ -514,9 +516,9 @@ function scoreBeadBreadth(snapshot: PlanningScoreSnapshot, target: (name: string
 	put("bead_breadth", { oversized_count: 0, oversized_ids: [] }, metricTarget, "PASS", evidence);
 }
 function scorePlanToCode(snapshot: PlanningScoreSnapshot, target: (name: string, fallback: number | boolean) => number | boolean, put: MetricWriter): void {
-	const hours = planToCodeHours(snapshot.repoCommits, snapshot.mission);
+	const timing = planToCodeTiming(snapshot.repoCommits, snapshot.mission, snapshot.planFirstCommit);
 	const maxHours = numberValue(target("plan_to_code_hours", 24)) ?? 24;
-	put("plan_to_code_hours", hours, "<= " + maxHours, hours === null ? "UNKNOWN" : hours <= maxHours ? "PASS" : "FAIL");
+	put("plan_to_code_hours", timing.hours, "<= " + maxHours, timing.hours === null ? "UNKNOWN" : timing.hours <= maxHours ? "PASS" : "FAIL", timing.evidence);
 }
 export function scorePlanningSnapshot(snapshot: PlanningScoreSnapshot, tuning: PlanningScoreTuning): MissionScore {
 	const weight = (name: string) => numberValue(tuning.weights[name]) ?? 1;
@@ -538,14 +540,45 @@ function positiveRound(value: string): boolean {
 	const parsed = Number(value.trim());
 	return Number.isInteger(parsed) && parsed > 0;
 }
-function planToCodeHours(repoCommits: readonly PlanningCommit[] | null, mission: string): number | null {
-	if (!repoCommits) return null;
-	const drafts = repoCommits.filter((commit) => { const tag = parseTag(commit.subject, "plan"); return tag?.mission === mission && tag.action === "draft"; });
-	const draft = [...drafts].sort((left, right) => left.timestamp - right.timestamp).at(0);
-	if (!draft) return null;
-	const code = repoCommits.filter((commit) => commit.timestamp >= draft.timestamp && isCodeCommit(commit));
-	const firstCode = [...code].sort((left, right) => left.timestamp - right.timestamp).at(0);
-	return firstCode ? (firstCode.timestamp - draft.timestamp) / 3600 : null;
+function planToCodeTiming(repoCommits: readonly PlanningCommit[] | null, mission: string, reference?: string | null): { hours: number | null; evidence: Record<string, unknown> } {
+	const source = reference === undefined ? "draft_tag" : "configured_first_commit";
+	if (!repoCommits) return { hours: null, evidence: { source, reason: "commit history unavailable" } };
+	let start: PlanningCommit | undefined;
+	if (reference !== undefined) {
+		if (typeof reference !== "string" || reference.length < 4 || reference.length > 64) {
+			return { hours: null, evidence: { source, reason: "invalid configured first_commit" } };
+		}
+		const prefix = reference.toLowerCase();
+		for (const commit of repoCommits) {
+			if (!commit.sha.startsWith(prefix)) continue;
+			if (start) return { hours: null, evidence: { source, reason: "ambiguous configured first_commit" } };
+			start = commit;
+		}
+	} else {
+		for (const commit of repoCommits) {
+			const tag = parseTag(commit.subject, "plan");
+			if (tag?.mission !== mission || tag.action !== "draft") continue;
+			if (!start || commit.timestamp < start.timestamp || (commit.timestamp === start.timestamp && commit.sha < start.sha)) start = commit;
+		}
+	}
+	if (!start) return { hours: null, evidence: { source, reason: reference === undefined ? "no tagged draft commit" : "configured first_commit not found in available history" } };
+	const evidence: Record<string, unknown> = { source, plan_start_sha: start.sha, plan_start_epoch_s: start.timestamp };
+	if (!Number.isFinite(start.timestamp)) return { hours: null, evidence: { source, reason: "invalid plan start timestamp" } };
+	let firstCode: PlanningCommit | undefined;
+	for (const commit of repoCommits) {
+		if (commit.timestamp < start.timestamp || !isCodeCommit(commit)) continue;
+		if (!Number.isFinite(commit.timestamp)) return { hours: null, evidence: { source, reason: "invalid code commit timestamp" } };
+		if (!firstCode || commit.timestamp < firstCode.timestamp || (commit.timestamp === firstCode.timestamp && commit.sha < firstCode.sha)) firstCode = commit;
+	}
+	if (!firstCode) {
+		evidence.reason = "no code commit at or after plan start";
+		return { hours: null, evidence };
+	}
+	const elapsed = firstCode.timestamp - start.timestamp;
+	evidence.first_code_sha = firstCode.sha;
+	evidence.first_code_epoch_s = firstCode.timestamp;
+	evidence.elapsed_seconds = elapsed;
+	return { hours: elapsed / 3600, evidence };
 }
 function planShipRatio(snapshot: PlanningScoreSnapshot, tuning: PlanningScoreTuning): { value: number | null; status: PlanningStatus; evidence: Record<string, unknown> } {
 	if (!snapshot.repoCommits || !snapshot.trackerCommits || snapshot.nowEpochSeconds === null) return { value: null, status: "UNKNOWN", evidence: { reason: "commit history or scoring time unavailable" } };
@@ -598,6 +631,7 @@ function scoreMission(context: RepositoryScoreContext, mission: string): Mission
 	const current = polish.at(-1);
 	const reviewRounds = fromPlanConfig?.reviews && planPath ? readReviewRounds(repoPath, fromPlanConfig.reviews, planPath) : null;
 	return scorePlanningSnapshot({ repoPath, trackerPath, mission, planPath, planExists, repoCommits: repoWithDiff, trackerCommits, beads,
+		planFirstCommit: fromPlanConfig?.firstCommit,
 		polishPreviousBeads: previous ? readIssuesAtCommit(trackerPath, previous.sha) : null,
 		polishCurrentBeads: current ? readIssuesAtCommit(trackerPath, current.sha) : null, nowEpochSeconds, stage: stringValue(settings.stage) ?? undefined, reviewRounds, ci }, config.tuning);
 }
@@ -619,7 +653,8 @@ function loadPlanConfig(repo: string, override: string | null, home: string): Pl
 	const name = stringValue(plan.name) ?? DEFAULT_PLAN_MISSION;
 	if (!safeMission(name)) throw new Error("Plan config [plan] name is not a mission name: " + source);
 	const reviews = stringValue(plan.reviews);
-	return { mission: name, planPath, reviews: reviews ? resolvePlanPath(repo, "", reviews, home) : null, source };
+	return { mission: name, planPath, reviews: reviews ? resolvePlanPath(repo, "", reviews, home) : null, source,
+		firstCommit: Object.hasOwn(plan, "first_commit") ? stringValue(plan.first_commit) : undefined };
 }
 /** Distinct review-round labels from `round<label>-*.md` file names and findings.jsonl `round` fields; null when none. */
 function readReviewRounds(repo: string, reviewsRel: string, planPath: string): ReviewRounds | null {

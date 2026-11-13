@@ -6,7 +6,8 @@ import { renderOutput, type PresentationResult } from "../../src/output.ts";
 import { record } from "../../src/mcp-sources.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { runSync } from "../../src/kitlib/run.ts";
-import { fixtureDeadlineS } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
+import * as api from "../../src/planning-score.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -639,4 +640,80 @@ test("PLANMISSIONS1 configured plan scores its mission only; stray tags fall bac
 	expect((await scoreRows(repo, home)).map((row) => row.mission)).toEqual(["kept"]);
 	const bare = phantomRepo("discovery", null);
 	expect((await scoreRows(bare.repo, bare.home)).map((row) => row.mission)).toContain("ghost");
+});
+
+test("PLANTIMING1 configured first_commit measures an untagged legacy plan with real Git provenance", async () => {
+	const { root, home } = writeBeadProject("plan-timing-configured", []);
+	const decoder = new TextDecoder();
+	const started = 1_700_000_000;
+	const git = async (args: string[], timestamp = started) => {
+		const date = new Date(timestamp * 1000).toISOString();
+		const result = await runFixtureAsync(["git", ...args], {
+			cwd: root, floor_s: 10, label: "PLANTIMING1 git",
+			env: { ...process.env, HOME: home, TMPDIR: root, GIT_CEILING_DIRECTORIES: root,
+				GIT_DIR: undefined, GIT_COMMON_DIR: undefined, GIT_WORK_TREE: undefined,
+				GIT_INDEX_FILE: undefined, GIT_OBJECT_DIRECTORY: undefined, GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
+				GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: join(home, "no-global-gitconfig"), GIT_CONFIG_COUNT: "0",
+				GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+		});
+		expect(result.rc, decoder.decode(result.stderr)).toBe(0);
+		return decoder.decode(result.stdout).trim();
+	};
+	await git(["init", "--quiet"]);
+	await git(["config", "user.name", "Plan Timing Fixture"]);
+	await git(["config", "user.email", "plan-timing@example.invalid"]);
+	mkdirSync(join(root, ".omp"), { recursive: true });
+	const config = "[plan]\nname = \"timing\"\npath = \"PLAN_timing.md\"\n";
+	writeFileSync(join(root, "PLAN_timing.md"), "Existing plan, without a tagged draft commit.\n");
+	writeFileSync(join(root, ".omp", "plan.toml"), config);
+	writeFileSync(join(root, ".omp", "planning-score.toml"), "[ci]\nmode = \"local\"\ncheck = \"true\"\nbranch = \"main\"\nreceipts = \"receipts\"\n");
+	await git(["add", "PLAN_timing.md", ".omp", ".beads"]);
+	await git(["commit", "--quiet", "-m", "docs: initial plan [test]"]);
+	const planSha = await git(["rev-parse", "HEAD"]);
+	mkdirSync(join(root, "src"), { recursive: true });
+	writeFileSync(join(root, "src", "first.rs"), "fn main() {}\n");
+	writeFileSync(join(root, ".omp", "plan.toml"), config + `first_commit = "${planSha.slice(0, 12)}"\n`);
+	await git(["add", "src/first.rs", ".omp/plan.toml"]);
+	await git(["commit", "--quiet", "-m", "feat: first source [test]"], started + 453);
+	const codeSha = await git(["rev-parse", "HEAD"]);
+	expect((await scoreRows(root, home))[0]).toMatchObject({
+		mission: "timing",
+		metrics: { plan_to_code_hours: { value: 453 / 3600, status: "PASS", evidence: {
+			source: "configured_first_commit", plan_start_sha: planSha, plan_start_epoch_s: started,
+			first_code_sha: codeSha, first_code_epoch_s: started + 453, elapsed_seconds: 453,
+		} } },
+	});
+	writeFileSync(join(root, ".omp", "plan.toml"), config + "first_commit = 42\n");
+	expect((await scoreRows(root, home))[0]).toMatchObject({
+		metrics: { plan_to_code_hours: { value: null, status: "UNKNOWN", evidence: { reason: "invalid configured first_commit" } } },
+	});
+}, fixtureDeadlineS(30) * 1000);
+
+test("PLANTIMING1 bad explicit anchors never fall back to an unrelated tagged draft", async () => {
+	const base = passingSnapshot();
+	const commits = [...base.repoCommits,
+		commit("abcd000000000000000000000000000000000000", "docs: first anchor", now - day),
+		commit("abcd111111111111111111111111111111111111", "docs: second anchor", now - day + 1),
+	];
+	for (const reference of [null, "", "not-a-sha", "ffffffff", "abcd"]) {
+		const result = api.scorePlanningSnapshot({ ...base, planFirstCommit: reference, repoCommits: commits }, tuning);
+		expect(result.metrics.plan_to_code_hours).toMatchObject({ value: null, status: "UNKNOWN", evidence: { reason: expect.any(String) } });
+	}
+});
+
+test("PLANTIMING1 preserves missing-evidence, ordering, zero and tagged-draft semantics", async () => {
+	const base = passingSnapshot();
+	const planSha = "1234000000000000000000000000000000000000";
+	const codeSha = "5678000000000000000000000000000000000000";
+	const anchor = commit(planSha, "docs: initial plan", now - day);
+	const before = commit("9000000000000000000000000000000000000000", "feat: before plan", now - day - 1, { changedPaths: ["src/before.rs"] });
+	const missing = api.scorePlanningSnapshot({ ...base, planFirstCommit: planSha, repoCommits: null }, tuning);
+	expect(missing.metrics.plan_to_code_hours).toMatchObject({ value: null, status: "UNKNOWN", evidence: { reason: "commit history unavailable" } });
+	const noCode = api.scorePlanningSnapshot({ ...base, planFirstCommit: planSha, repoCommits: [before, anchor] }, tuning);
+	expect(noCode.metrics.plan_to_code_hours).toMatchObject({ value: null, status: "UNKNOWN", evidence: { reason: "no code commit at or after plan start" } });
+	const zero = api.scorePlanningSnapshot({ ...base, planFirstCommit: planSha,
+		repoCommits: [commit(codeSha, "feat: at plan start", anchor.timestamp, { changedPaths: ["src/first.rs"] }), before, anchor] }, tuning);
+	expect(zero.metrics.plan_to_code_hours).toMatchObject({ value: 0, status: "PASS", evidence: { plan_start_sha: planSha, first_code_sha: codeSha } });
+	const fallback = api.scorePlanningSnapshot(base, tuning);
+	expect(fallback.metrics.plan_to_code_hours).toMatchObject({ value: 2, status: "PASS", evidence: { source: "draft_tag" } });
 });

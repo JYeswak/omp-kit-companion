@@ -133,7 +133,18 @@ Run on every `br` write, as reports, never as a review round: cycles and edge di
 ## Scoring: `omp-kit planning score`
 Reads the repo's git history, plan file and tracker; prints one JSON line per mission and an overall score. Thresholds and weights live in one file, so tuning means editing one number: kit defaults in `omp-kit/config/planning-score.toml`, with an optional repo override in `.omp/planning-score.toml`.
 
-**The comprehensive plan.** A repo whose plan of record is one comprehensive plan names it in `.omp/plan.toml` `[plan]` (`name`, `path`, `reviews`; the same file the omp-kit plan tooling `plan_check.py`/`plan_gen.py` reads). The score adds that plan as mission `<name>` (default `plan`) and counts its review rounds from the review files: distinct `round<label>-*.md` file names plus `round` fields in `findings.jsonl` (`plan_last_diff` is the plan's change in the commit that recorded the latest round). Without review files it falls back to `plan(<name>): review round N` commits. `OMP_KIT_PLAN_CONFIG=PATH` scores a repo against a plan config kept outside it.
+**The comprehensive plan.** A repo whose plan of record is one comprehensive plan names it in `.omp/plan.toml` `[plan]` (`name`, `path`, `reviews`; the same file the omp-kit plan tooling `plan_check.py`/`plan_gen.py` reads). The scorer selects only that mission `<name>` (default `plan`) and counts its review rounds from the review files: distinct `round<label>-*.md` file names plus `round` fields in `findings.jsonl` (`plan_last_diff` is the plan's change in the commit that recorded the latest round). Without review files it falls back to `plan(<name>): review round N` commits. `OMP_KIT_PLAN_CONFIG=PATH` scores a repo against a plan config kept outside it.
+
+**Plan-to-code provenance.** An existing `[plan] first_commit` is the plan's declared
+baseline, not a reason to create a new draft marker. The scorer resolves its full or
+unambiguous abbreviated commit ID in available Git history and measures to the first
+source-code commit at or after it using UTC committer timestamps. Evidence includes
+`plan_start_sha`, `first_code_sha` and `elapsed_seconds`. A malformed, ambiguous or
+missing explicit reference, unavailable history or absent later code stays `UNKNOWN`
+with a reason; it never falls back to another draft. Only an absent `first_commit`
+uses the original `plan(<name>): draft` convention. Do not reset the baseline or
+change the target merely to obtain green.
+
 
 | Metric | Measured from | Default target | Weight |
 |---|---|---|---|
@@ -145,14 +156,14 @@ Reads the repo's git history, plan file and tracker; prints one JSON line per mi
 | `polish_rounds` | `beads(<m>): polish round N` commits | ≥ 6, or steady earlier | 1.0 |
 | `polish_last_changed` | share of the mission's non-parked-plan beads changed in the last polish round | ≤ 0.05 | 1.0 |
 | `bead_self_contained` | median bead body length; share naming tests from `acceptance_criteria`; deps per bead | ≥ 300 chars; ≥ 0.4; ≥ 1.0 (Jeff's corpus: 48% name tests, 1.46 deps) | 1.0 |
-| `plan_to_code_hours` | first plan commit to first cod
+| `plan_to_code_hours` | verified `[plan] first_commit`, otherwise tagged draft, to first code commit (UTC committer time) | ≤ 24 hours | 1.0 |
+| `plan_ship_ratio_7d` | planning and tracker commits per code commit, last 7 days | ≤ 2.0 by default; repo override allowed | 1.0 |
+| `main_green` | hosted CI or configured local receipt for the declared branch head | PASS; missing receipt/result is UNKNOWN | 1.0 |
 
 **Existing missions.** Set `[missions.<m>] stage = "build"` in `.omp/planning-score.toml` when the mission is already converted and building. It enters at step 7; plan, conversion, coverage and polish metrics (including plan-to-code time) are `NOT_APPLICABLE`, not failed. Bead quality, current plan-to-ship ratio and CI evidence remain scored.
 
 **Repos without hosted CI.** In `.omp/planning-score.toml`, set `[ci] mode = "local"`, name the check command, branch and receipt directory. The scorer reads the latest receipt matching that branch head SHA; the receipt records `sha`, `exit_code` and `time`. It never runs the check command during scoring. No receipt for the current head SHA is `UNKNOWN`, never green. This is a per-repo CI mode, not a waiver.
 
-**Weighted score.** Defaults assign weight 1.0 to every metric above. The weighted score is the percentage of applicable metric weight that passed; `UNKNOWN` is never counted as pass, and `NOT_APPLICABLE` metrics are excluded.e commit for the mission | ≤ 24 | 1.0 |
-| `plan_ship_ratio_7d` | planning and tracker commits per code commit, last 7 days | ≤ 2.0 by default; repo override allowed | 1.0 |
-| `main_green` | hosted CI or configured local receipt for the declared branch head | PASS; missing receipt/result is UNKNOWN | 1.0 |
+**Weighted score.** Defaults assign weight 1.0 to every metric above. The weighted score is the percentage of applicable metric weight that passed; `UNKNOWN` is never counted as pass, and `NOT_APPLICABLE` metrics are excluded.
 
 `omp-kit planning score --fleet` runs it across every fleet repo and prints one row each, so every repo is graded the same way and the numbers can be compared week to week.
