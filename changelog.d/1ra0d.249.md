@@ -1,0 +1,1 @@
+- `omp-kit project add` starts seats again: it now sends the program and seat model that Agent Mail 0.3.39 requires when minting each seat identity. (MINTFIELDS1, ompkit-1ra0d.249)

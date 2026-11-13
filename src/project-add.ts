@@ -455,8 +455,10 @@ export async function applyProjectAdd(input: ProjectAddInput): Promise<{ ok: tru
 	} else {
 		agents = [];
 		try {
+			// MINTFIELDS1 (ompkit-1ra0d.249): Agent Mail 0.3.39 requires program and model on every identity.
+			const seatModel = input.model?.trim() || `omp-profile:${input.profile.trim()}`;
 			for (let index = 0; index < 1 + input.workers; index++) {
-				const minted = await mail.call("create_agent_identity", { project_key: repo });
+				const minted = await mail.call("create_agent_identity", { project_key: repo, program: "omp", model: seatModel });
 				const name = agentNameOf(minted);
 				if (name === null) return failed("PROJECT_MAIL_MINT_FAILED", "Agent Mail minted an identity without a usable name", "Check the Agent Mail server health and retry; nothing was written.");
 				agents.push(name);
