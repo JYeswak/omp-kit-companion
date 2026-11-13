@@ -1,0 +1,1 @@
+Expose the stock OS `ps` executable in the isolated extension-test PATH so real process-incarnation and owned-scratch checks work without private fleet tools. Keep all ownership refusals and private-tool absence checks unchanged. (ompkit-lrbd.9)
