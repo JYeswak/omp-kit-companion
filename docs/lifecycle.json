@@ -72,7 +72,8 @@
 			"verbs": ["value"],
 			"doc": "docs/phases.md",
 			"test": "tests/cli/value.test.ts",
-			"metric": "UNKNOWN"
+			"metric": "value_clutterfreespaces_ios",
+			"note": "CFS is the product the kit guides, so its value field is this phase's number; every other managed project's value_<slug> prints beside it on the daily line."
 		},
 		{
 			"phase": "revenue",

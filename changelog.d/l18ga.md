@@ -1,0 +1,1 @@
+- The lifecycle map's measure-value phase now names its daily number, `value_clutterfreespaces_ios`, instead of `UNKNOWN`.
