@@ -574,8 +574,10 @@ function scoreRepoEntry(entry: FleetRepo, kitRoot: string, home: string, default
 	const repoCommits = readGitLog(repoPath);
 	const trackerCommits = trackerPath === repoPath ? repoCommits : readGitLog(trackerPath);
 	if (!repoCommits || !trackerCommits) return [unknownScore(entry.name, repoPath, "UNKNOWN", config.tuning, "Repository or tracker history is unreadable")];
-	const missions = discoverMissions(repoCommits, trackerCommits, config.raw);
-	if (planConfig && !missions.includes(planConfig.mission)) missions.push(planConfig.mission);
+	// PLANMISSIONS1 (ompkit-1ra0d.253): a named plan config scores its mission only;
+	// commit-tag discovery is the fallback for repos without one, so stray tags in a
+	// configured repo never become phantom scored missions.
+	const missions = planConfig ? [planConfig.mission] : discoverMissions(repoCommits, trackerCommits, config.raw);
 	missions.sort();
 	if (!missions.length) return [unknownScore(entry.name, repoPath, "UNKNOWN", config.tuning, "No planning mission commits or configured mission were found")];
 	const beads = readIssues(trackerPath);

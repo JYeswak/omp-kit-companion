@@ -5,6 +5,8 @@ import { diagnose } from "../../src/diagnostics.ts";
 import { renderOutput, type PresentationResult } from "../../src/output.ts";
 import { record } from "../../src/mcp-sources.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { runSync } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -601,4 +603,40 @@ test("FLY1 duplicates: distinct beads produce no duplicate report", async () => 
 	const { root, home } = writeBeadProject("beads-dedup-clean", [distinctA, distinctB]);
 	const report = await diagnose({ root, home, project: root, scope: "beads" });
 	expect(report.find((item) => item.component === "beads" && item.evidence !== undefined && "duplicate_pairs" in item.evidence)?.status).toBe("OK");
+});
+
+// PLANMISSIONS1 (ompkit-1ra0d.253): a named plan config scores its mission only;
+// stray commit tags never become phantom scored missions. Without a config the
+// tag discovery fallback still applies (planted negative).
+function phantomRepo(label: string, config: string | null) {
+	const repo = fixture("plan-missions-" + label);
+	const home = fixture("plan-missions-home-" + label);
+	const decoder = new TextDecoder();
+	const git = (args: string[]) => {
+		const result = runSync(["git", ...args], { cwd: repo, deadline_s: fixtureDeadlineS(60) });
+		expect(result.rc, decoder.decode(result.stderr)).toBe(0);
+	};
+	git(["init", "--quiet"]);
+	git(["config", "user.name", "Plan Fixture"]);
+	git(["config", "user.email", "plan-fixture@example.invalid"]);
+	mkdirSync(join(repo, ".omp"), { recursive: true });
+	mkdirSync(join(repo, ".beads"), { recursive: true });
+	writeFileSync(join(repo, "PLAN_kept.md"), "kept plan\n");
+	writeFileSync(join(repo, ".beads", "issues.jsonl"), JSON.stringify({ id: "k1", title: "Kept", description: "Plan: PLAN_kept.md", acceptance_criteria: "checked", status: "open", issue_type: "task", dependencies: [] }) + "\n");
+	writeFileSync(join(repo, ".omp", "planning-score.toml"), "[ci]\nmode = \"local\"\ncheck = \"true\"\nbranch = \"main\"\nreceipts = \"receipts\"\n");
+	if (config !== null) writeFileSync(join(repo, ".omp", "plan.toml"), config);
+	git(["add", "-A"]);
+	git(["commit", "--quiet", "-m", "draft [test]"]);
+	git(["commit", "--quiet", "--allow-empty", "-m", "plan(ghost): review round 1 [test]"]);
+	git(["commit", "--quiet", "--allow-empty", "-m", "beads(ghost): convert [test]"]);
+	git(["branch", "-M", "main"]);
+	return { repo, home };
+}
+
+test("PLANMISSIONS1 configured plan scores its mission only; stray tags fall back to discovery without config", async () => {
+	const kept = "[plan]\nname = \"kept\"\npath = \"PLAN_kept.md\"\n";
+	const { repo, home } = phantomRepo("configured", kept);
+	expect((await scoreRows(repo, home)).map((row) => row.mission)).toEqual(["kept"]);
+	const bare = phantomRepo("discovery", null);
+	expect((await scoreRows(bare.repo, bare.home)).map((row) => row.mission)).toContain("ghost");
 });
