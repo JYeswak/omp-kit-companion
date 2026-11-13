@@ -1,1 +1,0 @@
-- The git error text in `land`'s path-preparation refusal is now scrubbed for token shapes before it is cut to 300 characters, so a token that crosses the cut can't leak its prefix.

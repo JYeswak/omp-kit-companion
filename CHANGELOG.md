@@ -4,6 +4,29 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.130] - 2026-11-13
+
+### Changed
+
+- `project status` now reports the latest goal state instead of resurrecting an older active goal after a pause or drop. Explicit later activation still appears; status never resumes a goal.
+- Eval kernels (which never receive `AGENT_NAME` or `TERN_PANE`) no longer refuse the seat's own work: `land` and the `br` shim resolve the seat from its session file through its live Tern pane, keeping today's refusal when the seat can't be resolved uniquely.
+- Retire beads filed by the daily loop-close job again allow keeping a silent code with a recorded reason. Their retire check now looks only at code that still emits it, so classifier tables and tests that name the code don't block the close.
+- The gate-events classifier now names more recurring failures instead of leaving them `tool-error:unclassified`: unknown tools, LSP symbol and file misses, edits that changed nothing, aborted operations, seat restarts mid-turn, and Agent Mail error envelopes (database errors, bad arguments, missing records).
+- `scratch-reaper` now finishes inside its 30-minute cap on large censuses: each run covers a budgeted slice of the scratch dirs and persists its scan cursor beside the job receipt, so successive runs advance to full coverage instead of every run rescanning from the start and timing out. A run also stops starting new dirs as its deadline approaches, takes one open-file snapshot per run (refreshed on a cadence) instead of one per directory, and a timed-out run's receipt now names the action that was in flight.
+- The git error text in `land`'s path-preparation refusal is now scrubbed for token shapes before it is cut to 300 characters, so a token that crosses the cut can't leak its prefix.
+- `cd` into a directory the same command creates (for example `ovnfs new X && cd X && git update-index`) is no longer refused `LOOKUP_REFUSED`. Outside scratch it passes; inside scratch it is refused `EXPORT_INDEX_REFUSED` with a reason.
+- `omp-kit verify --live-readback` now uses the lesson recorded on the verified bead when the readback child has none. All 25 open readback children had been refused `LESSON_MISSING`, so the daily readback could close none of them.
+- Landing a named checkout now records its authoring base automatically, including with automatic review, so edits to peer changes already present in that checkout no longer fail the stale-worktree check. Changes landed after that base remain protected.
+- A landed message with no trailers gets its Authored-On trailer as its own final paragraph on every Git version (Git 2.43 put it directly under the subject).
+- `sh scripts/commit-preflight.sh` inside an ovnfs checkout now judges the checkout's staged index with the source repository's installed hook chain instead of reporting `UNKNOWN installed-gate: no installed hook chain`.
+- The scheduled `imessage-bridge` and `imessage-brief` jobs run again. Every tick had crashed with `HANDLER_FAILED` (`job.program.argv`) because they were sent to the configured-command runner, which they have no command for; messages from your phone stopped reaching the lead after 2026-11-11.
+- Fix first-run `apply policy --plan` refusing `UNVERIFIED_PROFILE` when the native layer materializes a profile's config files while the kit is reading them; the refusal now names the cause and the native command that reproduces it.
+- README quick start gains step 6, `apply plugin --apply --yes` followed by `doctor --scope plugin_release`, so a stranger who follows it ends with a linked plugin instead of a `DEGRADED` doctor. The release-flow paragraph is tightened to keep README under its size budget.
+- The lifecycle map's measure-value phase now names its daily number, `value_clutterfreespaces_ios`, instead of `UNKNOWN`.
+- `omp-kit value [--project PATH]` measures the project's declared user-value metric in `.omp/value.json` against its target, so the measure-value phase now reports MET, BELOW, UNDECLARED or UNKNOWN instead of an open gap.
+- `omp-kit value` scrubs token shapes from the probe's stderr or stdout before quoting them in an UNKNOWN reason.
+- `omp-kit value` reports UNKNOWN when the probe's output exceeds the capture bound, instead of judging a cut prefix.
+
 ## [0.2.129] - 2026-11-12
 
 ### Changed

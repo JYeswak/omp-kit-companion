@@ -1,1 +1,0 @@
-- Eval kernels (which never receive `AGENT_NAME` or `TERN_PANE`) no longer refuse the seat's own work: `land` and the `br` shim resolve the seat from its session file through its live Tern pane, keeping today's refusal when the seat can't be resolved uniquely.

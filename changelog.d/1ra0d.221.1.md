@@ -1,1 +1,0 @@
-- `project status` now reports the latest goal state instead of resurrecting an older active goal after a pause or drop. Explicit later activation still appears; status never resumes a goal.

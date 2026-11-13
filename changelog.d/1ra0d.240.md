@@ -1,1 +1,0 @@
-- The scheduled `imessage-bridge` and `imessage-brief` jobs run again. Every tick had crashed with `HANDLER_FAILED` (`job.program.argv`) because they were sent to the configured-command runner, which they have no command for; messages from your phone stopped reaching the lead after 2026-11-11.

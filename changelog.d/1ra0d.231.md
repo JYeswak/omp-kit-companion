@@ -1,1 +1,0 @@
-- The gate-events classifier now names more recurring failures instead of leaving them `tool-error:unclassified`: unknown tools, LSP symbol and file misses, edits that changed nothing, aborted operations, seat restarts mid-turn, and Agent Mail error envelopes (database errors, bad arguments, missing records).
