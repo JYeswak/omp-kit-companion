@@ -1736,14 +1736,54 @@ export interface LandReviewDeps {
 	runReviewer(prompt: string): { ok: true; text: string; summary: string } | { ok: false; finding: string };
 }
 
-function defaultCheckoutDir(repo: string, name: string): string | null {
-	let rows: { name: string; path: string }[];
+function defaultCheckoutDir(repo: string, name: string, requireRepoSource = false): string | null {
+	let rows: { name: string; path: string; source: string }[];
 	try {
 		const listed = listOvnfsCheckouts(repo);
 		if ("unavailable" in listed) return null;
 		rows = listed.rows;
 	} catch { return null; }
-	return rows.find((row) => row.name === name)?.path ?? null;
+	const row = rows.find((row) => row.name === name);
+	if (!requireRepoSource) return row?.path ?? null;
+	try { return row && realpathSync(row.source) === realpathSync(repo) ? row.path : null; }
+	catch { return null; }
+}
+
+/** Let Git retain the final trailer block, inserting before Bead rather than
+ * starting a new paragraph that would hide the caller's existing trailers. */
+async function insertLandTrailers(repo: string, message: string, trailers: string[]): Promise<string | null> {
+	try {
+		const result = await kitlibRun(["git", "interpret-trailers", "--no-divider", "--where", "start",
+			...trailers.flatMap((trailer) => ["--trailer", trailer])], {
+			cwd: repo, env: gitEnvironment(), stdin: Buffer.from(message, "utf8"),
+			deadline_s: 30, max_output_bytes: 1024 * 1024,
+		});
+		if (result.rc !== 0 || result.timed_out || result.killed || result.truncated) return null;
+		return new TextDecoder().decode(result.stdout).trimEnd();
+	} catch { return null; }
+}
+
+/** Checkout provenance is opportunistic: unreadable/off-history bases leave
+ * admission exactly as it was, and an authored trailer is never replaced. */
+async function checkoutAuthoredMessage(repo: string, checkout: string | null, message: string, head: string): Promise<{ message: string; authoredOn: string | null }> {
+	const unchanged = { message, authoredOn: null };
+	if (checkout === null) return unchanged;
+	try {
+		if (message.toLowerCase().includes("authored-on")) {
+			const parsed = await kitlibRun(["git", "interpret-trailers", "--parse"], {
+				cwd: repo, env: gitEnvironment(), stdin: Buffer.from(message, "utf8"),
+				deadline_s: 30, max_output_bytes: 1024 * 1024,
+			});
+			if (parsed.rc !== 0 || parsed.timed_out || parsed.killed || parsed.truncated) return unchanged;
+			if (new TextDecoder().decode(parsed.stdout).split("\n").some((line) => line.toLowerCase().startsWith("authored-on:"))) return unchanged;
+		}
+		const base = git(checkout, ["rev-parse", "--verify", "HEAD^{commit}"]);
+		if (base.code !== 0 || base.interrupted || base.out.trim().length === 0) return unchanged;
+		const authoredOn = base.out.trim();
+		if (isAncestor(repo, authoredOn, head) !== true) return unchanged;
+		const landedMessage = await insertLandTrailers(repo, message, [`Authored-On: ${authoredOn}`]);
+		return landedMessage === null ? unchanged : { message: landedMessage, authoredOn };
+	} catch { return unchanged; }
 }
 
 function defaultBeadText(bead: string): { ok: true; text: string } | { ok: false; finding: string } {
@@ -2079,7 +2119,11 @@ export async function landReviewAutoCommand(repo: string, request: ParsedCommand
 	}
 	const head = git(repo, ["rev-parse", "--verify", "HEAD^{commit}"]);
 	if (head.code !== 0) return failRoute(["refused land: local main has no readable commit"], author, "COMMIT_GATE_REFUSED", paths);
-	const landedMessage = `${message}\n\nReview-Session: ${ran.summary}\nReview-Verdict: LAND`;
+	const reviewedMessage = await insertLandTrailers(repo, message, [`Review-Session: ${ran.summary}`, "Review-Verdict: LAND"])
+		?? `${message}\n\nReview-Session: ${ran.summary}\nReview-Verdict: LAND`;
+	const authoredCheckout = deps.checkoutDir === defaultCheckoutDir ? defaultCheckoutDir(repo, checkoutName, true) : checkoutDir;
+	const authored = await checkoutAuthoredMessage(repo, authoredCheckout, reviewedMessage, head.out.trim());
+	const landedMessage = authored.message;
 	const result = await commitOwnedPathsAndPublish(repo, {
 		paths, message: landedMessage, owner: granted.owner, base: head.out.trim(),
 		keepCheckout: request.flags.has("--keep-checkout"), namedCheckout: checkoutName, patchFile: null,
@@ -2090,8 +2134,10 @@ export async function landReviewAutoCommand(repo: string, request: ParsedCommand
 	if (overall !== "PUSHED") {
 		release(paths);
 		const prior = Array.isArray(result.errors) ? result.errors.map((entry) => `${entry.code}: ${entry.message}`) : [];
-		return failRoute([`refused land: ${prior.join("; ") || "publication was not verified"}`], author, "COMMIT_GATE_REFUSED");
+		const refusedResult = failRoute([`refused land: ${prior.join("; ") || "publication was not verified"}`], author, "COMMIT_GATE_REFUSED");
+		return { ...refusedResult, data: { ...refusedResult.data, authored_on: authored.authoredOn } };
 	}
+	data.authored_on = authored.authoredOn;
 	data.review = { verdict: "LAND", author, bead, checkout: checkoutName, routed: [], findings: parsed.findings, text: `Independent-session review recorded (${ran.summary}); landed with review trailers.` };
 	return result;
 }
@@ -2212,5 +2258,8 @@ export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 	if ("error" in currentOwner) return currentOwner.error;
 	if (currentOwner.owner !== owner.owner) return refused("OWNER_MISMATCH", "The live pane owner changed before saving", "Reacquire the correct identity and reservation; nothing was committed.");
 	const checkoutFlag = request.flags.get("--checkout");
-	return commitOwnedPathsAndPublish(repo, { paths, message, owner: owner.owner, base: head.out.trim(), keepCheckout: request.flags.has("--keep-checkout"), namedCheckout: typeof checkoutFlag === "string" ? checkoutFlag : null, patchFile: null });
+	const checkoutName = typeof checkoutFlag === "string" ? checkoutFlag : null;
+	const authored = await checkoutAuthoredMessage(repo, checkoutName === null ? null : defaultCheckoutDir(repo, checkoutName, true), message, head.out.trim());
+	const result = await commitOwnedPathsAndPublish(repo, { paths, message: authored.message, owner: owner.owner, base: head.out.trim(), keepCheckout: request.flags.has("--keep-checkout"), namedCheckout: checkoutName, patchFile: null });
+	return { ...result, data: { ...(result.data as Record<string, unknown> | null), authored_on: authored.authoredOn } };
 }

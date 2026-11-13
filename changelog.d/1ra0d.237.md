@@ -1,0 +1,1 @@
+- Landing a named checkout now records its authoring base automatically, including with automatic review, so edits to peer changes already present in that checkout no longer fail the stale-worktree check. Changes landed after that base remain protected.
