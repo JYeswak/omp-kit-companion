@@ -1750,14 +1750,19 @@ function defaultCheckoutDir(repo: string, name: string, requireRepoSource = fals
 }
 
 /** Let Git retain the final trailer block, inserting before Bead rather than
- * starting a new paragraph that would hide the caller's existing trailers. */
+ * starting a new paragraph that would hide the caller's existing trailers. A
+ * message with no trailer block gets its own final paragraph here: Git versions
+ * differ on whether a subject-only message gains the separating blank line. */
 async function insertLandTrailers(repo: string, message: string, trailers: string[]): Promise<string | null> {
+	const runGit = (args: string[]) => kitlibRun(["git", "interpret-trailers", "--no-divider", ...args], {
+		cwd: repo, env: gitEnvironment(), stdin: Buffer.from(message, "utf8"),
+		deadline_s: 30, max_output_bytes: 1024 * 1024,
+	});
 	try {
-		const result = await kitlibRun(["git", "interpret-trailers", "--no-divider", "--where", "start",
-			...trailers.flatMap((trailer) => ["--trailer", trailer])], {
-			cwd: repo, env: gitEnvironment(), stdin: Buffer.from(message, "utf8"),
-			deadline_s: 30, max_output_bytes: 1024 * 1024,
-		});
+		const parsed = await runGit(["--parse"]);
+		if (parsed.rc !== 0 || parsed.timed_out || parsed.killed || parsed.truncated) return null;
+		if (new TextDecoder().decode(parsed.stdout).trim() === "") return `${message.trimEnd()}\n\n${trailers.join("\n")}`;
+		const result = await runGit(["--where", "start", ...trailers.flatMap((trailer) => ["--trailer", trailer])]);
 		if (result.rc !== 0 || result.timed_out || result.killed || result.truncated) return null;
 		return new TextDecoder().decode(result.stdout).trimEnd();
 	} catch { return null; }
