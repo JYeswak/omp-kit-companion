@@ -7,6 +7,8 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import type { CliResult, ParsedCommand } from "./cli.ts";
+import { resolvePaneForSessionFileSync, type SeatSessionDeps } from "./seat-from-session.ts";
+import { paneSeatName } from "../extensions/kit-seat-identity.ts";
 import { authorizeSourceAct } from "./source-authority.ts";
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { convergeRepository } from "./converge.ts";
@@ -831,22 +833,30 @@ type PaneKey = { key: string } | { refusal: CliResult };
 // Owner seam (ompkit-kdbz.1.2.1): the tern:<id> mapping below resolves a DECLARED
 // Agent Mail pane registration (binding=legacy-unverified), not cryptographic or
 // current-native identity proof. Stronger caller/session proof stays on parent ACTOR1.
-function paneKey(): PaneKey {
-	const herdr = process.env.HERDR_PANE_ID;
-	if (process.env.HERDR_ENV === "1" || herdr !== undefined) {
+/** EVALIDENTITY1 (ompkit-1ra0d.221.2): land's owner lookup with an eval-seat fallback. Reads env (never
+ * process.env directly) so tests inject fixtures; paneKey() below calls this with the live environment.
+ * When TERN_PANE is absent, a single live Tern pane whose session file is PI_SESSION_FILE resolves the
+ * same tern:<id> key; zero or several matches keep the OWNER_UNKNOWN refusal, never a guess. */
+export function paneKeyForEnv(env: Record<string, string | undefined>, deps: SeatSessionDeps = {}): PaneKey {
+	const herdr = env.HERDR_PANE_ID;
+	if (env.HERDR_ENV === "1" || herdr !== undefined) {
 		const id = herdr?.trim() ?? "";
-		if (process.env.HERDR_ENV !== "1" || !id || id !== herdr)
+		if (env.HERDR_ENV !== "1" || !id || id !== herdr)
 			return { refusal: refused("OWNER_UNAVAILABLE", "A native Herdr pane identity is required", "Run land inside a Herdr-managed pane with HERDR_ENV=1 and its unchanged HERDR_PANE_ID; no files were changed.") };
-		const tmux = process.env.TMUX_PANE;
-		const tern = process.env.TERN_PANE;
+		const tmux = env.TMUX_PANE;
+		const tern = env.TERN_PANE;
 		if ((tmux && tmux.length > 0) || (tern && tern.trim().length > 0))
 			return { refusal: refused("OWNER_AMBIGUOUS", "Herdr and outer pane identity markers are both present", "Run land from the native Herdr pane after inherited tmux and Tern markers have been removed; no files were changed.") };
 		return { key: `herdr:${id}` };
 	}
-	const tmux = process.env.TMUX_PANE;
+	const tmux = env.TMUX_PANE;
 	if (tmux && tmux.length > 0) return { key: tmux };
-	const tern = process.env.TERN_PANE;
-	if (!tern || tern.trim().length === 0) return { refusal: refused("OWNER_UNKNOWN", "A live pane identity is required", "Run land inside a registered tmux or Tern agent pane; no files were changed.") };
+	const tern = env.TERN_PANE;
+	if (!tern || tern.trim().length === 0) {
+		const pane = resolvePaneForSessionFileSync({ ...deps, env });
+		if (pane !== null) return { key: `tern:${pane}` };
+		return { refusal: refused("OWNER_UNKNOWN", "A live pane identity is required", "Run land inside a registered tmux or Tern agent pane; no files were changed.") };
+	}
 	const id = tern.trim();
 	let decimal = true;
 	for (let i = 0; i < id.length; i++) {
@@ -857,6 +867,9 @@ function paneKey(): PaneKey {
 	return { key: `tern:${id}` };
 }
 
+function paneKey(): PaneKey {
+	return paneKeyForEnv(process.env);
+}
 // LANDPANETIMEOUT1 (ompkit-fp72.120.16.280): `am agents resolve-pane` ran under a fixed 10 s spawnSync timeout
 // and a timeout read as OWNER_UNKNOWN. Measured 2026-11-05: the real am answers in 15-24 ms (n=10, load1 16.8 on
 // 32 cores), but in ~/.local/state/omp-kit/full-suite-verdicts logs 45 land-test cases read OWNER_UNKNOWN from a
@@ -929,10 +942,18 @@ export function readActiveReservations(repo: string, owner: string, spawnEnv?: R
 	return { rows: read.rows };
 }
 
+/** EVALIDENTITY1 (ompkit-1ra0d.221.2): the seat name for a resolved pane key. Only a tern:<id> key
+ * carries identity files; tmux and herdr seats keep the AGENT_NAME requirement, never a guess. */
+export function seatNameForPaneKey(key: string, home: string): string | null {
+	if (!key.startsWith("tern:")) return null;
+	const seat = paneSeatName({ TERN_PANE: key.slice(5) }, home);
+	return seat.kind === "none" ? null : seat.name;
+}
+
 function authorizedOwner(repo: string, paths: string[], spawnEnv?: Record<string, string>): { owner: string } | { error: CliResult } {
-	const claimed = process.env.AGENT_NAME;
 	const selected = paneKey();
 	if ("refusal" in selected) return { error: selected.refusal };
+	const claimed = process.env.AGENT_NAME ?? seatNameForPaneKey(selected.key, homedir());
 	if (!claimed) return { error: refused("OWNER_UNKNOWN", "The agent name claim is required", "Set AGENT_NAME to the identity registered for this pane; no files were changed.") };
 	const resolved = resolvePaneOwner(repo, selected.key, spawnEnv);
 	if ("error" in resolved) return resolved;

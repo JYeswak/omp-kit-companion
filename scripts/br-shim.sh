@@ -212,6 +212,28 @@ if [ -n "$fixture_project" ]; then
 	fi
 	fixture_identity_project=$fixture_project
 fi
+# EVALIDENTITY1 (ompkit-1ra0d.221.2): an eval kernel carries PI_SESSION_FILE but neither AGENT_NAME
+# nor TERN_PANE (omp's kernel env allowlist drops both). When AGENT_NAME is unset, resolve this
+# seat the same way land does — one kit helper, src/seat-from-session.ts, which maps the session
+# file to its single live Tern pane and that pane to its Agent Mail name. Anything but one clean
+# name leaves AGENT_NAME unset and the refusal below stands, never a guess.
+if [ -z "${AGENT_NAME:-}" ] && [ -n "${PI_SESSION_FILE:-}" ]; then
+	shim_seat_kit=""
+	shim_seat_dir=$(dirname -- "$self_path") || shim_seat_dir=""
+	if [ -n "$shim_seat_dir" ]; then
+		shim_seat_kit=$(CDPATH='' cd -- "$shim_seat_dir/.." && pwd) || shim_seat_kit=""
+	fi
+	shim_seat_name=""
+	if [ -n "$shim_seat_kit" ] && [ -f "$shim_seat_kit/src/seat-from-session.ts" ] && command -v bun >/dev/null 2>&1; then
+		shim_seat_name=$(bun run --no-env-file --config=/dev/null "$shim_seat_kit/src/seat-from-session.ts" 2>/dev/null) || shim_seat_name=""
+	fi
+	shim_seat_nl='
+'
+	case "$shim_seat_name" in
+		""|*"$shim_seat_nl"*) ;;
+		*) AGENT_NAME="$shim_seat_name"; export AGENT_NAME ;;
+	esac
+fi
 if [ -z "${AGENT_NAME:-}" ]; then
 	fail "BR_SHIM_IDENTITY_REQUIRED refusing to run br without AGENT_NAME (pane identity not resolved at spawn)"
 fi
