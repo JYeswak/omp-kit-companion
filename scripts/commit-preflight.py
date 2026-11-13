@@ -20,6 +20,7 @@ from pathlib import Path
 import sys
 import shutil
 import time
+from typing import Optional
 
 from kitlib_run import run
 from kitlib_tmp import owned_tmp
@@ -118,6 +119,75 @@ def note_has_added_line(stdout, env):
     return False
 
 
+def _ovnfs_source_hooks_dir(root: Path, env: dict) -> Optional[tuple]:
+    """PREFLIGHTOVNFS1: in an ovnfs checkout the own hooks dir holds no installed
+    chain, so resolve the source repository's hooks dir instead. Every failure
+    returns None so the caller falls through to today's UNKNOWN message."""
+    which_path = env.get('PATH', os.defpath) if isinstance(env, dict) else os.defpath
+    if shutil.which('ovnfs', path=which_path) is None:
+        return None
+    try:
+        listing = run(['ovnfs', 'ls', '--json'], deadline_s=3, grace_s=0.2,
+                      max_output_bytes=1 << 20, env=env)
+    except (OSError, ValueError, TypeError):
+        return None
+    if listing.timed_out or listing.rc != 0:
+        return None
+    try:
+        parsed = json.loads(listing.stdout.decode())
+    except (ValueError, UnicodeError):
+        return None
+    if isinstance(parsed, dict):
+        rows = parsed.get('checkouts')
+    elif isinstance(parsed, list):
+        rows = parsed
+    else:
+        return None
+    if not isinstance(rows, list):
+        return None
+    try:
+        want = os.path.realpath(str(root))
+    except OSError:
+        return None
+    source = None
+    name = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_path = row.get('path')
+        if not isinstance(row_path, str):
+            continue
+        try:
+            if os.path.realpath(row_path) != want:
+                continue
+        except OSError:
+            continue
+        candidate = row.get('source')
+        row_name = row.get('name')
+        if isinstance(candidate, str) and candidate and isinstance(row_name, str) and row_name:
+            source = candidate
+            name = row_name
+        break
+    if source is None or name is None:
+        return None
+    if not os.path.isdir(source):
+        return None
+    try:
+        resolved = run(['git', '-C', source, 'rev-parse', '--git-path', 'hooks'],
+                       deadline_s=5, grace_s=0.2, max_output_bytes=1 << 20, env=env)
+    except (OSError, ValueError, TypeError):
+        return None
+    if resolved.timed_out or resolved.rc != 0:
+        return None
+    hooks = Path(os.fsdecode(resolved.stdout).strip())
+    if not hooks.is_absolute():
+        hooks = Path(source) / hooks
+    chain = hooks / 'hooks.d' / 'pre-commit'
+    if not sorted(chain.glob('[0-9][0-9]-omp-kit-staged-*')):
+        return None
+    return (hooks, name)
+
+
 def installed_checks(root: Path, env: dict) -> tuple[list, int]:
     """Resolve commit's hook location, not PATH or the source checkout's scripts."""
     hooks = Path(os.fsdecode(required(['git', 'rev-parse', '--git-path', 'hooks'], env)).strip())
@@ -126,8 +196,16 @@ def installed_checks(root: Path, env: dict) -> tuple[list, int]:
     chain = hooks / 'hooks.d' / 'pre-commit'
     candidates = sorted(chain.glob('[0-9][0-9]-omp-kit-staged-*'))
     if not candidates:
-        print('UNKNOWN installed-gate: no installed hook chain at ' + str(hooks), flush=True)
-        return [], 0
+        fallback = _ovnfs_source_hooks_dir(root, env)
+        if fallback is not None:
+            hooks, checkout_name = fallback
+            print('installed-gate: using source hooks ' + str(hooks) +
+                  ' for ovnfs checkout ' + checkout_name, flush=True)
+            chain = hooks / 'hooks.d' / 'pre-commit'
+            candidates = sorted(chain.glob('[0-9][0-9]-omp-kit-staged-*'))
+        if not candidates:
+            print('UNKNOWN installed-gate: no installed hook chain at ' + str(hooks), flush=True)
+            return [], 0
     if not os.access(hooks / 'pre-commit', os.X_OK):
         print('UNKNOWN installed-gate: installed pre-commit runner is missing or not executable at ' + str(hooks), flush=True)
         return [], 1

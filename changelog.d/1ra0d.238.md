@@ -1,0 +1,1 @@
+- `sh scripts/commit-preflight.sh` inside an ovnfs checkout now judges the checkout's staged index with the source repository's installed hook chain instead of reporting `UNKNOWN installed-gate: no installed hook chain`.
