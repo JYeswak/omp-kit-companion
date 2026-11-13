@@ -83,7 +83,7 @@ import { ccStateDir } from "./service.ts";
 import { retainOmpSessions } from "./session-retain.ts";
 import { retainStateLedgers, type LedgerRetentionReport } from "./ledger-retain.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
-import { defaultBudgetLedgerPath, releaseBudgetEntry, SCRATCH_EXPORT_DIRECTORY, updateScratchUsers } from "./scratch.ts";
+import { defaultBudgetLedgerPath, releaseBudgetEntry, SCRATCH_EXPORT_DIRECTORY, SCRATCH_REAPER_ENTRY_BUDGET, SCRATCH_REAPER_HEADROOM_MS, updateScratchUsers } from "./scratch.ts";
 import type { ScratchReleaseOptions } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
 import { registerTernHandlers } from "./tern/omp-adapter.ts";
@@ -2709,9 +2709,16 @@ export function firstFailure(result: Pick<ScratchApplyResult, "applied" | "kille
 
 /** Only the current service keeper may enter this body in its owned child. */
 async function runScratchReaperBody(home: string): Promise<CliResult> {
+	// REAPTIMEOUT1: the census outgrew an unbounded scan (TIMEOUT every run since 2026-11-04), so each
+	// run covers a budgeted slice and persists its cursor; successive runs advance to full coverage.
+	// The deadline keeps headroom past applyScratch for browser, ledger and receipt work inside the cap.
+	const capOverride = Number(process.env.OMP_KIT_RUN_CAP_MS);
+	const cap = Number.isFinite(capOverride) && capOverride > 0 ? capOverride : RUN_TIME_CAPS_MS["scratch-reaper"];
 	const result = applyScratch(home, {
 		liveness: defaultLiveness(), run: scratchRunner, home, runtimeRepo: kitIdentity().release.root,
 		onInspect: path => { process.send?.({ action: "INSPECT", path }); },
+		entryBudget: SCRATCH_REAPER_ENTRY_BUDGET,
+		deadlineMs: Date.now() + Math.max(60_000, cap - SCRATCH_REAPER_HEADROOM_MS),
 	});
 	process.send?.({ action: "BROWSER_INSPECT", path: home });
 	const browserInventory = collectBrowserProcesses();
@@ -3691,8 +3698,9 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 								remediation: "Inspect local worker diagnostics; no successful completion is implied." }], verification: "UNVERIFIED" };
 					}
 				}
+				// REAPTIMEOUT1: the in-flight action survives in the receipt, so the next TIMEOUT names its cause.
 				const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: result.code,
-					omp_version: null, status, cap_ms: capMs };
+					omp_version: null, status, cap_ms: capMs, interruptedAction: run.lastAction };
 				if (!recordJobReceipt(home, job.name, receipt)) {
 					return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
 						errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",

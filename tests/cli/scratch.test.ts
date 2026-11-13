@@ -426,7 +426,9 @@ test("apply records an owner race as a refused skip without failing the run", ()
     return clearRun();
   };
 
-  const result = applyScratch(home, { ...depsFor({ run }), home });
+  // REAPTIMEOUT1: the run takes one lsof snapshot and refreshes it on a cadence instead of one
+  // snapshot per dir; a zero cadence restores the per-verdict refresh this race needs.
+  const result = applyScratch(home, { ...depsFor({ run }), home, snapshotRefreshMs: 0 });
   expect(result.applied).toContainEqual(expect.objectContaining({
     dir, action: "SKIP", reason: "final-recheck-refused",
   }));

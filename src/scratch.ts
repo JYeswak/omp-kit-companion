@@ -1951,6 +1951,52 @@ function inodeOf(path: string): string | null {
 	}
 }
 
+export interface ReaperCursorStore { load(): string | null; save(cursor: string | null): void }
+
+/** REAPTIMEOUT1: where a budgeted run persists its scan position: beside jobs/scratch-reaper.json. */
+export function reaperCursorPath(home: string): string {
+	const root = process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
+	return join(root, "omp-kit", "jobs", "scratch-reaper.cursor.json");
+}
+
+/** REAPTIMEOUT1: file-backed scan-position store; IO failures read as uncovered and never fail a run. */
+export function fileReaperCursorStore(home: string): ReaperCursorStore {
+	const path = reaperCursorPath(home);
+	return {
+		load: (): string | null => {
+			try {
+				const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+				if (typeof parsed === "object" && parsed !== null && "cursor" in parsed) {
+					const cursor: unknown = parsed.cursor;
+					return typeof cursor === "string" ? cursor : null;
+				}
+				return null;
+			} catch {
+				return null;
+			}
+		},
+		save: (cursor: string | null): void => {
+			try {
+				mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+				writeFileSync(path, `${JSON.stringify({ cursor, updated_at: new Date().toISOString() })}\n`, { mode: 0o600 });
+			} catch {
+				/* Best effort: the next run rescans from the stored or start position. */
+			}
+		},
+	};
+}
+
+/**
+ * REAPTIMEOUT1: per-run bounds so the census fits under the service cap. A larger census than
+ * one run's budget is covered across successive runs via the cursor; each run stays inside its
+ * entry budget and stops starting new dirs past deadlineMs (the in-flight dir finishes).
+ */
+export const SCRATCH_REAPER_ENTRY_BUDGET = 1500;
+/** REAPTIMEOUT1: one lsof snapshot serves fd rechecks this long before a bounded refresh. */
+export const SCRATCH_REAPER_SNAPSHOT_REFRESH_MS = 60_000;
+/** REAPTIMEOUT1: the reaper body keeps this much of its cap past applyScratch for browser, ledger and receipt work. */
+export const SCRATCH_REAPER_HEADROOM_MS = 240_000;
+
 export interface ApplyDeps extends InspectDeps {
 	home: string;
 	/** Signal seam used by safety regressions; reached only after the complete production proof. */
@@ -1959,6 +2005,17 @@ export interface ApplyDeps extends InspectDeps {
 	/** Hold discharge probe (ompkit-774u.15): true when the hold's bead is closed, false when open, null when
 	unprovable. Defaults to a read-only `br show --json` through the runner; null fails open to a veto (keep). */
 	beadClosed?: (bead: string) => boolean | null;
+	/** REAPTIMEOUT1: max session dirs inspected and applied per run; undefined means the whole census. */
+	entryBudget?: number;
+	/** REAPTIMEOUT1: epoch ms after which no new dir starts; undefined means no deadline. */
+	deadlineMs?: number;
+	/**
+	 * REAPTIMEOUT1: scan-position persistence across runs. Undefined resolves to the file store
+	 * beside the job receipt; null disables persistence (every run rescans from the start).
+	 */
+	cursorStore?: ReaperCursorStore | null;
+	/** REAPTIMEOUT1: snapshot refresh cadence in ms; defaults to SCRATCH_REAPER_SNAPSHOT_REFRESH_MS. */
+	snapshotRefreshMs?: number;
 }
 
 function isBeadClosed(bead: string, deps: ApplyDeps): boolean | null {
@@ -3888,26 +3945,59 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	const roots = entries.map(entry => entry.root);
 	const systemWorkDirs = resolveSystemWorkDirs(deps);
 	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
-	const planned: { verdict: ScratchVerdict; root: string }[] = [];
-	const snapDeps: ApplyDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
-	const bunBuildPlan = inspectBunBuildFiles(entries, snapDeps);
-	const collect = (dir: string, root: string, nameRequired = true) => {
-		const verdict = inspectOne(dir, root, snapDeps, nameRequired);
-		if (verdict !== null) planned.push({ verdict, root });
-	};
-	for (const root of roots) eachSessionDir(root, dir => collect(dir, root), dir => collect(dir, root, false));
-	for (const dir of systemWorkDirs) {
-		const verdict = inspectSystemWorkDir(dir, snapDeps);
-		if (verdict !== null) planned.push({ verdict, root: dirname(dir) });
+	// REAPTIMEOUT1: enumerate cheaply (readdir only), then scan a sorted slice. The slice bounds both
+	// the inspect walks and the apply rechecks, so a run fits inside its cap; the cursor carries the
+	// scan position to the next run. Safety verdicts are unchanged: only the covered subset differs.
+	const candidates: { dir: string; root: string; nameRequired: boolean }[] = [];
+	for (const root of roots) {
+		eachSessionDir(root,
+			dir => candidates.push({ dir, root, nameRequired: true }),
+			dir => candidates.push({ dir, root, nameRequired: false }));
 	}
+	for (const dir of systemWorkDirs) candidates.push({ dir, root: dirname(dir), nameRequired: false });
+	candidates.sort((a, b) => (a.dir < b.dir ? -1 : a.dir > b.dir ? 1 : 0));
+	const store = deps.cursorStore === null ? null : (deps.cursorStore ?? fileReaperCursorStore(home));
+	const cursor = store?.load() ?? null;
+	const budget = deps.entryBudget ?? candidates.length;
+	const start = cursor === null ? 0 : candidates.findIndex(row => row.dir > cursor);
+	const slice = (start < 0 ? [] : candidates.slice(start, start + Math.max(0, budget)));
+	const pastDeadline = (): boolean => deps.deadlineMs !== undefined && Date.now() >= deps.deadlineMs;
+	const refreshMs = deps.snapshotRefreshMs ?? SCRATCH_REAPER_SNAPSHOT_REFRESH_MS;
+	let snapAt = Date.now();
+	let snap = takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+	const snapDeps: ApplyDeps = { ...deps, lsofSnapshot: snap };
+	const refreshSnap = (): ApplyDeps => {
+		// REAPTIMEOUT1: one snapshot per run, refreshed on a cadence — never one full-system lsof per
+		// dir, which cost ~2 s each and blew the 30 min cap on a 6k+ census. A null snapshot still
+		// retries on the cadence, so a recovered lsof is picked up without per-dir spawns.
+		if (Date.now() - snapAt >= refreshMs) {
+			const next = takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+			if (next !== null || snap === undefined) snap = next;
+			snapAt = Date.now();
+		}
+		return { ...deps, lsofSnapshot: snap };
+	};
+	const systemSet = new Set(systemWorkDirs);
+	const planned: { verdict: ScratchVerdict; root: string }[] = [];
+	let consumed = 0;
+	for (const row of slice) {
+		if (pastDeadline()) break;
+		consumed++;
+		const verdict = systemSet.has(row.dir)
+			? inspectSystemWorkDir(row.dir, snapDeps)
+			: inspectOne(row.dir, row.root, snapDeps, row.nameRequired);
+		if (verdict !== null) planned.push({ verdict, root: row.root });
+	}
+	const bunBuildPlan = inspectBunBuildFiles(entries, snapDeps);
 	const sessions: ScratchVerdict[] = [];
 	const applied: ScratchVerdict[] = [];
 	for (let index = 0; index < planned.length; index++) {
+		if (pastDeadline()) break;
 		const row = planned[index]!;
 		const verdict = row.verdict;
 		sessions.push(verdict);
 		let terminal = verdict;
-		const fresh: ApplyDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
+		const fresh = refreshSnap();
 		let actionRoot = dirname(verdict.dir);
 		for (const candidate of allRoots) {
 			if (verdict.dir.startsWith(candidate + "/")) {
@@ -3926,6 +4016,14 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 			dir: terminal.dir, at: new Date(now).toISOString(), action: terminal.action, reason: terminal.reason,
 			error: terminal.error ?? terminal.reason });
 		deps.onProgress?.(terminal, { done: index + 1, total: planned.length });
+	}
+	// REAPTIMEOUT1: the next run resumes after the last candidate consumed (inspected, whether or
+	// not it produced a verdict or applied). A fully covered census resets to null so the
+	// following run starts over; a cursor past every candidate (all reaped) is covered too.
+	if (store !== null) {
+		const expired = pastDeadline();
+		const covered = (start < 0 || start + consumed >= candidates.length) && !expired;
+		store.save(covered ? null : (consumed > 0 ? slice[consumed - 1]!.dir : cursor));
 	}
 	const bunBuilds = bunBuildPlan.map(row => {
 		const terminal = applyBunBuildFile(row, entries, deps);
