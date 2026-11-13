@@ -303,6 +303,21 @@ export function judge(expected: string, rc: number | null, out: string): { pass:
 		const pass = found && (n !== 0 || rc === 0);
 		return { pass, detail: `summary ${m[1]} fail: ${pass ? "found" : "not found"}` };
 	}
+	// VERIFYNUMERIC1 (ompkit-1ra0d.242): a closed set of numeric shapes judges the output's first
+	// integer instead of searching for the prose literally ('prints a count' never appears in '346').
+	// Any other wording keeps the literal behavior below.
+	const numeric = /^(?:prints\s+(?:a\s+)?(?:count|number)(?:\s+(above|below|over|under)\s+(\d+))?|(<=|>=|<|>|=)\s*(\d+))$/i.exec(exp);
+	if (numeric !== null) {
+		const first = /(?:^|[^0-9.])(\d+)(?![0-9.])/.exec(out);
+		if (first === null) return { pass: false, detail: "output has no integer" };
+		const value = Number(first[1]);
+		const word = numeric[1]?.toLowerCase();
+		const op = word === "above" || word === "over" ? ">" : word === "below" || word === "under" ? "<" : numeric[3];
+		const bound = Number(numeric[2] ?? numeric[4]);
+		const pass = op === undefined ? true
+			: op === "<=" ? value <= bound : op === ">=" ? value >= bound : op === "<" ? value < bound : op === ">" ? value > bound : value === bound;
+		return { pass, detail: op === undefined ? `output prints integer ${value}` : `integer ${value} ${pass ? "meets" : "fails"} ${op} ${bound}` };
+	}
 	if ((m = /^(?:prints|contains)\s+(.+)$/i.exec(e))) { const needle = m[1]!.replace(/^["'`]|["'`]$/g, ""); return { pass: out.includes(needle), detail: `output ${out.includes(needle) ? "contains" : "lacks"} ${JSON.stringify(needle)}` }; }
 	// Any other wording: the literal text must appear in the output; rc is not consulted (the box said what it expects).
 	return { pass: out.includes(e), detail: `output ${out.includes(e) ? "contains" : "lacks"} ${JSON.stringify(e)}` };

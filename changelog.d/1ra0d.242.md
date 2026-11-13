@@ -1,0 +1,1 @@
+- `omp-kit verify` now judges numeric acceptance phrasings by the output's first integer: `prints a count`, `prints a number`, `prints a count above N` / `below N`, and `<= N`, `>= N`, `< N`, `> N`, `= N`. Before, it searched the output for the prose literally, so a live readback whose output met the expectation still failed.
