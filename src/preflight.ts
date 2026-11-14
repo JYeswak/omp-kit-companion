@@ -128,7 +128,7 @@ export async function preflightCommit(repo: string, options: { message?: string;
 	return envelope("commit", null, snapshot, findings);
 }
 
-interface BeadView { id: string; status: string; assignee: string | null; updated_at: string; acceptance: { index: number; checked: boolean; text: string }[]; labels: string[] }
+interface BeadView { id: string; status: string; assignee: string | null; updated_at: string; acceptance: { index: number; checked: boolean; text: string }[]; labels: string[]; reworkFeedback: string | null }
 
 /** Claim reads bind the raw tracker explicitly; other transitions retain their PATH namespace and budget. */
 async function readTracker(repo: string, env: Record<string, string>, args: string[], claim: boolean): Promise<unknown> {
@@ -163,8 +163,19 @@ async function readBead(repo: string, id: string, env: Record<string, string>, r
 	const b = row as Record<string, unknown>;
 	const acText = typeof b.acceptance_criteria === "string" ? b.acceptance_criteria : "";
 	const acceptance = acText.split("\n").filter(l => /^- \[[ xX]\]/.test(l)).map((l, i) => ({ index: i + 1, checked: /^- \[[xX]\]/.test(l), text: l }));
+	let reworkFeedback: string | null = null;
+	let feedbackTime = -Infinity;
+	for (const comment of Array.isArray(b.comments) ? b.comments : []) {
+		if (!comment || typeof comment !== "object") continue;
+		const body = typeof comment.text === "string" ? comment.text : typeof comment.body === "string" ? comment.body : "";
+		const trimmed = body.trimStart();
+		if (!trimmed.startsWith("REWORK ") && !trimmed.startsWith("VERDICT: REWORK") && !trimmed.startsWith("Verdict: REWORK")) continue;
+		const parsed = Date.parse(String(comment.created_at ?? comment.timestamp ?? ""));
+		const time = Number.isFinite(parsed) ? parsed : -Infinity;
+		if (time >= feedbackTime) { reworkFeedback = body; feedbackTime = time; }
+	}
 	return { id: String(b.id), status: String(b.status), assignee: typeof b.assignee === "string" && b.assignee ? b.assignee : null,
-		updated_at: String(b.updated_at ?? ""), acceptance, labels: Array.isArray(b.labels) ? b.labels.map(String) : [] };
+		updated_at: String(b.updated_at ?? ""), acceptance, labels: Array.isArray(b.labels) ? b.labels.map(String) : [], reworkFeedback };
 }
 
 const PHASE_TAG = /\[(build|landed|live)\]/;
@@ -202,7 +213,11 @@ export async function preflightBead(act: Exclude<PreflightAct, "commit" | "publi
 	}
 	const gated = bead.labels.filter(l => ["human-gate", "owner-decision", "kind:process"].includes(l));
 	if (act === "claim") {
-		if (bead.status !== "open") push("NOT_OPEN", `${id} is ${bead.status}`, "claim only an open bead");
+		if (bead.status === "rework" && bead.reworkFeedback) f.unshift({
+			gate: "br-policy", code: "REWORK_FEEDBACK", detail: bead.reworkFeedback,
+			remedy: "Resume the existing review feedback without replacing its original acceptance.", fix: null, blocking: false,
+		});
+		if (bead.status !== "open" && bead.status !== "rework") push("NOT_OPEN", `${id} is ${bead.status}`, "claim only an open or rework bead");
 		// CLAIMSELF1 (ompkit-1ra0d.158): a claim by the current assignee is a
 		// reversible no-op that activates the bead, not a conflict. Only a
 		// different holder (or an unknown actor) is refused ASSIGNED.

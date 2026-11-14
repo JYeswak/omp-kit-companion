@@ -176,6 +176,41 @@ test("CLAIMSELF1: claim by the current assignee is admitted; claim by another ac
 	expect(other.ok).toBe(false);
 });
 
+test("REWORKCLAIM1: released feedback reaches the claim caller; custody and terminal states still refuse", async () => {
+	const feedback = "REWORK kit-released: preserve the original failed acceptance and repair it.";
+	const bead = {
+		id: "kit-released", status: "rework", assignee: "", updated_at: "2026-11-14T00:00:00Z",
+		labels: [] as string[], acceptance_criteria: "- [ ] [build] original obligation",
+		comments: [
+			{ text: feedback, created_at: "2026-11-14T00:00:00Z" },
+			{ text: "REWORK kit-released: older feedback", created_at: "2026-11-13T00:00:00Z" },
+			{ text: "Later discussion does not replace review feedback.", created_at: "2026-11-14T01:00:00Z" },
+		],
+	};
+	const read = async (args: string[]): Promise<unknown> => args[0] === "show" ? [bead] : [];
+	const admitted = await preflightBead("claim", base, bead.id, { actor: "Peer", env: {}, read });
+	expect(admitted.ok, renderEnvelope(admitted)).toBe(true);
+	expect(admitted.findings[0]?.detail).toBe(feedback);
+	const decoded = await run(["python3", "scripts/claim_verdict.py", bead.id, "0"], {
+		cwd: kitRoot, deadline_s: fixtureDeadlineS(10), stdin: JSON.stringify(admitted),
+	});
+	expect(decoded.rc).toBe(0);
+	expect(new TextDecoder().decode(decoded.stdout)).toBe("PASS\n");
+	expect(new TextDecoder().decode(decoded.stderr)).toBe(`${feedback}\n`);
+	for (const [status, assignee, labels, code] of [
+		["rework", "Implementer", [], "ASSIGNED"],
+		["rework", "", ["human-gate"], "GATED_LABEL"],
+		["rework", "", ["needs-director"], "NEEDS_DIRECTOR"],
+		["closed", "", [], "NOT_OPEN"],
+		["deferred", "", [], "NOT_OPEN"],
+	] as const) {
+		Object.assign(bead, { status, assignee, labels: [...labels] });
+		const refused = await preflightBead("claim", base, bead.id, { actor: "Peer", env: {}, read });
+		expect(refused.ok).toBe(false);
+		expect(refused.findings.some(f => f.blocking && f.code === code)).toBe(true);
+	}
+});
+
 test("non-claim preflight honors the PATH tracker even when BR_REAL names a different tracker", async () => {
 	const dir = join(base, "non-claim-namespace");
 	const bin = join(dir, "bin");
@@ -308,7 +343,7 @@ async function claimFixture(name: string, actor: string, root: string, brBin: st
 	// Preserve the resolved harness authority exactly. Only local fixture
 	// bootstrap selects the native backend rather than a caller's policy shim.
 	mkdirSync(join(repo, ".beads"), { recursive: true });
-	await brun(["init", "--db", join(repo, ".beads", "beads.db")], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
+	await brun(["init", "--db", join(repo, ".beads", "beads.db"), "--actor", actor], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
 	const ac = "- [ ] [a] [build] probe passes `true` -> rc 0";
 	const gatedOut = await brun(["create", "gated bead [test]", "-l", "needs-director", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
 	const eligibleOut = await brun(["create", "eligible bead [test]", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
@@ -319,12 +354,14 @@ async function claimFixture(name: string, actor: string, root: string, brBin: st
 
 test.skipIf(!hasBr || !hasOmpKit)("local preflight bootstrap survives a guarded outer actor while the old ambient choice is refused", { timeout: 120000 }, async () => {
 	const owned = ownedTmp("preflight-bootstrap-actor");
-	const savedActor = process.env.AGENT_NAME, savedPath = process.env.PATH, savedDb = process.env.BEADS_DB;
+	const savedActor = process.env.AGENT_NAME, savedPath = process.env.PATH, savedDb = process.env.BEADS_DB, savedReal = process.env.BR_REAL;
+	const backend = nativeBr();
 	const bin = join(owned.path, "policy-bin");
 	mkdirSync(bin);
 	symlinkSync(join(import.meta.dir, "../../scripts/br-shim.sh"), join(bin, "br"));
 	try {
 		process.env.AGENT_NAME = "OuterFixtureIdentity";
+		process.env.BR_REAL = backend;
 		process.env.PATH = `${bin}:${savedPath ?? ""}`;
 		delete process.env.BEADS_DB;
 		await expect(claimFixture("old-ambient", "BootstrapActor", owned.path, "br")).rejects.toThrow("BR_SHIM_ACTOR_MISMATCH");
@@ -335,6 +372,7 @@ test.skipIf(!hasBr || !hasOmpKit)("local preflight bootstrap survives a guarded 
 		if (savedActor === undefined) delete process.env.AGENT_NAME; else process.env.AGENT_NAME = savedActor;
 		if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
 		if (savedDb === undefined) delete process.env.BEADS_DB; else process.env.BEADS_DB = savedDb;
+		if (savedReal === undefined) delete process.env.BR_REAL; else process.env.BR_REAL = savedReal;
 		owned.cleanup();
 	}
 });
@@ -449,8 +487,32 @@ import { runCli } from ${JSON.stringify(new URL("../../src/cli.ts", import.meta.
 process.exitCode = await runCli(process.argv.slice(2));
 `);
 	chmodSync(join(shimBin, "omp-kit"), 0o755);
-	return { ...process.env, PATH: `${shimBin}:${process.env.PATH ?? ""}`, AGENT_NAME: actor } as Record<string, string>;
+	// Local claims bind the same native backend used to seed the owned DB;
+	// an injected grader authority or inherited BR_REAL remains untouched.
+	const localBackend = !resolveHarness() && !process.env.BR_REAL ? { BR_REAL: nativeBr() } : {};
+	return { ...process.env, ...localBackend, PATH: `${shimBin}:${process.env.PATH ?? ""}`, AGENT_NAME: actor } as Record<string, string>;
 }
+
+test.skipIf(!hasBr || !hasOmpKit)("REWORKCLAIM1: candidate shim atomically claims a real released rework fixture", { timeout: fixtureDeadlineS(120) * 1000 }, async () => {
+	const actor = "ReworkBuilder";
+	const owned = await nativeFixtureRoot("released-rework");
+	try {
+		const brBin = nativeBr();
+		const { repo, eligible } = await claimFixture("released", "OriginalImplementer", owned.dir, brBin);
+		await brun(["update", eligible, "--status", "rework", "--actor", "OriginalImplementer"], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
+		const feedback = `REWORK ${eligible}: repair the original failure; do not replace acceptance.`;
+		await brun(["comments", "add", eligible, feedback, "--actor", "Reviewer"], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
+		const result = await run(["br", "update", eligible, "--claim", "--actor", actor], {
+			cwd: repo, deadline_s: fixtureDeadlineS(60),
+			env: { ...(await shimClaimEnv(actor, owned.dir)), BEADS_DB: join(repo, ".beads", "beads.db"), BR_REAL: brBin },
+		});
+		expect(new TextDecoder().decode(result.stderr)).toStartWith(`${feedback}\n`);
+		expect(result.rc).toBe(0);
+		expect(await beadRow(repo, eligible)).toEqual({ status: "in_progress", assignee: actor, labels: [] });
+	} finally {
+		await releaseFixtureRoot(owned);
+	}
+});
 
 test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director refuses NEEDS_DIRECTOR on the unit and the supported CLI path; recorded director resolution re-admits", { timeout: 120000 }, async () => {
 	const actor = "TestSeatNeedsDirector";

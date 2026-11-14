@@ -27,6 +27,9 @@ def main() -> int:
     elif int(sys.argv[2]) != 0 or doc.get("ok") is not True:
         raise ValueError("claim authority failed without a refusal")
     else:
+        for finding in findings:
+            if finding["code"] == "REWORK_FEEDBACK" and not finding["blocking"]:
+                print(finding["detail"], file=sys.stderr)
         print("PASS")
     return 0
 
