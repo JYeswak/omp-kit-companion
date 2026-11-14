@@ -25,11 +25,14 @@ export type BeadBreadthSpan = {
 	component_count: number;
 	split_suggestion: string;
 };
+type DeclaredScopeComponent = { name: string; files: string[]; basis: string };
 type DeclaredBeadScope = {
 	version: 1;
 	kind: "code" | "operational";
 	files: string[];
 	basis: string;
+	read_only?: string[];
+	components?: DeclaredScopeComponent[];
 };
 type BeadScopeResolution =
 	| { kind: "legacy"; files: string[] | null }
@@ -306,13 +309,53 @@ function contractBreadthFiles(bead: PlanningBead, acceptanceFiles: string[] | nu
 	return [...files].sort();
 }
 
+function canonicalScopePaths(entries: readonly unknown[], field: string): Set<string> | string {
+	const paths = new Set<string>();
+	for (const entry of entries) {
+		if (typeof entry !== "string") return `Source-Scope ${field} must contain canonical paths`;
+		const path = normalizedBreadthPath(entry);
+		if (!path || path !== entry) return `invalid Source-Scope ${field} path: ${entry}`;
+		paths.add(path);
+	}
+	return paths;
+}
+
+/** Membership is machine-checked; functional cohesion still needs non-author source review. */
+function componentOwnership(entries: readonly unknown[], files: readonly string[]): DeclaredScopeComponent[] | string {
+	const remaining = new Set<string>();
+	for (const file of files) if (!isBreadthBookkeeping(file)) remaining.add(file);
+	const names = new Set<string>();
+	const components: DeclaredScopeComponent[] = [];
+	for (const entry of entries) {
+		if (!record(entry) || Object.keys(entry).length !== 3 ||
+			typeof entry.name !== "string" || !entry.name.trim() ||
+			typeof entry.basis !== "string" || !entry.basis.trim() || !Array.isArray(entry.files)) {
+			return "Source-Scope components require a name, product files and a nonempty source basis";
+		}
+		const name = entry.name.trim();
+		if (names.has(name)) return `duplicate Source-Scope component name: ${name}`;
+		names.add(name);
+		const owned = canonicalScopePaths(entry.files, "component files");
+		if (typeof owned === "string") return owned;
+		if (!owned.size) return `Source-Scope component has no product files: ${name}`;
+		if (owned.size !== entry.files.length) return `Source-Scope component repeats a product file: ${name}`;
+		for (const file of owned) {
+			if (!remaining.delete(file)) return `Source-Scope component repeats or claims an unplanned, read-only or bookkeeping file: ${file}`;
+		}
+		components.push({ name, files: [...owned].sort(), basis: entry.basis.trim() });
+	}
+	if (remaining.size) return `Source-Scope component ownership omits planned product files: ${[...remaining].sort().join(", ")}`;
+	return components.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+}
+
 function resolveBeadBreadthScope(bead: PlanningBead): BeadScopeResolution {
 	const legacy = explicitAcceptanceFiles(stringValue(bead.acceptance_criteria) ?? "");
 	const declarations = (stringValue(bead.notes) ?? "").split("\n")
 		.map(line => line.trim()).filter(line => line.startsWith("Source-Scope:"));
 	if (!declarations.length) return { kind: "legacy", files: legacy };
 	const files = contractBreadthFiles(bead, legacy);
-	const invalid = (reason: string): BeadScopeResolution => ({ kind: "invalid", files, reason });
+	const invalid = (reason: string, knownFiles: string[] | null = files): BeadScopeResolution =>
+		({ kind: "invalid", files: knownFiles, reason });
 	if (declarations.length !== 1) return invalid("multiple Source-Scope declarations");
 	if (files === null) return invalid("unparseable acceptance scope; metadata cannot erase it");
 	let value: unknown;
@@ -321,25 +364,33 @@ function resolveBeadBreadthScope(bead: PlanningBead): BeadScopeResolution {
 	} catch {
 		return invalid("malformed Source-Scope JSON");
 	}
-	if (!record(value) || Object.keys(value).length !== 4 || value.version !== 1 ||
-		(value.kind !== "code" && value.kind !== "operational") || !Array.isArray(value.files) ||
+	if (!record(value) || Object.keys(value).length !== 4 + Number(value.read_only !== undefined) + Number(value.components !== undefined) ||
+		value.version !== 1 || (value.kind !== "code" && value.kind !== "operational") || !Array.isArray(value.files) ||
+		(value.read_only !== undefined && !Array.isArray(value.read_only)) ||
+		(value.components !== undefined && !Array.isArray(value.components)) ||
 		typeof value.basis !== "string" || !value.basis.trim()) {
-		return invalid("Source-Scope requires version 1, code/operational kind, files and a nonempty source basis");
+		return invalid("Source-Scope requires version 1, kind, files and basis; only read_only paths and component ownership are optional");
 	}
-	const declared = new Set<string>();
-	for (const entry of value.files) {
-		if (typeof entry !== "string") return invalid("Source-Scope files must be canonical paths");
-		const path = normalizedBreadthPath(entry);
-		if (!path || path !== entry) return invalid(`invalid Source-Scope path: ${entry}`);
-		declared.add(path);
+	const declared = canonicalScopePaths(value.files, "files");
+	if (typeof declared === "string") return invalid(declared);
+	const readOnly = value.read_only === undefined ? null : canonicalScopePaths(value.read_only, "read_only");
+	if (typeof readOnly === "string") return invalid(readOnly);
+	if (readOnly) for (const path of readOnly) {
+		if (declared.has(path)) return invalid(`Source-Scope path is both planned and read-only: ${path}`);
 	}
 	if (value.kind === "code" && !declared.size) return invalid("code Source-Scope cannot declare zero files");
-	const missing = files.filter(path => !declared.has(path));
+	const missing = files.filter(path => !declared.has(path) && !readOnly?.has(path));
 	if (missing.length) return invalid(`Source-Scope omits known contract files: ${missing.join(", ")}`);
 	if (value.kind === "operational" && declared.size) return invalid("operational Source-Scope must declare zero source files");
 	const declaration: DeclaredBeadScope = {
 		version: 1, kind: value.kind, files: [...declared].sort(), basis: value.basis.trim(),
 	};
+	if (readOnly) declaration.read_only = [...readOnly].sort();
+	if (value.components !== undefined) {
+		const ownership = componentOwnership(value.components, declaration.files);
+		if (typeof ownership === "string") return invalid(ownership, declaration.files);
+		declaration.components = ownership;
+	}
 	return { kind: "declared", files: declaration.files, declaration };
 }
 
@@ -353,6 +404,12 @@ function breadthComponent(path: string): string {
 	return parts.slice(0, 2).join("/");
 }
 
+/** Required release/status bookkeeping still counts toward the all-file limit. */
+function isBreadthBookkeeping(path: string): boolean {
+	return path === "ROADMAP.md" || (path.startsWith("changelog.d/") &&
+		path.endsWith(".md") && path.lastIndexOf("/") === "changelog.d".length);
+}
+
 function breadthSplitSuggestion(id: string, groups: ReadonlyMap<string, readonly string[]>, limits: BeadBreadthLimits): string {
 	const children: string[] = [];
 	for (const component of [...groups.keys()].sort()) {
@@ -360,7 +417,7 @@ function breadthSplitSuggestion(id: string, groups: ReadonlyMap<string, readonly
 		for (let start = 0; start < files.length; start += limits.maxFiles)
 			children.push(component + ": " + files.slice(start, start + limits.maxFiles).join(", "));
 	}
-	return `Split ${id} into child beads grouped by component, with at most ${limits.maxFiles} files each: ${children.join("; ")}. Keep cross-component integration acceptance in the parent.`;
+	return `Plan genuine product slices for ${id}, with at most ${limits.maxFiles} changed files each, including required release/status documentation. Do not split implementation from its tests or bookkeeping. Current product footprints: ${children.join("; ")}. Keep cross-component integration acceptance in the parent.`;
 }
 
 /** Explicit notes scope supplements legacy acceptance paths; metadata cannot erase known contract files. */
@@ -391,11 +448,16 @@ export function analyzeBeadBreadth(beads: readonly PlanningBead[], limits: BeadB
 			continue;
 		}
 		const groups = new Map<string, string[]>();
-		for (const file of files) {
-			const component = breadthComponent(file);
-			const group = groups.get(component);
-			if (group) group.push(file);
-			else groups.set(component, [file]);
+		if (scope.kind === "declared" && scope.declaration.components !== undefined) {
+			for (const component of scope.declaration.components) groups.set(component.name, component.files);
+		} else {
+			for (const file of files) {
+				if (isBreadthBookkeeping(file)) continue;
+				const component = breadthComponent(file);
+				const group = groups.get(component);
+				if (group) group.push(file);
+				else groups.set(component, [file]);
+			}
 		}
 		const components = [...groups.keys()].sort();
 		if (scope.kind !== "invalid") checkedBeads++;

@@ -493,6 +493,20 @@ test("A9 doctor and planning score CLI share configured bead breadth", () => {
 		{ ...issue("operations", []), notes: breadthScopeNotes("operational", []) },
 		{ ...issue("understated", ["src/required/a.ts", "src/required/b.ts"]),
 			notes: breadthScopeNotes("code", ["src/required/a.ts"]) },
+		{ ...issue("delivery", []), notes: breadthScopeNotes("code", [
+			"src/activation.ts", "tests/cli/activation.test.ts", "changelog.d/activation.md", "ROADMAP.md",
+		]) },
+		{ ...issue("provenance", ["src/metadata/worker.ts"]),
+			description: "Current source src/metadata/worker.ts; read-only research upstream/rch-result.rs.",
+			notes: breadthScopeNotes("code", ["src/metadata/worker.ts"], "Current implementation and read-only prior art",
+				["upstream/rch-result.rs"]) },
+		{ ...issue("functional", []), notes: breadthScopeNotes("code", [
+			"src/owned-request.ts", "src/owned-response.ts", "scripts/owned-validation.ts", "tests/cli/owned.test.ts",
+		], "Actual bounded ownership fixture", undefined, [{
+			name: "request-boundary",
+			files: ["src/owned-request.ts", "src/owned-response.ts", "scripts/owned-validation.ts", "tests/cli/owned.test.ts"],
+			basis: "Request entry, shared validation, response and its real consumer belong to one boundary",
+		}]) },
 	];
 	const lines: string[] = [];
 	for (const item of issues) lines.push(JSON.stringify(item));
@@ -562,6 +576,15 @@ test("A9 doctor and planning score CLI share configured bead breadth", () => {
 	const declaredScopes = [
 		{ id: "metadata-files", kind: "code", files: ["src/metadata/worker.ts"] },
 		{ id: "operations", kind: "operational", files: [] },
+		{ id: "delivery", kind: "code", files: [
+			"ROADMAP.md", "changelog.d/activation.md", "src/activation.ts", "tests/cli/activation.test.ts",
+		] },
+		{ id: "provenance", kind: "code", files: ["src/metadata/worker.ts"], read_only: ["upstream/rch-result.rs"] },
+		{ id: "functional", kind: "code", files: [
+			"scripts/owned-validation.ts", "src/owned-request.ts", "src/owned-response.ts", "tests/cli/owned.test.ts",
+		], components: [{ name: "request-boundary", files: [
+			"scripts/owned-validation.ts", "src/owned-request.ts", "src/owned-response.ts", "tests/cli/owned.test.ts",
+		], basis: expect.any(String) }] },
 	];
 	expect(diagnosedEvidence.declared_scopes).toMatchObject(declaredScopes);
 	expect(scoredEvidence.declared_scopes).toMatchObject(declaredScopes);
@@ -728,8 +751,12 @@ test("PLANTIMING1 preserves missing-evidence, ordering, zero and tagged-draft se
 	expect(fallback.metrics.plan_to_code_hours).toMatchObject({ value: 2, status: "PASS", evidence: { source: "draft_tag" } });
 });
 
-function breadthScopeNotes(kind: "code" | "operational", files: readonly string[], basis = "Source-backed current operation/caller inventory"): string {
-	return "Source-Scope: " + JSON.stringify({ version: 1, kind, files, basis });
+function breadthScopeNotes(kind: "code" | "operational", files: readonly string[],
+	basis = "Source-backed current operation/caller inventory", readOnly?: readonly string[], components?: readonly unknown[]): string {
+	const scope: Record<string, unknown> = { version: 1, kind, files, basis };
+	if (readOnly !== undefined) scope.read_only = readOnly;
+	if (components !== undefined) scope.components = components;
+	return "Source-Scope: " + JSON.stringify(scope);
 }
 
 function breadthMetricFor(beads: api.PlanningBead[]) {
@@ -843,4 +870,125 @@ test("BREADTHMETA1 cannot mask a known oversized contract or relax either budget
 		notes: breadthScopeNotes("code", components) })])).toMatchObject({
 		status: "FAIL", evidence: { oversized_beads: [{ id: "components", file_count: 4, component_count: 4 }] },
 	});
+});
+
+test("SCOPEACCOUNT1 counts delivery docs as files but not product components", () => {
+	const files = ["src/rch-cycle.ts", "src/cli.ts", "tests/cli/rch-cycle.test.ts", "changelog.d/fix.md", "ROADMAP.md"];
+	const original = "- [ ] The original outcome remains unchanged.";
+	const metric = breadthMetricFor([bead("complete", { acceptance_criteria: original, notes: breadthScopeNotes("code", files) })]);
+	expect(metric).toMatchObject({ status: "PASS", target: { max_files: 5, max_components: 3 },
+		evidence: { declared_scopes: [{ id: "complete", files: [...files].sort() }] } });
+	const oversized = breadthMetricFor([bead("six", { acceptance_criteria: original,
+		notes: breadthScopeNotes("code", [...files, "changelog.d/another.md"]) })]);
+	expect(oversized).toMatchObject({ status: "FAIL", evidence: {
+		oversized_beads: [{ id: "six", file_count: 6, component_count: 3 }] } });
+});
+
+test("SCOPEACCOUNT1 does not hide ordinary docs or code behind bookkeeping", () => {
+	const product = ["src/rch-cycle.ts", "src/cli.ts", "tests/cli/rch-cycle.test.ts"];
+	for (const extra of ["README.md", "changelog.d/hidden.ts", "changelog.d/archive/guide.md"]) {
+		const metric = breadthMetricFor([bead("not-bookkeeping", { acceptance_criteria: "- [ ] Original outcome.",
+			notes: breadthScopeNotes("code", [...product, extra]) })]);
+		expect(metric, extra).toMatchObject({ status: "FAIL", evidence: {
+			oversized_beads: [{ file_count: 4, component_count: 4 }] } });
+	}
+});
+
+test("SCOPEACCOUNT1 preserves explicit read-only provenance without hiding missing writes", () => {
+	const writes = ["src/rch-cycle.ts", "tests/cli/rch-cycle.test.ts"];
+	const references = ["upstream/rch-result.rs"];
+	const contract = {
+		labels: ["mission:demo"],
+		acceptance_criteria: "- [ ] Preserve `src/rch-cycle.ts` and its consumer.",
+		description: "Read-only prior art upstream/rch-result.rs.",
+	};
+	const item = bead("references", { ...contract,
+		notes: breadthScopeNotes("code", writes, "Actual planned changes and read-only research", references) });
+	const before = JSON.stringify(item);
+	expect(breadthMetricFor([item])).toMatchObject({ status: "PASS", evidence: {
+		declared_scopes: [{ id: "references", files: [...writes].sort(), read_only: references }] } });
+	expect(JSON.stringify(item)).toBe(before);
+	for (const notes of [
+		breadthScopeNotes("code", writes),
+		breadthScopeNotes("code", [writes[1]!], "Known implementation is still required", references),
+	]) {
+		expect(breadthMetricFor([bead("missing-write", { ...contract, notes })]))
+			.toMatchObject({ status: "UNKNOWN", evidence: { unknown_ids: ["missing-write"] } });
+	}
+});
+
+test("SCOPEACCOUNT1 rejects contradictory provenance and preserves genuine read-only operations", () => {
+	const valid = { version: 1, kind: "code", files: ["src/worker.ts"], basis: "Actual source-backed operation" };
+	for (const read_only of ["upstream/reference.rs", ["../outside.rs"], ["/absolute/reference.rs"], [1], ["src/worker.ts"]]) {
+		const metric = breadthMetricFor([bead("bad-reference", { acceptance_criteria: "- [ ] Preserve `src/worker.ts`.",
+			notes: "Source-Scope: " + JSON.stringify({ ...valid, read_only }) })]);
+		expect(metric).toMatchObject({ status: "UNKNOWN", evidence: {
+			scope_errors: [{ id: "bad-reference", reason: expect.any(String) }] } });
+	}
+	const operation = bead("read-only", {
+		acceptance_criteria: "- [ ] Read `upstream/reference.rs` without modifying it.",
+		notes: breadthScopeNotes("operational", [], "Read-only qualification, no changes", ["upstream/reference.rs"]),
+	});
+	expect(breadthMetricFor([operation])).toMatchObject({ status: "PASS", evidence: {
+		declared_scopes: [{ id: "read-only", files: [], read_only: ["upstream/reference.rs"] }] } });
+});
+
+test("SCOPEOWN1 measures explicit functional ownership without hiding either cap", () => {
+	const product = ["src/request.ts", "src/response.ts", "scripts/validate.ts", "tests/cli/request.test.ts"];
+	const files = [...product, "ROADMAP.md"];
+	const components = [{ name: "request-boundary", files: product,
+		basis: "Existing request/response entry shares validation and the corresponding consumer" }];
+	const control = { acceptance_criteria: "- [ ] Original outcome remains authoritative." };
+	expect(breadthMetricFor([bead("owned", { ...control,
+		notes: breadthScopeNotes("code", files, "Real bounded ownership", undefined, components) })]))
+		.toMatchObject({ status: "PASS", evidence: {
+			declared_scopes: [{ id: "owned", files: [...files].sort(), components: [{
+				name: "request-boundary", files: [...product].sort(), basis: expect.any(String),
+			}] }] } });
+	expect(breadthMetricFor([bead("six-owned", { ...control,
+		notes: breadthScopeNotes("code", [...files, "changelog.d/fix.md"], "Six real writes", undefined, components) })]))
+		.toMatchObject({ status: "FAIL", evidence: {
+			oversized_beads: [{ id: "six-owned", file_count: 6, component_count: 1 }] } });
+	const four = product.map((path, index) => ({ name: `boundary-${index}`, files: [path], basis: "Distinct source owner" }));
+	expect(breadthMetricFor([bead("four-owned", { ...control,
+		notes: breadthScopeNotes("code", files, "Four genuine owners", undefined, four) })]))
+		.toMatchObject({ status: "FAIL", evidence: {
+			oversized_beads: [{ id: "four-owned", file_count: 5, component_count: 4 }] } });
+});
+
+test("SCOPEOWN1 rejects incomplete or contradictory product ownership", () => {
+	const files = ["src/lease.ts", "tests/cli/lease.test.ts"];
+	const owner = { name: "lease-boundary", files, basis: "Actual handler and consumer" };
+	const partitions = [
+		"not-an-array", [],
+		[{ ...owner, files: [files[0]!] }],
+		[owner, { name: "duplicate-file", files: [files[0]!], basis: "A conflicting owner" }],
+		[{ ...owner, files: [...files, files[0]!] }],
+		[{ ...owner, files: [...files, "src/not-planned.ts"] }],
+		[{ ...owner, files: [...files, "upstream/reference.rs"] }],
+		[{ ...owner, files: [...files, "ROADMAP.md"] }],
+		[{ ...owner, files: [] }],
+		[{ ...owner, basis: "" }],
+		[{ ...owner, extra: true }],
+		[{ ...owner, files: [files[0]!] }, { ...owner, files: [files[1]!] }],
+	];
+	for (const components of partitions) {
+		const notes = "Source-Scope: " + JSON.stringify({
+			version: 1, kind: "code", files: [...files, "ROADMAP.md"], basis: "Actual planned source",
+			read_only: ["upstream/reference.rs"], components,
+		});
+		expect(breadthMetricFor([bead("bad-owner", { acceptance_criteria: "- [ ] Original outcome.", notes })]))
+			.toMatchObject({ status: "UNKNOWN", evidence: {
+				scope_errors: [{ id: "bad-owner", reason: expect.any(String) }] } });
+	}
+});
+
+test("SCOPEOWN1 invalid ownership cannot downgrade six declared writes to UNKNOWN", () => {
+	const files = Array.from({ length: 6 }, (_, index) => `src/large/write${index}.ts`);
+	expect(breadthMetricFor([bead("six-invalid", { acceptance_criteria: "- [ ] Original outcome.",
+		notes: breadthScopeNotes("code", files, "Six known planned edits", undefined, []) })]))
+		.toMatchObject({ status: "FAIL", evidence: {
+			oversized_beads: [{ id: "six-invalid", file_count: 6 }],
+			scope_errors: [{ id: "six-invalid", reason: expect.any(String) }],
+		} });
 });
