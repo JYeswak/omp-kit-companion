@@ -130,10 +130,23 @@ function readCursor(path: string): number | null {
 	}
 }
 
-function writeCursor(path: string, agent: string, project: string, cursor: number, at: Date): void {
+/** Message ids already woken, so a server re-emission never wakes twice. Bounded; oldest evicted first. */
+const MAX_DELIVERED = 200;
+
+function readDelivered(path: string): number[] {
+	try {
+		const record = JSON.parse(readFileSync(path, "utf8"));
+		if (record?.schema !== 1 || !Array.isArray(record.delivered)) return [];
+		return record.delivered.filter((id: unknown): id is number => Number.isSafeInteger(id)).slice(-MAX_DELIVERED);
+	} catch {
+		return [];
+	}
+}
+
+function writeCursor(path: string, agent: string, project: string, cursor: number, delivered: readonly number[], at: Date): void {
 	mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
 	const tmp = `${path}.${process.pid}.tmp`;
-	writeFileSync(tmp, JSON.stringify({ schema: 1, agent, project, cursor, at: at.toISOString() }));
+	writeFileSync(tmp, JSON.stringify({ schema: 1, agent, project, cursor, delivered: [...delivered].slice(-MAX_DELIVERED), at: at.toISOString() }));
 	renameSync(tmp, path);
 }
 
@@ -208,10 +221,16 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 			const got = await read(agent!, project, after);
 			if (got === null) return;
 			if (after === null) {
-				writeCursor(path, agent!, project, got.next_cursor, now());
+				writeCursor(path, agent!, project, got.next_cursor, [], now());
 				return;
 			}
-			const fresh = got.events.filter(e => e.from !== agent && (e.kind === "to" || e.kind === "cc"));
+			// WAKEPENDING1 cursor/dedup: the feed carries no read state, so a server re-emission at or
+			// below the cursor would re-wake. Judge freshness by position AND prior delivery, never by
+			// position alone. A crash between sendMessage and the write below still replays once
+			// (at-least-once delivery is kept); the steady-state replay class is closed.
+			const delivered = new Set(readDelivered(path));
+			const fresh = got.events.filter(e => e.from !== agent && (e.kind === "to" || e.kind === "cc")
+				&& e.cursor > after && !delivered.has(e.message_id));
 			if (fresh.length > 0) {
 				// J-2026-11-09-02: every agent wakes on its mail; no fleet stop or paused goal silences it.
 				pi.sendMessage({ customType: "kit-inbox-wake", content: wakeText(agent!, fresh), display: true },
@@ -224,9 +243,12 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 						ts, message_id: e.message_id, project_key: project, sender: e.from, recipient: agent,
 						subject: e.subject, status: "WOKEN_INPROCESS", detail: "kit-inbox-wake followUp", cursor: e.cursor,
 					}) + "\n");
+					delivered.add(e.message_id);
 				}
 			}
-			if (got.next_cursor !== after) writeCursor(path, agent!, project, got.next_cursor, now());
+			if (got.next_cursor !== after || fresh.length > 0) {
+				writeCursor(path, agent!, project, got.next_cursor, [...delivered], now());
+			}
 		} catch {
 			// A failed poll keeps the cursor, so the same messages are delivered on the next one.
 		} finally {

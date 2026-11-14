@@ -207,4 +207,47 @@ describe("kit-inbox-wake", () => {
 		expect(registeredRepo(dir.path, env("007"))).toBeNull();
 		expect(registeredRepo(dir.path, env(""))).toBeNull();
 	});
+	test("planted: a server re-emission at or below the cursor never re-wakes", async () => {
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			{ events: [event(69611, 101)], next_cursor: 101, tail_cursor: 101 },
+			{ events: [event(69611, 101)], next_cursor: 101, tail_cursor: 101 },
+		]);
+		const h = harness(f.deps);
+		await h.start();
+		await h.tick();
+		expect(h.sent.length).toBe(1);
+		await h.tick();
+		expect(f.calls).toEqual([null, 100, 101]);
+		expect(h.sent.length).toBe(1);
+	});
+
+	test("planted: a redelivered id under a fresh server cursor wakes once and the cursor still advances", async () => {
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			{ events: [event(69612, 101)], next_cursor: 101, tail_cursor: 101 },
+			{ events: [event(69612, 105)], next_cursor: 105, tail_cursor: 105 },
+		]);
+		const h = harness(f.deps);
+		await h.start();
+		await h.tick();
+		await h.tick();
+		expect(h.sent.length).toBe(1);
+		const cursor = JSON.parse(readFileSync(cursorPath(f.dir, "PeachLeopard", "/repo"), "utf8"));
+		expect(cursor.cursor).toBe(105);
+	});
+
+	test("planted: a restarted seat does not re-wake mail it already delivered", async () => {
+		const f = fixture([{ events: [], next_cursor: 100, tail_cursor: 100 }]);
+		await harness(f.deps).start();
+		const reads: Array<InboxRead | null> = [
+			{ events: [event(69613, 101)], next_cursor: 101, tail_cursor: 101 },
+			{ events: [event(69613, 101)], next_cursor: 101, tail_cursor: 101 },
+		];
+		const h2 = harness({ ...f.deps, read: async () => reads.shift() ?? null });
+		await h2.start();
+		expect(h2.sent.length).toBe(1);
+		await h2.tick();
+		expect(h2.sent.length).toBe(1);
+	});
 });
