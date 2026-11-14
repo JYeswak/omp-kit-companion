@@ -435,34 +435,6 @@ function ownedListArgs(tracker: TrackerRef, name: string): string[] {
 	return ["list", "--assignee", name, "--limit", "0", "--json", "--no-auto-import", "--no-auto-flush", ...(tracker.db ? ["--db", tracker.db] : [])];
 }
 
-/** Owned (in_progress/rework) bead ids assigned to `name` in one tracker, by the guard's own bounded read; null when the read fails. */
-export async function ownedBeadIds(exec: FlywheelExec, tracker: TrackerRef, name: string): Promise<string[] | null> {
-	const args = ownedListArgs(tracker, name);
-	let result: FlywheelExecResult;
-	try {
-		result = await exec(tracker.bin, args, { cwd: tracker.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
-	} catch {
-		return null;
-	}
-	if (result.code !== 0 || result.killed) return null;
-	try {
-		const parsed: unknown = JSON.parse(result.stdout);
-		const issues = Array.isArray(parsed) ? parsed : field(parsed, "issues");
-		if (!Array.isArray(issues)) return null;
-		const held: string[] = [];
-		for (const row of issues) {
-			const status = field(row, "status");
-			const assignee = field(row, "assignee");
-			const id = field(row, "id");
-			if (typeof status === "string" && BEAD_OWNED_STATUSES[status] === true && typeof assignee === "string"
-				&& assignee.trim().toLowerCase() === name.trim().toLowerCase()
-				&& typeof id === "string" && id !== "") held.push(id);
-		}
-		return held;
-	} catch {
-		return null;
-	}
-}
 
 /** One owned (in_progress/rework) bead row: id and status, title when the row has one. */
 export interface OwnedBeadRow {
@@ -1604,15 +1576,15 @@ async function checkNativeClaim(request: TrackerRequest, deps: TrackerMutationDe
 		});
 	}
 	if (request.operation === "claim") {
-		const held = await ownedBeadIds(deps.exec, { ...bound, key: bound.db ?? bound.cwd }, actor);
-		if (held === null) return refuseClaim({
+		const held = await readOwnedBeads(deps.exec, { ...bound, key: bound.db ?? bound.cwd }, actor);
+		if (!held.ok) return refuseClaim({
 			class: "tool_read_failure", bead: request.ids[0] ?? null, actor,
 			next: `the guard could not list active claims for ${actor}; restore the native lookup before claiming a second bead`,
 		});
-		const other = held.find(id => !request.ids.some(wanted => wanted.toLowerCase() === id.toLowerCase()));
+		const other = held.rows.find(row => !request.ids.some(wanted => wanted.toLowerCase() === row.id.toLowerCase()));
 		if (other !== undefined) return refuseClaim({
 			class: "unsafe_custody", bead: request.ids[0] ?? null, actor,
-			next: `${actor} already holds active ${other}; release it (br update ${other} --status open --assignee "" --if-unchanged <updated_at>) or land it before claiming another implementation`,
+			next: `${actor} already holds active ${other.id}; release it (br update ${other.id}${other.status === "rework" ? "" : " --status open"} --assignee "" --if-unchanged <updated_at>) or land it before claiming another implementation`,
 		});
 	}
 	return undefined;
