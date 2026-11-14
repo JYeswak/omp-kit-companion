@@ -148,6 +148,28 @@ class RepairAdmission(unittest.TestCase):
         rc, err = self.run_update(fixture(BAD_DESC, CODE_ACC), "--claim")
         self.assertEqual((rc, err), (0, ""))
 
+    def test_metatype_only_admits_unchanged_legacy_contract(self) -> None:
+        legacy = fixture(BAD_DESC, "- [ ] Keep the original live obligation unchanged.")
+        for flags in (("--type", "epic"), ("-t", "epic"), ("--type=epic",)):
+            with self.subTest(flags=flags):
+                rc, err = self.run_update(legacy, *flags)
+                self.assertEqual((rc, err), (0, ""))
+
+    def test_metatype_does_not_exempt_content_edits(self) -> None:
+        for flags in (("--description", BAD_DESC),
+                      ("--acceptance-criteria", "- [ ] An unreplayable replacement")):
+            with self.subTest(flags=flags):
+                rc, err = self.run_update(fixture(), "--type", "epic", *flags)
+                self.assertEqual(rc, 4, err)
+                self.assertIn("LINT_REFUSED", err)
+
+    def test_metatype_does_not_exempt_review_entry(self) -> None:
+        bead = fixture(CLEAN_DESC, CODE_ACC)
+        bead["created_at"] = "2026-11-14T00:00:00Z"
+        rc, err = self.run_update(bead, "--type", "task", "--status", "in_review")
+        self.assertEqual(rc, 4, err)
+        self.assertIn("AC_UNTICKED_BUILD_LANDED", err)
+
     def test_clean_edit_is_still_admitted_without_a_repair_note(self) -> None:
         rc, err = self.run_update(fixture(CLEAN_DESC, CODE_ACC), "--title", "Renamed clean fixture")
         self.assertEqual((rc, err), (0, ""))

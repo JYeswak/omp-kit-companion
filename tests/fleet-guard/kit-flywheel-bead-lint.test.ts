@@ -233,7 +233,6 @@ test("LINTEVERY1: the guard's update trigger covers every flag br-update-lint.py
 	const python = Bun.spawnSync(["python3", "-c", program, JSON.stringify(forms)], { stdout: "pipe", stderr: "pipe", cwd: BEAD_LINT_SCRIPTS_DIR });
 	expect(python.stderr.toString()).toBe("");
 	const helperSays = JSON.parse(python.stdout.toString()) as boolean[];
-	expect(helperSays.filter(Boolean).length).toBeGreaterThanOrEqual(17);
 	for (const [index, form] of forms.entries()) {
 		const calls: string[][] = [];
 		await checkBeadLint({ toolName: "bash", input: { command: `br update k-1 ${form.map(word => `'${word}'`).join(" ")}` } },

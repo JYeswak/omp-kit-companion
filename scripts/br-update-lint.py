@@ -14,11 +14,11 @@ Exit contract (shim honors it):
 
 Only lint-relevant content flags trigger evaluation: --title,
 -d/--description/--body, --description-file, --acceptance-criteria,
---add-acceptance, --set-labels/--add-label/--remove-label, -t/--type.
-Workflow flags (--status/--priority/--assignee/--owner/--claim) and edge
-flags (--parent) never newly fail the gated checks and pass through, so
-claiming a failing bead for repair is never deadlocked by them; only the
-REPLAYABLE1 claim gate below judges a claim.
+--add-acceptance, --set-labels/--add-label/--remove-label.
+Workflow flags (-t/--type, --status/--priority/--assignee/--owner/--claim)
+and edge flags (--parent) do not rewrite the stored contract and pass through,
+so classifying or claiming a failing bead is not deadlocked by its old text.
+Review entry and the REPLAYABLE1 claim gate below remain independently enforced.
 
 Repair admission (LINTREPAIR ompkit-fp72.135.3.50): a content edit to a bead
 that already fails is admitted when the checks it fails afterwards are a
@@ -138,7 +138,6 @@ def has_content_flags(args: argparse.Namespace) -> bool:
         args.set_labels is not None,
         bool(args.add_label),
         bool(args.remove_label),
-        args.type is not None,
     ])
 
 
