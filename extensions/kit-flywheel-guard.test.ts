@@ -2,14 +2,13 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import kitFlywheelGuard, { FINITE_JOB_DEFAULT_TIMEOUT_S, FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, normalizeRemoteUrl, shellCommands } from "./kit-flywheel-guard";
+import kitFlywheelGuard, { FINITE_JOB_DEFAULT_TIMEOUT_S, FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, normalizeRemoteUrl } from "./kit-flywheel-guard";
 import type { FlywheelBeforeSubagentSpawnEvent, FlywheelContext, FlywheelExecResult, FlywheelToolCallResult } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput } from "../tests/fleet-guard/kit-flywheel-host";
 import type { FakeHost, Responder } from "../tests/fleet-guard/kit-flywheel-host";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { run, runSync } from "../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "../tests/cli/fixture-process.ts";
-import { resolveRealBr } from "../src/kitlib/readonly-br.ts";
 import { briefContract, briefHandbackRefusal, briefHasCommitPreflight, briefTargets, checkTaskBrief, isVerifyOnlyBriefTask, renderBrief } from "../src/brief.ts";
 import { check as checkRetiredTaskReservation, clearReservationCache } from "../src/fleet-guard/reservations.ts";
 import { judge } from "../src/verify.ts";
@@ -1385,68 +1384,6 @@ test("DRAIN1: repair releases of ownerless or already-open beads pass untouched"
 	expect(await drainCall({ "k-9": { status: "open", assignee: "Holder" } }, {}, "br update k-9 --status open")).toBeUndefined();
 });
 
-for (const status of ["rework", "in_progress"] as const) {
-	test(`CLAIMRELEASESTATE1: ${status} release remedy obeys the native strict workflow`, async () => {
-		const dir = freshDir(base, `claim-release-${status}-`);
-		const db = join(dir, ".beads", "beads.db");
-		const env: Record<string, string> = {};
-		for (const [key, value] of Object.entries(process.env)) {
-			if (value !== undefined && !key.startsWith("BEADS_") && !key.startsWith("BD_")
-				&& !key.startsWith("GIT_") && !["BR_ACTOR", "BR_AGENT_NAME", "BR_OUTPUT_FORMAT"].includes(key)) env[key] = value;
-		}
-		const real = resolveRealBr(env.PATH ?? "");
-		if (!real.ok) throw new Error(real.reason);
-		const native = (args: string[]) => run([
-			real.path, "--db", db, "--actor", "Holder", "--no-auto-import", "--no-auto-flush", ...args,
-		], { cwd: dir, env, deadline_s: fixtureDeadlineS(20) });
-		const initialized = await native(["init"]);
-		expect(initialized.rc, new TextDecoder().decode(initialized.stderr)).toBe(0);
-		writeFileSync(join(dir, ".beads", "policy.yaml"), [
-			"workflow:", "  strict: true", "  statuses: [open, in_progress, rework, closed]", "  transitions:",
-			"    initial: [open]", "    open: [in_progress]", "    in_progress: [open, rework]",
-			"    rework: [in_progress]", "    closed: [open]", "",
-		].join("\n"));
-		const acceptance = "- [ ] [a] [build] `printf ready` -> ready";
-		const created = await native([
-			"create", "original rework", "--assignee", "Holder", "--acceptance-criteria", acceptance, "--json",
-		]);
-		expect(created.rc, new TextDecoder().decode(created.stderr)).toBe(0);
-		const id = JSON.parse(new TextDecoder().decode(created.stdout)).id;
-		const started = await native(["update", id, "--status", "in_progress"]);
-		expect(started.rc, new TextDecoder().decode(started.stderr)).toBe(0);
-		if (status === "rework") {
-			const reworked = await native(["update", id, "--status", "rework", "--transition-comment", "REWORK retain the original falsifier"]);
-			expect(reworked.rc, new TextDecoder().decode(reworked.stderr)).toBe(0);
-		}
-		const shown = await native(["show", id, "--json"]);
-		expect(shown.rc, new TextDecoder().decode(shown.stderr)).toBe(0);
-		const before = JSON.parse(new TextDecoder().decode(shown.stdout))[0];
-		const comments = await native(["comments", "list", id, "--json"]);
-		expect(comments.rc, new TextDecoder().decode(comments.stderr)).toBe(0);
-		const feedback = JSON.parse(new TextDecoder().decode(comments.stdout));
-		const refusal = await drainCall(
-			{ [id]: { status, assignee: "Holder" }, "k-next": { status: "open", assignee: null } },
-			{ Holder: [{ id, status, assignee: "Holder" }] },
-			"br --actor Holder update k-next --claim",
-		);
-		expect(refusal?.block).toBe(true);
-		const next = JSON.parse(refusal?.reason ?? "{}").refusal.next as string;
-		const begin = next.indexOf("(br ");
-		const end = next.indexOf(")", begin);
-		if (begin < 0 || end < 0) throw new Error(`No release command in remedy: ${next}`);
-		const releaseCommand = next.slice(begin + 1, end).replace("<updated_at>", before.updated_at);
-		const command = shellCommands(releaseCommand)[0]!;
-		const admitted = await drainCall({ [id]: { status, assignee: "Holder" } }, {}, releaseCommand);
-		expect(admitted?.block, admitted?.reason).not.toBe(true);
-		const released = await native(command.slice(1));
-		expect(released.rc, new TextDecoder().decode(released.stderr)).toBe(0);
-		const after = JSON.parse(new TextDecoder().decode((await native(["show", id, "--json"])).stdout))[0];
-		expect(after.status).toBe(status === "rework" ? "rework" : "open");
-		expect(after.assignee ?? null).toBeNull();
-		expect(after.acceptance_criteria).toBe(before.acceptance_criteria);
-		expect(JSON.parse(new TextDecoder().decode((await native(["comments", "list", id, "--json"])).stdout))).toEqual(feedback);
-	}, fixtureDeadlineS(45) * 1_000);
-}
 
 test("DRAIN1: second active claim is refused naming the held id; re-claim of the held bead passes", async () => {
 	const shows = { "k-1": { status: "in_progress", assignee: "Holder" }, "k-2": { status: "open", assignee: null } };

@@ -7,9 +7,10 @@ import { sanitizedEnv } from "../../src/runtime.ts";
 import { parseOwnerFile } from "../../src/scratch.ts";
 import { run as kitlibRun } from "../../src/kitlib/run.ts";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
-import { runFixtureAsync } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 import { createFlywheelHost, toolCall as guardCall, type Responder as GuardResponder } from "../fleet-guard/kit-flywheel-host";
-import type { FlywheelToolCallResult } from "../../extensions/kit-flywheel-guard";
+import { shellCommands, type FlywheelToolCallResult } from "../../extensions/kit-flywheel-guard";
+import { resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const fixtures: OwnedTmp[] = [];
@@ -223,6 +224,13 @@ function gatedemoteResponder(shows: Record<string, GuardRow>, edges: Record<stri
 	return call => {
 		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
 		if (call.command === "env") return { stdout: "", stderr: "", code: 0 };
+		if (call.args[0] === "list") {
+			const flag = call.args.indexOf("--assignee");
+			const assignee = flag < 0 ? null : call.args[flag + 1];
+			const issues = Object.entries(shows).filter(([, row]) => assignee === null || row.assignee === assignee)
+				.map(([id, row]) => ({ id, ...row }));
+			return { stdout: JSON.stringify({ issues, total: issues.length }), stderr: "", code: 0 };
+		}
 		if (call.command === "omp-kit") {
 			if (mine === undefined) return { stdout: "", stderr: "not stubbed", code: 127 };
 			return { stdout: JSON.stringify(mine), stderr: "", code: 0 };
@@ -371,3 +379,68 @@ test("GATEDEMOTE1-kept: a claim of a peer-held bead still refuses", async () => 
 	expect(refused?.reason).toContain("CLAIM_REFUSED");
 	expect(refused?.reason).toContain("Ghost retains k-3");
 });
+for (const status of ["rework", "in_progress"] as const) {
+	test(`CLAIMRELEASESTATE1: ${status} release remedy obeys the native strict workflow`, async () => {
+		const base = fixtureRoot();
+		const dir = gatedemoteProject(base, `claim-release-${status}`);
+		const db = join(dir, ".beads", "beads.db");
+		const env: Record<string, string> = {};
+		for (const [key, value] of Object.entries(process.env)) {
+			if (value !== undefined && !key.startsWith("BEADS_") && !key.startsWith("BD_")
+				&& !key.startsWith("GIT_") && !["BR_ACTOR", "BR_AGENT_NAME", "BR_OUTPUT_FORMAT"].includes(key)) env[key] = value;
+		}
+		const real = resolveRealBr(env.PATH ?? "");
+		if (!real.ok) throw new Error(real.reason);
+		const native = (args: string[]) => kitlibRun([
+			real.path, "--db", db, "--actor", "Holder", "--no-auto-import", "--no-auto-flush", ...args,
+		], { cwd: dir, env, deadline_s: fixtureDeadlineS(20) });
+		const initialized = await native(["init"]);
+		expect(initialized.rc, new TextDecoder().decode(initialized.stderr)).toBe(0);
+		writeFileSync(join(dir, ".beads", "policy.yaml"), [
+			"workflow:", "  strict: true", "  statuses: [open, in_progress, rework, closed]", "  transitions:",
+			"    initial: [open]", "    open: [in_progress]", "    in_progress: [open, rework]",
+			"    rework: [in_progress]", "    closed: [open]", "",
+		].join("\n"));
+		const acceptance = "- [ ] [a] [build] `printf ready` -> ready";
+		const created = await native([
+			"create", "original rework", "--assignee", "Holder", "--acceptance-criteria", acceptance, "--json",
+		]);
+		expect(created.rc, new TextDecoder().decode(created.stderr)).toBe(0);
+		const id = JSON.parse(new TextDecoder().decode(created.stdout)).id;
+		const started = await native(["update", id, "--status", "in_progress"]);
+		expect(started.rc, new TextDecoder().decode(started.stderr)).toBe(0);
+		if (status === "rework") {
+			const reworked = await native(["update", id, "--status", "rework", "--transition-comment", "REWORK retain the original falsifier"]);
+			expect(reworked.rc, new TextDecoder().decode(reworked.stderr)).toBe(0);
+		}
+		const shown = await native(["show", id, "--json"]);
+		expect(shown.rc, new TextDecoder().decode(shown.stderr)).toBe(0);
+		const before = JSON.parse(new TextDecoder().decode(shown.stdout))[0];
+		const comments = await native(["comments", "list", id, "--json"]);
+		expect(comments.rc, new TextDecoder().decode(comments.stderr)).toBe(0);
+		const feedback = JSON.parse(new TextDecoder().decode(comments.stdout));
+		const host = await createFlywheelHost(base, {
+			env: { BR_ACTOR: "Holder" },
+			respond: gatedemoteResponder({
+				[id]: before, "k-next": { ...before, id: "k-next", status: "open", assignee: null },
+			}),
+		});
+		const refusal = await guardCall(host, dir, "br --actor Holder update k-next --claim");
+		expect(refusal?.block).toBe(true);
+		const next = JSON.parse(refusal?.reason ?? "{}").refusal.next as string;
+		const begin = next.indexOf("(br ");
+		const end = next.indexOf(")", begin);
+		if (begin < 0 || end < 0) throw new Error(`No release command in remedy: ${next}`);
+		const releaseCommand = next.slice(begin + 1, end).replace("<updated_at>", before.updated_at);
+		const command = shellCommands(releaseCommand)[0]!;
+		const admitted = await guardCall(host, dir, releaseCommand);
+		expect(admitted?.block, admitted?.reason).not.toBe(true);
+		const released = await native(command.slice(1));
+		expect(released.rc, new TextDecoder().decode(released.stderr)).toBe(0);
+		const after = JSON.parse(new TextDecoder().decode((await native(["show", id, "--json"])).stdout))[0];
+		expect(after.status).toBe(status === "rework" ? "rework" : "open");
+		expect(after.assignee ?? null).toBeNull();
+		expect(after.acceptance_criteria).toBe(before.acceptance_criteria);
+		expect(JSON.parse(new TextDecoder().decode((await native(["comments", "list", id, "--json"])).stdout))).toEqual(feedback);
+	}, fixtureDeadlineS(45) * 1_000);
+}
