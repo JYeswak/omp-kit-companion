@@ -92,13 +92,15 @@ export async function pushCheckCommand(request: ParsedCommand): Promise<CliResul
 			{ code: "PUSH_CHECK_EXPORT_UNAVAILABLE", message: "A scratch export directory could not be created", remediation: "Restore temporary-directory access and retry; nothing was recorded." });
 	}
 	try {
-		const archive = kitlibRunSync(["git", "-C", repo, "archive", commit], { cwd: repo, deadline_s: 120, max_output_bytes: 512 * 1024 * 1024 });
-		if (archive.rc !== 0 || archive.timed_out || archive.killed || archive.truncated) {
-			return refusal(77, { status: "UNRUN", path: ".omp/push-check", sha256: head.sha256, reason: "export_unavailable" },
-				{ code: "PUSH_CHECK_EXPORT_UNAVAILABLE", message: "The commit's tree could not be exported", remediation: "Repair the repository and retry; nothing was recorded." });
-		}
-		const extract = await kitlibRun(["tar", "-xf", "-", "-C", exportRoot], { cwd: repo, stdin: archive.stdout, deadline_s: 120, max_output_bytes: 8 * 1024 * 1024 });
-		if (extract.rc !== 0 || extract.timed_out) {
+		// PUSHCHECK-STREAM1 (ompkit-nhvk7): stream the archive straight into tar through an OS
+		// pipe instead of buffering it in memory. The old 512 MiB capture refused every repo whose
+		// archive is larger (CFS archives to 696 MB). This is bounded by disk, not memory, and works
+		// for any repo size. The script text is static so the safety gate can judge it; the commit
+		// sha (hex-validated) and both paths travel in the environment, never interpolated.
+		// pipefail makes a git failure refuse even if tar exits first.
+		const stream = await kitlibRun(["bash", "-c", "set -o pipefail; git -C \"$REPO\" archive \"$COMMIT\" | tar -xf - -C \"$DESTDIR\""],
+			{ cwd: repo, deadline_s: 120, max_output_bytes: 8 * 1024 * 1024, env: { ...process.env, REPO: repo, COMMIT: commit, DESTDIR: exportRoot } });
+		if (stream.rc !== 0 || stream.timed_out || stream.killed) {
 			return refusal(77, { status: "UNRUN", path: ".omp/push-check", sha256: head.sha256, reason: "export_unavailable" },
 				{ code: "PUSH_CHECK_EXPORT_UNAVAILABLE", message: "The commit's tree could not be exported", remediation: "Repair the repository and retry; nothing was recorded." });
 		}
