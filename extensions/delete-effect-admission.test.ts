@@ -312,6 +312,35 @@ describe("canonical bridge wiring (guard-removal negative)", () => {
     expect(result).toBeUndefined();
   });
 
+  test("an execution handoff cannot hide the original protected deletion", async () => {
+    const reviewed = "exec slb execute --expected-command-hash abc -- request-123";
+    const nativeHandoff = async (): Promise<SlbRunResult> => ({
+      ...await allowNative(),
+      stdout: JSON.stringify({ hookSpecificOutput: {
+        hookEventName: "PreToolUse", permissionDecision: "allow",
+        updatedInput: { command: reviewed },
+      } }),
+    });
+    const event = {
+      type: "tool_call", toolName: "bash", toolCallId: "call-fixture",
+      input: rmInput(`rm ${PROTECTED}`),
+    };
+    for (const ap of [undefined, approval()]) {
+      const bridge = createSlbGuard(nativeHandoff, {
+        protectedRoots: [...ROOTS], approvalOf: () => ap, nowMs: () => NOW,
+      });
+      const result = await bridge.handle(event, { cwd: "var/agent-tmp/delete-effect-fixture" });
+      if (ap === undefined) {
+        expect(result?.block).toBe(true);
+        expect(result?.reason).toContain("shell-rm");
+      } else {
+        expect(result).toEqual({ input: { command: reviewed } });
+      }
+    }
+    expect(existsSync(PROTECTED)).toBe(false);
+    expect(event.input.command).toBe(`rm ${PROTECTED}`);
+  });
+
   test("unconfigured bridge keeps prior behavior (edit passes through)", async () => {
     const bridge = createSlbGuard(allowNative);
     const result = await bridge.handle(

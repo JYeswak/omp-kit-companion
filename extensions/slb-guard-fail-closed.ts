@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { run } from "../src/kitlib/run";
 import {
   admitDeleteEffect,
   deleteEffectsOf,
@@ -33,31 +34,22 @@ export type SlbRunResult = {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  incomplete?: boolean;
 };
 
 export type SlbRunner = (payload: SlbPayload, cwd: string) => Promise<SlbRunResult>;
 export type BlockResult = { block: true; reason: string };
+type InputRevision = { input: JsonRecord; block?: never; reason?: never };
+type SlbDecision =
+  | { kind: "allow"; updatedInput?: { command: string } }
+  | { kind: "deny"; reason: string };
 
-type SpawnedChild = {
-  stdin: { write: (input: string) => unknown; end: () => unknown };
-  stdout: ReadableStream<Uint8Array>;
-  stderr: ReadableStream<Uint8Array>;
-  exited: Promise<number>;
-  kill: () => void;
-};
-
-type SpawnProcess = (argv: string[], options: {
-  cwd: string;
-  stdin: "pipe";
-  stdout: "pipe";
-  stderr: "pipe";
-}) => SpawnedChild;
 
 type OmpExtensionApi = {
   on: (event: "tool_call", handler: (event: ToolCallEvent, ctx: BridgeContext) => unknown) => void;
 };
 
-const SLB_PATH = "/Users/josh/.local/bin/slb-guard-fail-closed";
+const SLB_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024;
 const SLB_TIMEOUT_MS = 10_000;
 
 function object(value: unknown): JsonRecord | undefined {
@@ -98,58 +90,41 @@ export function buildSlbPayload(command: string, sessionId?: string): SlbPayload
   };
 }
 
-function spawnNative(argv: string[], options: {
-  cwd: string;
-  stdin: "pipe";
-  stdout: "pipe";
-  stderr: "pipe";
-}): SpawnedChild {
-  return Bun.spawn(argv, options) as unknown as SpawnedChild;
-}
 
 export function makeSlbRunner(
-  spawn: SpawnProcess = spawnNative,
+  execute: typeof run = run,
   timeoutMs = SLB_TIMEOUT_MS,
 ): SlbRunner {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   return async (payload, cwd) => {
-    let child: SpawnedChild;
     try {
-      child = spawn([SLB_PATH], { cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-    } catch {
-      return { exitCode: 1, stdout: "", stderr: "spawn failure", timedOut: false };
-    }
-
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        child.kill();
-      } catch {
-        // The caller receives a fail-closed decision.
+      const executable = Bun.which("slb");
+      if (!executable) {
+        return { exitCode: 1, stdout: "", stderr: "native SLB executable not found", timedOut: false };
       }
-    }, timeoutMs);
-
-    try {
-      child.stdin.write(`${JSON.stringify(payload)}\n`);
-      child.stdin.end();
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      return { exitCode, stdout, stderr, timedOut };
+      const result = await execute([executable, "hook", "guard"], {
+        cwd,
+        stdin: `${JSON.stringify(payload)}\n`,
+        deadline_s: timeoutMs / 1000,
+        max_output_bytes: SLB_OUTPUT_LIMIT_BYTES,
+        max_total_bytes: SLB_OUTPUT_LIMIT_BYTES * 2,
+      });
+      return {
+        exitCode: result.rc ?? 1,
+        stdout: decoder.decode(result.stdout),
+        stderr: decoder.decode(result.stderr),
+        timedOut: result.timed_out,
+        incomplete: result.truncated || result.total_truncated || result.killed,
+      };
     } catch {
-      return { exitCode: 1, stdout: "", stderr: "child failure", timedOut };
-    } finally {
-      clearTimeout(timer);
+      return { exitCode: 1, stdout: "", stderr: "native SLB process failure", timedOut: false };
     }
   };
 }
 
-export function evaluateSlbResult(result: SlbRunResult):
-  | { kind: "allow" }
-  | { kind: "deny"; reason: string } {
+export function evaluateSlbResult(result: SlbRunResult): SlbDecision {
   if (result.timedOut) return { kind: "deny", reason: "SLB guard timed out; refusing the Bash call" };
+  if (result.incomplete) return { kind: "deny", reason: "SLB guard output was incomplete; refusing the Bash call" };
   if (result.exitCode !== 0) return { kind: "deny", reason: "SLB guard failed; refusing the Bash call" };
   if (result.stderr.trim() !== "") return { kind: "deny", reason: "SLB guard emitted stderr; refusing the Bash call" };
 
@@ -170,7 +145,16 @@ export function evaluateSlbResult(result: SlbRunResult):
   if (specific?.hookEventName !== "PreToolUse") {
     return { kind: "deny", reason: "SLB guard returned an invalid hook position; refusing the Bash call" };
   }
-  if (specific.permissionDecision === "allow") return { kind: "allow" };
+  if (specific.permissionDecision === "allow") {
+    if (!Object.hasOwn(specific, "updatedInput")) return { kind: "allow" };
+    const updatedInput = object(specific.updatedInput);
+    if (!updatedInput || Object.keys(updatedInput).length !== 1 ||
+      typeof updatedInput.command !== "string" || updatedInput.command.trim() === "" ||
+      updatedInput.command.includes("\0")) {
+      return { kind: "deny", reason: "SLB guard returned an unsupported execution revision; refusing the Bash call" };
+    }
+    return { kind: "allow", updatedInput: { command: updatedInput.command } };
+  }
   if (specific.permissionDecision === "deny" || specific.permissionDecision === "ask") {
     return {
       kind: "deny",
@@ -213,7 +197,7 @@ export function createSlbGuard(runGate: SlbRunner = makeSlbRunner(), deleteAdmis
     return undefined;
   };
   return {
-    async handle(event: ToolCallEvent, ctx?: BridgeContext): Promise<BlockResult | undefined> {
+    async handle(event: ToolCallEvent, ctx?: BridgeContext): Promise<BlockResult | InputRevision | undefined> {
       if (event.type !== "tool_call") return undefined;
       const toolCallId =
         typeof event.toolCallId === "string" && event.toolCallId.trim() !== ""
@@ -230,15 +214,21 @@ export function createSlbGuard(runGate: SlbRunner = makeSlbRunner(), deleteAdmis
         return { block: true, reason: "OMP SLB bridge: malformed Bash call; refusing" };
       }
 
-      let decision: { kind: "allow" } | { kind: "deny"; reason: string };
+      let decision: SlbDecision;
       try {
         decision = evaluateSlbResult(await runGate(buildSlbPayload(command, sessionIdOf(ctx)), cwd));
       } catch {
         decision = { kind: "deny", reason: "SLB guard failed; refusing the Bash call" };
       }
       if (decision.kind === "deny") return { block: true, reason: decision.reason };
-      if (deleteAdmission === undefined) return undefined;
-      return admitEffects(deleteEffectsOf("bash", event.input), toolCallId, deleteAdmission);
+      if (deleteAdmission !== undefined) {
+        const blocked = admitEffects(deleteEffectsOf("bash", event.input), toolCallId, deleteAdmission);
+        if (blocked) return blocked;
+      }
+      if (decision.updatedInput) {
+        return { input: { ...object(event.input), command: decision.updatedInput.command } };
+      }
+      return undefined;
     },
   };
 }

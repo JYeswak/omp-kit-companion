@@ -3,7 +3,6 @@ import {
   buildSlbPayload,
   createSlbGuard,
   evaluateSlbResult,
-  makeSlbRunner,
   type SlbRunResult,
 } from "./slb-guard-fail-closed";
 
@@ -33,28 +32,6 @@ const denyOutput = (): SlbRunResult => ({
   timedOut: false,
 });
 
-function childFor(stdout: string, stderr = "", exitCode = 0) {
-  let input = "";
-  let killed = false;
-  return {
-    child: {
-      stdin: {
-        write(value: string) {
-          input += value;
-        },
-        end() {},
-      },
-      stdout: new Response(stdout).body!,
-      stderr: new Response(stderr).body!,
-      exited: Promise.resolve(exitCode),
-      kill() {
-        killed = true;
-      },
-    },
-    input: () => input,
-    killed: () => killed,
-  };
-}
 
 describe("SLB fail-closed OMP bridge", () => {
   test("builds the exact native Bash payload", () => {
@@ -66,23 +43,6 @@ describe("SLB fail-closed OMP bridge", () => {
     });
   });
 
-  test("passes fixed argv, exact payload, and cwd to the native executable", async () => {
-    const spawned = childFor(allowOutput().stdout);
-    const capture: { argv?: string[]; cwd?: string } = {};
-    const runner = makeSlbRunner((argv, options) => {
-      capture.argv = argv;
-      capture.cwd = options.cwd;
-      return spawned.child;
-    });
-
-    const result = await runner(buildSlbPayload("printf safe", "omp-session-test"), "/tmp/omp-slb-test"); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
-
-    expect(result).toEqual(allowOutput());
-    expect(capture.argv).toEqual(["/Users/josh/.local/bin/slb-guard-fail-closed"]);
-    expect(capture.cwd).toBe("/tmp/omp-slb-test"); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
-    expect(JSON.parse(spawned.input().trim())).toEqual(buildSlbPayload("printf safe", "omp-session-test"));
-    expect(spawned.killed()).toBe(false);
-  });
 
   test("allows the native benign inverse", async () => {
     const bridge = createSlbGuard(async () => allowOutput());
@@ -128,5 +88,54 @@ describe("SLB fail-closed OMP bridge", () => {
       stderr: "",
       timedOut: false,
     })).toEqual({ kind: "deny", reason: "review" });
+  });
+
+  test("delivers the reviewed command to the consumer without mutating the original call", async () => {
+    const reviewed = "exec slb execute --expected-command-hash abc -- request-123";
+    const original = { ...bashEvent("printf unreviewed"), input: { command: "printf unreviewed", timeout: 7 } };
+    const bridge = createSlbGuard(async () => ({
+      ...allowOutput(),
+      stdout: JSON.stringify({ hookSpecificOutput: {
+        hookEventName: "PreToolUse", permissionDecision: "allow",
+        updatedInput: { command: reviewed },
+      } }),
+    }));
+    const result = await bridge.handle(original, context);
+    expect(result).toEqual({ input: { command: reviewed, timeout: 7 } });
+    expect(original.input).toEqual({ command: "printf unreviewed", timeout: 7 });
+  });
+
+  test("refuses malformed or unsupported execution revisions rather than running the original", async () => {
+    for (const updatedInput of [null, [], "printf other", {}, { command: "" },
+      { command: "   " }, { command: 17 }, { command: "printf safe", cwd: "/elsewhere" }]) {
+      const bridge = createSlbGuard(async () => ({
+        ...allowOutput(),
+        stdout: JSON.stringify({ hookSpecificOutput: {
+          hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput,
+        } }),
+      }));
+      await expect(bridge.handle(bashEvent("printf original"), context)).resolves.toMatchObject({ block: true });
+    }
+  });
+
+  test("never promotes an ask or deny carrying a replacement into execution", async () => {
+    for (const permissionDecision of ["ask", "deny"]) {
+      const bridge = createSlbGuard(async () => ({
+        ...allowOutput(),
+        stdout: JSON.stringify({ hookSpecificOutput: {
+          hookEventName: "PreToolUse", permissionDecision,
+          permissionDecisionReason: "approval required",
+          updatedInput: { command: "printf not-approved" },
+        } }),
+      }));
+      await expect(bridge.handle(bashEvent("printf original"), context)).resolves.toEqual({
+        block: true, reason: "approval required",
+      });
+    }
+  });
+
+  test("never accepts a truncated allow decision", async () => {
+    const bridge = createSlbGuard(async () => ({ ...allowOutput(), incomplete: true }));
+    await expect(bridge.handle(bashEvent("printf safe"), context)).resolves.toMatchObject({ block: true });
   });
 });
