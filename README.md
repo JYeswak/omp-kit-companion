@@ -480,7 +480,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit planning` | `planning score\|convert` | Score planning evidence; convert a plan into native beads (dry run or `--apply`) | `omp-kit planning score --fleet --json` |
 | `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and hashes; `anchor` compares live-doc Mission with the record | `omp-kit mission anchor --json` |
 | `omp-kit preflight` | `preflight commit\|claim\|in-review\|close [BEAD]` | Every finding an act faces, with fix, at once; changes nothing | `omp-kit preflight close x` |
-| `omp-kit verify` | `verify BEAD --export SHA` | Non-author close: replay each box's command on the export, judge by named outcome, tick, gate, close | `omp-kit verify x` |
+| `omp-kit verify` | `verify BEAD --export SHA` | Non-author close: replay each box's command on the export, judge by named outcome, tick, gate, close. Active work must complete its author's `in_review` handoff before replay; open-bead verification remains supported | `omp-kit verify x` |
 | `omp-kit slice-verify` | `slice-verify --overlay PATH [--test FILE...]` | Base-vs-overlay verdict | `omp-kit slice-verify --overlay src/next.ts --test tests/cli/next.test.ts` |
 | `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Report landed-but-open beads and orphaned claims; reclaim only with no live holder; UNKNOWN never reclaimed | `omp-kit drain stale-claims --project .` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |

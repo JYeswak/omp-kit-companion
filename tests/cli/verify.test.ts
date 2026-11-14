@@ -1665,6 +1665,51 @@ test("VERIFYABSPATH1 unmappable: a repo path that cannot be rewritten is UNJUDGE
 	expect(res.replays[0]!.detail).toContain(`UNJUDGED REPO_PATH_UNMAPPED: ${JSON.stringify(token)}`);
 });
 
+test("VERIFYHANDOFFSTATE1: active work is refused before replay; author handoff enables the same published export", async () => {
+	const marker = join(base, "handoff-state-replay");
+	const code = await repo("handoff-state", {
+		"entered.sh": "#!/bin/sh\nprintf entered > \"$VERIFYHANDOFFSTATE1_MARKER\"\nprintf '16 pass\\n0 fail\\n'\n",
+	});
+	const t = await policyTracker("handoff-state-t");
+	const env = { ...trackerEnv(t), VERIFYHANDOFFSTATE1_MARKER: marker };
+	const acceptance = "- [ ] [a] [build] `sh scripts/entered.sh` -> 16 pass 0 fail";
+	const id = await createBead(t, "handoff state", [
+		"--description", "WHAT: verify handoff state fixture.\n\nWHY: active work must hand off before a non-author closes it.",
+		"--acceptance-criteria", acceptance, "--assignee", "Author",
+	]);
+	const start = await brun(["update", id, "--status", "in_progress", "--actor", "Author"], t.dir, env);
+	expect(start.rc, start.out).toBe(0);
+	const before = await row(t, id);
+	const invoke = () => run([
+		"bun", "run", "--silent", cliPath, "verify", id, "--export", code.sha,
+		"--project", code.dir, "--actor", "Peer", "--lesson", "handoff state fixture", "--json",
+	], { cwd: code.dir, deadline_s: fixtureDeadlineS(30), env });
+	const refused = await invoke();
+	const refusal = JSON.parse(new TextDecoder().decode(refused.stdout));
+	expect(refused.rc).toBe(2);
+	expect(refusal.data.overall).toBe("NOT_IN_REVIEW");
+	expect(refusal.data.log).toContain("in_review handoff");
+	expect(refusal.data.replays).toEqual([]);
+	expect(refusal.data.acts).toEqual([]);
+	expect(existsSync(marker)).toBe(false);
+	expect(await row(t, id)).toEqual(before);
+
+	const handoff = await brun([
+		"update", id, "--status", "in_review", "--transition-comment", "fixture author handoff", "--actor", "Author",
+	], t.dir, env);
+	expect(handoff.rc, handoff.out).toBe(0);
+	const passed = await invoke();
+	const result = JSON.parse(new TextDecoder().decode(passed.stdout));
+	expect(passed.rc, new TextDecoder().decode(passed.stderr)).toBe(0);
+	expect(result.data.overall).toBe("CLOSED");
+	expect(result.data.replays).toHaveLength(1);
+	expect(result.data.replays[0].pass).toBe(true);
+	expect(readFileSync(marker, "utf8")).toBe("entered");
+	const after = await row(t, id);
+	expect(after.status).toBe("closed");
+	expect(after.acceptance_criteria).toBe(acceptance.replace("- [ ]", "- [x]"));
+}, fixtureDeadlineS(90) * 1_000);
+
 /* VERIFYOPEN1 (ompkit-1ra0d.70): verify admits open beads, not just in_review; the non-author
    replay of every box on the exact export is the proof. Unticked boxes are ticked on PASS. */
 const OPEN_PASS_BOXES = "- [ ] [a] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [b] [build] `sh scripts/t.sh` -> prints 0 fail";
