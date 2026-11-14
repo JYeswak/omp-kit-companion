@@ -93,4 +93,23 @@ describe("push-check stream export", () => {
 		expect(overallOf(res.body)).toBe("UNRUN");
 		expect(firstErrorCode(res.body)).toBe("PUSH_CHECK_EXPORT_UNAVAILABLE");
 	});
+
+	test("stream: producer failing after a valid tar still refuses without running the check", async () => {
+		const dir = await makeRepo("push-check-stream-producer-fail", {
+			"note.txt": "small\n",
+			".omp/push-check": "#!/bin/sh\nset -eu\nexit 0\n",
+		});
+		chmodSync(join(dir, ".omp", "push-check"), 0o755);
+		await sh(["git", "add", "note.txt", ".omp/push-check"], dir);
+		await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "check [test]"], dir);
+		const sha = (await sh(["git", "rev-parse", "HEAD"], dir)).out.trim();
+		const realGit = (await sh(["sh", "-c", "command -v git"], dir)).out.trim();
+		const bin = join(dir, "fakebin");
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(join(bin, "git"), "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = archive ]; then\n    \"$REAL_GIT\" \"$@\"\n    exit 1\n  fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n");
+		chmodSync(join(bin, "git"), 0o755);
+		const res = await pushCheck(dir, sha, { PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, REAL_GIT: realGit });
+		expect(overallOf(res.body)).toBe("UNRUN");
+		expect(firstErrorCode(res.body)).toBe("PUSH_CHECK_EXPORT_UNAVAILABLE");
+	});
 });
