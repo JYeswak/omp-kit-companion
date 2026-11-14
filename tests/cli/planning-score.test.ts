@@ -489,6 +489,10 @@ test("A9 doctor and planning score CLI share configured bead breadth", () => {
 		issue("repeated", ["src/repeated/one.ts", "src/repeated/one.ts", "src/repeated/one.ts"]),
 		issue("missing", []),
 		issue("unparseable", ["src/unparseable"]),
+		{ ...issue("metadata-files", []), notes: breadthScopeNotes("code", ["src/metadata/worker.ts"]) },
+		{ ...issue("operations", []), notes: breadthScopeNotes("operational", []) },
+		{ ...issue("understated", ["src/required/a.ts", "src/required/b.ts"]),
+			notes: breadthScopeNotes("code", ["src/required/a.ts"]) },
 	];
 	const lines: string[] = [];
 	for (const item of issues) lines.push(JSON.stringify(item));
@@ -549,12 +553,18 @@ test("A9 doctor and planning score CLI share configured bead breadth", () => {
 	const oversizedIds = ["over-files", "over-components"];
 	expect(diagnosed.status).toBe("FAIL");
 	expect(diagnosedEvidence.oversized_ids).toEqual(oversizedIds);
-	expect(diagnosedEvidence.unknown_ids).toEqual(["missing", "unparseable"]);
+	expect(diagnosedEvidence.unknown_ids).toEqual(["missing", "understated", "unparseable"]);
 	expect(scored.status).toBe("FAIL");
 	if (!record(scored.value) || !scoredEvidence) throw new Error("A9 planning score omitted breadth evidence");
 	expect(scored.value.oversized_ids).toEqual(oversizedIds);
 	expect(scoredEvidence.oversized_ids).toEqual(oversizedIds);
-	expect(scoredEvidence.unknown_ids).toEqual(["missing", "unparseable"]);
+	expect(scoredEvidence.unknown_ids).toEqual(["missing", "understated", "unparseable"]);
+	const declaredScopes = [
+		{ id: "metadata-files", kind: "code", files: ["src/metadata/worker.ts"] },
+		{ id: "operations", kind: "operational", files: [] },
+	];
+	expect(diagnosedEvidence.declared_scopes).toMatchObject(declaredScopes);
+	expect(scoredEvidence.declared_scopes).toMatchObject(declaredScopes);
 	const details = diagnosedEvidence.oversized_beads;
 	if (!Array.isArray(details)) throw new Error("A9 doctor omitted measured spans");
 	let filesSuggestion = "";
@@ -581,11 +591,11 @@ test("A9 doctor and planning score CLI share configured bead breadth", () => {
 		throw new Error("A9 relaxed CLI output omitted bead breadth evidence");
 	expect(relaxedDoctor.status).toBe("UNVERIFIED");
 	expect(relaxedDoctor.evidence.oversized_ids).toEqual([]);
-	expect(relaxedDoctor.evidence.unknown_ids).toEqual(["missing", "unparseable"]);
+	expect(relaxedDoctor.evidence.unknown_ids).toEqual(["missing", "understated", "unparseable"]);
 	expect(relaxedMetric.status).toBe("UNKNOWN");
 	expect(relaxedMetric.value).toBeNull();
 	expect(relaxedMetric.evidence.oversized_ids).toEqual([]);
-	expect(relaxedMetric.evidence.unknown_ids).toEqual(["missing", "unparseable"]);
+	expect(relaxedMetric.evidence.unknown_ids).toEqual(["missing", "understated", "unparseable"]);
 }, 30_000);
 
 
@@ -716,4 +726,121 @@ test("PLANTIMING1 preserves missing-evidence, ordering, zero and tagged-draft se
 	expect(zero.metrics.plan_to_code_hours).toMatchObject({ value: 0, status: "PASS", evidence: { plan_start_sha: planSha, first_code_sha: codeSha } });
 	const fallback = api.scorePlanningSnapshot(base, tuning);
 	expect(fallback.metrics.plan_to_code_hours).toMatchObject({ value: 2, status: "PASS", evidence: { source: "draft_tag" } });
+});
+
+function breadthScopeNotes(kind: "code" | "operational", files: readonly string[], basis = "Source-backed current operation/caller inventory"): string {
+	return "Source-Scope: " + JSON.stringify({ version: 1, kind, files, basis });
+}
+
+function breadthMetricFor(beads: api.PlanningBead[]) {
+	const metric = api.scorePlanningSnapshot({ ...passingSnapshot(), beads }, tuning).metrics.bead_breadth;
+	if (!metric) throw new Error("bead breadth metric missing");
+	return metric;
+}
+
+test("BREADTHMETA1 measures explicit source scope without rewriting the original contract", () => {
+	const item = bead("declared", {
+		acceptance_criteria: "- [x] Existing consumer outcome remains unchanged.",
+		notes: breadthScopeNotes("code", ["src/shared/start.ts", "src/shared/finish.ts"]),
+	});
+	const original = JSON.stringify(item);
+	const metric = breadthMetricFor([item]);
+	expect(metric.status).toBe("PASS");
+	expect(metric.target).toEqual({ max_files: 5, max_components: 3 });
+	expect(metric.evidence).toMatchObject({
+		active_beads: 1, checked_beads: 1, unknown_ids: [],
+		declared_scopes: [{ id: "declared", kind: "code", files: ["src/shared/finish.ts", "src/shared/start.ts"],
+			basis: "Source-backed current operation/caller inventory" }],
+	});
+	expect(JSON.stringify(item)).toBe(original);
+});
+
+test("BREADTHMETA1 distinguishes an explicit zero-code operation from missing scope", () => {
+	const operation = bead("operation", {
+		labels: ["mission:demo"],
+		description: "Read existing native pressure/admission state; no source changes.",
+		acceptance_criteria: "- [ ] Every worker reports actual pressure and slots.",
+		notes: breadthScopeNotes("operational", [], "Existing native RCH readback, no source edits"),
+	});
+	expect(breadthMetricFor([operation])).toMatchObject({
+		status: "PASS", evidence: { checked_beads: 1, unknown_ids: [],
+			declared_scopes: [{ id: "operation", kind: "operational", files: [] }] },
+	});
+	expect(breadthMetricFor([{ ...operation, notes: "No scope was declared" }])).toMatchObject({
+		status: "UNKNOWN", evidence: { checked_beads: 0, unknown_ids: ["operation"] },
+	});
+});
+
+test("BREADTHMETA1 rejects invalid explicit metadata instead of falling back to a legacy PASS", () => {
+	const valid = { version: 1, kind: "code", files: ["src/legacy/worker.ts"], basis: "Actual current source owner" };
+	const badNotes = [
+		"Source-Scope: {",
+		"Source-Scope: null",
+		"Source-Scope: " + JSON.stringify({ ...valid, version: 2 }),
+		"Source-Scope: " + JSON.stringify({ ...valid, kind: "guess" }),
+		"Source-Scope: " + JSON.stringify({ ...valid, files: [] }),
+		"Source-Scope: " + JSON.stringify({ ...valid, files: ["../outside.ts"] }),
+		"Source-Scope: " + JSON.stringify({ ...valid, files: ["/absolute/worker.ts"] }),
+		"Source-Scope: " + JSON.stringify({ ...valid, basis: " " }),
+		"Source-Scope: " + JSON.stringify({ ...valid, extra: true }),
+		breadthScopeNotes("operational", ["src/legacy/worker.ts"]),
+		breadthScopeNotes("code", ["src/legacy/worker.ts"]) + "\n" + breadthScopeNotes("operational", []),
+	];
+	for (const notes of badNotes) {
+		const metric = breadthMetricFor([bead("invalid", {
+			acceptance_criteria: "- [ ] Preserve `src/legacy/worker.ts`.", notes,
+		})]);
+		expect(metric.status, notes).toBe("UNKNOWN");
+		expect(metric.evidence).toMatchObject({
+			unknown_ids: ["invalid"], scope_errors: [{ id: "invalid", reason: expect.any(String) }],
+		});
+	}
+});
+
+test("BREADTHMETA1 rejects understated acceptance and unquoted source-owner paths", () => {
+	const acceptance = "- [ ] Preserve `src/required/a.ts` and `src/required/b.ts`.";
+	for (const notes of [breadthScopeNotes("code", ["src/required/a.ts"]), breadthScopeNotes("operational", [])]) {
+		const metric = breadthMetricFor([bead("understated", { acceptance_criteria: acceptance, notes })]);
+		expect(metric.status).toBe("UNKNOWN");
+		expect(metric.evidence).toMatchObject({
+			scope_errors: [{ id: "understated", reason: expect.stringContaining("src/required/b.ts") }],
+		});
+	}
+	for (const path of ["src/runtime/worker.ts", "config/runtime.toml"]) {
+		const sourceOwner = {
+			labels: ["mission:demo"],
+			description: `Current implementation owner: ${path}; do not omit this contract.`,
+			acceptance_criteria: "- [ ] Original operational-looking wording stays unchanged.",
+		};
+		expect(breadthMetricFor([bead("owner", { ...sourceOwner, notes: breadthScopeNotes("operational", []) })]))
+			.toMatchObject({ status: "UNKNOWN", evidence: {
+				scope_errors: [{ id: "owner", reason: expect.stringContaining(path) }],
+			} });
+		expect(breadthMetricFor([bead("owner", { ...sourceOwner,
+			notes: breadthScopeNotes("code", [path]) })])).toMatchObject({ status: "PASS" });
+	}
+});
+
+test("BREADTHMETA1 cannot mask a known oversized contract or relax either budget", () => {
+	const files = Array.from({ length: 6 }, (_, index) => `src/large/file${index}.ts`);
+	const acceptance = files.map(path => "`" + path + "`").join(" ");
+	for (const notes of [breadthScopeNotes("code", [files[0]!]), breadthScopeNotes("operational", [])]) {
+		const metric = breadthMetricFor([bead("large", { acceptance_criteria: acceptance, notes })]);
+		expect(metric.status).toBe("FAIL");
+		expect(metric.target).toEqual({ max_files: 5, max_components: 3 });
+		expect(metric.evidence).toMatchObject({
+			oversized_ids: ["large"], oversized_beads: [{ id: "large", file_count: 6 }],
+		});
+	}
+	const declared = breadthMetricFor([bead("declared-large", {
+		acceptance_criteria: "- [ ] Original outcome.",
+		notes: breadthScopeNotes("code", files),
+	})]);
+	expect(declared).toMatchObject({ status: "FAIL", target: { max_files: 5, max_components: 3 },
+		evidence: { oversized_beads: [{ id: "declared-large", file_count: 6, component_count: 1 }] } });
+	const components = ["src/one/a.ts", "src/two/a.ts", "src/three/a.ts", "src/four/a.ts"];
+	expect(breadthMetricFor([bead("components", { acceptance_criteria: "- [ ] Original outcome.",
+		notes: breadthScopeNotes("code", components) })])).toMatchObject({
+		status: "FAIL", evidence: { oversized_beads: [{ id: "components", file_count: 4, component_count: 4 }] },
+	});
 });

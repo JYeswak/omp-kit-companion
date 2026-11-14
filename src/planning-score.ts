@@ -25,11 +25,23 @@ export type BeadBreadthSpan = {
 	component_count: number;
 	split_suggestion: string;
 };
+type DeclaredBeadScope = {
+	version: 1;
+	kind: "code" | "operational";
+	files: string[];
+	basis: string;
+};
+type BeadScopeResolution =
+	| { kind: "legacy"; files: string[] | null }
+	| { kind: "declared"; files: string[]; declaration: DeclaredBeadScope }
+	| { kind: "invalid"; files: string[] | null; reason: string };
 export type BeadBreadthAnalysis = {
 	active_beads: number;
 	checked_beads: number;
 	oversized_beads: BeadBreadthSpan[];
 	unknown_ids: string[];
+	declared_scopes?: Array<DeclaredBeadScope & { id: string }>;
+	scope_errors?: Array<{ id: string; reason: string }>;
 };
 export type LocalCheckReceipt = { sha?: unknown; exit_code?: unknown; time?: unknown };
 type PlanningHostedRun = {
@@ -250,6 +262,18 @@ function normalizedBreadthPath(raw: string): string | null {
 	for (const char of suffix) if (char < "0" || char > "9") return path;
 	return null;
 }
+function collectBreadthPathTokens(text: string, files: Set<string>): void {
+	let start = 0;
+	while (start < text.length) {
+		while (start < text.length && (text[start] === "," || text[start] === ";" || text[start]!.trim().length === 0)) start++;
+		if (start >= text.length) break;
+		let end = start;
+		while (end < text.length && text[end] !== "," && text[end] !== ";" && text[end]!.trim().length > 0) end++;
+		const path = normalizedBreadthPath(text.slice(start, end));
+		if (path) files.add(path);
+		start = end + 1;
+	}
+}
 
 function explicitAcceptanceFiles(acceptance: string): string[] | null {
 	const files = new Set<string>();
@@ -263,19 +287,60 @@ function explicitAcceptanceFiles(acceptance: string): string[] | null {
 		const end = acceptance.indexOf(marker, start + width);
 		if (end < 0) return null;
 		const code = acceptance.slice(start + width, end);
-		let tokenStart = 0;
-		while (tokenStart < code.length) {
-			while (tokenStart < code.length && (code[tokenStart] === "," || code[tokenStart] === ";" || code[tokenStart]!.trim().length === 0)) tokenStart++;
-			if (tokenStart >= code.length) break;
-			let tokenEnd = tokenStart;
-			while (tokenEnd < code.length && code[tokenEnd] !== "," && code[tokenEnd] !== ";" && code[tokenEnd]!.trim().length > 0) tokenEnd++;
-			const path = normalizedBreadthPath(code.slice(tokenStart, tokenEnd));
-			if (path) files.add(path);
-			tokenStart = tokenEnd + 1;
-		}
+		collectBreadthPathTokens(code, files);
 		cursor = end + width;
 	}
 	return [...files].sort();
+}
+function contractBreadthFiles(bead: PlanningBead, acceptanceFiles: string[] | null): string[] | null {
+	if (acceptanceFiles === null) return null;
+	const files = new Set(acceptanceFiles);
+	for (const field of [bead.acceptance_criteria, bead.description, bead.design]) {
+		const candidates = new Set<string>();
+		collectBreadthPathTokens(stringValue(field) ?? "", candidates);
+		for (const path of candidates) {
+			if (path.startsWith("-") || path.includes("=")) continue;
+			if (path.includes("/") || CODE_EXTENSIONS.has(path.slice(path.lastIndexOf(".")).toLowerCase())) files.add(path);
+		}
+	}
+	return [...files].sort();
+}
+
+function resolveBeadBreadthScope(bead: PlanningBead): BeadScopeResolution {
+	const legacy = explicitAcceptanceFiles(stringValue(bead.acceptance_criteria) ?? "");
+	const declarations = (stringValue(bead.notes) ?? "").split("\n")
+		.map(line => line.trim()).filter(line => line.startsWith("Source-Scope:"));
+	if (!declarations.length) return { kind: "legacy", files: legacy };
+	const files = contractBreadthFiles(bead, legacy);
+	const invalid = (reason: string): BeadScopeResolution => ({ kind: "invalid", files, reason });
+	if (declarations.length !== 1) return invalid("multiple Source-Scope declarations");
+	if (files === null) return invalid("unparseable acceptance scope; metadata cannot erase it");
+	let value: unknown;
+	try {
+		value = JSON.parse(declarations[0]!.slice("Source-Scope:".length).trim());
+	} catch {
+		return invalid("malformed Source-Scope JSON");
+	}
+	if (!record(value) || Object.keys(value).length !== 4 || value.version !== 1 ||
+		(value.kind !== "code" && value.kind !== "operational") || !Array.isArray(value.files) ||
+		typeof value.basis !== "string" || !value.basis.trim()) {
+		return invalid("Source-Scope requires version 1, code/operational kind, files and a nonempty source basis");
+	}
+	const declared = new Set<string>();
+	for (const entry of value.files) {
+		if (typeof entry !== "string") return invalid("Source-Scope files must be canonical paths");
+		const path = normalizedBreadthPath(entry);
+		if (!path || path !== entry) return invalid(`invalid Source-Scope path: ${entry}`);
+		declared.add(path);
+	}
+	if (value.kind === "code" && !declared.size) return invalid("code Source-Scope cannot declare zero files");
+	const missing = files.filter(path => !declared.has(path));
+	if (missing.length) return invalid(`Source-Scope omits known contract files: ${missing.join(", ")}`);
+	if (value.kind === "operational" && declared.size) return invalid("operational Source-Scope must declare zero source files");
+	const declaration: DeclaredBeadScope = {
+		version: 1, kind: value.kind, files: [...declared].sort(), basis: value.basis.trim(),
+	};
+	return { kind: "declared", files: declaration.files, declaration };
 }
 
 function breadthComponent(path: string): string {
@@ -298,7 +363,7 @@ function breadthSplitSuggestion(id: string, groups: ReadonlyMap<string, readonly
 	return `Split ${id} into child beads grouped by component, with at most ${limits.maxFiles} files each: ${children.join("; ")}. Keep cross-component integration acceptance in the parent.`;
 }
 
-/** Only backtick-delimited acceptance paths count; nested files group by their first two path segments. */
+/** Explicit notes scope supplements legacy acceptance paths; metadata cannot erase known contract files. */
 export function analyzeBeadBreadth(beads: readonly PlanningBead[], limits: BeadBreadthLimits): BeadBreadthAnalysis {
 	const active = beads.filter((bead) => {
 		const status = stringValue(bead.status)?.toLowerCase();
@@ -306,13 +371,23 @@ export function analyzeBeadBreadth(beads: readonly PlanningBead[], limits: BeadB
 	});
 	const oversizedBeads: BeadBreadthSpan[] = [];
 	const unknownIds = new Set<string>();
+	const declaredScopes: Array<DeclaredBeadScope & { id: string }> = [];
+	const scopeErrors: Array<{ id: string; reason: string }> = [];
 	let checkedBeads = 0;
 	for (const bead of active) {
 		const id = stringValue(bead.id)?.trim();
 		const title = stringValue(bead.title) ?? "";
-		const files = explicitAcceptanceFiles(stringValue(bead.acceptance_criteria) ?? "");
-		if (!id || !files || !files.length) {
-			unknownIds.add(id || "UNKNOWN");
+		if (!id) { unknownIds.add("UNKNOWN"); continue; }
+		const scope = resolveBeadBreadthScope(bead);
+		const files = scope.files;
+		if (scope.kind === "invalid") {
+			unknownIds.add(id);
+			scopeErrors.push({ id, reason: scope.reason });
+		} else if (scope.kind === "declared") {
+			declaredScopes.push({ id, ...scope.declaration });
+		}
+		if (files === null || (!files.length && scope.kind !== "declared")) {
+			unknownIds.add(id);
 			continue;
 		}
 		const groups = new Map<string, string[]>();
@@ -323,14 +398,19 @@ export function analyzeBeadBreadth(beads: readonly PlanningBead[], limits: BeadB
 			else groups.set(component, [file]);
 		}
 		const components = [...groups.keys()].sort();
-		checkedBeads++;
+		if (scope.kind !== "invalid") checkedBeads++;
 		if (files.length <= limits.maxFiles && components.length <= limits.maxComponents) continue;
 		oversizedBeads.push({
 			id, title, files, components, file_count: files.length, component_count: components.length,
 			split_suggestion: breadthSplitSuggestion(id, groups, limits),
 		});
 	}
-	return { active_beads: active.length, checked_beads: checkedBeads, oversized_beads: oversizedBeads, unknown_ids: [...unknownIds].sort() };
+	return {
+		active_beads: active.length, checked_beads: checkedBeads, oversized_beads: oversizedBeads,
+		unknown_ids: [...unknownIds].sort(),
+		...(declaredScopes.length ? { declared_scopes: declaredScopes } : {}),
+		...(scopeErrors.length ? { scope_errors: scopeErrors } : {}),
+	};
 }
 function stableValue(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map(stableValue);
@@ -500,6 +580,8 @@ function scoreBeadBreadth(snapshot: PlanningScoreSnapshot, target: (name: string
 		active_beads: analysis.active_beads, checked_beads: analysis.checked_beads,
 		oversized_ids: oversizedIds, oversized_beads: analysis.oversized_beads,
 		unknown_ids: analysis.unknown_ids,
+		...(analysis.declared_scopes ? { declared_scopes: analysis.declared_scopes } : {}),
+		...(analysis.scope_errors ? { scope_errors: analysis.scope_errors } : {}),
 	};
 	if (!analysis.active_beads) {
 		put("bead_breadth", null, metricTarget, "NOT_APPLICABLE", { ...evidence, reason: "no active mission beads" });

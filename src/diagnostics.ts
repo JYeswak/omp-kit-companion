@@ -1759,13 +1759,15 @@ function inspectBeadBreadth(project: string, kitRoot: string, home: string): Fin
 	unknownIds.sort();
 	const status = analysis.oversized_beads.length ? "FAIL" : unknownIds.length ? "UNVERIFIED" : "OK";
 	const reason = analysis.oversized_beads.length ? "Active beads exceed the configured file or component breadth limits" :
-		unknownIds.length ? "Some active beads lack parseable acceptance file evidence" : "No active bead exceeds the configured breadth limits";
+		unknownIds.length ? "Some active beads lack consistent declared source-scope evidence" : "No active bead exceeds the configured breadth limits";
 	const recommendation = analysis.oversized_beads.length
 		? "Split oversized beads into child beads grouped by the reported components; keep integration acceptance in the parent."
-		: unknownIds.length ? "Add backtick-delimited repository-relative file paths to active acceptance criteria, or repair malformed tracker rows." : "No action required.";
+		: unknownIds.length ? "Declare source-backed Source-Scope metadata in native notes, preserving acceptance; repair contradictory declarations or malformed tracker rows." : "No action required.";
 	const evidence = {
 		tracker_path: trackerPath, limits: { max_files: maxFiles, max_components: maxComponents }, active_beads: analysis.active_beads,
 		checked_beads: analysis.checked_beads, oversized_ids: oversizedIds, oversized_beads: analysis.oversized_beads, unknown_ids: unknownIds,
+		...(analysis.declared_scopes ? { declared_scopes: analysis.declared_scopes } : {}),
+		...(analysis.scope_errors ? { scope_errors: analysis.scope_errors } : {}),
 	};
 	return finding("bead_breadth", status, reason, recommendation, evidence);
 }
