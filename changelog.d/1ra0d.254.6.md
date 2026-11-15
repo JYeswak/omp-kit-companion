@@ -1,1 +1,0 @@
-- Admit issue-type-only workflow updates without forcing unchanged legacy bead descriptions or acceptance to be rewritten. Type-plus-content edits, claim checks, review entry and native type validation retain their existing gates. (ompkit-1ra0d.254.6)

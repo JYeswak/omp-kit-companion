@@ -4,6 +4,40 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.132] - 2026-11-15
+
+### Added
+
+- Planning score and `doctor --scope beads` accept one source-backed scope declaration in native bead `notes`, preserving original acceptance, ticks, proof classes and the existing file/component limits. Undeclared scope retains legacy behavior; invalid or understated metadata stays unverified, and known oversized work still fails.
+- One reserved notes line declares a genuine zero-source operation:
+- ```text Source-Scope: {"version":1,"kind":"operational","files":[],"basis":"Existing native readback only; no source, config or test changes"} ```
+- For code, configuration, tests or documentation work, use `kind:"code"` and the complete canonical repository-relative `files` list. A nonempty source `basis` is required; known contract paths are a lower bound. Replace the single declaration under native issue CAS rather than appending another. This declares scope, not completion or runtime proof; limits, weights and stages are unchanged.
+
+### Changed
+
+- Allow eligible released rework through normal atomic claims and show the latest original review feedback before claim output. Foreign custody, human/director gates, terminal-state checks and native tracker policy remain enforced. (ompkit-162go)
+- Admit issue-type-only workflow updates without forcing unchanged legacy bead descriptions or acceptance to be rewritten. Type-plus-content edits, claim checks, review entry and native type validation retain their existing gates. (ompkit-1ra0d.254.6)
+- Count every changed file toward the breadth file limit, including mandatory release/status documents. Root `ROADMAP.md` and direct `changelog.d/*.md` release fragments do not create product components; ordinary documentation and non-Markdown code still do. Numeric limits, weights and proof obligations are unchanged. (ompkit-1ra0d.254.7)
+- `Source-Scope` version 1 notes may include an optional `read_only` array of canonical provenance paths, disjoint from planned `files`. References remain visible in scorer/doctor evidence without becoming edits; missing known paths without an explicit annotation, invalid paths, unknown fields and read/write overlap remain unverified. Existing declarations remain supported. Old readers may refuse the new annotation until a qualified checker is selected.
+- The bounded functional-ownership prototype accepts optional `components` entries with `name`, product `files` and a nonempty source/evidence `basis`. Product files must form an exact disjoint partition; missing, repeated, out-of-scope, read-only or bookkeeping members fail closed. Every changed file still counts, invalid ownership cannot hide six declared writes, and absent ownership preserves automatic product-path grouping. Schema validity does not certify functional cohesion: a non-author must review the real ownership evidence before adoption.
+- Fix native verification of Node test-runner summaries while preserving exact test counts and zero-failure exit checks.
+- Fix intermittent standalone installer failures by preserving canonical parent-death process supervision for embedded Python runners.
+- Expose the stock OS `ps` executable in the isolated extension-test PATH so real process-incarnation and owned-scratch checks work without private fleet tools. Keep all ownership refusals and private-tool absence checks unchanged. (ompkit-lrbd.9)
+
+### Fixed
+
+- A second-claim refusal now tells held rework to clear its assignee without changing workflow state, preserving acceptance and review feedback; active-work release and custody checks remain unchanged.
+- `omp-kit planning score` scores only the configured plan mission when `.omp/plan.toml` names it; commit-tag discovery is the fallback for repos without one, so stray tags never become phantom scored missions.
+- `omp-kit planning score` derives plan-to-code latency from the configured `[plan].first_commit` without requiring a synthetic draft marker. The metric reports verified Git commit/timestamp provenance and explicit UNKNOWN reasons for invalid, ambiguous, or unavailable evidence; absent anchors retain tagged-draft behavior.
+- The opt-in SLB bridge uses the native `slb hook guard` protocol instead of a machine-specific private adapter. It preserves reviewed execution-input handoffs and protected DELETE admission, rejects unsupported revisions and incomplete output, and bundles its shared bounded-process dependency for installed extensions. Native ask/deny and unavailable-tool failures remain non-allow; no approval policy changes.
+- `verify` now stops active work before replay with an author-handoff remedy instead of attempting a close forbidden by strict workflow policy; open-bead verification remains supported.
+- Inbox wakes no longer redeliver mail the seat already received: a wake now requires the event cursor to advance past the stored cursor and the message id to be unseen, so a re-emitted feed cannot wake twice. [(commit 639b59c)](https://github.com/JYeswak/omp-kit-companion/commit/639b59cb690812bd53c6883569fee4c890d03862)
+- Keep real native tracker recovery integration controls in the native CLI suite, so the stock extension suite remains runnable without fleet tools while retaining every recovery and custody assertion.
+- A scratch dir whose release marker parses is treated as released even when the current `.owner` text drifted (rehome rewrite, inherited ovnfs copy): `scratch mine` and the save guard omit it, and a second release reports `already-released` instead of refusing with `release-marker-already-present`. A marker that does not parse is completed with a fresh marker instead of refusing.
+- push-check exports the commit tree through a streaming git-archive-to-tar pipe instead of buffering it in memory, so repositories whose archives exceed the old 512 MiB cap are checked instead of refused.
+- On a handled verify-act failure, restore provable parent acceptance before withdrawing only the attempt's unchanged live readback with native compare-and-swap. Preserve uncertain or peer-modified state and report the rollback failure.
+- Retry a withdrawn readback only against its exact recorded revision and the current parent obligations. Operator pauses and peer edits remain untouched; unhandled crash orphans are not automatically recovered.
+
 ## [0.2.131] - 2026-11-13
 
 ### Changed

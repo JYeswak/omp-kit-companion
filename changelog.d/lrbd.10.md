@@ -1,1 +1,0 @@
-- Fix intermittent standalone installer failures by preserving canonical parent-death process supervision for embedded Python runners.
