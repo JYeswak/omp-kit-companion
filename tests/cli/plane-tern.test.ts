@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, statSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, statSync, truncateSync, writeFileSync, writeSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import {
@@ -26,6 +26,7 @@ import {
 import type { TernObserverIo, SessionJournalResult } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { buildTernProofKey, proveTernEntry } from "../../src/send.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 /** Every journal fixture this file parses; the bounded-tail equivalence test at the end replays them all. */
 const journalCorpus = new Set<string>();
@@ -1152,8 +1153,7 @@ test("WAKEWINDOW1: a 100 MiB journal with its checkpoint 20 MiB back decides IDL
 	if (busyView === null) throw new Error("WAKEWINDOW1 open turn was unreadable");
 	const busy = parseSessionView(busyView);
 	expect(sessionJournalDecision(busy)).toBe("BUSY");
-	expect(busy).toMatchObject({ status: "KNOWN", lastMessageRole: "user",
-		window: { anchored: true, leafProven: true } });
+	expect(busy).toMatchObject({ status: "KNOWN", lastMessageRole: "user" });
 }, 30_000);
 
 test("WAKEWINDOW1: widening does not turn a hidden unresolved async job into IDLE", () => {
@@ -1166,3 +1166,40 @@ test("WAKEWINDOW1: widening does not turn a hidden unresolved async job into IDL
 	expect(journal).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: true,
 		window: { anchored: true, leafProven: true } });
 });
+
+test("SESSIONCAP2: a busy journal above 512 MiB stays bounded and preserves appended-message proof", () => {
+	const path = join(tailTmp.path, "busy-above-512m.jsonl");
+	const fd = openSync(path, "w");
+	try {
+		writeSync(fd, JSON.stringify({ type: "session", version: 3, id: "large-busy", timestamp: stamp(0), cwd: "/repo" }) + "\n");
+		writeSync(fd, nativeMessage("large-user", null, 1, userText("start")) + "\n");
+		const filler = "x".repeat(PAD_RECORD_BYTES);
+		let parent = "large-user";
+		for (let n = 0; n < 8192; n++) {
+			const id = `large-pad-${n}`;
+			writeSync(fd, JSON.stringify({ type: "custom", id, parentId: parent, timestamp: stamp(2),
+				customType: "memory_recall", data: filler }) + "\n");
+			parent = id;
+		}
+		writeSync(fd, nativeMessage("large-assistant", parent, 3, callsTool("large-tool")) + "\n");
+	} finally {
+		closeSync(fd);
+	}
+	expect(statSync(path).size).toBeGreaterThan(512 * 1024 * 1024);
+	const view = readSessionView(defaultTernIo(), path);
+	if (view === null) throw new Error("SESSIONCAP2 busy journal was unreadable");
+	const journal = parseSessionView(view);
+	expect(sessionJournalDecision(journal)).toBe("BUSY");
+	expect(view.readSteps?.reduce((total, step) => total + step.bytesRead, 0))
+		.toBeLessThanOrEqual(SESSION_TAIL_WINDOW_BYTES + SESSION_HEAD_BYTES + 1);
+	if (journal.status !== "KNOWN") throw new Error("SESSIONCAP2 active turn was not proven");
+	const sent = { kind: "message" as const, marker: "kit-send-sessioncap2", objective: "",
+		payload: "Read the pending mail.\nkit-send-sessioncap2" };
+	const key = buildTernProofKey(view, journal, sent);
+	const wrongPayload = buildTernProofKey(view, journal, { ...sent, payload: sent.payload + " different" });
+	appendFileSync(path, nativeMessage("large-delivered", "large-assistant", 4, userText(sent.payload)) + "\n");
+	const fresh = readSessionView(defaultTernIo(), path);
+	if (fresh === null) throw new Error("SESSIONCAP2 appended journal was unreadable");
+	expect(proveTernEntry(fresh, key)).toMatchObject({ status: "PROVEN", offset: view.fileSize, entryId: "large-delivered" });
+	expect(proveTernEntry(fresh, wrongPayload).status).toBe("ABSENT");
+}, fixtureDeadlineS(30) * 1000);

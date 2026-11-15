@@ -1027,7 +1027,7 @@ export function readSessionTail(path: string, windowBytes: number = SESSION_TAIL
 	}
 }
 
-/** Recover older branch anchors without weakening the bounded parser or trusting an unproven leaf. */
+/** Recover older branch anchors for settled or unknown state; a proven active turn needs no idle proof. */
 function readAnchoredSessionTail(path: string, proof?: SessionProofRange): SessionJournalView | null {
 	let view = readSessionTail(path, SESSION_TAIL_WINDOW_BYTES, proof);
 	if (view === null || view.fileSize <= MAX_SESSION_BYTES) return null;
@@ -1039,6 +1039,8 @@ function readAnchoredSessionTail(path: string, proof?: SessionProofRange): Sessi
 			bytesRead: view.head.length + view.tail.length + (view.tailStart === 0 ? 0 : 1)
 				+ (view.proofRange?.bytes.length ?? 0) });
 		const journal = parseSessionJournalTail(view);
+		// The bounded parser already proves this turn BUSY; older state cannot settle its visible pending work.
+		if (sessionJournalDecision(journal) === "BUSY") return { ...view, readSteps };
 		const needsOlderRecords = journal.status === "KNOWN"
 			? !journal.window?.anchored || !journal.window.leafProven
 			: journal.reason === "TAIL_STATE_BEYOND_WINDOW" || journal.reason === "TAIL_ACTIVE_LEAF_UNPROVEN"
