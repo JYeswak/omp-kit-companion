@@ -395,3 +395,98 @@ test("EMBEDDEP1 staging a pysafe.py change without regenerating installer/instal
 		expect(removed.err).toContain("staged-embed: REFUSED: the commit removes installer/embed-bootstrap.py");
 	} finally { scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1000);
+
+
+async function embeddedReaperConsumer(f: Fixture, restoreFileLaunch = false): Promise<RunResult> {
+	const code = `import json, os, signal, subprocess, sys
+ns = {"__name__": "installer_reaper_consumer"}
+exec(compile(${JSON.stringify(installerSource)}, "<standalone installer>", "exec"), ns)
+native = ns["kitlib_run"].pysafe
+${restoreFileLaunch ? "native._reaper_source = None" : ""}
+
+def finish_reaper():
+    state = native._reaper_state
+    fd, proc = state["fd"], state["proc"]
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    state.update(owner=None, fd=None, proc=None)
+    if proc is not None:
+        try:
+            proc.wait(timeout=${fixtureDeadlineS(5)})
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=${fixtureDeadlineS(2)})
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=${fixtureDeadlineS(2)})
+
+try:
+    # EOF must execute the actual canonical reaper, not a nonexistent __file__.
+    native._reaper_start()
+    entry = native._reaper_state["proc"]
+    finish_reaper()
+    if entry.returncode != 0:
+        raise RuntimeError("INSTALLREAPER1_REAPER_EXIT:" + str(entry.returncode))
+
+    observed = bytearray()
+    registry_closed = False
+    parent_reaper = None
+    def observe(index, chunk):
+        global registry_closed, parent_reaper
+        if index == 0:
+            observed.extend(chunk)
+        if not registry_closed and b"READY\\n" in observed:
+            parent_reaper = native._reaper_state["proc"]
+            os.close(native._reaper_state["fd"])
+            registry_closed = True
+
+    # Closing only this process's registry simulates parent death. A no-op reaper
+    # would leave the real child alive until run_bounded's separate timeout.
+    result = native.run_bounded(
+        [sys.executable, "-I", "-c", "import os,time; os.write(1,b'READY\\\\n'); time.sleep(120)"],
+        timeout=${fixtureDeadlineS(10)}, grace=1, cap_bytes=4096, on_chunk=observe)
+    if not registry_closed or result.outcome != native.OK or result.returncode != -signal.SIGKILL:
+        raise RuntimeError("INSTALLREAPER1_SUPERVISION:" + repr(result))
+    reaper_exit = parent_reaper.wait(timeout=${fixtureDeadlineS(5)})
+    if reaper_exit != 0:
+        raise RuntimeError("INSTALLREAPER1_REAPER_EXIT:" + str(reaper_exit))
+    print(json.dumps({"reaper_exit": reaper_exit, "child_exit": result.returncode,
+                      "child_ready": b"READY\\n" in result.stdout,
+                      "child_timed_out": result.outcome == native.TIMEOUT}))
+finally:
+    finish_reaper()
+`;
+	return run([python, "-I", "-c", code], {
+		cwd: f.work, env: f.env, deadline_s: fixtureDeadlineS(25), grace_s: 1, max_output_bytes: 65536,
+	});
+}
+
+function expectEmbeddedReaperConsumer(result: RunResult): void {
+	expectSuccess(result);
+	expect(JSON.parse(decoder.decode(result.stdout))).toEqual({
+		reaper_exit: 0, child_exit: -9, child_ready: true, child_timed_out: false,
+	});
+}
+
+test("INSTALLREAPER1: standalone embedded reaper executes and reaps its supervised child at parent-registry EOF", async () => {
+	const f = fixture();
+	try {
+		expectEmbeddedReaperConsumer(await embeddedReaperConsumer(f));
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(35) * 1000);
+
+test("INSTALLREAPER1_MUTANT: restoring only the file-backed launch loses the unchanged embedded consumer", async () => {
+	const f = fixture();
+	try {
+		expectEmbeddedReaperConsumer(await embeddedReaperConsumer(f));
+		const mutant = await embeddedReaperConsumer(f, true);
+		expect(mutant.timed_out).toBe(false);
+		expect(mutant.rc).not.toBe(0);
+		expect(decoder.decode(mutant.stderr)).toContain("INSTALLREAPER1_REAPER_EXIT:2");
+		expect(() => expectEmbeddedReaperConsumer(mutant)).toThrow();
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(60) * 1000);

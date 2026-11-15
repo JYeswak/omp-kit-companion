@@ -302,12 +302,19 @@ def kill_live_groups() -> int:
 _reaper_lock = threading.Lock()
 _reaper_state: dict = {"owner": None, "fd": None, "proc": None}
 _reaper_registered: set = set()
+# Standalone consumers bind their verified canonical bytes as source text when
+# __file__ is metadata only, so the reaper still executes this exact module.
+_reaper_source: Optional[str] = None
 
 
 def _reaper_start() -> None:
+    if _reaper_source is None:
+        command = [sys.executable, "-I", os.path.realpath(__file__), "reaper"]
+    else:
+        command = [sys.executable, "-I", "-c", _reaper_source, "reaper"]
     read_fd, write_fd = os.pipe()
     try:
-        proc = subprocess.Popen([sys.executable, "-I", os.path.realpath(__file__), "reaper"],
+        proc = subprocess.Popen(command,
                                 stdin=read_fd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 start_new_session=True, close_fds=True)
     except BaseException:
