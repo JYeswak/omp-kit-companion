@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import sys
 import time
 import unittest
@@ -30,6 +31,7 @@ import kitlib_tmp  # noqa: E402  (owned temp dirs: removed on exit and HUP/INT/T
 from pysafe import run_bounded  # noqa: E402  (cancel-safe spawn: own process group, stdin DEVNULL, hard deadline)
 
 UPDATE_LINT = str(SCRIPTS / "br-update-lint.py")
+PROJECTION = runpy.run_path(UPDATE_LINT)
 ENFORCED_AT = "2026-10-24T00:00:00.000001Z"
 CODE_ACC = (
     "- [ ] [a] [build] parser handles tags `true` -> rc 0; planted negative: an untagged line is refused\n"
@@ -172,6 +174,57 @@ class RepairAdmission(unittest.TestCase):
 
     def test_clean_edit_is_still_admitted_without_a_repair_note(self) -> None:
         rc, err = self.run_update(fixture(CLEAN_DESC, CODE_ACC), "--title", "Renamed clean fixture")
+        self.assertEqual((rc, err), (0, ""))
+
+    def project(self, body: str, *flags: str) -> str:
+        args = PROJECTION["parse_update"](["update", "rpr-1", *flags])
+        return PROJECTION["prospective"](fixture(CLEAN_DESC, body), args, str(self.root))["acceptance_criteria"]
+
+    def test_checkbox_projection_preserves_markers_and_text(self) -> None:
+        body = "- [ ] Alpha\r\n  * [X] Beta, gamma\r\n+[\u00a0] Delta\r\n"
+        self.assertEqual(
+            self.project(body, "--check-acceptance", "1,3", "--uncheck-acceptance", "BETA, GAMMA"),
+            "- [x] Alpha\r\n  * [ ] Beta, gamma\r\n+[x] Delta\r\n")
+        self.assertEqual(self.project(body, "--check-acceptance", "Beta, gamma"), body)
+        self.assertEqual(
+            self.project("- [ ] Alpha\n- [ ] Alpha extended\n", "--check-acceptance", "ALPHA"),
+            "- [x] Alpha\n- [ ] Alpha extended\n")
+        self.assertEqual(
+            self.project(body, "--check-acceptance", "Alpha", "--check-acceptance", "Delta"),
+            "- [x] Alpha\r\n  * [X] Beta, gamma\r\n+[x] Delta\r\n")
+
+    def test_checkbox_projection_ignores_fenced_examples(self) -> None:
+        for body in ("````markdown\n- [ ] example\n```\n- [ ] still code\n````\n- [ ] real\n",
+                     "~~~\n- [ ] example\n~~~ trailing text\n- [ ] still code\n~~~\n- [ ] real\n"):
+            with self.subTest(body=body):
+                self.assertEqual(self.project(body, "--check-acceptance", "1"),
+                                 body.replace("- [ ] real", "- [x] real"))
+
+    def test_checkbox_selectors_are_validated_before_projection(self) -> None:
+        body = "- [ ] same first\n- [ ] same second\n"
+        for flags in (("--check-acceptance", "0"),
+                      ("--check-acceptance", "1,99"),
+                      ("--check-acceptance", "missing"),
+                      ("--check-acceptance", "same"),
+                      ("--check-acceptance", "1", "--uncheck-acceptance", "1"),
+                      ("--check-acceptance", "3", "--add-acceptance", "new item")):
+            with self.subTest(flags=flags), self.assertRaises(ValueError):
+                self.project(body, *flags)
+        with self.assertRaises(ValueError):
+            self.project("```\n- [ ] example\n", "--add-acceptance", "new item")
+
+    def test_checkbox_edits_precede_appending_and_reject_replacement_conflicts(self) -> None:
+        body = "* [ ] Alpha\r\n* [X] Beta\r\n\r\n"
+        self.assertEqual(
+            self.project(body, "--check-acceptance", "1", "--add-acceptance", " New item "),
+            "* [x] Alpha\r\n* [X] Beta\r\n* [ ] New item\r\n\r\n")
+        replacement = "* [ ] Other\r\n* [X] Beta\r\n\r\n"
+        for flag in ("--check-acceptance", "--uncheck-acceptance", "--add-acceptance"):
+            with self.subTest(flag=flag), self.assertRaises(ValueError):
+                self.project(body, "--acceptance-criteria", replacement, flag, "1")
+
+    def test_standalone_checkbox_update_does_not_add_a_legacy_lint_gate(self) -> None:
+        rc, err = self.run_update(fixture(), "--check-acceptance", "1")
         self.assertEqual((rc, err), (0, ""))
 
 

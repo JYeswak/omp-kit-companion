@@ -117,6 +117,8 @@ def parse_update(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--acceptance-criteria", "--acceptance",
                         dest="acceptance")
     parser.add_argument("--add-acceptance", action="append", default=[])
+    parser.add_argument("--check-acceptance", action="append", default=[])
+    parser.add_argument("--uncheck-acceptance", action="append", default=[])
     parser.add_argument("--set-labels")
     parser.add_argument("--add-label", action="append", default=[])
     parser.add_argument("--remove-label", action="append", default=[])
@@ -176,6 +178,101 @@ def tracker_rows(real: str, project: str, db: str) -> list[dict]:
     return [row for row in rows if isinstance(row, dict) and row.get("id")]
 
 
+# Rust char::is_whitespace (native br), not Python's additional U+001C..U+001F separators.
+AC_WHITESPACE = " \t\n\r\v\f\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+
+
+def acceptance_markers(body: str) -> tuple[list[tuple[int, str, str, str]], bool]:
+    """Native checklist marker offsets/text/bullets, excluding fenced examples."""
+    entries: list[tuple[int, str, str, str]] = []
+    fence: tuple[str, int] | None = None
+    offset = 0
+    for raw in body.split("\n"):
+        content = raw.rstrip("\r")
+        line = content.lstrip(AC_WHITESPACE)
+        start = offset + len(content) - len(line)
+        offset += len(raw) + 1
+        if line[:1] in ("`", "~"):
+            marker = line[0]
+            width = len(line) - len(line.lstrip(marker))
+            if width >= 3:
+                suffix = line[width:]
+                if fence is not None:
+                    if marker == fence[0] and width >= fence[1] and not suffix.strip(" \t"):
+                        fence = None
+                    continue
+                if marker != "`" or "`" not in suffix:
+                    fence = (marker, width)
+                    continue
+        if fence is not None or line[:1] not in ("-", "*", "+"):
+            continue
+        cursor = 1
+        while cursor < len(line) and line[cursor] in AC_WHITESPACE:
+            cursor += 1
+        if line[cursor:cursor + 1] != "[" or line[cursor + 2:cursor + 3] != "]":
+            continue
+        marker = line[cursor + 1]
+        if marker not in ("x", "X") and marker not in AC_WHITESPACE:
+            continue
+        entries.append((start + cursor + 1, marker, line[cursor + 3:].strip(AC_WHITESPACE), line[0]))
+    return entries, fence is not None
+
+
+def project_acceptance(body: str, checks: list[str], unchecks: list[str], additions: list[str]) -> str:
+    """Mirror native br's byte-preserving check/uncheck/append plan before lint."""
+    entries, open_fence = acceptance_markers(body)
+
+    def resolve(values: list[str]) -> set[int]:
+        selected: set[int] = set()
+        for raw in values:
+            value = raw.strip(AC_WHITESPACE)
+            if not value:
+                raise ValueError("acceptance selector must not be empty")
+            pieces = [piece.strip(AC_WHITESPACE) for piece in value.split(",")]
+            if all(piece and all("0" <= char <= "9" for char in piece) for piece in pieces):
+                indexes = [int(piece) - 1 for piece in pieces]
+                if any(index < 0 or index >= len(entries) for index in indexes):
+                    raise ValueError("acceptance item number is out of range")
+                selected.update(indexes)
+                continue
+            needle = value.lower()
+            matches = [index for index, entry in enumerate(entries) if entry[2].lower() == needle]
+            if len(matches) != 1:
+                matches = [index for index, entry in enumerate(entries) if needle in entry[2].lower()]
+            if len(matches) != 1:
+                raise ValueError("acceptance text selector must match exactly one item")
+            selected.add(matches[0])
+        return selected
+
+    checked = resolve(checks)
+    unchecked = resolve(unchecks)
+    if checked & unchecked:
+        raise ValueError("acceptance item requested both checked and unchecked")
+    if additions and open_fence:
+        raise ValueError("cannot append acceptance inside an unclosed code fence")
+    texts = [text.strip(AC_WHITESPACE) for text in additions]
+    if any(not text or "\n" in text or "\r" in text for text in texts):
+        raise ValueError("appended acceptance must be a nonempty single line")
+    chunks: list[str] = []
+    cursor = 0
+    for index, (position, marker, _text, _bullet) in enumerate(entries):
+        want = True if index in checked else False if index in unchecked else None
+        if want is None or want == (marker in ("x", "X")):
+            continue
+        chunks.extend((body[cursor:position], "x" if want else " "))
+        cursor = position + 1
+    chunks.append(body[cursor:])
+    projected = "".join(chunks)
+    if not texts:
+        return projected
+    newline = "\r\n" if "\r\n" in projected else "\n"
+    bullet = entries[-1][3] if entries else "-"
+    head = projected.rstrip("\r\n") if projected.strip(AC_WHITESPACE) else ""
+    tail = projected[len(head):] if head else ""
+    appended = newline.join(f"{bullet} [ ] {text}" for text in texts)
+    return head + (newline if head else "") + appended + tail
+
+
 def prospective(
     live: dict, args: argparse.Namespace, project: str
 ) -> dict:
@@ -212,10 +309,13 @@ def prospective(
     elif args.description is not None:
         bead["description"] = args.description
     if args.acceptance is not None:
+        if args.check_acceptance or args.uncheck_acceptance or args.add_acceptance:
+            raise ValueError("acceptance replacement cannot be combined with in-place checklist edits")
         bead["acceptance_criteria"] = args.acceptance
-    for text in args.add_acceptance:
-        # br stores --add-acceptance as a new "- [ ] <text>" box.
-        bead["acceptance_criteria"] += f"\n- [ ] {text}"
+    if args.check_acceptance or args.uncheck_acceptance or args.add_acceptance:
+        bead["acceptance_criteria"] = project_acceptance(
+            live.get("acceptance_criteria") or "", args.check_acceptance,
+            args.uncheck_acceptance, args.add_acceptance)
     if args.set_labels is not None:
         bead["labels"] = split_csv([args.set_labels])
     else:

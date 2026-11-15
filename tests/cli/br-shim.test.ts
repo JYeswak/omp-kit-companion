@@ -1470,3 +1470,74 @@ test("SHIMCHAIN1 mutant: without the chain rule the same pane-shim-first read is
 		expect(read.backend).toEqual([]);
 	} finally { f.scratch.cleanup(); }
 }, CASE_BUDGET_MS);
+
+test("TICKPROJECTION1 native combined checkbox/review update preserves strict admission", async () => {
+	const f = await handoffRepo(true);
+	try {
+		const unchecked = HANDOFF_AC.replace("[x]", "[ ]");
+		await f.br(["update", "hh-owned", "--acceptance-criteria", unchecked]);
+		f.ledger();
+		const before = await f.br(["show", "hh-owned", "--json"]);
+		const unfinished = await f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
+		expect(unfinished.rc).toBe(4);
+		expect(decoder.decode(unfinished.stderr)).toContain("AC_UNTICKED_BUILD_LANDED");
+		expect(await f.br(["show", "hh-owned", "--json"])).toBe(before);
+		const admitted = await f.shim(["update", "hh-owned", "--check-acceptance", "1",
+			"--status", "in_review", "--transition-comment", f.done]);
+		expect(admitted.rc, decoder.decode(admitted.stderr)).toBe(0);
+		const checked = JSON.parse(await f.br(["show", "hh-owned", "--json"]))[0];
+		expect(checked.status).toBe("in_review");
+		expect(checked.acceptance_criteria).toBe(HANDOFF_AC);
+		for (const flags of [["--uncheck-acceptance", "1"], ["--check-acceptance", "99"]]) {
+			const snapshot = await f.br(["show", "hh-owned", "--json"]);
+			const refused = await f.shim(["update", "hh-owned", ...flags,
+				"--status", "in_review", "--transition-comment", f.done]);
+			expect(refused.rc).not.toBe(0);
+			expect(await f.br(["show", "hh-owned", "--json"])).toBe(snapshot);
+		}
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1_000);
+
+test("TICKPROJECTION1 prospective bytes match native checkbox edit plans", async () => {
+	const f = await handoffRepo(true);
+	const sample = "- [ ] Alpha\r\n  * [X] Beta, gamma\r\n+[\u00a0] Delta\r\n";
+	const replacement = sample.replace("Alpha", "Other");
+	const cases = [
+		{ body: sample, flags: ["--check-acceptance", "1,3", "--uncheck-acceptance", "BETA, GAMMA"] },
+		{ body: sample, flags: ["--check-acceptance", "Alpha", "--check-acceptance", "Delta"] },
+		{ body: "- [ ] Alpha\n- [ ] Alpha extended\n", flags: ["--check-acceptance", "ALPHA"] },
+		{ body: "````markdown\n- [ ] example\n```\n- [ ] still code\n````\n- [ ] real\n",
+			flags: ["--check-acceptance", "1"] },
+		{ body: "* [ ] Alpha\r\n* [X] Beta\r\n\r\n",
+			flags: ["--check-acceptance", "1", "--add-acceptance", " New item "] },
+	];
+	const project = "import json,os,runpy,sys; sys.path.insert(0,os.path.dirname(sys.argv[1])); m=runpy.run_path(sys.argv[1]); "
+		+ "live=json.loads(sys.argv[2]); args=m['parse_update'](['update',live['id'],*json.loads(sys.argv[3])]); "
+		+ "print(json.dumps(m['prospective'](live,args,sys.argv[4])['acceptance_criteria']))";
+	try {
+		for (const { body, flags } of cases) {
+			const created = JSON.parse(await f.br(["create", "Native checkbox projection oracle",
+				"--description", "WHAT: preserve checklist bytes. WHY: projection must match the native update.",
+				"--acceptance-criteria", body, "--json"]));
+			const live = JSON.parse(await f.br(["show", created.id, "--json"]))[0];
+			const predicted = JSON.parse(await f.checked(["python3", "-c", project,
+				join(root, "scripts/br-update-lint.py"), JSON.stringify(live), JSON.stringify(flags), f.tracker]));
+			await f.br(["update", created.id, ...flags]);
+			const actual = JSON.parse(await f.br(["show", created.id, "--json"]))[0];
+			expect(predicted, JSON.stringify(flags)).toBe(actual.acceptance_criteria);
+		}
+		const conflict = JSON.parse(await f.br(["create", "Native checkbox conflict oracle",
+			"--description", "WHAT: preserve native state. WHY: conflicting acceptance operations reject atomically.",
+			"--acceptance-criteria", sample, "--json"]));
+		const snapshot = await f.br(["show", conflict.id, "--json"]);
+		for (const flag of ["--check-acceptance", "--uncheck-acceptance", "--add-acceptance"]) {
+			const flags = ["--acceptance-criteria", replacement, flag, "1"];
+			await expect(f.checked(["python3", "-c", project, join(root, "scripts/br-update-lint.py"),
+				JSON.stringify(JSON.parse(snapshot)[0]), JSON.stringify(flags), f.tracker]))
+				.rejects.toThrow("acceptance replacement cannot be combined");
+			const refused = await f.shim(["update", conflict.id, ...flags]);
+			expect(refused.rc, decoder.decode(refused.stderr)).toBe(2);
+			expect(await f.br(["show", conflict.id, "--json"])).toBe(snapshot);
+		}
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1_000);
