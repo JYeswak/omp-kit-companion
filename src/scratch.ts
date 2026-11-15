@@ -2309,6 +2309,19 @@ function readReleaseRecord(dir: string): ReleaseRecord | null {
 	return { owner, ownerText, markerText, releasedAt: marker.releasedAt, legacy: true, legacyName: marker.legacyName, bin: null, ref: null };
 }
 
+/** SCRATCHMARK1 (ompkit-585m0): a release marker that parses is a completed release even when
+ * the current .owner text drifted (rehome rewrite, ovnfs copy). Owner-hash and inode pins stay
+ * inside readReleaseRecord for the retiring paths; this only answers whether a release happened. */
+function validReleaseMarker(dir: string): { bin: ScratchBin | null } | null {
+  if (isSymlink(dir)) return null;
+  const markerPath = join(dir, RELEASE_FILE);
+  if (isSymlink(markerPath)) return null;
+  const markerText = readText(markerPath);
+  if (markerText === null) return null;
+  const parsed = parseReleaseMarker(markerText);
+  return parsed === null ? null : { bin: parsed.bin };
+}
+
 function callerIsOwnedBy(ownerPid: number, callerPid: number, run: ScratchRunner): boolean {
 	if (ownerPid === callerPid) return true;
 	// pid 1 heads every ancestor chain, and dirs with `pid=1` (hand-made owners) are nobody's in particular.
@@ -2694,7 +2707,17 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 			}
 			return { ok: true, changed: false, dir, reason: "already-released", ownerPid: owner.pid };
 		}
-		return { ok: false, changed: false, dir, reason: "release-marker-already-present", ownerPid: owner.pid };
+		if (validReleaseMarker(dir) !== null) {
+			// SCRATCHMARK1: the marker parses, so the release already happened; the current .owner
+			// text only drifted (rehome rewrite, ovnfs copy). Report the release, never refuse it.
+			return { ok: true, changed: false, dir, reason: "already-released", ownerPid: owner.pid };
+		}
+		// Invalid marker: complete the release below with a fresh marker instead of refusing.
+		try {
+			unlinkSync(markerPath);
+		} catch {
+			return { ok: false, changed: false, dir, reason: "release-marker-write-failed", ownerPid: owner.pid };
+		}
 	}
 	const releasedAt = new Date(deps.now ?? Date.now()).toISOString();
 	const binLines = opts.bin === undefined ? "" : `bin=${opts.bin}\n${opts.ref === undefined ? "" : `ref=${opts.ref}\n`}`;
@@ -2745,7 +2768,17 @@ function releaseLegacy(dir: string, home: string, deps: InspectDeps, dev: number
 	if (existsSync(markerPath)) {
 		const prior = readReleaseRecord(dir);
 		if (prior && prior.legacy && prior.ownerText === ownerText) return { ok: true, changed: false, dir, reason: "already-released", ownerPid: prior.owner.pid };
-		return { ok: false, changed: false, dir, reason: "release-marker-already-present", ownerPid: null };
+		if (validReleaseMarker(dir) !== null) {
+			// SCRATCHMARK1: the marker parses, so the release already happened; the current .owner
+			// text only drifted. Report the release, never refuse it.
+			return { ok: true, changed: false, dir, reason: "already-released", ownerPid: null };
+		}
+		// Invalid marker: complete the release below with a fresh marker instead of refusing.
+		try {
+			unlinkSync(markerPath);
+		} catch {
+			return { ok: false, changed: false, dir, reason: "release-marker-write-failed", ownerPid: null };
+		}
 	}
 	const releasedAt = new Date(deps.now ?? Date.now()).toISOString();
 	const markerText = `version=1\nlegacy=1\nlegacy_name=${basename(dir)}\nrelease_reason=${reason}\nrelease_actor=${process.pid}\nlegacy_owner_b64=${Buffer.from(ownerText, "utf8").toString("base64")}\nowner_sha256=${createHash("sha256").update(ownerText).digest("hex")}\ndevice=${dev}\ninode=${ino}\nreleased_at=${releasedAt}\n`;
@@ -4194,6 +4227,13 @@ export function ownedScratch(home: string, deps: InspectDeps): OwnedScratchRow[]
 			const overBudget = budget !== null && bytes > budget;
 			if (released) {
 				rows.push({ dir, label: owner.label, state: "released", bin: released.bin ?? "unbinned", bytes, budget, overBudget });
+				continue;
+			}
+			// SCRATCHMARK1: a marker that parses is a completed release even when the current .owner
+			// text drifted (rehome rewrite, ovnfs copy). Omitted from the owed set like any released dir.
+			const drifted = validReleaseMarker(dir);
+			if (drifted !== null) {
+				rows.push({ dir, label: owner.label, state: "released", bin: drifted.bin ?? "unbinned", bytes, budget, overBudget });
 			} else if (owner.bin === "hold" && owner.expires !== null) {
 				rows.push({ dir, label: owner.label, state: Date.parse(owner.expires) > now ? "held" : "hold-expired", bin: "hold", bytes, budget, overBudget });
 			} else {

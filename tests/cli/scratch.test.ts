@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, lutimesSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
-import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectBunBuildFiles, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, disposalGate, fleetTestTmpBase, inspectBunBuildFiles, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, ownedScratch, owesRelease, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
 import type { SeatIdentity } from "../../src/scratch.ts";
 import { exportCommitToScratch, parseFreeOwner, parseTextOwner, releaseBudgetEntry, repoOfRoot } from "../../src/scratch.ts";
 import type { ScratchVerdict } from "../../src/scratch.ts";
@@ -2401,4 +2401,29 @@ test("CHILDSCRATCH1: the parent seat releases a finished child's dir; an unrelat
 	}
 	expect(existsSync(join(live, "work.txt"))).toBe(true);
 	expect(existsSync(join(live, ".omp-kit-release"))).toBe(false);
+});
+
+test("SCRATCHMARK1: a dir carrying a release marker is omitted from mine and the save guard, and a second release is already-released", () => {
+  const { home } = cliHome();
+  const root = agentTmp("scratch-mark1");
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  const dir = sessionDir(root, "mark1", process.pid);
+  const fields = { pid: String(process.pid), label: "mark1", repo: fixtureRepo, created: "2026-10-01T00:00:00Z", bin: "throwaway", purpose: "probe" };
+  writeFileSync(join(dir, ".owner"), ownerText(fields));
+  // First release writes the marker.
+  expect(releaseScratch(dir, home, depsFor(), { bin: "throwaway" })).toMatchObject({ ok: true, reason: "owner-released" });
+  expect(existsSync(join(dir, ".omp-kit-release"))).toBe(true);
+  // Rehome-style drift: same seat pid, rewritten owner text, so the owner hash no longer matches the marker.
+  writeFileSync(join(dir, ".owner"), ownerText({ ...fields, label: "mark1-moved" }));
+  // Mine and the save guard omit the marked dir instead of owing it.
+  const rows = ownedScratch(home, depsFor());
+  expect(rows.find((row) => row.dir === dir)?.state).toBe("released");
+  expect(rows.filter(owesRelease).some((row) => row.dir === dir)).toBe(false);
+  expect(disposalGate(home, "push", depsFor()).owed.some((row) => row.dir === dir)).toBe(false);
+  // A second release reports already-released (rc 0) instead of refusing.
+  expect(releaseScratch(dir, home, depsFor(), { bin: "throwaway" })).toMatchObject({ ok: true, changed: false, reason: "already-released" });
+  // Deleting the marker makes mine list it again.
+  rmSync(join(dir, ".omp-kit-release"));
+  expect(ownedScratch(home, depsFor()).find((row) => row.dir === dir)?.state).toBe("unreleased");
 });
