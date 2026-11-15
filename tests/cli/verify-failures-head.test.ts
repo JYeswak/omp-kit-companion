@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { judge } from "../../src/verify.ts";
+import { judge, verifyBead } from "../../src/verify.ts";
+import { fakeBr, inReview, installFixtureIdentity, repo, restoreFixtureIdentity } from "./verify-fixture.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 test("VERIFYFAILURESHEAD1: `N failures` / `N failure` heads judge like `N fail`", () => {
 	// Shape of a turnline selftest summary: ok lines ending in `0 failures`.
@@ -32,3 +34,60 @@ test("VERIFYFAILURESHEAD1: `N failures` / `N failure` heads judge like `N fail`"
 	// ... while the literal still passes when the text really appears.
 	expect(judge("0 fails", 0, "ok\n0 fails\n").pass).toBe(true);
 });
+
+test("VERIFYNODE1: Node and Bun summaries satisfy the same exact-count expectations", () => {
+	for (const output of ["ℹ pass 4\nℹ fail 0\n", "# pass 4\n# fail 0\n", " 4 pass\n 0 fail\n"]) {
+		expect(judge("0 fail", 0, output).pass).toBe(true);
+		expect(judge("0 failures: proves the run passed", 0, output).pass).toBe(true);
+		expect(judge("4 pass", 0, output).pass).toBe(true);
+		expect(judge("4 pass 0 fail", 0, output).pass).toBe(true);
+	}
+	expect(judge("991 pass 0 fail", 0, "ℹ pass 991\nℹ fail 0\n").pass).toBe(true);
+	expect(judge("1 failure", 1, "ℹ fail 1\n").pass).toBe(true);
+	expect(judge("4 pass 1 fail", 1, "ℹ pass 4\nℹ fail 1\n").pass).toBe(true);
+});
+
+test("VERIFYNODE1: failure counts, exit status and literal matching stay authoritative", () => {
+	for (const output of ["ℹ pass 4\nℹ fail 0\n", " 4 pass\n 0 fail\n"]) {
+		expect(judge("0 fail", 1, output).pass).toBe(false);
+		expect(judge("4 pass 0 fail", 1, output).pass).toBe(false);
+	}
+	expect(judge("0 fail", 0, "ℹ fail 1\n").pass).toBe(false);
+	expect(judge("0 fail", 0, "ℹ fail 10\n").pass).toBe(false);
+	expect(judge("0 fail", 0, "ℹ fail 01\n").pass).toBe(false);
+	expect(judge("4 pass", 0, "ℹ pass 40\n").pass).toBe(false);
+	expect(judge("4 pass", 0, "14 pass\n").pass).toBe(false);
+	expect(judge("4 pass 0 fail", 0, "ℹ pass 3\nℹ fail 0\n").pass).toBe(false);
+	expect(judge("0 fail", 0, "no test summary\n").pass).toBe(false);
+	expect(judge("0 fail", 0, "ℹ fails 0\n").pass).toBe(false);
+	expect(judge("0 fails", 0, "ℹ fail 0\n").pass).toBe(false);
+	expect(judge("0 fails", 0, "literal 0 fails\n").pass).toBe(true);
+});
+
+test("VERIFYNODE1 VERIFYJUDGE1: real Node summaries close clean exports and keep failing exports in REWORK", async () => {
+	installFixtureIdentity();
+	try {
+		const prelude = "const { test } = require('node:test');\nconst assert = require('node:assert/strict');\n";
+		const { dir, sha } = await repo("verify-node-summary", {
+			"node-pass.cjs": `${prelude}for (let i = 0; i < 4; i++) test('case ' + i, () => assert.equal(i, i));\n`,
+			"node-fail.cjs": `${prelude}for (let i = 0; i < 4; i++) test('case ' + i, () => assert.equal(i, i === 3 ? -1 : i));\n`,
+		});
+		for (const [reporter, file, passes] of [
+			["spec", "node-pass.cjs", true],
+			["tap", "node-pass.cjs", true],
+			["spec", "node-fail.cjs", false],
+		] as const) {
+			const command = `NODE_DISABLE_COLORS=1 node --test --test-reporter=${reporter} scripts/${file}`;
+			const ac = `- [ ] [a] [build] \`${command}\` -> 0 fail\n- [ ] [b] [build] \`${command}\` -> 4 pass 0 fail`;
+			const br = fakeBr(inReview(ac));
+			const result = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+			expect(result.code).toBe(passes ? "CLOSED" : "REWORK");
+			expect(result.replays.map(replay => replay.pass)).toEqual([passes, passes]);
+			expect(result.replays.map(replay => replay.rc)).toEqual(passes ? [0, 0] : [1, 1]);
+			expect(br.state().status).toBe(passes ? "closed" : "rework");
+			expect(br.state().acceptance_criteria).toBe(passes ? ac.replaceAll("- [ ]", "- [x]") : ac);
+		}
+	} finally {
+		restoreFixtureIdentity();
+	}
+}, fixtureDeadlineS(15) * 1_000);
