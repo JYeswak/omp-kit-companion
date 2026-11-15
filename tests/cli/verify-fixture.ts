@@ -1,7 +1,6 @@
-/** Shared verify fixture helpers (LESSONAUTO1 split): the repo/tracker fakes also defined in
- * verify.test.ts, exported here so verify-lessons.test.ts does not duplicate the big blocks.
- * verify.test.ts keeps its own copies and stays byte-identical to main.
- */
+/** Shared code-repository, fake-tracker and native-tracker helpers for verifier suites. */
+import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { run } from "../../src/kitlib/run.ts";
@@ -230,3 +229,77 @@ if (a[0] === "create") process.stdout.write('{"id":"kit-1.1"}');
 }
 
 export const inReview = (ac: string) => ({ id: "kit-1", status: "in_review", assignee: "Author", updated_at: "2026-10-26T00:00:00Z", labels: [], acceptance_criteria: ac });
+export async function brun(args: string[], cwd: string, env?: Record<string, string>): Promise<{ rc: number | null; out: string }> {
+	const merged = { ...process.env, ...(env ?? {}) } as Record<string, string>;
+	const r = await run(["br", ...args], { cwd, deadline_s: fixtureDeadlineS(60), env: merged });
+	return { rc: r.rc, out: new TextDecoder().decode(r.stdout) + new TextDecoder().decode(r.stderr) };
+}
+
+/** A real tracker in owned scratch, initialized with no inherited binding. */
+export async function tracker(root: string, name: string): Promise<{ dir: string; db: string }> {
+	const dir = join(root, name);
+	mkdirSync(dir, { recursive: true });
+	const env = { ...process.env } as Record<string, string>;
+	delete env.BEADS_DB;
+	const r = await run(["br", "init", "--db", join(dir, ".beads", "beads.db")], { cwd: dir, deadline_s: fixtureDeadlineS(60), env });
+	if (r.rc !== 0) throw new Error(`br init -> ${r.rc}: ${new TextDecoder().decode(r.stderr)}`);
+	return { dir, db: join(dir, ".beads", "beads.db") };
+}
+
+/** One tracker per named group of tests that each create their own beads and only compare state they
+ * captured after their own setup; a test that counts or lists the whole tracker keeps its own. */
+const sharedTrackers = new Map<string, Promise<{ dir: string; db: string }>>();
+export function sharedTracker(root: string, name: string, setup?: (t: { dir: string; db: string }) => Promise<void>): Promise<{ dir: string; db: string }> {
+	const key = join(root, name);
+	let created = sharedTrackers.get(key);
+	if (created === undefined) {
+		created = tracker(root, name).then(async t => { await setup?.(t); return t; });
+		sharedTrackers.set(key, created);
+	}
+	return created;
+}
+
+export function trackerEnv(t: { dir: string; db: string }): Record<string, string> {
+	return { ...process.env, BEADS_DB: t.db } as Record<string, string>;
+}
+
+/** `fields` are br create flags (description, acceptance, assignee, parent) set in the create act itself. */
+export async function createBead(t: { dir: string; db: string }, title: string, fields: string[] = []): Promise<string> {
+	const env = { ...process.env, BEADS_DB: t.db } as Record<string, string>;
+	const created = await brun(["create", title, ...fields, "--json"], t.dir, env);
+	if (created.rc !== 0) throw new Error(`create -> ${created.rc}: ${created.out}`);
+	const parsed: unknown = JSON.parse(created.out);
+	const id = typeof parsed === "object" && parsed !== null && "id" in parsed && typeof parsed.id === "string" ? parsed.id : null;
+	if (id === null) throw new Error(`create returned no id: ${created.out.slice(0, 200)}`);
+	return id;
+}
+/** Read-only journal mode of a tracker db; a hot-journal recovery would itself be a mutation, so clean fixtures only. */
+function journalMode(dbPath: string): string {
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		const row = db.query("PRAGMA journal_mode;").get() as Record<string, unknown> | null;
+		const value = row === null ? null : Object.values(row)[0];
+		if (typeof value !== "string" || value.length === 0) throw new Error(`no journal_mode for ${dbPath}`);
+		return value;
+	} finally {
+		db.close();
+	}
+}
+
+/** Whole-tracker state: journal plus the authoritative sqlite bytes plus live WAL content and journal mode, read synchronously. A mutation visible only in WAL is observed; br startup auto-import/recovery would show here too. SHM holds volatile lock state, so only its presence and size are witnessed, never its bytes. */
+export function stateHash(t: { dir: string }): string {
+	const beadsDir = join(t.dir, ".beads");
+	const h = createHash("sha256");
+	h.update(readFileSync(join(beadsDir, "issues.jsonl")));
+	h.update(readFileSync(join(beadsDir, "beads.db")));
+	const wal = join(beadsDir, "beads.db-wal");
+	h.update(existsSync(wal) ? readFileSync(wal) : "ABSENT:beads.db-wal");
+	const shm = join(beadsDir, "beads.db-shm");
+	h.update(existsSync(shm) ? `PRESENT:${readFileSync(shm).length}` : "ABSENT:beads.db-shm");
+	h.update(`journal_mode:${journalMode(join(beadsDir, "beads.db"))}`);
+	return h.digest("hex");
+}
+export async function row(t: { dir: string; db: string }, id: string): Promise<Record<string, unknown>> {
+	const shown = await brun(["show", id, "--json"], t.dir, trackerEnv(t));
+	return (JSON.parse(shown.out) as Record<string, unknown>[])[0]!;
+}

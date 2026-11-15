@@ -865,6 +865,11 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const family = input.family ?? "unknown (set --family)";
 	const deferredTags = deferred.map(b => tag(b)).join(" ");
 	const reuse = deferred.length > 0 ? row?.readbacks[0] : undefined;
+	const deferredAcceptance = deferred.map(box => box.line).join("\n");
+	const reused = reuse === undefined ? null : await showBead(reuse, input.repo, env);
+	if (reuse !== undefined && reused === null) return { ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: existing readback ${reuse} is unreadable; no tracker act ran`).join("\n"), acts };
+	const resume = reused?.status === "deferred" ? await readbackResume(row.id, reused, deferredAcceptance, input.repo, env) : null;
+	if (resume !== null && "reason" in resume) return { ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${resume.reason}; no tracker act ran`).join("\n"), acts };
 	const childRef = reuse ?? CHILD;
 	const reason = `verified by ${input.actor} (family: ${family}) on export ${input.exportSha}: ${ran.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}${deferred.length ? `; deferred ${deferredTags} to ${childRef} (LIVEREADBACK, child of ${homeNote || home}, related to ${input.bead})` : ""}`;
 	if (deferred.length > 0) {
@@ -872,8 +877,9 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		let item = 0;
 		const remaining = acceptance.split("\n").filter(raw => !CHECKLIST_ITEM.test(raw.trim()) || !moved.has(++item)).join("\n");
 		const childDescription = `WHAT: read back, on the installed kit, the boxes omp-kit verify deferred when it closed ${input.bead} on export ${input.exportSha}: \`omp-kit verify <this bead> --live-readback\`. A pass ticks them and closes this bead; a failure reopens ${input.bead} with REWORK naming the box.\n\nWHY: ${input.bead}'s executed boxes passed, and br closes a bead only with every box ticked (CLOSEPASS1 ompkit-774u.52, J-2026-10-29-20), so these boxes stay open, visible debt until they are read back.\n\nVerified bead: ${input.bead} (related link)`;
-		if (reuse === undefined) acts.push(["br", "create", `LIVEREADBACK: ${title}`, "-t", "task", "-l", LIVE_READBACK_LABEL, "--parent", home, "--deps", `related:${input.bead}`, "--description", childDescription, "--acceptance-criteria", deferred.map(b => b.line).join("\n"), "--json", "--actor", input.actor]);
-		else acts.push(["br", "update", reuse, "--acceptance-criteria", deferred.map(b => b.line).join("\n"), "--actor", input.actor]);
+		if (reuse === undefined) acts.push(["br", "create", `LIVEREADBACK: ${title}`, "-t", "task", "-l", LIVE_READBACK_LABEL, "--parent", home, "--deps", `related:${input.bead}`, "--description", childDescription, "--acceptance-criteria", deferredAcceptance, "--json", "--actor", input.actor]);
+		else if (resume !== null && "revision" in resume) acts.push(["br", "update", reuse, "--status", "open", "--transition-comment", `verify resumed its unchanged withdrawn readback for ${input.bead}`, "--if-unchanged", resume.revision, "--json", "--actor", input.actor]);
+		else acts.push(["br", "update", reuse, "--acceptance-criteria", deferredAcceptance, "--actor", input.actor]);
 		// br refuses, without --force, a rewrite that keeps less than half of a field's length; only acceptance shrinks.
 		const shrinks = [...remaining].length * 2 < [...acceptance].length + 4;
 		acts.push(["br", "update", input.bead, "--description", `${description}\n\n## Original acceptance (before omp-kit verify moved ${deferredTags} to ${childRef})\n${acceptance}`, "--acceptance-criteria", remaining, ...(shrinks ? ["--force"] : []), "--actor", input.actor]);
@@ -889,7 +895,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	if (homeNote) log.push(`LIVEREADBACK child placed under ${homeNote}`);
 	const child = deferred.length > 0 ? childRef : undefined;
 	if (input.dryRun) return { ok: true, code: "DRY_RUN", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts, child };
-	const done = await executeActs(acts, input.repo, env, { bead: row, actor: input.actor });
+	const done = await executeActs(acts, input.repo, env, { bead: row, actor: input.actor, ...(resume !== null && "revision" in resume ? { resumedChild: resume.child } : {}) });
 	if (done.failure !== null) return { ok: false, code: "ACT_FAILED", bead: input.bead, export: input.exportSha, replays, log: log.concat(done.failure).join("\n"), acts: done.acts, child: done.child ?? reuse, rollback: done.rollback };
 	if (done.skippedGate !== null) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${done.skippedGate}'; skipping gate report`);
 	recordCloseLesson(input.repo, input.bead, lesson, input.exportSha, log);
@@ -900,7 +906,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
  * Run tracker acts in order. The id a `br create --json` act prints replaces CHILD in every later act, and the
  * returned acts carry that substitution. The first non-zero act stops the run and is named in `failure`.
  */
-type ActCheckpoint = { bead: BeadRow; actor: string };
+type ActCheckpoint = { bead: BeadRow; actor: string; resumedChild?: string };
 
 function acceptanceAfterAct(acceptance: string, argv: string[]): string {
 	const replacement = argv.indexOf("--acceptance-criteria");
@@ -920,10 +926,9 @@ function acceptanceAfterAct(acceptance: string, argv: string[]): string {
 /** Compensate only this attempt's acceptance edit; never overwrite a peer change. */
 async function restoreAcceptance(checkpoint: ActCheckpoint, expected: string, cwd: string, env: Record<string, string>, acts: string[][]): Promise<AcceptanceRollback> {
 	const before = checkpoint.bead;
-	if (expected === before.acceptance) return { status: "NOT_NEEDED", detail: "this attempt did not change acceptance" };
 	const current = await showBead(before.id, cwd, env);
 	if (current?.acceptance === before.acceptance && current.status === before.status)
-		return { status: "RESTORED", detail: "original acceptance and status are present" };
+		return { status: expected === before.acceptance ? "NOT_NEEDED" : "RESTORED", detail: "original acceptance and status are present" };
 	if (current === null || current.status !== before.status || current.acceptance !== expected || current.updatedAt === null)
 		return { status: "STATE_UNPROVEN", detail: "current tracker state differs from this attempt; no peer edit was overwritten" };
 	const undo = ["br", "update", before.id, "--acceptance-criteria", before.acceptance, "--if-unchanged", current.updatedAt, "--actor", checkpoint.actor];
@@ -935,9 +940,104 @@ async function restoreAcceptance(checkpoint: ActCheckpoint, expected: string, cw
 		? { status: "RESTORED", detail: "original acceptance and status verified after revision-guarded restore" }
 		: { status: "STATE_UNPROVEN", detail: "acceptance restore readback did not verify original state" };
 }
+/** Outcome of withdrawing this attempt's live child after a failed act. No peer child is ever touched. */
+export interface ChildWithdrawal { status: "NOT_NEEDED" | "WITHDRAWN" | "STATE_UNPROVEN" | "WITHDRAW_REFUSED"; detail: string }
+
+const READBACK_ROLLBACK_PREFIX = "verify-rollback:";
+
+/** A receipt's exact child revision prevents a later peer edit or operator pause being resumed. */
+async function readbackResume(parent: string, child: BeadRow, acceptance: string, cwd: string, env: Record<string, string>): Promise<{ child: string; revision: string } | { reason: string }> {
+	if (child.updatedAt === null || child.assignee !== null || child.acceptance !== acceptance
+		|| !child.labels.includes(LIVE_READBACK_LABEL) || child.related.length !== 1 || child.related[0] !== parent)
+		return { reason: `STATE_UNPROVEN: deferred readback ${child.id} does not match the current parent obligations` };
+	const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];
+	const listed = await run(["br", "comments", "list", parent, "--json", ...db], { cwd, env, deadline_s: 60, max_output_bytes: 4 * 1024 * 1024 });
+	if (listed.rc !== 0 || listed.truncated || listed.total_truncated) return { reason: `STATE_UNPROVEN: withdrawal receipts for ${parent} are unreadable` };
+	let comments: unknown;
+	try { comments = JSON.parse(text(listed.stdout)); } catch { return { reason: `STATE_UNPROVEN: withdrawal receipts for ${parent} are invalid` }; }
+	if (!Array.isArray(comments)) return { reason: `STATE_UNPROVEN: withdrawal receipts for ${parent} are incomplete` };
+	for (const comment of comments) {
+		if (comment === null || typeof comment !== "object" || !("text" in comment) || typeof comment.text !== "string"
+			|| !("author" in comment) || typeof comment.author !== "string" || !comment.text.startsWith(READBACK_ROLLBACK_PREFIX)) continue;
+		let receipt: unknown;
+		try { receipt = JSON.parse(comment.text.slice(READBACK_ROLLBACK_PREFIX.length)); } catch { continue; }
+		if (receipt === null || typeof receipt !== "object") continue;
+		const record = receipt as Record<string, unknown>;
+		if (record.version === 1 && record.parent === parent && record.child === child.id
+			&& record.actor === comment.author && record.updated_at === child.updatedAt) return { child: child.id, revision: child.updatedAt };
+	}
+	return { reason: `STATE_UNPROVEN: deferred readback ${child.id} has no unchanged machine-withdrawal receipt; operator state is retained` };
+}
+
+/** The native child transition and its marker commit together. A parent comment records the
+ * returned exact child revision without advancing it again, so retry remains revision-bound.
+ * Unhandled process crashes are not claimed atomic or automatically swept. */
+export async function withdrawChild(child: string, baseline: { status: string | null; updatedAt: string | null }, parent: string, actor: string, cwd: string, env: Record<string, string>, ranActs: string[][]): Promise<ChildWithdrawal> {
+	const current = await showBead(child, cwd, env);
+	if (current === null || baseline.status !== "open" || baseline.updatedAt === null || current.assignee !== null
+		|| current.status !== baseline.status || current.updatedAt !== baseline.updatedAt)
+		return { status: "STATE_UNPROVEN", detail: "live child is unreadable or differs from this attempt's atomic baseline; no peer edit overwritten" };
+	const marker = { version: 1, parent, child, actor };
+	const defer = ["br", "update", child, "--status", "deferred", "--transition-comment", READBACK_ROLLBACK_PREFIX + JSON.stringify(marker), "--if-unchanged", baseline.updatedAt, "--json", "--actor", actor];
+	ranActs.push(defer);
+	const deferred = await run(defer, { cwd, deadline_s: 60, env });
+	if (deferred.rc !== 0) return { status: "WITHDRAW_REFUSED", detail: `defer rc ${deferred.rc}: ${text(deferred.stderr)}` };
+	let mutation: unknown;
+	try { mutation = JSON.parse(text(deferred.stdout)); } catch { return { status: "STATE_UNPROVEN", detail: "child withdrawal returned no exact revision; retry remains unproven" }; }
+	const row: unknown = Array.isArray(mutation) ? mutation[0] : mutation;
+	if (row === null || typeof row !== "object" || !("id" in row) || row.id !== child
+		|| !("status" in row) || row.status !== "deferred" || !("updated_at" in row) || typeof row.updated_at !== "string")
+		return { status: "STATE_UNPROVEN", detail: "child withdrawal returned an incomplete revision; retry remains unproven" };
+	const receipt = ["br", "comments", "add", parent, "-m", READBACK_ROLLBACK_PREFIX + JSON.stringify({ ...marker, updated_at: row.updated_at }), "--actor", actor];
+	ranActs.push(receipt);
+	const recorded = await run(receipt, { cwd, deadline_s: 60, env });
+	if (recorded.rc !== 0) return { status: "WITHDRAW_REFUSED", detail: "child deferred with its marker, but the exact retry receipt could not be recorded on the parent" };
+	return { status: "WITHDRAWN", detail: `live child ${child} deferred with its exact revision recorded for ${parent}` };
+}
+
+interface ReadbackCheckpoint { id: string; status: string | null; updatedAt: string | null }
+
+/** Capture the mutation's own receipt, never a later read that could adopt a peer edit. */
+function readbackCheckpoint(stdout: Uint8Array): ReadbackCheckpoint | null {
+	let mutation: unknown;
+	try { mutation = JSON.parse(text(stdout)); } catch { return null; }
+	const row: unknown = Array.isArray(mutation) ? mutation[0] : mutation;
+	if (row === null || typeof row !== "object") return null;
+	const record = row as Record<string, unknown>;
+	if (typeof record.id !== "string" || record.id === "") return null;
+	return {
+		id: record.id,
+		status: typeof record.status === "string" ? record.status : null,
+		updatedAt: typeof record.updated_at === "string" ? record.updated_at : null,
+	};
+}
+
+async function compensateAttempt(checkpoint: ActCheckpoint | undefined, expected: string, child: ReadbackCheckpoint | undefined, creationUnproven: boolean, execution: { cwd: string; env: Record<string, string>; acts: string[][] }): Promise<{ rollback: AcceptanceRollback; withdrawal: ChildWithdrawal }> {
+	const { cwd, env, acts } = execution;
+	let rollback: AcceptanceRollback = checkpoint === undefined
+		? { status: "NOT_NEEDED", detail: "no acceptance checkpoint was changed" }
+		: await restoreAcceptance(checkpoint, expected, cwd, env, acts);
+	const parentRestored = rollback.status === "NOT_NEEDED" || rollback.status === "RESTORED";
+	const withdrawal: ChildWithdrawal = child !== undefined && checkpoint !== undefined
+		? parentRestored
+			? await withdrawChild(child.id, child, checkpoint.bead.id, checkpoint.actor, cwd, env, acts)
+			: { status: "STATE_UNPROVEN", detail: "parent restoration is unproven; the live child remains active" }
+		: creationUnproven
+			? { status: "STATE_UNPROVEN", detail: "child creation returned no identity; no child state was changed" }
+			: { status: "NOT_NEEDED", detail: "no live child was created or resumed" };
+	if (withdrawal.status !== "NOT_NEEDED") {
+		const status = !parentRestored ? rollback.status
+			: withdrawal.status === "STATE_UNPROVEN" ? "STATE_UNPROVEN"
+				: withdrawal.status === "WITHDRAW_REFUSED" ? "ROLLBACK_REFUSED" : "RESTORED";
+		rollback = { status, detail: `${rollback.detail}; withdrawal ${withdrawal.status}: ${withdrawal.detail}` };
+	}
+	return { rollback, withdrawal };
+}
 
 async function executeActs(acts: string[][], cwd: string, env: Record<string, string>, checkpoint?: ActCheckpoint): Promise<{ acts: string[][]; child?: string; failure: string | null; skippedGate: string | null; rollback?: AcceptanceRollback }> {
 	let child: string | undefined;
+	let managedChild: ReadbackCheckpoint | undefined;
+	let creationUnproven = false;
 	let skippedGate: string | null = null;
 	let expectedAcceptance = checkpoint?.bead.acceptance ?? "";
 	let failure: string | null = null;
@@ -950,6 +1050,16 @@ async function executeActs(acts: string[][], cwd: string, env: Record<string, st
 		if (checkpoint !== undefined && argv[1] === "update" && argv[2] === checkpoint.bead.id)
 			expectedAcceptance = acceptanceAfterAct(expectedAcceptance, argv);
 		const r = await run(argv, { cwd, deadline_s: 60, env });
+		const creating = argv[1] === "create";
+		const resuming = argv[1] === "update" && argv[2] === checkpoint?.resumedChild;
+		if (creating || resuming) {
+			const receipt = readbackCheckpoint(r.stdout);
+			const id = resuming ? checkpoint?.resumedChild : receipt?.id;
+			if (id !== undefined) {
+				if (creating) child = id;
+				managedChild = receipt?.id === id ? receipt : { id, status: null, updatedAt: null };
+			} else if (creating) creationUnproven = true;
+		}
 		if (r.rc !== 0) {
 			// VERIFYGATE1 fallback: the pre-act gate query could not say whether the workflow requires
 			// this gate (an older br, an unreadable answer). Skip exactly this validation and run on to
@@ -961,25 +1071,17 @@ async function executeActs(acts: string[][], cwd: string, env: Record<string, st
 			failure = `act failed rc ${r.rc}: ${argv.slice(0, 4).join(" ")}: ${text(r.stderr)}`;
 			break;
 		}
-		if (argv[1] === "create") {
-			let doc: unknown;
-			try { doc = JSON.parse(text(r.stdout)); } catch { doc = null; }
-			const id = doc !== null && typeof doc === "object" && "id" in doc ? doc.id : undefined;
-			if (typeof id !== "string" || id === "") {
-				failure = `act failed: br create printed no child id: ${text(r.stdout)}`;
-				break;
-			}
-			child = id;
+		if (creating && child === undefined) {
+			failure = `act failed: br create printed no child id: ${text(r.stdout)}`;
+			break;
 		}
 	}
 	if (failure === null) return { acts: ranActs, child, failure: null, skippedGate };
-	const rollback = checkpoint === undefined
-		? { status: "NOT_NEEDED" as const, detail: "no acceptance checkpoint was changed" }
-		: await restoreAcceptance(checkpoint, expectedAcceptance, cwd, env, ranActs);
-	return { acts: ranActs, child, rollback, skippedGate, failure: `${failure}\nrollback: ${rollback.status}` };
+	const { rollback, withdrawal } = await compensateAttempt(checkpoint, expectedAcceptance, managedChild, creationUnproven, { cwd, env, acts: ranActs });
+	return { acts: ranActs, child, rollback, skippedGate, failure: `${failure}\nrollback: ${rollback.status}\nwithdrawal: ${withdrawal.status}` };
 }
 
-/** The fields verify reads from one `br show --json` row, or null when br names no such bead. `related` lists the ids its `related` dependencies point at; `readbacks` lists open or in-progress live-readback beads related back to it. */
+/** The fields verify reads from one bead. Deferred readback candidates require an exact native withdrawal receipt before reactivation. */
 interface BeadRow { id: string; title: string; description: string; acceptance: string; status: string; assignee: string | null; createdBy: string | null; updatedAt: string | null; labels: string[]; parent: string | null; related: string[]; readbacks: string[] }
 
 async function showBead(id: string, repo: string, env: Record<string, string>): Promise<BeadRow | null> {
@@ -1000,7 +1102,7 @@ async function showBead(id: string, repo: string, env: Record<string, string>): 
 	// retry then hit br's duplicate refusal. An open child titled exactly for this bead is reused instead.
 	const readbacks = (Array.isArray(record.dependents) ? record.dependents : [])
 		.map((dep: unknown) => dep !== null && typeof dep === "object" && "dependency_type" in dep && dep.dependency_type === "related"
-			&& "title" in dep && dep.title === `LIVEREADBACK: ${title}` && "status" in dep && (dep.status === "open" || dep.status === "in_progress")
+			&& "title" in dep && dep.title === `LIVEREADBACK: ${title}` && "status" in dep && (dep.status === "open" || dep.status === "in_progress" || dep.status === "deferred")
 			&& "id" in dep && typeof dep.id === "string" ? dep.id : "")
 		.filter(dep => dep !== "");
 	return { id: field("id") ?? id, title, description: field("description") ?? "", acceptance: field("acceptance_criteria") ?? "", status: field("status") ?? "", assignee: field("assignee"), createdBy: field("created_by"), updatedAt: field("updated_at"), labels, parent: field("parent"), related, readbacks };
