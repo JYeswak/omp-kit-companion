@@ -1,0 +1,1 @@
+- Verify OMP 18.21 lifecycle compatibility with real native pause, queued-mail, draft, callback, guard, goal-preservation and model-activity controls.
