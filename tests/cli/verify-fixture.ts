@@ -53,7 +53,7 @@ export function restoreFixtureIdentity(): void {
 	for (const [key, value] of callerSelectors) if (value === undefined) delete process.env[key]; else process.env[key] = value;
 }
 
-async function sh(cmd: string[], cwd: string, env?: Record<string, string>): Promise<string> {
+export async function sh(cmd: string[], cwd: string, env?: Record<string, string>): Promise<string> {
 	// Always the live process.env: a spawn without env keeps selectors the file dropped in beforeAll.
 	const r = await run(cmd, { cwd, deadline_s: fixtureDeadlineS(60), env: { ...process.env, ...(env ?? {}) } as Record<string, string> });
 	if (r.rc !== 0) throw new Error(`${cmd.join(" ")} -> ${r.rc}: ${new TextDecoder().decode(r.stderr)}`);

@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { readJsonl, type ReadResult } from "./kitlib/jsonl.ts";
 import { parseSessionJournalTail, readSessionTail } from "./plane-tern.ts";
 import { inspectModelActivity } from "./model-activity.ts";
+import { inspectVerifyLedger, type OriginalClaimEvidence } from "./verify-ledger.ts";
 
 export const MODEL_JOURNAL_WINDOW_BYTES = 8 * 1024 * 1024;
 export type WorkingModelEvidence =
@@ -126,11 +127,10 @@ function ledgerEvent(value: unknown): ModelLedgerEvent | null {
 /** A bounded read model of the shim's captured invocations, not an alternative bead-state authority.
  * Pending intents, malformed/torn/missing pages and unread pages keep coverage UNKNOWN.
  * An outcome commits a digest of its original intent: corrections never rewrite that capture. */
-export function inspectModelLedger(stateRoot: string | null, project?: string, now = Date.now()) {
+function inspectClaimLedger(stateRoot: string | null, tracker: string | null, now: number, bead?: string) {
 	const records: ModelLedgerEvent[] = [];
 	const problems: string[] = [];
 	const directory = stateRoot === null ? null : join(stateRoot, MODEL_LEDGER_DIRECTORY);
-	const tracker = project === undefined ? null : resolve(project, ".beads/beads.db");
 	const date = new Date(now);
 	const start = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) - MODEL_LEDGER_RETENTION_DAYS * 86_400_000;
 	let bytesRead = 0;
@@ -170,7 +170,7 @@ export function inspectModelLedger(stateRoot: string | null, project?: string, n
 		for (const value of result.rows) {
 			const row = ledgerEvent(value);
 			if (!row) { problems.push("INVALID_LEDGER_EVENT"); continue; }
-			if (tracker === null || row.tracker === tracker) records.push(row);
+			if ((tracker === null || row.tracker === tracker) && (bead === undefined || row.beads.includes(bead))) records.push(row);
 		}
 	}
 	const intents = new Map<string, ModelLedgerEvent>(), outcomes = new Map<string, ModelLedgerEvent>();
@@ -208,10 +208,49 @@ export function inspectModelLedger(stateRoot: string | null, project?: string, n
 	return { status: complete ? "KNOWN" : "UNKNOWN", problems: [...new Set(problems)],
 		cohort: { definition: "Captured shim claim invocations with native rc 0; not all tracker writes or active working time",
 			tracker, start: new Date(start).toISOString(), end: new Date(now).toISOString() },
-		activity: inspectModelActivity(stateRoot, now),
 		counts: { successful_claims: claims, known_claims: known, unknown_claims: claims - known, unresolved_claims: pending, unresolved_operations: unresolved, refused_operations: refused },
 		known_claim_model_coverage: complete && claims > 0 ? 100 * known / claims : null,
 		bytes_read: bytesRead, limits: { max_files: MODEL_LEDGER_MAX_FILES, max_read_bytes: MODEL_LEDGER_MAX_READ_BYTES,
 			retention_days: MODEL_LEDGER_RETENTION_DAYS, max_day_bytes: MODEL_LEDGER_MAX_DAY_BYTES, max_event_bytes: MODEL_LEDGER_MAX_EVENT_BYTES },
 		operations };
+}
+
+function unknownClaim(reason: string): OriginalClaimEvidence {
+	return { status: "UNKNOWN", reason, operation_id: null, actor: null, incarnation: null,
+		captured_at: null, intent_sha256: null, attribution: unknown(reason) };
+}
+
+/** Bind an unambiguous successful captured claim, never a later closer or selected model.
+ * Multiple claims require the attempt's retained original snapshot, not a last-claim guess. */
+export function observeAuthorClaim(stateRoot: string | null, tracker: string, bead: string, now = Date.now()): OriginalClaimEvidence {
+	const report = inspectClaimLedger(stateRoot, resolve(tracker), now, bead);
+	if (report.status !== "KNOWN") return unknownClaim("AUTHOR_EVIDENCE_INCOMPLETE");
+	let selected: typeof report.operations[number] | null = null;
+	for (const operation of report.operations) {
+		if (operation.intent.kind !== "claim" || !operation.intent.beads.includes(bead)
+			|| operation.integrity !== "KNOWN" || operation.outcome?.native_rc !== 0
+			|| operation.outcome.native_timed_out === true) continue;
+		if (selected !== null) return unknownClaim("AUTHOR_CLAIM_AMBIGUOUS");
+		selected = operation;
+	}
+	if (selected === null || selected.outcome === null) return unknownClaim("AUTHOR_CLAIM_MISSING");
+	const outcome = selected.outcome;
+	const incarnation = outcome.claim_incarnations[bead];
+	const digest = outcome.intent_sha256;
+	const reason = !identifier(incarnation) ? "AUTHOR_CLAIM_INCARNATION_UNAVAILABLE"
+		: !sha256Text(digest) ? "AUTHOR_CLAIM_BINDING_UNAVAILABLE"
+		: outcome.attribution.status === "UNKNOWN" ? outcome.attribution.reason : null;
+	return { status: reason === null ? "KNOWN" : "UNKNOWN", reason,
+		operation_id: selected.intent.operation_id, actor: selected.intent.actor,
+		incarnation: identifier(incarnation) ? incarnation : null, captured_at: selected.intent.at,
+		intent_sha256: sha256Text(digest) ? digest : null, attribution: outcome.attribution };
+}
+
+/** Compose the human-facing inspection without making claim lookup read activity journals. */
+export function inspectModelLedger(stateRoot: string | null, project?: string, now = Date.now()) {
+	const tracker = project === undefined ? null : resolve(project, ".beads/beads.db");
+	return Object.assign(inspectClaimLedger(stateRoot, tracker, now), {
+		activity: inspectModelActivity(stateRoot, now),
+		verification: inspectVerifyLedger(stateRoot, now, tracker ?? undefined),
+	});
 }

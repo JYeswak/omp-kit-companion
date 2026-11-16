@@ -3,7 +3,10 @@ import { Buffer } from "node:buffer";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { inspectModelLedger, observeWorkingModel, MODEL_LEDGER_MAX_READ_BYTES } from "../../src/model-ledger.ts";
+import { inspectModelLedger, observeAuthorClaim, observeWorkingModel, MODEL_LEDGER_MAX_READ_BYTES } from "../../src/model-ledger.ts";
+import { appendVerifyCorrection, inspectVerifyLedger } from "../../src/verify-ledger.ts";
+import type { VerifyLedgerInspection } from "../../src/verify-ledger.ts";
+import { verifyBead, type VerifyResult } from "../../src/verify.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { nativeBr } from "./lib/native-br.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
@@ -378,7 +381,8 @@ function mutantModule(path: string, name: string, before: string, after: string)
 	if (source === original) throw new Error(`CLAIMMODEL1 ${name} mutation anchor no longer matches`);
 	source = source.replace('"./plane-tern.ts"', JSON.stringify(join(root, "src/plane-tern.ts")))
 		.replace('"./kitlib/jsonl.ts"', JSON.stringify(join(root, "src/kitlib/jsonl.ts")))
-		.replace('"./model-activity.ts"', JSON.stringify(join(root, "src/model-activity.ts")));
+		.replace('"./model-activity.ts"', JSON.stringify(join(root, "src/model-activity.ts")))
+		.replace('"./verify-ledger.ts"', JSON.stringify(join(root, "src/verify-ledger.ts")));
 	const file = join(path, `${name}.ts`);
 	writeFileSync(file, source);
 	return file;
@@ -1052,3 +1056,294 @@ test("ACTIVECLOCK1 the same native session consumer oracle kills duplicate repla
 		expect(witness.mutant.accepted).toBe(false);
 	} finally { mutant.scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1000);
+
+interface NativeFixture {
+	scratch: { path: string; cleanup(): void };
+	database: string;
+	env: Record<string, string>;
+	path: string;
+	id: string;
+	call(args: string[], options?: { native?: boolean; actor?: string; tool?: string }): Promise<{ rc: number | null; out: string; err: string }>;
+}
+type FirstVerifyProject = { dir: string };
+
+async function firstVerifyGit(cwd: string, args: string[], env: Record<string, string>): Promise<string> {
+	const result = await run(["git", ...args], { cwd, env, deadline_s: fixtureDeadlineS(60), max_output_bytes: 64 * 1024 });
+	expect(result.rc, `${args.join(" ")}: ${decoder.decode(result.stderr)}`).toBe(0);
+	expect(result.timed_out || result.killed || result.truncated || result.total_truncated).toBe(false);
+	return decoder.decode(result.stdout).trim();
+}
+
+async function firstVerifyProject(f: NativeFixture, name: string, script: string): Promise<{ project: FirstVerifyProject; sha: string }> {
+	const dir = join(f.scratch.path, name), origin = join(f.scratch.path, `${name}.origin.git`);
+	mkdirSync(join(dir, "scripts"), { recursive: true });
+	writeFileSync(join(dir, ".gitignore"), "var/agent-tmp/\nvar/verify-evidence/\n.omp/lessons.local.jsonl\n");
+	await firstVerifyGit(dir, ["init", "-q"], f.env);
+	await firstVerifyGit(f.scratch.path, ["init", "--bare", "-q", origin], f.env);
+	await firstVerifyGit(dir, ["remote", "add", "origin", origin], f.env);
+	const project = { dir };
+	return { project, sha: await firstVerifyPublish(f, project, script) };
+}
+
+async function firstVerifyPublish(f: NativeFixture, project: FirstVerifyProject, script: string): Promise<string> {
+	writeFileSync(join(project.dir, "scripts", "t.sh"), script);
+	await firstVerifyGit(project.dir, ["add", "-A"], f.env);
+	await firstVerifyGit(project.dir, ["-c", "user.name=FIRSTVERIFY1", "-c", "user.email=firstverify1@example.test", "commit", "-q", "-m", "FIRSTVERIFY1 export"], f.env);
+	await firstVerifyGit(project.dir, ["push", "-q", "origin", "HEAD:main"], f.env);
+	return firstVerifyGit(project.dir, ["rev-parse", "HEAD"], f.env);
+}
+
+async function firstVerifyHandoff(f: NativeFixture, acceptance: string): Promise<void> {
+	symlinkSync(f.env.BR_REAL!, join(f.scratch.path, "bin", "br"));
+	for (const args of [
+		["update", f.id, "--claim", "--json"],
+		["update", f.id, "--description", "WHAT: FIRSTVERIFY1 verifier consumer fixture.\n\nWHY: verify attempt evidence must bind the actual author claim and exact Git export.", "--acceptance", acceptance, "--add-label", "kind:fix", "--json"],
+		["update", f.id, "--status", "in_review", "--transition-comment", "FIRSTVERIFY1 author handoff", "--json"],
+	]) {
+		const result = await f.call(args, { actor: "ClaimAuthor", ...(args.includes("--claim") ? { tool: claimCall } : {}) });
+		expect(result.rc, result.err).toBe(0);
+	}
+}
+
+async function firstVerifyResume(f: NativeFixture, reclaimCallId?: string): Promise<void> {
+	const started = await f.call(["update", f.id, "--status", "in_progress", "--transition-comment", "FIRSTVERIFY1 author resumed rework", "--json"], { actor: "ClaimAuthor" });
+	expect(started.rc, started.err).toBe(0);
+	if (reclaimCallId !== undefined) {
+		const reclaimed = await f.call(["update", f.id, "--claim", "--json"], { actor: "ClaimAuthor", tool: reclaimCallId });
+		expect(reclaimed.rc, reclaimed.err).toBe(0);
+	}
+	const handedOff = await f.call(["update", f.id, "--status", "in_review", "--transition-comment", "FIRSTVERIFY1 author re-handoff", "--json"], { actor: "ClaimAuthor" });
+	expect(handedOff.rc, handedOff.err).toBe(0);
+}
+
+function firstVerifyEnv(f: NativeFixture, toolCallId = closeCall): Record<string, string> {
+	return { ...f.env, BEADS_DB: f.database, PI_TOOL_CALL_ID: toolCallId };
+}
+
+function firstVerifyStateRoot(f: NativeFixture): string {
+	const stateHome = f.env.XDG_STATE_HOME;
+	if (stateHome === undefined) throw new Error("FIRSTVERIFY1 fixture has no isolated XDG_STATE_HOME");
+	return join(stateHome, "omp-kit");
+}
+
+function firstVerifyReport(f: NativeFixture): VerifyLedgerInspection {
+	return inspectVerifyLedger(firstVerifyStateRoot(f), Date.now(), f.database);
+}
+
+function firstVerifyAttempt(report: VerifyLedgerInspection, id: string) {
+	const attempt = report.attempts.find(row => row.id === id);
+	if (attempt === undefined) throw new Error(`FIRSTVERIFY1 attempt ${id} was not projected`);
+	return attempt;
+}
+
+
+async function waitForFirstVerifyFile(path: string, settled: () => VerifyResult | undefined): Promise<void> {
+	const deadline = Date.now() + fixtureDeadlineS(60) * 1_000;
+	while (!existsSync(path)) {
+		const early = settled();
+		if (early !== undefined) throw new Error(`FIRSTVERIFY1 exited before replay barrier: ${early.log}`);
+		if (Date.now() >= deadline) throw new Error(`FIRSTVERIFY1 timed out waiting for ${path}`);
+		// An OS child must create this marker; fake timers cannot advance that process, so the short poll yields while checking real state.
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setTimeout(resolve, 10);
+		await promise;
+	}
+}
+
+test("FIRSTVERIFY1 real verify consumer keeps the first FAIL across a later PASS, model/claim change and correction", async () => {
+	const f = await nativeFixture();
+	try {
+		const acceptance = "- [ ] [a] [build] `sh scripts/t.sh` -> right";
+		const { project, sha: failedSha } = await firstVerifyProject(f, "firstverify-fail-pass", "#!/bin/sh\nprintf 'wrong\\n'\n");
+		await firstVerifyHandoff(f, acceptance);
+		const originalClaim = f.inspect().operations.find(row => row.intent.kind === "claim");
+		if (originalClaim === undefined) throw new Error("FIRSTVERIFY1 original claim was not recorded");
+		const firstResult = await verifyBead({ bead: f.id, exportSha: failedSha, repo: project.dir, actor: "PeerVerifier", env: firstVerifyEnv(f), lesson: "FIRSTVERIFY1 fixture review" });
+		expect(firstResult.code).toBe("REWORK");
+		expect(firstResult.verificationEvidence).toMatchObject({ status: "FINALIZED", outcome: "FAIL" });
+		const firstId = firstResult.verificationEvidence?.attemptId;
+		if (firstId === undefined) throw new Error("FIRSTVERIFY1 failed review did not return its durable attempt id");
+		const firstReport = firstVerifyReport(f);
+		const original = firstVerifyAttempt(firstReport, firstId);
+		expect(original).toMatchObject({
+			outcome: "FAIL", complete: true, replayed: true,
+			context: {
+				tracker: f.database, bead: f.id, export_requested: failedSha, export_commit: failedSha,
+				author: { status: "KNOWN", operation_id: originalClaim.intent.operation_id, attribution: { status: "KNOWN", model: "gpt-6.1-sol" } },
+				verifier: { actor: "PeerVerifier", attribution: { status: "KNOWN", model: "muse" } },
+			},
+		});
+
+		journal(f.path, [
+			assistant("native-claim", null, claimCall, "gpt-6.1-sol"),
+			assistant("native-close", "native-claim", closeCall, "muse", "anthropic-api"),
+			assistant("native-reclaim", "native-close", "reclaim-call", "claude-sonnet-4.5", "anthropic-api"),
+			assistant("verify-next", "native-reclaim", "verify-next-call", "haiku", "anthropic-api"),
+		]);
+		await firstVerifyResume(f, "reclaim-call");
+		const claimHistory = f.inspect().operations.filter(row => row.intent.kind === "claim");
+		expect(claimHistory).toHaveLength(2);
+		const reclaimedClaim = claimHistory[1];
+		if (reclaimedClaim === undefined) throw new Error("FIRSTVERIFY1 re-claim operation was not captured");
+		expect(reclaimedClaim.intent.claim_incarnations[f.id]).toBe(originalClaim.intent.operation_id);
+		expect(reclaimedClaim.outcome?.attribution).toMatchObject({ status: "KNOWN", model: "claude-sonnet-4.5" });
+		const passedSha = await firstVerifyPublish(f, project, "#!/bin/sh\nprintf 'right\\n'\n");
+		const secondResult = await verifyBead({ bead: f.id, exportSha: passedSha, repo: project.dir, actor: "PeerVerifier", env: firstVerifyEnv(f, "verify-next-call"), lesson: "FIRSTVERIFY1 fixture retry" });
+		expect(secondResult.code).toBe("CLOSED");
+		expect(secondResult.verificationEvidence).toMatchObject({ status: "FINALIZED", outcome: "PASS" });
+		const secondId = secondResult.verificationEvidence?.attemptId;
+		if (secondId === undefined) throw new Error("FIRSTVERIFY1 passing review did not return its durable attempt id");
+		let report = firstVerifyReport(f);
+		const attempts = report.attempts.filter(row => row.context.tracker === f.database && row.context.bead === f.id);
+		expect(attempts.map(row => row.outcome)).toEqual(["FAIL", "PASS"]);
+		expect(report.first_attempts.filter(row => row.context.bead === f.id).map(row => row.outcome)).toEqual(["FAIL"]);
+		const firstAfterRetry = firstVerifyAttempt(report, firstId);
+		expect(firstAfterRetry.context).toEqual(original.context);
+		const secondAttempt = firstVerifyAttempt(report, secondId);
+		expect(secondAttempt.context).toMatchObject({
+			export_requested: passedSha, export_commit: passedSha,
+			verifier: { attribution: { status: "KNOWN", model: "haiku" } },
+		});
+		if (secondAttempt.context.author.status === "KNOWN")
+			expect(secondAttempt.context.author.attribution.model).toBe("gpt-6.1-sol");
+		else expect(secondAttempt.context.author.status).toBe("UNKNOWN");
+
+		const currentAuthor = observeAuthorClaim(firstVerifyStateRoot(f), f.database, f.id);
+		const ref = firstVerifyAttempt(report, firstId).attempt;
+		if (ref === null) throw new Error("FIRSTVERIFY1 retained attempt has no correction reference");
+		const correction = await appendVerifyCorrection(ref, { reason: "later claim evidence was revisited", author: currentAuthor });
+		expect(correction.status).toBe("FINALIZED");
+		report = firstVerifyReport(f);
+		const preserved = firstVerifyAttempt(report, firstId);
+		expect(preserved.outcome).toBe("FAIL");
+		expect(preserved.context).toEqual(original.context);
+		expect(report.first_attempts.filter(row => row.context.bead === f.id).map(row => row.outcome)).toEqual(["FAIL"]);
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(240) * 1_000);
+
+test("FIRSTVERIFY1 concurrent completion cannot let the later PASS outrun the first durable begin", async () => {
+	const f = await nativeFixture();
+	const started = join(f.scratch.path, "slow-started"), release = join(f.scratch.path, "slow-release");
+	let firstRun: Promise<VerifyResult> | undefined;
+	let firstSettled: VerifyResult | undefined;
+	try {
+		const script = "#!/bin/sh\nif [ \"$FIRSTVERIFY_MODE\" = slow ]; then\n  printf started > \"$FIRSTVERIFY_STARTED\"\n  while [ ! -e \"$FIRSTVERIFY_RELEASE\" ]; do sleep 0.01; done\n  printf 'wrong\\n'\nelse\n  printf 'right\\n'\nfi\n";
+		const { project, sha } = await firstVerifyProject(f, "firstverify-concurrent", script);
+		const acceptance = "- [ ] [a] [build] `sh scripts/t.sh` -> right";
+		await firstVerifyHandoff(f, acceptance);
+		firstRun = verifyBead({ bead: f.id, exportSha: sha, repo: project.dir, actor: "PeerVerifier",
+			env: { ...firstVerifyEnv(f), FIRSTVERIFY_MODE: "slow", FIRSTVERIFY_STARTED: started, FIRSTVERIFY_RELEASE: release }, lesson: "FIRSTVERIFY1 concurrent slow" })
+			.then(result => { firstSettled = result; return result; });
+		await waitForFirstVerifyFile(started, () => firstSettled);
+		const later = await verifyBead({ bead: f.id, exportSha: sha, repo: project.dir, actor: "PeerVerifier",
+			env: { ...firstVerifyEnv(f), FIRSTVERIFY_MODE: "fast", FIRSTVERIFY_STARTED: started, FIRSTVERIFY_RELEASE: release }, lesson: "FIRSTVERIFY1 concurrent fast" });
+		expect(later.code).toBe("CLOSED");
+		expect(later.verificationEvidence).toMatchObject({ status: "FINALIZED", outcome: "PASS" });
+		const laterId = later.verificationEvidence?.attemptId;
+		if (laterId === undefined) throw new Error("FIRSTVERIFY1 later concurrent attempt has no id");
+		const pending = firstVerifyReport(f).attempts.filter(row => row.context.bead === f.id);
+		expect(pending).toHaveLength(2);
+		const firstPending = pending[0], secondPending = pending[1];
+		if (firstPending === undefined || secondPending === undefined) throw new Error("FIRSTVERIFY1 concurrent attempts were not both projected");
+		expect(firstPending.complete).toBe(false);
+		expect(secondPending.id).toBe(laterId);
+		expect(secondPending.complete).toBe(true);
+		expect(secondPending.outcome).toBe("PASS");
+
+		writeFileSync(release, "continue");
+		const earlier = await firstRun;
+		expect(earlier.verificationEvidence).toMatchObject({ status: "FINALIZED", outcome: "FAIL" });
+		const earlierId = earlier.verificationEvidence?.attemptId;
+		if (earlierId === undefined) throw new Error("FIRSTVERIFY1 earlier concurrent attempt has no id");
+		const settled = firstVerifyReport(f);
+		const attempts = settled.attempts.filter(row => row.context.bead === f.id);
+		expect(attempts.map(row => row.id)).toEqual([earlierId, laterId]);
+		expect(attempts.map(row => row.outcome)).toEqual(["FAIL", "PASS"]);
+		expect(settled.first_attempts.filter(row => row.context.bead === f.id).map(row => row.outcome)).toEqual(["FAIL"]);
+	} finally {
+		writeFileSync(release, "continue");
+		if (firstRun !== undefined) await firstRun.catch(() => undefined);
+		f.scratch.cleanup();
+	}
+}, fixtureDeadlineS(240) * 1_000);
+
+test("FIRSTVERIFY1 interrupted first replay stays UNJUDGED when a later exact export passes", async () => {
+	const f = await nativeFixture();
+	try {
+		const acceptance = "- [ ] [a] [build] `exec sh scripts/t.sh` -> right";
+		const { project, sha: interruptedSha } = await firstVerifyProject(f, "firstverify-interrupted", "#!/bin/sh\nkill -KILL $$\n");
+		await firstVerifyHandoff(f, acceptance);
+		const interrupted = await verifyBead({ bead: f.id, exportSha: interruptedSha, repo: project.dir, actor: "PeerVerifier", env: firstVerifyEnv(f), lesson: "FIRSTVERIFY1 interrupted fixture" });
+		expect(interrupted.verificationEvidence).toMatchObject({ status: "FINALIZED", outcome: "UNJUDGED" });
+		expect(interrupted.replays[0]?.execution).toMatchObject({ eligible: true, attempted: true, completed: false });
+		const execution = interrupted.replays[0]?.execution;
+		expect(execution?.signal === 9 || execution?.timedOut === true || execution?.killed === true).toBe(true);
+
+		await firstVerifyResume(f);
+		const passedSha = await firstVerifyPublish(f, project, "#!/bin/sh\nprintf 'right\\n'\n");
+		const passed = await verifyBead({ bead: f.id, exportSha: passedSha, repo: project.dir, actor: "PeerVerifier", env: firstVerifyEnv(f), lesson: "FIRSTVERIFY1 after interruption" });
+		expect(passed.code).toBe("CLOSED");
+		expect(passed.verificationEvidence).toMatchObject({ status: "FINALIZED", outcome: "PASS" });
+		const report = firstVerifyReport(f);
+		expect(report.attempts.filter(row => row.context.bead === f.id).map(row => row.outcome)).toEqual(["UNJUDGED", "PASS"]);
+		expect(report.first_attempts.filter(row => row.context.bead === f.id).map(row => row.outcome)).toEqual(["UNJUDGED"]);
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(240) * 1_000);
+
+test("FIRSTVERIFY1 begin failure and environment no-replay are explicit UNJUDGED outcomes", async () => {
+	const f = await nativeFixture();
+	try {
+		const { project, sha } = await firstVerifyProject(f, "firstverify-no-replay", "#!/bin/sh\nprintf 'right\\n'\n");
+		const token = join(project.dir, "scripts", "t.sh");
+		const acceptance = `- [ ] [a] [build] \`sh ${token}\` -> right`;
+		await firstVerifyHandoff(f, acceptance);
+
+		const unavailable = await verifyBead({ bead: f.id, exportSha: sha, repo: project.dir,
+			actor: "PeerVerifier", env: { ...firstVerifyEnv(f), XDG_STATE_HOME: "relative-state-is-not-valid" }, lesson: "FIRSTVERIFY1 begin failure" });
+		expect(unavailable).toMatchObject({ code: "ENVIRONMENT", replays: [], verificationEvidence: { status: "UNAVAILABLE" } });
+		expect(unavailable.acts).toEqual([]);
+
+		const unsafeRoot = join(f.scratch.path, "unsafe root");
+		mkdirSync(unsafeRoot, { recursive: true });
+		const previous = process.env.GRADE_WAVE_SCRATCH;
+		let result: VerifyResult;
+		try {
+			process.env.GRADE_WAVE_SCRATCH = unsafeRoot;
+			result = await verifyBead({ bead: f.id, exportSha: sha, repo: project.dir,
+				actor: "PeerVerifier", env: firstVerifyEnv(f), lesson: "FIRSTVERIFY1 environment failure" });
+		} finally {
+			if (previous === undefined) delete process.env.GRADE_WAVE_SCRATCH; else process.env.GRADE_WAVE_SCRATCH = previous;
+		}
+		expect(result.code).toBe("ENVIRONMENT");
+		expect(result.replays.map(replay => [replay.pass, replay.rc, replay.execution?.attempted])).toEqual([[null, null, false]]);
+		const unmapped = result.replays[0];
+		if (unmapped === undefined) throw new Error("FIRSTVERIFY1 unmapped environment replay was not projected");
+		expect(unmapped.detail).toContain(`UNJUDGED REPO_PATH_UNMAPPED: ${JSON.stringify(token)}`);
+		expect(result.verificationEvidence).toMatchObject({ status: "FINALIZED", outcome: "UNJUDGED" });
+		const attempts = firstVerifyReport(f).attempts.filter(row => row.context.bead === f.id);
+		expect(attempts).toHaveLength(1);
+		const noReplayAttempt = attempts[0];
+		if (noReplayAttempt === undefined) throw new Error("FIRSTVERIFY1 no-replay attempt was not projected");
+		expect(noReplayAttempt.outcome).toBe("UNJUDGED");
+		expect(noReplayAttempt.replayed).toBe(false);
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(240) * 1_000);
+
+test("FIRSTVERIFY1 dry run replays the exact export without allocating review credit", async () => {
+	const f = await nativeFixture();
+	try {
+		const { project, sha } = await firstVerifyProject(f, "firstverify-dry-run", "#!/bin/sh\nprintf 'right\\n'\n");
+		await firstVerifyHandoff(f, "- [ ] [a] [build] `sh scripts/t.sh` -> right");
+		const before = firstVerifyReport(f).attempts.length;
+		const dryRun = await verifyBead({ bead: f.id, exportSha: sha, repo: project.dir, actor: "PeerVerifier", env: firstVerifyEnv(f), dryRun: true, lesson: "FIRSTVERIFY1 dry run" });
+		expect(dryRun.code).toBe("DRY_RUN");
+		expect(dryRun.replays.map(replay => replay.pass)).toEqual([true]);
+		expect(dryRun.verificationEvidence).toMatchObject({ status: "NOT_RECORDED" });
+		expect(firstVerifyReport(f).attempts).toHaveLength(before);
+		const shown = await f.call(["show", f.id, "--json"], { native: true });
+		const rows = JSON.parse(shown.out);
+		const bead = Array.isArray(rows) ? rows[0] : rows;
+		expect(bead.status).toBe("in_review");
+		expect(bead.acceptance_criteria).toContain("- [ ]");
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(180) * 1_000);

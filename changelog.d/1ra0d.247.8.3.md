@@ -1,0 +1,1 @@
+- Preserve the first non-author verification outcome and original claim/model evidence across retries and corrections, with explicit incomplete evidence and no dry-run review credit.

@@ -29,6 +29,20 @@ KIT="${KIT:-$HOME/.local/opt/omp-kit/bin/omp-kit}"
 `audit` lists receipts, `doctor` diagnoses safely, `capabilities` prints
 the exact command grammar (the same registry that drives `--help`).
 
+## First-verification evidence
+
+`omp-kit verify BEAD --export SHA` records original author claim/model,
+verifier model, exact export and outcome under
+`model_ledger.verification` in `omp-kit doctor --scope work --json`.
+The first durable begin wins across retries; corrections append lineage
+without rewriting it. Dry runs allocate no attempts.
+
+Unjudged/incomplete attempts and missing, expired or pre-recorder history
+cannot count as judged PASS/FAIL. `counts` covers all scoped attempts;
+`first_attempts` is the separate first-result cohort. Storage retains bounded
+28-day pages. Source evidence is not an installed-upgrade or staffing-efficacy
+claim.
+
 ## Apply one thing at a time
 
 Rules, policy, and the project-loading guard are separate opt-ins. Preview

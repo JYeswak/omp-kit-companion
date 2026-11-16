@@ -37,6 +37,9 @@ import { appendLocalLesson, readLessonsLog } from "./lessons.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { checkPublishedCommits, preflightBead } from "./preflight.ts";
 import { installReadonlyBr, resolveRealBr } from "./kitlib/readonly-br.ts";
+import { observeAuthorClaim, observeWorkingModel } from "./model-ledger.ts";
+import { beginVerifyAttempt, finalizeVerifyAttempt, resolveVerifyStateRoot } from "./verify-ledger.ts";
+import type { VerifyAttemptFinish, VerifyAttemptOutcome, VerifyAttemptRef, VerifyFinalEvidence } from "./verify-ledger.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 
 const text = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -150,7 +153,15 @@ async function verifierKnownToTargetMail(repo: string, actor: string, env: Recor
  * `item` is its 1-based position among all `- [ ]` checklist lines, tagged or not: the number br's --check-acceptance takes.
  */
 export interface Box { index: number; item: number; letter: string | null; checked: boolean; phase: string | null; body: string; line: string }
-export interface BoxReplay { index: number; letter: string | null; command: string | null; expected: string | null; rc: number | null; pass: boolean | null; detail: string; output?: { path: string; bytes: number; complete: boolean } }
+export interface BoxReplay {
+	index: number; letter: string | null; command: string | null; expected: string | null;
+	rc: number | null; pass: boolean | null; detail: string;
+	output?: { path: string; bytes: number; complete: boolean };
+	execution?: {
+		eligible: boolean; attempted: boolean; reused: boolean; resultObserved: boolean; completed: boolean;
+		timedOut: boolean; killed: boolean; signal: number | null; truncated: boolean; totalTruncated: boolean;
+	};
+}
 export interface AcceptanceRollback {
 	status: "NOT_NEEDED" | "RESTORED" | "ROLLBACK_REFUSED" | "STATE_UNPROVEN";
 	detail: string;
@@ -163,10 +174,70 @@ export interface VerifyResult {
 	replays: BoxReplay[];
 	log: string;
 	acts: string[][];
+	/** FIRSTVERIFY1: attempt-ledger status; native verify result codes remain authoritative. */
+	verificationEvidence?: {
+		status: "FINALIZED" | "ALREADY_FINALIZED" | "UNAVAILABLE" | "CONFLICT" | "NOT_RECORDED";
+		attemptId?: string;
+		outcome?: VerifyAttemptOutcome;
+		reason?: string;
+	};
 	/** CLOSEPASS1: the LIVEREADBACK child holding the boxes this close deferred ("{child}" in a dry run). */
 	child?: string;
 	/** A compensation observation, never proof of an atomic tracker transaction. */
 	rollback?: AcceptanceRollback;
+}
+
+type ReplayExecution = NonNullable<BoxReplay["execution"]>;
+const skippedExecution = (eligible: boolean): ReplayExecution => ({
+	eligible, attempted: false, reused: false, resultObserved: false, completed: false,
+	timedOut: false, killed: false, signal: null, truncated: false, totalTruncated: false,
+});
+
+function replayUncertainty(replay: BoxReplay): string {
+	const execution = replay.execution;
+	if (execution === undefined) return "EXECUTION_METADATA_UNAVAILABLE";
+	const facts: string[] = [];
+	if (!execution.attempted && !execution.reused) facts.push("NOT_EXECUTED");
+	if (!execution.resultObserved) facts.push("RESULT_UNOBSERVED");
+	if (execution.timedOut) facts.push("TIMED_OUT");
+	if (execution.killed) facts.push("PROCESS_GROUP_KILLED");
+	if (execution.signal !== null) facts.push(`SIGNAL_${execution.signal}`);
+	if (execution.truncated) facts.push("OUTPUT_TRUNCATED");
+	if (execution.totalTruncated) facts.push("TOTAL_OUTPUT_TRUNCATED");
+	if (!execution.completed && !execution.timedOut && !execution.killed && execution.signal === null) facts.push("PROCESS_INCOMPLETE");
+	if (replay.pass === null) facts.push("NO_NAMED_VERDICT");
+	return facts.length === 0 ? "INCOMPLETE" : facts.join(",");
+}
+
+function classifyAttempt(replays: readonly BoxReplay[]): { outcome: VerifyAttemptOutcome; replayed: boolean; reason: string } {
+	const required = replays.filter(replay => replay.execution?.eligible);
+	const completeFailure = required.find(replay => {
+		const execution = replay.execution;
+		return replay.pass === false && execution !== undefined && (execution.attempted || execution.reused)
+			&& execution.resultObserved && execution.completed && !execution.truncated && !execution.totalTruncated;
+	});
+	if (completeFailure) return {
+		outcome: "FAIL",
+		replayed: true,
+		reason: `complete named-outcome replay failed ${tag({ letter: completeFailure.letter, index: completeFailure.index })}`,
+	};
+	const complete = required.length > 0 && required.every(replay => {
+		const execution = replay.execution;
+		return replay.pass === true && execution !== undefined && (execution.attempted || execution.reused)
+			&& execution.resultObserved && execution.completed && !execution.timedOut && !execution.killed
+			&& execution.signal === null && !execution.truncated && !execution.totalTruncated;
+	});
+	if (complete) return { outcome: "PASS", replayed: true, reason: `all ${required.length} eligible named outcomes were replayed completely` };
+	const incomplete = required.filter(replay => {
+		const execution = replay.execution;
+		return replay.pass !== true || execution === undefined || !(execution.attempted || execution.reused)
+			|| !execution.resultObserved || !execution.completed || execution.timedOut || execution.killed
+			|| execution.signal !== null || execution.truncated || execution.totalTruncated;
+	});
+	const reason = required.length === 0
+		? "no eligible named-outcome replay was executed"
+		: `named-outcome replay was incomplete for ${incomplete.map(replay => `${tag({ letter: replay.letter, index: replay.index })} (${replayUncertainty(replay)})`).join("; ")}`;
+	return { outcome: "UNJUDGED", replayed: required.some(replay => replay.execution?.attempted === true || replay.execution?.reused === true), reason };
 }
 
 export function parseBoxes(acceptance: string): Box[] {
@@ -632,6 +703,7 @@ function recordCloseLesson(repo: string, bead: string, lesson: string, sha: stri
 
 export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const env = { ...process.env, ...(input.env ?? {}) } as Record<string, string>;
+	const verifierAtInvocation = observeWorkingModel(env);
 	const acts: string[][] = [];
 	const log: string[] = [`verify ${input.bead} export ${input.exportSha} actor ${input.actor} ${new Date().toISOString()}`];
 	const pre = await preflightBead("close", input.repo, input.bead, { actor: input.actor, env });
@@ -668,6 +740,106 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	// know at the first act, after a full replay. Prove the verifier up front, before replaying anything.
 	const identity = await verifierKnownToTargetMail(input.repo, input.actor, env);
 	if (!identity.known) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`UNJUDGED: Agent Mail cannot verify ${input.actor} in ${input.repo} (${identity.detail}); register the verifier in the target project (am agents create --project ${input.repo} --program <program> --model <model>) then retry; no replay or tracker act ran`).join("\n"), acts };
+	const isFullCommit = (value: string) => {
+		if (value.length !== 40 && value.length !== 64) return false;
+		for (const character of value.toLowerCase()) {
+			const code = character.charCodeAt(0);
+			if (!((code >= 48 && code <= 57) || (code >= 97 && code <= 102))) return false;
+		}
+		return true;
+	};
+	const resolvedExport = await run(["git", "rev-parse", "--verify", `${publication.sha}^{commit}`], { cwd: input.repo, deadline_s: 60, env });
+	const candidate = text(resolvedExport.stdout).trim().toLowerCase();
+	const exportCommit = resolvedExport.rc === 0 && !resolvedExport.timed_out && !resolvedExport.killed
+		&& !resolvedExport.truncated && !resolvedExport.total_truncated && isFullCommit(candidate) ? candidate : null;
+	const tracker = resolve(input.repo, env.BEADS_DB || join(".beads", "beads.db"));
+	const stateRoot = resolveVerifyStateRoot(env);
+	let attempt: VerifyAttemptRef | null = null;
+	let replays: BoxReplay[] = [];
+	let replayAttempted = false;
+	let requiredJudgementPending: string | null = null;
+	let scratchCleanup: (() => void) | null = null;
+	if (!input.dryRun) {
+		const context = {
+			tracker,
+			bead: input.bead,
+			export_requested: input.exportSha,
+			export_commit: exportCommit,
+			bead_created_at: row.createdAt,
+			author: observeAuthorClaim(stateRoot, tracker, input.bead),
+			verifier: { actor: input.actor, attribution: verifierAtInvocation },
+		};
+		const begun = await beginVerifyAttempt(stateRoot, context);
+		if (begun.status === "UNAVAILABLE") {
+			const reason = `verify attempt evidence unavailable: ${begun.reason}; no replay or tracker act ran`;
+			log.push(`ENVIRONMENT: ${reason}`);
+			return { ok: false, code: "ENVIRONMENT", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts,
+				verificationEvidence: { status: "UNAVAILABLE", reason: begun.reason } };
+		}
+		attempt = begun.attempt;
+		log.push(`verify attempt ${attempt.id} recorded for tracker ${tracker}, export ${exportCommit ?? "UNKNOWN"}`);
+	}
+	const cleanupScratch = () => {
+		const cleanup = scratchCleanup;
+		scratchCleanup = null;
+		cleanup?.();
+	};
+	const finishAttempt = async (result: VerifyResult): Promise<VerifyResult> => {
+		cleanupScratch();
+		if (attempt === null) {
+			if (!input.dryRun) return result;
+			const reason = "dry run did not allocate an actual verification attempt";
+			return { ...result, verificationEvidence: { status: "NOT_RECORDED", reason },
+				log: `${result.log}\nverify evidence: NOT_RECORDED (${reason})` };
+		}
+		const replayClassification = classifyAttempt(result.replays);
+		const classified = requiredJudgementPending !== null && replayClassification.outcome === "PASS"
+			? { ...replayClassification, outcome: "UNJUDGED" as const, reason: requiredJudgementPending }
+			: replayClassification;
+		const evidence: VerifyFinalEvidence = {
+			result_code: result.code,
+			outcome: classified.outcome,
+			reason: classified.reason,
+			replayed: replayAttempted || classified.replayed,
+			export_commit: exportCommit,
+		};
+		let finalized: VerifyAttemptFinish;
+		try {
+			finalized = await finalizeVerifyAttempt(attempt, evidence);
+		} catch (error) {
+			finalized = { status: "UNAVAILABLE" as const, reason: `finalization threw: ${error instanceof Error ? error.message : String(error)}` };
+		}
+		const persisted = finalized.status === "FINALIZED" || finalized.status === "ALREADY_FINALIZED";
+		const visibleReason = "reason" in finalized ? finalized.reason : evidence.reason;
+		const verificationEvidence: NonNullable<VerifyResult["verificationEvidence"]> = {
+			status: finalized.status,
+			attemptId: attempt.id,
+			reason: visibleReason,
+			...(persisted ? { outcome: evidence.outcome } : {}),
+		};
+		const visibleOutcome = persisted ? evidence.outcome : "UNRECORDED";
+		const visibility = `verify evidence: ${finalized.status} outcome=${visibleOutcome} replayed=${evidence.replayed} native_result=${result.code}; ${visibleReason}`;
+		return { ...result, verificationEvidence, log: `${result.log}\n${visibility}` };
+	};
+	const finishInterrupted = async (error: unknown): Promise<void> => {
+		if (attempt === null) return;
+		const reason = `verification interrupted by exception: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`;
+		const evidence: VerifyFinalEvidence = {
+			result_code: "EXCEPTION", outcome: "INCOMPLETE", reason,
+			replayed: replayAttempted, export_commit: exportCommit,
+		};
+		try {
+			const finalized = await finalizeVerifyAttempt(attempt, evidence);
+			process.stderr.write(`verify evidence: ${finalized.status} outcome=INCOMPLETE replayed=${replayAttempted}; ${reason}${"reason" in finalized ? `; ${finalized.reason}` : ""}\n`);
+		} catch (finalizeError) {
+			process.stderr.write(`verify evidence: UNAVAILABLE outcome=INCOMPLETE replayed=${replayAttempted}; ${reason}; finalization failed: ${finalizeError instanceof Error ? finalizeError.message : String(finalizeError)}\n`);
+		}
+	};
+	if (attempt !== null && exportCommit === null) {
+		log.push("UNJUDGED: the full export commit identity could not be resolved; no replay ran");
+		return await finishAttempt({ ok: false, code: "UNKNOWN", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts });
+	}
+	try {
 	// The owned replay fixture uses an explicit database path under its per-run
 	// scratch; deleting BEADS_DB alone would still discover an ancestor tracker.
 	// VERIFYTMP1 (ompkit-1ra0d.73): the export has no .git, so a box that reads git discovers whatever
@@ -678,6 +850,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const scratchRoot = harnessRoot ?? join(input.repo, "var", "agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true });
 	const scratch = ownedTmp("verify", { bead: input.bead, root: scratchRoot });
+	scratchCleanup = () => scratch.cleanup();
 	const realBr = resolveRealBr(env.PATH);
 	// HERMETIC1-B: tracker management keeps caller authority; acceptance never inherits it.
 	const replayBase = { ...env };
@@ -691,7 +864,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	delete replayBase.NODE_OPTIONS;
 	replayBase.PATH = (env.PATH ?? "/usr/bin:/bin").split(delimiter)
 		.filter(dir => basename(resolve(dir)) !== "agent-bin" && basename(realOrLexical(dir)) !== "agent-bin").join(delimiter);
-	if (!realBr.ok) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`UNJUDGED: ${realBr.reason}`).join("\n"), acts };
+	if (!realBr.ok) return await finishAttempt({ ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`UNJUDGED: ${realBr.reason}`).join("\n"), acts });
 	const replayBin = installReadonlyBr(scratch.path, realBr.path);
 	const wantsOwned = replayable.some(b => b.body.includes("OWNED_TRACKER_DB"));
 	let ownedDb = "";
@@ -700,7 +873,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		mkdirSync(fixtureDir, { recursive: true });
 		ownedDb = join(fixtureDir, ".beads", "beads.db");
 		const fixtureInit = await run([realBr.path, "init", "--db", ownedDb], { cwd: fixtureDir, deadline_s: 60, env: replayBase });
-		if (fixtureInit.rc !== 0) return { ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`owned fixture init failed rc ${fixtureInit.rc}: ${text(fixtureInit.stderr).slice(0, 200)}; unmet prerequisite: owned tracker binding`).join("\n"), acts };
+		if (fixtureInit.rc !== 0) return await finishAttempt({ ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`owned fixture init failed rc ${fixtureInit.rc}: ${text(fixtureInit.stderr).slice(0, 200)}; unmet prerequisite: owned tracker binding`).join("\n"), acts });
 	}
 	// VERIFYSCRATCH1 (ompkit-fp72.135.3.81): selftests that build fixture trackers under GRADE_WAVE_SCRATCH
 	// (grade_wave.py --selftest) then build them inside this run's root, where the read-only br admits them.
@@ -713,11 +886,11 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	mkdirSync(exportDir, { recursive: true });
 	const archive = await run(["sh", "-c", `git -C ${JSON.stringify(input.repo)} archive ${JSON.stringify(input.exportSha)} | tar -x -C ${JSON.stringify(exportDir)}`], { deadline_s: 300, env });
 	if (archive.rc !== 0 || !existsSync(join(exportDir, "scripts")) && !existsSync(join(exportDir, "src"))) {
-		return { ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`export failed rc ${archive.rc}: ${text(archive.stderr).slice(0, 200)}`).join("\n"), acts };
+		return await finishAttempt({ ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`export failed rc ${archive.rc}: ${text(archive.stderr).slice(0, 200)}`).join("\n"), acts });
 	}
 	mkdirSync(exportTmp, { recursive: true });
 	log.push(`exported ${input.exportSha} to ${exportDir}`);
-	const replays: BoxReplay[] = [];
+	replays = [];
 	const environmentFailures: string[] = [];
 	type ReplayOutcome = Pick<RunResult, "rc" | "timed_out" | "killed" | "truncated" | "total_truncated" | "stdout" | "stderr"> & { out: string; elapsedMs: number };
 	const commandResults = new Map<string, ReplayOutcome>();
@@ -726,7 +899,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		if (box.phase === "live" || box.phase === "after") {
 			const command = commandOf(box.body)!;
 			process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(command)} elapsed=0ms verdict=PENDING\n`);
-			replays.push({ index: box.index, letter: box.letter, command: null, expected: null, rc: null, pass: null, detail: `pending: ${box.phase} phase prerequisite unmet in export replay; not executed` });
+			replays.push({ index: box.index, letter: box.letter, command: null, expected: null, rc: null, pass: null, detail: `pending: ${box.phase} phase prerequisite unmet in export replay; not executed`, execution: skippedExecution(false) });
 			log.push(`${tag(box)} PENDING ${box.phase} phase prerequisite unmet; not executed`);
 			continue;
 		}
@@ -737,7 +910,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		if (paths.unmapped.length > 0) {
 			const detail = `UNJUDGED REPO_PATH_UNMAPPED: ${paths.unmapped.map(t => JSON.stringify(t)).join(", ")} names the verified repo ${input.repo} but cannot be rewritten into export ${exportDir}; not executed`;
 			environmentFailures.push(`${tag(box)} ${detail}`);
-			replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: null, pass: null, detail });
+			replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: null, pass: null, detail, execution: skippedExecution(true) });
 			log.push(`${tag(box)} ${detail}`);
 			continue;
 		}
@@ -746,7 +919,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		const deps = await ensureBoxDeps(command, exportDir, replayEnv, log, provisioned);
 		if (deps !== null && !deps.ok) {
 			environmentFailures.push(`${tag(box)} ${deps.detail}`);
-			replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: null, pass: null, detail: `${deps.detail}; not executed` });
+			replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: null, pass: null, detail: `${deps.detail}; not executed`, execution: skippedExecution(true) });
 			log.push(`${tag(box)} ${deps.detail}; not executed; needs-director`);
 			continue;
 		}
@@ -756,6 +929,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		if (cached === undefined) {
 			const started = Date.now();
 			process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(named)} elapsed=0ms verdict=RUNNING`);
+			replayAttempted = true;
 			const result = await run(["sh", "-c", command], { cwd: exportDir, deadline_s: 900, env: replayEnv, max_output_bytes: 4 * 1024 * 1024 });
 			replay = {
 				rc: result.rc,
@@ -773,6 +947,18 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 			replay = cached;
 		}
 		const { out, elapsedMs } = replay;
+		const execution: ReplayExecution = {
+			eligible: true,
+			attempted: !reused,
+			reused,
+			resultObserved: replay.rc !== null || replay.timed_out || replay.killed,
+			completed: replay.rc !== null && replay.rc >= 0 && !replay.timed_out && !replay.killed,
+			timedOut: replay.timed_out,
+			killed: replay.killed,
+			signal: replay.rc !== null && replay.rc < 0 ? -replay.rc : null,
+			truncated: replay.truncated,
+			totalTruncated: replay.total_truncated,
+		};
 		const v = replay.truncated || replay.total_truncated
 			? { pass: false, detail: `OUTPUT_LIMIT: capture exceeded ${REPLAY_STREAM_BYTES} bytes per stream; full output unavailable` }
 			: judge(expected, replay.rc, out);
@@ -802,23 +988,23 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 			else process.stderr.write(`; completed_elapsed=${elapsedMs}ms final_verdict=ENVIRONMENT\n`);
 			environmentFailures.push(`${tag(box)} ${environment}`);
 			const detail = `environment prerequisite unmet: ${environment}${evidence}${childExcerpt(replay.rc, replay.timed_out, out)}`;
-			replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: replay.rc, pass: null, detail, output });
+			replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: replay.rc, pass: null, detail, output, execution });
 			log.push(`${tag(box)} ENVIRONMENT ${named}: ${detail}; needs-director`);
 			continue;
 		}
 		if (reused) process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(named)} elapsed=${elapsedMs}ms verdict=${v.pass ? "PASS" : "FAIL"}\n`);
 		else process.stderr.write(`; completed_elapsed=${elapsedMs}ms final_verdict=${v.pass ? "PASS" : "FAIL"}\n`);
 		const excerpt = v.pass ? "" : childExcerpt(replay.rc, replay.timed_out, out);
-		replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: replay.rc, pass: v.pass, detail: v.detail + evidence + excerpt, ...(output === undefined ? {} : { output }) });
+		replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: replay.rc, pass: v.pass, detail: v.detail + evidence + excerpt, execution, ...(output === undefined ? {} : { output }) });
 		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${named} -> ${v.detail}${evidence}${excerpt} (${elapsedMs} ms)${replay.timed_out ? " TIMEOUT" : ""}`);
 	}
-	scratch.cleanup();
+	cleanupScratch();
 	const failed = replays.filter(r => r.pass === false);
 	if (failed.length > 0) {
 		const comment = `REWORK ${input.bead}: ${failed.map(f => `${tag(f)} ${f.detail}`).join("; ")}\n${log.join("\n")}`;
 		acts.push(["br", "update", input.bead, "--status", "rework", "--transition-comment", comment, "--actor", input.actor]);
 		if (!input.dryRun) for (const a of acts) await run(a, { cwd: input.repo, deadline_s: 60, env });
-		return { ok: false, code: input.dryRun ? "DRY_RUN" : "REWORK", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts };
+		return await finishAttempt({ ok: false, code: input.dryRun ? "DRY_RUN" : "REWORK", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts });
 	}
 	if (environmentFailures.length > 0) {
 		// A missing or out-of-date lockfile is its own named refusal, never a silent pass or a
@@ -831,17 +1017,18 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 			const done = await executeActs(acts, input.repo, env);
 			if (done.failure !== null) log.push(done.failure);
 		}
-		return { ok: false, code, bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts };
+		return await finishAttempt({ ok: false, code, bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts });
 	}
 	const ran = replays.filter(r => r.pass === true);
 	if (ran.length === 0) {
 		const pending = replays.filter(r => r.pass === null);
-		return { ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${pending.map(p => `${tag(p)} ${p.detail}`).join("; ")}`).join("\n"), acts };
+		return await finishAttempt({ ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${pending.map(p => `${tag(p)} ${p.detail}`).join("; ")}`).join("\n"), acts });
 	}
 	const buildJudgements = boxes.filter(b => !b.checked && b.letter === "v" && b.phase === "build");
 	if (buildJudgements.length > 0) {
 		const pending = buildJudgements.map(tag).join(" ");
-		return { ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${pending} build judgement remains on the parent; it cannot be replayed or deferred as rollout debt`).join("\n"), acts };
+		requiredJudgementPending = `required build judgement remains pending: ${pending}`;
+		return await finishAttempt({ ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${pending} build judgement remains on the parent; it cannot be replayed or deferred as rollout debt`).join("\n"), acts });
 	}
 	// CLOSEPASS1 (ompkit-774u.52, J-2026-10-29-20): br closes a bead only when every box is ticked, so unticked
 	// [live]/[after] boxes this export cannot run move word for word into one LIVEREADBACK child. An unchecked
@@ -858,7 +1045,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		else {
 			const lane = input.laneParent ?? LANE_PARENT;
 			const laneRow = await showBead(lane, input.repo, env);
-			if (laneRow === null || !activeStatus(laneRow.status)) return { ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${input.bead} has no active parent and lane parent ${lane} is ${laneRow?.status || "unreadable"}; unmet prerequisite: an active parent for the LIVEREADBACK child`).join("\n"), acts };
+			if (laneRow === null || !activeStatus(laneRow.status)) return await finishAttempt({ ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${input.bead} has no active parent and lane parent ${lane} is ${laneRow?.status || "unreadable"}; unmet prerequisite: an active parent for the LIVEREADBACK child`).join("\n"), acts });
 			home = lane;
 			homeNote = `lane parent ${lane}, because ${input.bead} has no active parent`;
 		}
@@ -870,9 +1057,9 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const reuse = deferred.length > 0 ? row?.readbacks[0] : undefined;
 	const deferredAcceptance = deferred.map(box => box.line).join("\n");
 	const reused = reuse === undefined ? null : await showBead(reuse, input.repo, env);
-	if (reuse !== undefined && reused === null) return { ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: existing readback ${reuse} is unreadable; no tracker act ran`).join("\n"), acts };
+	if (reuse !== undefined && reused === null) return await finishAttempt({ ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: existing readback ${reuse} is unreadable; no tracker act ran`).join("\n"), acts });
 	const resume = reused?.status === "deferred" ? await readbackResume(row.id, reused, deferredAcceptance, input.repo, env) : null;
-	if (resume !== null && "reason" in resume) return { ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${resume.reason}; no tracker act ran`).join("\n"), acts };
+	if (resume !== null && "reason" in resume) return await finishAttempt({ ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${resume.reason}; no tracker act ran`).join("\n"), acts });
 	const childRef = reuse ?? CHILD;
 	const reason = `verified by ${input.actor} (family: ${family}) on export ${input.exportSha}: ${ran.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}${deferred.length ? `; deferred ${deferredTags} to ${childRef} (LIVEREADBACK, child of ${homeNote || home}, related to ${input.bead})` : ""}`;
 	if (deferred.length > 0) {
@@ -897,12 +1084,23 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${input.actor} (family: ${family})\n${lesson}\n${log.join("\n")}`, "--actor", input.actor]);
 	if (homeNote) log.push(`LIVEREADBACK child placed under ${homeNote}`);
 	const child = deferred.length > 0 ? childRef : undefined;
-	if (input.dryRun) return { ok: true, code: "DRY_RUN", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts, child };
+	if (input.dryRun) return await finishAttempt({ ok: true, code: "DRY_RUN", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts, child });
 	const done = await executeActs(acts, input.repo, env, { bead: row, actor: input.actor, ...(resume !== null && "revision" in resume ? { resumedChild: resume.child } : {}) });
-	if (done.failure !== null) return { ok: false, code: "ACT_FAILED", bead: input.bead, export: input.exportSha, replays, log: log.concat(done.failure).join("\n"), acts: done.acts, child: done.child ?? reuse, rollback: done.rollback };
+	if (done.failure !== null) return await finishAttempt({ ok: false, code: "ACT_FAILED", bead: input.bead, export: input.exportSha, replays, log: log.concat(done.failure).join("\n"), acts: done.acts, child: done.child ?? reuse, rollback: done.rollback });
 	if (done.skippedGate !== null) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${done.skippedGate}'; skipping gate report`);
 	recordCloseLesson(input.repo, input.bead, lesson, input.exportSha, log);
-	return { ok: true, code: "CLOSED", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: done.acts, child: done.child ?? reuse };
+	return await finishAttempt({ ok: true, code: "CLOSED", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: done.acts, child: done.child ?? reuse });
+	} catch (error) {
+		try { cleanupScratch(); }
+		catch (cleanupError) {
+			try { process.stderr.write(`verify scratch cleanup failed while preserving original exception: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}\n`); } catch { /* preserve the verifier exception */ }
+		}
+		try { await finishInterrupted(error); }
+		catch (finalizeError) {
+			try { process.stderr.write(`verify evidence finalization failed while preserving original exception: ${finalizeError instanceof Error ? finalizeError.message : String(finalizeError)}\n`); } catch { /* preserve the verifier exception */ }
+		}
+		throw error;
+	}
 }
 
 /**
@@ -1085,7 +1283,7 @@ async function executeActs(acts: string[][], cwd: string, env: Record<string, st
 }
 
 /** The fields verify reads from one bead. Deferred readback candidates require an exact native withdrawal receipt before reactivation. */
-interface BeadRow { id: string; title: string; description: string; acceptance: string; status: string; assignee: string | null; createdBy: string | null; updatedAt: string | null; labels: string[]; parent: string | null; related: string[]; readbacks: string[] }
+interface BeadRow { id: string; title: string; description: string; acceptance: string; status: string; assignee: string | null; createdBy: string | null; createdAt: string | null; updatedAt: string | null; labels: string[]; parent: string | null; related: string[]; readbacks: string[] }
 
 async function showBead(id: string, repo: string, env: Record<string, string>): Promise<BeadRow | null> {
 	const show = await run(["br", "show", id, "--json"], { cwd: repo, deadline_s: 60, env, max_output_bytes: 4 * 1024 * 1024 });
@@ -1108,7 +1306,7 @@ async function showBead(id: string, repo: string, env: Record<string, string>): 
 			&& "title" in dep && dep.title === `LIVEREADBACK: ${title}` && "status" in dep && (dep.status === "open" || dep.status === "in_progress" || dep.status === "deferred")
 			&& "id" in dep && typeof dep.id === "string" ? dep.id : "")
 		.filter(dep => dep !== "");
-	return { id: field("id") ?? id, title, description: field("description") ?? "", acceptance: field("acceptance_criteria") ?? "", status: field("status") ?? "", assignee: field("assignee"), createdBy: field("created_by"), updatedAt: field("updated_at"), labels, parent: field("parent"), related, readbacks };
+	return { id: field("id") ?? id, title, description: field("description") ?? "", acceptance: field("acceptance_criteria") ?? "", status: field("status") ?? "", assignee: field("assignee"), createdBy: field("created_by"), createdAt: field("created_at"), updatedAt: field("updated_at"), labels, parent: field("parent"), related, readbacks };
 }
 
 export interface LiveReadbackInput { bead: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; lesson?: string }
