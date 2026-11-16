@@ -91,16 +91,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api --paginate "repos/$GITHUB_REPOSITORY/rulesets?target=tag" > "$RUNNER_TEMP/tag-rulesets.json"
-          jq -e '
-            any(.[]?;
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/rulesets?target=tag" > "$RUNNER_TEMP/tag-rulesets.json"
+          valid=false
+          while IFS= read -r ruleset_id; do
+            [ -n "$ruleset_id" ] || continue
+            gh api "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id" > "$RUNNER_TEMP/tag-ruleset-$ruleset_id.json"
+            if jq -e '
               .enforcement == "active"
               and (.target == "tag" or .target == "refs/tags")
-              and (any(.rules[]?.type; . == "deletion"))
-              and (any(.rules[]?.type; . == "update"))
+              and any(.rules[]?.type; . == "deletion")
+              and any(.rules[]?.type; . == "update")
               and any(.conditions.ref_name.include[]?; . == "v*" or . == "refs/tags/v*")
-            )
-          ' "$RUNNER_TEMP/tag-rulesets.json" >/dev/null || {
+            ' "$RUNNER_TEMP/tag-ruleset-$ruleset_id.json" >/dev/null; then
+              valid=true
+              break
+            fi
+          done < <(jq -r '.[][]? | .id // empty' "$RUNNER_TEMP/tag-rulesets.json")
+          [ "$valid" = true ] || {
             echo "active immutable v* tag ruleset is required" >&2
             exit 4
           }
