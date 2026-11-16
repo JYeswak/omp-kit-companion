@@ -133,6 +133,7 @@ def main() -> None:
         "PASS release tag ruleset validator: 1 valid detail, 1 old summary-only "
         "negative control, and 3 named rc=4 rejections (unit fixtures; not live GitHub proof)"
     )
+    print(f"{len(cases) + 2} pass 0 fail")
 
 
 main()
