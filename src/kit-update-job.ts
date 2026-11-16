@@ -60,7 +60,9 @@ export type KitUpdateJobResult = {
 	 * PENDING_COMMIT counts tracked-hooks repos whose refreshed members wait
 	 * for the owning director to commit (owner route); only failed > 0 is FINDINGS.
 	 */
-	hooks?: { status: "APPLIED" | "PENDING_COMMIT" | "FAILED" | "NOT_RUN"; repos: number; refreshed: number; fresh: number; pending_commit: number; failed: number };
+	hooks?: { status: "APPLIED" | "PENDING_COMMIT" | "FAILED" | "NOT_RUN"; repos: number; refreshed: number; fresh: number; pending_commit: number; failed: number;
+		/** Actual producer evidence; absent when no report was obtained. */
+		results?: HookRefreshReport["results"] };
 	retention?: { status: "APPLIED" | "FAILED"; kept: string[]; removed: string[]; pollsRemoved: string[]; reason?: string };
 	/** The release version this tick attempted; a repeat for the same target suppresses on it. */
 	targetVersion?: string;
@@ -538,6 +540,7 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 				: {
 					status: report.failed > 0 ? "FAILED" as const : report.pending_commit > 0 ? "PENDING_COMMIT" as const : "APPLIED" as const,
 					repos: report.repos, refreshed: report.refreshed, fresh: report.fresh, pending_commit: report.pending_commit, failed: report.failed,
+					results: report.results,
 				};
 		} catch {
 			hooks = { status: "FAILED" as const, repos: 0, refreshed: 0, fresh: 0, pending_commit: 0, failed: 1 };

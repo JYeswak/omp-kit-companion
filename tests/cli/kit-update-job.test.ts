@@ -1,6 +1,6 @@
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { kitUpdateJobOverall, pollPublishedRelease, runKitUpdateJob, type KitUpdateJobConfig, type KitUpdateJobDependencies, type KitUpdateJobResult } from "../../src/kit-update-job.ts";
 import { isLiveDeferredOnly, judgeKitPostcheck, reconcilePendingUpdate, type KitUpdateResult } from "../../src/kit-update.ts";
@@ -8,7 +8,9 @@ import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPen
 import type { PluginReceipt } from "../../src/apply-plugin.ts";
 import { resolveOmpLauncher } from "../../src/paths.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
-import { fixtureDeadlineS } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
+import { binary, fixtureContractFiles, manifest, tar } from "./kit-update-fixture.ts";
+import { liveHookRefreshIo, refreshFleetHooks } from "../../src/hook-refresh.ts";
 const dirs: string[] = [];
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 function config(enabled = true): KitUpdateJobConfig {
@@ -1165,5 +1167,269 @@ test("KITLIVEDEFER1: a recorded PENDING is not notified again", async () => {
 	});
 }, fixtureDeadlineS() * 1000);
 
+
+const HOOK_EVIDENCE_MEMBER = "hooks.d/pre-commit/40-omp-kit-evidence";
+const HOOK_EVIDENCE_OLD = "# managed hook before update\n";
+const HOOK_EVIDENCE_NEW = "# managed hook after update\n";
+const HOOK_EVIDENCE_ASSERTION = "HOOKJOBEVIDENCE1 persisted member evidence";
+type HookEvidenceMode = "untracked" | "tracked-and-failed";
+type HookEvidenceContext = {
+	value: Pick<KitUpdateJobConfig, "enabled" | "prefix" | "stateRoot" | "home" | "platform">;
+	release: { indexPath: string; archivePath: string; version: string; sourceTag: string };
+	files: { name: string; file: string }[];
+	oldBinary: string;
+	repos: { repo: string; source: string; dest: string; tracked: boolean; kind: "managed" | "owner" | "never" }[];
+	service: string;
+	notes: string;
+};
+
+function hookEvidenceEnv(root: string): Record<string, string> {
+	return { PATH: process.env.PATH ?? "", HOME: root, TMPDIR: root, TMP: root, TEMP: root, KITLIB_TMP_ROOT: root,
+		XDG_CONFIG_HOME: join(root, "xdg-config"), XDG_STATE_HOME: join(root, "xdg-state"),
+		XDG_CACHE_HOME: join(root, "xdg-cache"), XDG_DATA_HOME: join(root, "xdg-data"),
+		GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CEILING_DIRECTORIES: root, NO_COLOR: "1" };
+}
+
+async function hookEvidenceGit(repo: string, args: string[]): Promise<string> {
+	const result = await runFixtureAsync(["git", "-C", repo, ...args], {
+		cwd: repo, env: hookEvidenceEnv(dirname(repo)), floor_s: 30,
+	});
+	if (result.rc !== 0) throw new Error(new TextDecoder().decode(result.stderr));
+	return new TextDecoder().decode(result.stdout).trim();
+}
+
+function hookEvidenceBinary(): Buffer {
+	const quote = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
+	const info = JSON.stringify({ version: "1.2.4", source_tag: "v1.2.4", platform: { os: "darwin", arch: "arm64" } });
+	return Buffer.from("#!/bin/sh\ncase \"$1 $2\" in\n'--info ') printf '%s\\n' " + quote(info)
+		+ ";;\n'--version ') printf '%s\\n' 1.2.4;;\n'apply plugin') exec "
+		+ quote(process.execPath) + " --no-env-file " + quote(join(import.meta.dir, "../../src/cli.ts"))
+		+ " \"$@\";;\n*) printf '%s\\n' 'fixture refuses unexpected executable command' >&2; exit 2;;\nesac\n");
+}
+
+async function prepareHookEvidence(mode: HookEvidenceMode) {
+	const value = config();
+	const root = value.prefix;
+	const payload = [...fixtureContractFiles(),
+		{ name: "package.json", bytes: Buffer.from(JSON.stringify({ name: "omp-kit-companion", version: "1.2.4" })) },
+		{ name: "scripts/evidence-member.sh", bytes: Buffer.from(HOOK_EVIDENCE_NEW) }];
+	const executable = hookEvidenceBinary();
+	const releaseManifest = manifest("1.2.4", executable, payload);
+	const entries = [{ name: "bin/omp-kit", bytes: executable }, ...payload,
+		{ name: "release-manifest.json", bytes: releaseManifest }];
+	const source = join(root, "source");
+	mkdirSync(source);
+	const files = entries.map((entry, index) => {
+		const file = join(source, `payload-${index}`);
+		writeFileSync(file, entry.bytes);
+		return { name: entry.name, file };
+	});
+	const archivePath = join(source, "omp-kit-v1.2.4-darwin-arm64-none.tar");
+	const archive = tar(entries);
+	writeFileSync(archivePath, archive);
+	const indexPath = join(source, "release-index.json");
+	writeFileSync(indexPath, JSON.stringify({ schema_version: 1, version: "1.2.4", source_tag: "v1.2.4", assets: {
+		"darwin-arm64-none": { ...value.platform, filename: "omp-kit-v1.2.4-darwin-arm64-none.tar",
+			sha256: sha(archive), manifest_sha256: sha(releaseManifest) },
+	} }));
+	const oldBinary = join(source, "old-binary");
+	writeFileSync(oldBinary, binary("1.2.3"));
+	const rows: { name: string; tracked: boolean; kind: "managed" | "owner" | "never" }[] = mode === "untracked"
+		? [{ name: "enrolled repo", tracked: false, kind: "managed" }, { name: "never enrolled", tracked: false, kind: "never" }]
+		: [{ name: "tracked repo", tracked: true, kind: "managed" }, { name: "owner modified", tracked: false, kind: "owner" },
+			{ name: "never enrolled", tracked: false, kind: "never" }];
+	const repos: HookEvidenceContext["repos"] = [];
+	const before = new Map<string, { bytes: string | null; head: string }>();
+	for (const row of rows) {
+		const repo = join(root, row.name);
+		mkdirSync(repo);
+		await hookEvidenceGit(repo, ["init", "-q"]);
+		if (row.tracked) await hookEvidenceGit(repo, ["config", "core.hooksPath", ".githooks"]);
+		const hooks = row.tracked ? join(repo, ".githooks") : join(repo, ".git", "hooks");
+		const dest = join(hooks, HOOK_EVIDENCE_MEMBER);
+		const bytes = row.kind === "never" ? null : row.kind === "owner" ? "# owner modified hook\n" : HOOK_EVIDENCE_OLD;
+		if (bytes !== null) {
+			mkdirSync(dirname(dest), { recursive: true });
+			writeFileSync(dest, bytes);
+		}
+		if (row.tracked) await hookEvidenceGit(repo, ["add", "--", ".githooks"]);
+		await hookEvidenceGit(repo, ["-c", "user.name=HookFixture", "-c", "user.email=hook@example.invalid",
+			"commit", "-q", "--allow-empty", "-m", "owned hook fixture"]);
+		before.set(repo, { bytes, head: await hookEvidenceGit(repo, ["rev-parse", "HEAD"]) });
+		repos.push({ repo, dest, tracked: row.tracked, kind: row.kind, source: `owned:${mode}` });
+	}
+	const context: HookEvidenceContext = { value: { enabled: true, prefix: root, stateRoot: value.stateRoot,
+		home: value.home, platform: value.platform }, release: { indexPath, archivePath, version: "1.2.4", sourceTag: "v1.2.4" },
+		files, oldBinary, repos, service: join(root, "service-reconciled.json"), notes: join(root, "notifications.json") };
+	const contextPath = join(root, "consumer-context.json");
+	writeFileSync(contextPath, JSON.stringify(context));
+	const runner = join(root, "consumer.test.ts");
+	writeFileSync(runner, `import { test } from "bun:test";
+import { hookJobEvidenceConsumer } from ${JSON.stringify(join(import.meta.dir, "kit-update-job.test.ts"))};
+import { fixtureDeadlineS } from ${JSON.stringify(join(import.meta.dir, "fixture-process.ts"))};
+test("HOOKJOBEVIDENCE1_PROCESS", () => hookJobEvidenceConsumer(${JSON.stringify(contextPath)}), fixtureDeadlineS(120) * 1000);
+`);
+	return { context, runner, before };
+}
+
+/** The generated owned-process driver imports this helper; ordinary test cases remain filtered out. */
+export async function hookJobEvidenceConsumer(contextPath: string): Promise<void> {
+	const context: HookEvidenceContext = JSON.parse(readFileSync(contextPath, "utf8"));
+	const value: KitUpdateJobConfig = { ...context.value, pollRelease: async () => context.release };
+	const oldStore = join(value.prefix, "releases", "1.2.3");
+	const newStore = join(value.prefix, "releases", "1.2.4");
+	let pluginExec: KitUpdateJobDependencies["exec"];
+	mkdirSync(join(oldStore, "bin"), { recursive: true });
+	copyFileSync(context.oldBinary, join(oldStore, "bin", "omp-kit"));
+	chmodSync(join(oldStore, "bin", "omp-kit"), 0o755);
+	writeFileSync(join(oldStore, "release-manifest.json"), manifest("1.2.3", readFileSync(context.oldBinary)));
+	installSymlink(value.prefix, "1.2.3");
+	const notes: string[] = [];
+	const result = await runKitUpdateJob(value, {
+		apply: async () => {
+			const prepared = preparePluginUpdate(value);
+			pluginExec = prepared.exec;
+			for (const entry of context.files) {
+				const dest = join(newStore, entry.name);
+				mkdirSync(dirname(dest), { recursive: true });
+				copyFileSync(entry.file, dest);
+			}
+			chmodSync(join(newStore, "bin", "omp-kit"), 0o755);
+			const id = activate(value);
+			reconcilePendingUpdate({ stateRoot: value.stateRoot, prefix: value.prefix, id });
+			return { status: "UPDATED", exitCode: 0, receiptId: id, activeVersion: "1.2.4",
+				postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY" };
+		},
+		exec: async argv => {
+			if (!pluginExec) throw new Error("owned job invoked plugin commands before activation");
+			return pluginExec(argv);
+		},
+		omp: () => null,
+		reconcile: async binaryPath => {
+			if (readlinkSync(pluginLink(value.home, "codex")) !== newStore)
+				throw new Error("hook fixture service reconcile preceded plugin relink");
+			writeFileSync(context.service, JSON.stringify({ binary: binaryPath }));
+			return { ok: true, detail: "owned service boundary" };
+		},
+		refreshHooks: async (store, home) => {
+			if (store !== newStore || home !== value.home || !existsSync(context.service))
+				throw new Error("hook fixture refresh preceded successful activation/relink/reconcile");
+			const live = liveHookRefreshIo(home, store);
+			const source = join(store, "scripts", "evidence-member.sh");
+			const selected = (repo: string) => {
+				const row = context.repos.find(candidate => candidate.repo === repo);
+				if (!row) throw new Error("hook fixture rejects a foreign repository");
+				return row;
+			};
+			return refreshFleetHooks({ ...live, pullRepos: () => context.repos,
+				check: async repo => {
+					const { dest } = selected(repo);
+					return existsSync(dest) && readFileSync(dest).equals(readFileSync(source))
+						? { rc: 0, output: "" }
+						: { rc: 3, output: `install-commit-msg-bead: STALE installed member: ${dest} differs from ${source}; rerun install-commit-msg-bead.sh\n` };
+				},
+				runInstaller: repo => {
+					const { dest } = selected(repo);
+					if (readFileSync(dest, "utf8") !== HOOK_EVIDENCE_OLD)
+						return { ok: false, detail: "owned installer refuses an owner-modified postimage" };
+					copyFileSync(source, dest);
+					return { ok: true, detail: "owned filesystem member copied" };
+				},
+			});
+		},
+		notify: message => { notes.push(message); writeFileSync(context.notes, JSON.stringify(notes)); },
+	});
+	if (result.status !== "UPDATED" || inspectPendingKitUpdate(value.stateRoot) !== null)
+		throw new Error(`owned job did not finish its valid activation: ${JSON.stringify(result)}`);
+}
+
+async function assertHookEvidence(mode: HookEvidenceMode): Promise<void> {
+	const { context, runner, before } = await prepareHookEvidence(mode);
+	const preload = process.env.HOOKJOBEVIDENCE1_TEST_PRELOAD;
+	const result = await runFixtureAsync([process.execPath, "--no-env-file", "test", ...(preload ? ["--preload", preload] : []),
+		runner, "-t", "^HOOKJOBEVIDENCE1_PROCESS$"], {
+		cwd: context.value.prefix, env: hookEvidenceEnv(context.value.prefix), floor_s: 120,
+	});
+	const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
+	expect(result.rc, output).toBe(0);
+	const files = readdirSync(context.value.stateRoot).filter(name => name.startsWith("kit-update-job-") && name.endsWith(".json"));
+	expect(files).toHaveLength(1);
+	const record: KitUpdateJobResult = JSON.parse(readFileSync(join(context.value.stateRoot, files[0]!), "utf8"));
+	const expected = context.repos.map(row => expect.objectContaining({
+		repo: row.repo, source: row.source, hooks_dir: dirname(dirname(dirname(row.dest))), tracked: row.tracked,
+		status: row.kind === "never" ? "FRESH" : row.kind === "owner" ? "FAILED" : row.tracked ? "PENDING_COMMIT" : "REFRESHED",
+		paths: row.kind === "managed" ? [row.dest] : [],
+		members: row.kind === "managed" ? [{ member: HOOK_EVIDENCE_MEMBER,
+			before_sha256: sha(before.get(row.repo)!.bytes!), after_sha256: sha(HOOK_EVIDENCE_NEW), refreshed: true }] : [],
+	}));
+	expect(record.hooks?.results, HOOK_EVIDENCE_ASSERTION).toEqual(expect.arrayContaining(expected));
+	expect(record.hooks?.results?.map(row => row.repo).sort()).toEqual(context.repos.map(row => row.repo).sort());
+	for (const row of context.repos) {
+		const prior = before.get(row.repo)!;
+		expect(existsSync(row.dest) ? readFileSync(row.dest, "utf8") : null).toBe(
+			row.kind === "managed" ? HOOK_EVIDENCE_NEW : prior.bytes);
+		expect(await hookEvidenceGit(row.repo, ["rev-parse", "HEAD"])).toBe(prior.head);
+	}
+	const activations = readdirSync(context.value.stateRoot).filter(name => name.startsWith("kit-activation-") && name.endsWith(".json"));
+	expect(activations).toHaveLength(1);
+	const activation = JSON.parse(readFileSync(join(context.value.stateRoot, activations[0]!), "utf8"));
+	expect(record).toMatchObject({ status: "UPDATED", receiptId: activation.id, receipt: "RECONCILED",
+		activeVersion: context.release.version, targetVersion: context.release.version, relink: "APPLIED", service: "APPLIED",
+		hooks: { repos: context.repos.length, pending_commit: mode === "untracked" ? 0 : 1, failed: mode === "untracked" ? 0 : 1 } });
+	expect(activation.after.sha256).toBe(sha(readFileSync(join(context.value.prefix, "releases", "1.2.4", "bin", "omp-kit"))));
+	expect(activation.after.target).toBe("../releases/1.2.4/bin/omp-kit");
+	expect(readlinkSync(pluginLink(context.value.home, "codex"))).toBe(join(context.value.prefix, "releases", "1.2.4"));
+	expect(JSON.parse(readFileSync(context.service, "utf8")).binary).toBe(join(context.value.prefix, "bin", "omp-kit"));
+	const notes: string[] = JSON.parse(readFileSync(context.notes, "utf8"));
+	expect(notes).toHaveLength(1);
+	expect(notes[0]).toContain(record.receiptId!);
+}
+
+test("HOOKJOBEVIDENCE1: untracked producer outcomes survive the completed job process", () => assertHookEvidence("untracked"), fixtureDeadlineS(180) * 1000);
+test("HOOKJOBEVIDENCE1: tracked and failed producer outcomes survive the completed job process", () => assertHookEvidence("tracked-and-failed"), fixtureDeadlineS(180) * 1000);
+
+test("HOOKJOBEVIDENCE1_MUTANT: losing only member retention fails the unchanged persisted consumers", async () => {
+	const scratch = ownedTmp("hook-job-retention-mutant");
+	try {
+		const target = realpathSync(join(import.meta.dir, "../../src/kit-update-job.ts"));
+		const preload = join(scratch.path, "drop-member-results.ts");
+		const loaded = join(scratch.path, "mutant-loaded");
+		writeFileSync(preload, `
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+const target = ${JSON.stringify(target)};
+const loaded = ${JSON.stringify(loaded)};
+Bun.plugin({ name: "hook-job-member-retention-only", setup(builder) {
+	builder.onLoad({ filter: /kit-update-job\\.ts$/ }, args => {
+		if (realpathSync(args.path) !== target) return;
+		const source = readFileSync(target, "utf8");
+		const needle = "results: report.results,";
+		if (source.split(needle).length !== 2) throw new Error("hook retention mutant site is not unique");
+		writeFileSync(loaded, "member-results-removed");
+		return { contents: source.replace(needle, ""), loader: "ts", resolveDir: dirname(target) };
+	});
+}});
+`);
+		const argv = [process.execPath, "--no-env-file", "test", join(import.meta.dir, "kit-update-job.test.ts"), "-t", "^HOOKJOBEVIDENCE1:"];
+		const env = hookEvidenceEnv(scratch.path);
+		const healthy = await runFixtureAsync(argv, { cwd: scratch.path, env, floor_s: 300 });
+		const healthyOutput = new TextDecoder().decode(healthy.stdout) + new TextDecoder().decode(healthy.stderr);
+		expect(healthy.rc, healthyOutput).toBe(0);
+		expect(healthyOutput).toContain("2 pass");
+		const mutant = await runFixtureAsync(argv, { cwd: scratch.path,
+			env: { ...env, HOOKJOBEVIDENCE1_TEST_PRELOAD: preload }, floor_s: 300 });
+		const mutantOutput = new TextDecoder().decode(mutant.stdout) + new TextDecoder().decode(mutant.stderr);
+		expect(mutant.rc, mutantOutput).toBe(1);
+		expect(existsSync(loaded), mutantOutput).toBe(true);
+		expect(readFileSync(loaded, "utf8")).toBe("member-results-removed");
+		expect(mutantOutput).toContain(HOOK_EVIDENCE_ASSERTION);
+		expect(mutantOutput).toContain("2 fail");
+		console.log("HOOKJOBEVIDENCE1_MUTANT_WITNESS " + JSON.stringify({
+			healthy_rc: healthy.rc, mutant_rc: mutant.rc,
+			persisted_member_assertion_failed: mutantOutput.includes(HOOK_EVIDENCE_ASSERTION),
+			two_original_consumers_failed: mutantOutput.includes("2 fail"),
+		}));
+	} finally { scratch.cleanup(); }
+}, fixtureDeadlineS(600) * 1000);
 
 afterAll(() => cleanupAllOwnedTmp());
