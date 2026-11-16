@@ -46,7 +46,7 @@ def main() -> None:
             **valid, "conditions": {"ref_name": {"include": ["release-*"], "exclude": []}},
         },
     }
-    with owned_tmp("release-validate-tag", root=root / "var" / "agent-tmp") as work_s:
+    with owned_tmp("release-validate-tag") as work_s:
         work = Path(work_s)
         runner = work / "runner"
         runner.mkdir()
