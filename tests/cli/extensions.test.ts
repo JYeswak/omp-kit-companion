@@ -5,6 +5,7 @@ import { resolveOmpIdentity } from "../../src/paths.ts";
 import { checkExtensionImports, extractImportSpecifiers } from "../../src/extensions.ts";
 import { writeBundledHarness } from "./release-manifest-fixture.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { runFixtureAsync } from "./fixture-process.ts";
 
 const REPO_ROOT = join(import.meta.dir, "../..");
 
@@ -26,7 +27,7 @@ function writeHook(home: string, body: string): string {
 
 
 
-beforeAll(() => {
+beforeAll(async () => {
 	// Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
 	const omp = resolveOmpIdentity(process.env);
 	base = ownedTmp("omp-kit-extensions", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
@@ -38,17 +39,20 @@ beforeAll(() => {
 	for (const directory of ["rules", "retired", "cases", "policy", "extensions", "examples"]) {
 		cpSync(join(REPO_ROOT, directory), join(release, directory), { recursive: true });
 	}
-	for (const file of ["MANIFEST.tsv", "package.json"]) {
-		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, file)));
-	}
+	writeFileSync(join(release, "package.json"), readFileSync(join(REPO_ROOT, "package.json")));
 	mkdirSync(join(release, "scripts"), { recursive: true });
 	for (const file of ["rule-class.ts", "context-inventory.ts"]) {
 		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, "scripts", file)));
 	}
 	writeBundledHarness(release);
-	for (const file of ["MANIFEST.tsv", "package.json"]) {
-		writeFileSync(join(release, file), readFileSync(join(REPO_ROOT, file)));
-	}
+	// Source exports omit the ignored manifest; derive it from the candidate rules.
+	const manifest = await runFixtureAsync(["sh", join(REPO_ROOT, "scripts/build-manifest.sh"), "--stdout"], {
+		cwd: REPO_ROOT,
+		env: { ...process.env, TMPDIR: base, TMP: base, TEMP: base, KITLIB_TMP_ROOT: base, OMP: omp.launcher, OMP_SRC: omp.source },
+		floor_s: 60,
+	});
+	if (manifest.rc !== 0) throw new Error(`fixture manifest failed (${manifest.rc}): ${Buffer.from(manifest.stdout)}${Buffer.from(manifest.stderr)}`);
+	writeFileSync(join(release, "MANIFEST.tsv"), manifest.stdout);
 	const build = Bun.spawnSync([
 		process.execPath, "build", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig",
 		"--no-compile-autoload-tsconfig", join(REPO_ROOT, "src/cli.ts"), `--outfile=${binary}`,

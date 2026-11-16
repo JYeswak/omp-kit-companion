@@ -1,1 +1,2 @@
 - Verify OMP 18.21 lifecycle compatibility with real native pause, queued-mail, draft, callback, guard, goal-preservation and model-activity controls.
+- Generate the extension-doctor fixture manifest from candidate rules so clean source exports exercise every compiled-extension check without ignored checkout files.
