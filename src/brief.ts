@@ -273,7 +273,7 @@ export function renderBrief(contract: BriefContract, candidates: readonly BriefC
 export function isBuildBriefTask(task: Record<string, unknown>, context = ""): boolean {
 	const selector = typeof task.agent === "string" ? task.agent : "";
 	const body = typeof task.task === "string" ? task.task : "";
-	if (["reviewer", "security-reviewer", "seance", "zeststream-planner", "zeststream-reviewer"].includes(selector)) return false;
+	if (["reviewer", "security-reviewer", "zeststream-planner", "zeststream-reviewer"].includes(selector)) return false;
 	if (/^\s*(?:#\s*)?(?:read-only|analysis-only)\b/im.test(body)) return false;
 	// PRIORSPAWN1: an explicit verification/diagnosis/replay marker declares the task edits nothing.
 	if (/^\s*(?:#\s*)?no-edit:\s*(?:verify|diagnose|replay)\b/im.test(body)) return false;

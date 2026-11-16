@@ -335,3 +335,62 @@ test("BRIEFSCRATCHIO1 the brief [scratch] row teaches the passing spellings and 
 	const oldStep = `[scratch] Hazard: a refused \`scratch new\` piped through \`jq -r .data.dir\` exports TMPDIR=null and writes ./null outside owned scratch, \`export TMPDIR=$(...) || exit 1\` never exits because export returns 0, and \`--print-dir\` returns no release capability, so a dir made that way outside a seat is left to the reaper. Comply: ${BRIEF_SCRATCH_CREATE}, run inside the owning repo; keep CAP unexported and unprinted; when done: ${BRIEF_SCRATCH_RELEASE}.`;
 	for (const spelling of ["Python kernel", "edit tool", "never in a file", "never `rm -rf`", "no exemption"]) expect(oldStep).not.toContain(spelling);
 });
+
+test("SEANCECUT1 removed selector editing work requires the real current brief and still admits a completed contract", async () => {
+	const repo = await fixture();
+	const input = { context: `Repo: ${repo}`,
+		tasks: [{ agent: "seance", task: "# Target\nwork.txt\n# Change\nModify work.txt to fix the requested behavior." }] };
+	expect(await checkTaskBrief(input, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
+	const contract = await briefContract(repo, execute);
+	expect(await checkTaskBrief({ ...input, context: `${input.context}\n${renderBrief(contract)}` }, repo, execute)).toBeUndefined();
+	const completed = await completeTaskBrief(input, repo, execute);
+	expect(completed.refusal).toBeUndefined();
+	expect(completed.context).toContain(contract.marker);
+	expect(await checkTaskBrief({ ...input, context: completed.context }, repo, execute)).toBeUndefined();
+});
+
+test("SEANCECUT1 restored obsolete allowlist privilege loses the same editing-contract consumer oracle", async () => {
+	const repo = await fixture();
+	const input = { context: `Repo: ${repo}`,
+		tasks: [{ agent: "seance", task: "# Change\nModify work.txt to fix the requested behavior." }] };
+	const original = readFileSync(join(source, "src/brief.ts"), "utf8");
+	const needle = '["reviewer", "security-reviewer", "zeststream-planner", "zeststream-reviewer"]';
+	const replacement = '["reviewer", "security-reviewer", "seance", "zeststream-planner", "zeststream-reviewer"]';
+	const at = original.indexOf(needle);
+	if (at < 0 || original.indexOf(needle, at + needle.length) >= 0) throw new Error("SEANCECUT1 mutation is not uniquely planted");
+	const changed = original.slice(0, at) + replacement + original.slice(at + needle.length);
+	const directory = join(scratch.path, `seancecut-mutant-${++sequence}`);
+	mkdirSync(directory);
+	writeFileSync(join(directory, "brief.ts"), changed.replaceAll('from "./', `from "${join(source, "src")}/`));
+	// The owned synthetic source is generated at runtime; static import would
+	// erase the deliberately restored production-selector mutation.
+	const mutant: { checkTaskBrief: typeof checkTaskBrief } = await import(join(directory, "brief.ts"));
+	const controlIssue = await checkTaskBrief(input, repo, execute);
+	const mutantIssue = await mutant.checkTaskBrief(input, repo, execute);
+	const witness = {
+		control: { editing_requires_contract: typeof controlIssue === "string" && controlIssue.includes("BRIEF_CONTRACT_REFUSED") },
+		mutant: { editing_requires_contract: typeof mutantIssue === "string" && mutantIssue.includes("BRIEF_CONTRACT_REFUSED") },
+	};
+	console.log("SEANCECUT1 restored-selector mutant", JSON.stringify(witness));
+	expect(witness.control.editing_requires_contract).toBe(true);
+	expect(witness.mutant.editing_requires_contract).toBe(false);
+});
+
+test("SEANCECUT1 supported readonly selectors and explicit declarations retain the original real-consumer boundary", async () => {
+	const repo = await fixture(), contract = await briefContract(repo, execute);
+	const context = `Repo: ${repo}`, editing = "# Change\nModify work.txt to fix the requested behavior.";
+	for (const agent of ["reviewer", "security-reviewer", "zeststream-planner", "zeststream-reviewer"]) {
+		expect(await checkTaskBrief({ context, tasks: [{ agent, task: editing }] }, repo, execute)).toBeUndefined();
+	}
+	for (const task of ["Read-only: inspect work.txt", "Analysis-only: inspect work.txt",
+		"No-edit: verify work.txt", "No-edit: diagnose work.txt", "No-edit: replay the existing proof",
+		"# Change\nNone", "# Change\nN/A", "# Change\nno changes"]) {
+		expect(await checkTaskBrief({ context, tasks: [{ agent: "seance", task }] }, repo, execute)).toBeUndefined();
+	}
+	for (const task of [{ task: editing }, { agent: "future-agent", task: editing }, { agent: "seance", task: editing }]) {
+		expect(await checkTaskBrief({ context, tasks: [task] }, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
+		expect(await checkTaskBrief({ context: `${context}\n${renderBrief(contract)}`, tasks: [task] }, repo, execute)).toBeUndefined();
+	}
+	expect(await checkTaskBrief({ context: `${context}\n- READ-ONLY.`, tasks: [{ agent: "seance", task: editing }] }, repo, execute))
+		.toContain("BRIEF_CONTRACT_REFUSED");
+});
