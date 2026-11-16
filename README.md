@@ -555,7 +555,7 @@ Use repeatable `--done` for explicit reports.
 | `--scope extensions` | Extension listing and imports that would fail to load | `omp-kit doctor --scope extensions` |
 | `--scope router` | Router skill tooling presence | `omp-kit doctor --scope router` |
 | `--scope profile` | On-disk settings, with the limits of what they prove | `omp-kit doctor --scope profile` |
-| `--scope lsp` | Language-server configuration layers; `--deep --yes` probes TypeScript in a private fixture | `omp-kit doctor --scope lsp --file src/cli.ts` |
+| `--scope lsp` | Config layers; `--deep --yes` waits for initialized TypeScript diagnostics (private fixture) | `omp-kit doctor --scope lsp --file src/cli.ts` |
 | `--scope project-loading` | Startup inputs a project would load | `omp-kit doctor --scope project-loading --project PATH` |
 | `--scope work` / `--scope model` | Git; weekly model rates/tokens, UNKNOWN (source-only; no live/causal proof) | `omp-kit doctor --scope work` |
 | `--scope sessions` | Running OMP sessions: `CURRENT`, `STALE`, or `UNVERIFIED` against the install | `omp-kit doctor --scope sessions` |

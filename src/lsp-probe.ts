@@ -15,8 +15,8 @@ export interface LspJsonRpcTraceEntry {
 }
 
 const MAX_JSON_RPC_TRACE_ENTRIES = 64;
-const MAX_READINESS_POLL_RETRIES = 100;
-const MAX_READINESS_WAIT_MS = 25_000;
+// Safety ceiling, not a readiness guess; the actual initialize and diagnostics responses decide.
+const MAX_READINESS_WAIT_MS = 90_000;
 const READINESS_POLL_INTERVAL_MS = 250;
 
 export function buildLspJsonRpcReceipt(state: LspProbeState, calls: readonly { action: string; elapsed_ms?: number; result: string }[]): LspJsonRpcTraceEntry[] | undefined {
@@ -27,9 +27,8 @@ export function buildLspJsonRpcReceipt(state: LspProbeState, calls: readonly { a
 export function initialLspStatusChecks(statusBefore: string): { selected_server_configured: boolean } {
 	return { selected_server_configured: statusBefore.includes("Language servers: typescript-language-server (configured, not started)") };
 }
-// l9kv: every issued `status` call is one readiness attempt; the wait stage polls the real
-// server at READINESS_POLL_INTERVAL_MS intervals, capped at MAX_READINESS_WAIT_MS and
-// MAX_READINESS_POLL_RETRIES. Elapsed per attempt is recorded in the B10 report.
+// Preserve every issued status observation and its measured elapsed, including the initial
+// configured state and the post-diagnostic ready state. Status alone never establishes readiness.
 export function collectReadinessWaits(calls: readonly { action: string; elapsed_ms?: number; result: string }[]): LspProbeReport["readiness_waits"] {
 	return calls.filter(call => call.action === "status").map((call, index) => ({
 		attempt: index + 1,
@@ -37,15 +36,74 @@ export function collectReadinessWaits(calls: readonly { action: string; elapsed_
 		ready: call.result.includes("Language servers: typescript-language-server (ready)"),
 	}));
 }
+export interface LspReadinessSignals {
+	initialize_response: boolean;
+	first_diagnostic: boolean;
+}
+
+export function lspReadinessSignals(capabilities: string, diagnostics: string, diagnosticMarker: string): LspReadinessSignals {
+	const capability = capabilityObject(capabilities, "typescript-language-server");
+	return {
+		initialize_response: capability?.referencesProvider === true && capability.workspaceSymbolProvider === true &&
+			!/failed to start|Server failures:/i.test(capabilities),
+		// The request is pinned to src/api.ts; the unique marker survives flat and grouped native rendering.
+		first_diagnostic: diagnostics.includes(diagnosticMarker) &&
+			diagnostics.includes("Cannot find name") && !diagnostics.includes("no diagnostics report yet"),
+	};
+}
+
 export function nextLspReadinessDecision(
-	latestToolResult: string,
-	pollRetries: number,
+	signals: LspReadinessSignals,
 	elapsedMs: number,
-): { kind: "ready" } | { kind: "retry"; delayMs: number } | { kind: "incomplete" } {
-	if (latestToolResult.includes("Language servers: typescript-language-server (ready)")) return { kind: "ready" };
-	if (pollRetries >= MAX_READINESS_POLL_RETRIES || elapsedMs >= MAX_READINESS_WAIT_MS) return { kind: "incomplete" };
+	ceilingMs = MAX_READINESS_WAIT_MS,
+): { kind: "ready" } | { kind: "retry"; delayMs: number } | { kind: "incomplete"; code: "LSP_READINESS_CEILING_EXCEEDED" } {
+	if (signals.initialize_response && signals.first_diagnostic) return { kind: "ready" };
+	if (elapsedMs >= ceilingMs) return { kind: "incomplete", code: "LSP_READINESS_CEILING_EXCEEDED" };
 	return { kind: "retry", delayMs: READINESS_POLL_INTERVAL_MS };
 }
+
+type LspProbeTurn = { tool: { name: string; args: Record<string, unknown> } } | { text: string; readinessFailure?: string };
+
+/** Keep the fixed native-tool sequence separate from HTTP/SSE transport. */
+async function* lspProbeTurns(
+	diagnosticMarker: string,
+	absentSymbol: string,
+	readinessBudgetMs: (startedAt: number) => number,
+): AsyncGenerator<LspProbeTurn, LspProbeTurn, string> {
+	const status: LspProbeTurn = { tool: { name: "lsp", args: { action: "status" } } };
+	yield status;
+	const startedAt = performance.now();
+	const budgetMs = readinessBudgetMs(startedAt);
+	const capabilities = yield { tool: { name: "lsp", args: {
+		action: "capabilities", file: "src/api.ts", timeout: Math.max(5, Math.ceil(budgetMs / 1_000)),
+	} } };
+	let diagnostics = "";
+	let retried = false;
+	for (;;) {
+		const signals = lspReadinessSignals(capabilities, diagnostics, diagnosticMarker);
+		const decision = nextLspReadinessDecision(signals, performance.now() - startedAt, budgetMs);
+		if (decision.kind === "ready") break;
+		if (decision.kind === "incomplete" || !signals.initialize_response) {
+			const reason = decision.kind === "incomplete"
+				? `${decision.code}: no first diagnostic after initialize within ${budgetMs}ms.`
+				: "LSP_INITIALIZE_RESPONSE_UNOBSERVED: the selected server returned no initialized capabilities.";
+			return { text: reason, readinessFailure: reason };
+		}
+		if (retried) await delay(decision.delayMs);
+		retried = true;
+		const remainingMs = budgetMs - (performance.now() - startedAt);
+		diagnostics = yield { tool: { name: "lsp", args: {
+			action: "diagnostics", file: "src/api.ts", timeout: Math.max(5, Math.ceil(remainingMs / 1_000)),
+		} } };
+	}
+	yield status;
+	yield { tool: { name: "lsp", args: {
+		action: "references", file: "src/api.ts", line: 1, symbol: "lspProbeKnownSymbol", timeout: 60,
+	} } };
+	yield { tool: { name: "lsp", args: { action: "symbols", file: "*", query: absentSymbol, timeout: 60 } } };
+	return { text: "LSP route probe complete." };
+}
+
 export type LspProbeState = "PASS" | "MISSING" | "IMMEDIATE_EXIT" | "WRONG_MARKER" | "INCOMPLETE" | "TIMEOUT" | "UNVERIFIED";
 type ProbeTreeSnapshot = Record<string, [number, number, number, string | null]>;
 
@@ -450,6 +508,8 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 	let timedOut = false;
 	let timeoutObservation: LspTimeoutObservation | null = null;
 	let processStartedAt = 0;
+	const limit = Math.min(180_000, Math.max(1_000, input.timeoutMs ?? 180_000));
+	let readinessFailure: string | null = null;
 	let fixtureGitRc: number | null = null;
 	let ompCode: number | null = null;
 	let muxStopRc: number | null = null;
@@ -514,7 +574,8 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		}
 		writeFileSync(join(projectRoot, "package.json"), JSON.stringify({ name: "omp-kit-lsp-probe", private: true }) + "\n", { mode: 0o600 });
 		writeFileSync(join(projectRoot, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, target: "ES2022", module: "ESNext" }, include: ["src/**/*.ts"] }) + "\n", { mode: 0o600 });
-		writeFileSync(join(source, "api.ts"), "export function lspProbeKnownSymbol(): string { return \"known\"; }\n", { mode: 0o600 });
+		const diagnosticMarker = `LspProbeReadinessWitness_${randomUUID().replaceAll("-", "")}`;
+		writeFileSync(join(source, "api.ts"), `export function lspProbeKnownSymbol(): string { return "known"; }\nvoid ${diagnosticMarker};\n`, { mode: 0o600 });
 		writeFileSync(join(source, "uses.ts"), "import { lspProbeKnownSymbol } from \"./api\";\nexport const lspProbeUse = lspProbeKnownSymbol();\n", { mode: 0o600 });
 		const fixtureServers: Record<string, unknown> = {};
 		for (const name of Object.keys(defaults)) fixtureServers[name] = { disabled: name !== "typescript-language-server" };
@@ -533,16 +594,10 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		}
 		writeFileSync(join(template, "config.yml"), "memory:\n  backend: off\n", { mode: 0o600 });
 		const absentSymbol = `LspProbeAbsentSymbol_${randomUUID().replaceAll("-", "")}`;
-		const turns = [
-			{ tool: { name: "lsp", args: { action: "status" } } },
-			{ tool: { name: "lsp", args: { action: "capabilities", file: "src/api.ts", timeout: 60 } } },
-			{ tool: { name: "lsp", args: { action: "references", file: "src/api.ts", line: 1, symbol: "lspProbeKnownSymbol", timeout: 60 } } },
-			{ tool: { name: "lsp", args: { action: "symbols", file: "*", query: absentSymbol, timeout: 60 } } },
-		];
+		// Reserve ten seconds of the whole-probe deadline for completion and cleanup.
+		const sequence = lspProbeTurns(diagnosticMarker, absentSymbol, startedAt => Math.max(1_000,
+			Math.min(MAX_READINESS_WAIT_MS, limit - (startedAt - processStartedAt) - 10_000)));
 		const toolCallIssuedAt = new Map<string, number>();
-		let stage: "status" | "capabilities" | "wait" | "references" | "symbols" | "done" = "status";
-		let readinessPolls = 0;
-		let readinessWaitStartedAt: number | null = null;
 		mockServer = Bun.serve({
 			hostname: "127.0.0.1", port: 0,
 			async fetch(request) {
@@ -558,7 +613,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 				modelRequests.push(body);
 				modelRequestTimes.push(performance.now());
 				const main = isRecord(body) && Array.isArray(body.tools) && body.tools.length > 0;
-				let turn: { tool: { name: string; args: Record<string, unknown> } } | { text: string };
+				let turn: LspProbeTurn;
 				if (!main) {
 					turn = { text: "ok" };
 				} else {
@@ -571,34 +626,9 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 							break;
 						}
 					}
-					if (stage === "status") {
-						turn = turns[0]!;
-						stage = "capabilities";
-					} else if (stage === "capabilities") {
-						turn = turns[1]!;
-						stage = "wait";
-					} else if (stage === "wait") {
-						const elapsed = readinessWaitStartedAt === null ? 0 : performance.now() - readinessWaitStartedAt;
-						readinessWaitStartedAt ??= performance.now();
-						const decision = nextLspReadinessDecision(latestToolResult, readinessPolls, elapsed);
-						if (decision.kind === "ready") {
-							turn = turns[2]!;
-							stage = "references";
-						} else if (decision.kind === "retry") {
-							readinessPolls += 1;
-							await delay(decision.delayMs);
-							turn = turns[0]!;
-						} else {
-							stage = "done";
-							turn = { text: "LSP readiness did not reach ready within the bounded status-check window." };
-						}
-					} else if (stage === "references") {
-						turn = turns[3]!;
-						stage = "symbols";
-					} else {
-						stage = "done";
-						turn = { text: "LSP route probe complete." };
-					}
+					const next = await sequence.next(latestToolResult);
+					turn = next.value ?? { text: "LSP route probe complete." };
+					if ("text" in turn && turn.readinessFailure) readinessFailure = turn.readinessFailure;
 				}
 				let stream = sseEvent({ role: "assistant" });
 				if ("tool" in turn && turn.tool) {
@@ -650,7 +680,6 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		ompLaunched = true;
 		const stdoutPromise = readLimited(processHandle.stdout, MAX_PROCESS_OUTPUT_BYTES, captureAbort.signal);
 		const stderrPromise = readLimited(processHandle.stderr, MAX_PROCESS_OUTPUT_BYTES, captureAbort.signal);
-		const limit = Math.min(180_000, Math.max(1_000, input.timeoutMs ?? 180_000));
 		let timeoutTimer: NodeJS.Timeout | undefined;
 		const timeoutPromise = new Promise<{ kind: "timeout" }>(resolve => {
 			timeoutTimer = setTimeout(() => resolve({ kind: "timeout" }), limit);
@@ -711,17 +740,19 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		const statusBefore = statusCalls[0]?.result ?? "";
 		const statusAfter = statusCalls[statusCalls.length - 1]?.result ?? "";
 		const capabilitiesCall = calls.find(call => call.action === "capabilities");
+		const diagnosticCalls = calls.filter(call => call.action === "diagnostics");
 		const referencesCall = calls.find(call => call.action === "references");
 		const absentCall = calls.find(call => call.action === "symbols");
 		const capabilities = capabilitiesCall?.result ?? "";
 		const references = referencesCall?.result ?? "";
 		const absent = absentCall?.result ?? "";
-		const capability = capabilityObject(capabilities, "typescript-language-server");
+		const signals = lspReadinessSignals(capabilities, diagnosticCalls.at(-1)?.result ?? "", diagnosticMarker);
 		const actionArgumentsMatch = statusCalls.length >= 2 && calls[0]?.action === "status" &&
-			capabilitiesCall?.file === "src/api.ts" && referencesCall?.file === "src/api.ts" &&
+			capabilitiesCall?.file === "src/api.ts" && diagnosticCalls.length > 0 &&
+			diagnosticCalls.every(call => call.file === "src/api.ts") && referencesCall?.file === "src/api.ts" &&
 			referencesCall?.line === 1 && referencesCall?.symbol === "lspProbeKnownSymbol" &&
 			absentCall?.file === "*" && absentCall?.query === absentSymbol &&
-			calls.every(call => call.action === "status" || call === capabilitiesCall || call === referencesCall || call === absentCall);
+			calls.every(call => call.action === "status" || call.action === "diagnostics" || call === capabilitiesCall || call === referencesCall || call === absentCall);
 		const resultsPresent = calls.length >= 5 && calls.every(call => call.result.length > 0 && !call.result_truncated);
 		// l9kv: every readiness wait must carry a measured non-negative elapsed; a
 		// missing or negative elapsed fails this check (and demotes PASS below).
@@ -734,7 +765,8 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 			all_tool_results_present: resultsPresent,
 			...initialLspStatusChecks(statusBefore),
 			readiness_waits_elapsed_bounded: readinessWaits.every(wait => typeof wait.elapsed_ms === "number" && wait.elapsed_ms >= 0),
-			initialized_capabilities: capabilities.includes("typescript-language-server:") && capability?.referencesProvider === true && capability.workspaceSymbolProvider === true && !/failed to start|Server failures:/i.test(capabilities),
+			initialized_capabilities: signals.initialize_response,
+			first_diagnostic_observed: signals.first_diagnostic,
 			known_positive_reference: /Found\s+[1-9]\d* reference\(s\)/.test(references) && references.includes("src/uses.ts") && !/Server failures:/i.test(references),
 			absent_symbol_control: absent.includes(`No symbols matching \"${absentSymbol}\"`) && !/Server failures:/i.test(absent),
 			server_ready_after_request: statusAfter.includes("Language servers: typescript-language-server (ready)") && !/Server failures:/i.test(statusAfter),
@@ -751,12 +783,12 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		const immediateExit = /(?:failed to start|server exited|process exited|exited (?:with )?(?:code|status)|spawn(?:ing)? .*failed)/i.test(combined);
 		const checksPassed = Object.values(checks).every(Boolean) && ompCode === 0 && !timedOut && timeoutObservation === null;
 		state = classifyLspProbeOutcome({ timed_out: timedOut || timeoutObservation !== null, server_missing: serverMissing, wrong_marker: wrongMarker, immediate_exit: immediateExit, checks_passed: checksPassed });
-		reason = state === "PASS" ? "The OMP LSP tool initialized the selected real server, returned a known positive reference, and completed the absent-symbol control in the private fixture."
+		reason = readinessFailure ?? (state === "PASS" ? "The OMP LSP tool completed initialize and a fresh diagnostic response, returned a known positive reference, and completed the absent-symbol control in the private fixture."
 			: state === "MISSING" ? "The selected language server executable or runtime is missing."
 				: state === "WRONG_MARKER" ? "OMP did not select the server because its configured root marker was not present."
 					: state === "IMMEDIATE_EXIT" ? "The selected language server exited during OMP-mediated startup or initialization."
 						: state === "TIMEOUT" ? "The OMP-mediated LSP request exceeded its bounded timeout."
-							: "The OMP-mediated LSP route was incomplete; inspect the bounded checks and raw tool results.";
+							: "The OMP-mediated LSP route was incomplete; inspect the bounded checks and raw tool results.");
 	} catch (error) {
 		reason = `Deep LSP probe failed closed: ${error instanceof Error ? error.message : String(error)}`;
 	} finally {
