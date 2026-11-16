@@ -723,6 +723,35 @@ test("scratch release quarantines its live owner while leaving unreleased live s
   expect(existsSync(join(quarantine, oldEntry))).toBe(false);
  }, 30000);
 
+for (const { label, payload } of [
+  { label: "known-nonzero", payload: "quarantine byte accounting\n" },
+  { label: "explicit-zero", payload: "" },
+]) {
+  test(`QUARANTINEBYTES1 successful expiry records ${label} payload bytes`, () => {
+    const home = useState();
+    const now = Date.now();
+    const quarantine = quarantineDir(home);
+    const entry = quarantineEntryFor(label, new Date(now - 8 * 24 * 3600 * 1000));
+    const expired = join(quarantine, entry);
+    mkdirSync(expired, { recursive: true });
+    writeFileSync(join(expired, "payload"), payload);
+    backdateTree(expired, 8 * 24 * 3600 * 1000, now);
+    const expectedBytes = Buffer.byteLength(payload);
+
+    const deleted = applyQuarantineExpiry(home, { ...depsFor(), home, now });
+    expect(deleted).toContainEqual(expect.objectContaining({
+      dir: expired, action: "DELETE", sizeBytes: expectedBytes,
+    }));
+    expect(existsSync(expired)).toBe(false);
+    const events = readFileSync(reapLogPath(home), "utf8").trim().split("\n")
+      .map(line => JSON.parse(line));
+    const event = events.find(row => row.event === "delete-quarantined" && row.dir === expired);
+    expect(event).toHaveProperty("sizeBytes");
+    expect(typeof event.sizeBytes).toBe("number");
+    expect(event.sizeBytes).toBe(expectedBytes);
+  });
+}
+
 test("scratch release refuses a live directory owned by a different process", async () => {
   const { home, state } = cliHome();
   const root = agentTmp("scratch");

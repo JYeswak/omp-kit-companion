@@ -2195,7 +2195,7 @@ function removeExpiredEntry(path: string, entry: string, owner: ScratchOwner | n
 		return failed;
 	}
 	const deleted: ScratchVerdict = { dir: path, action: "DELETE", reason: eligibility.reason, owner: verdictOwner, sizeBytes: bytesBefore };
-	appendLog(home, { event: "delete-quarantined", dir: path, at, entry, owner: verdictOwner?.pid ?? null });
+	appendLog(home, { event: "delete-quarantined", dir: path, at, entry, owner: verdictOwner?.pid ?? null, sizeBytes: bytesBefore });
 	return deleted;
 }
 
