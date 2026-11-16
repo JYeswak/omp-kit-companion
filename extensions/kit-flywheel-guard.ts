@@ -1237,13 +1237,25 @@ export async function readBeadState(exec: FlywheelExec, request: Pick<TrackerReq
 		let authorship: BeadStateWithAuthorship["authorship"];
 		if (request.operation === "close") {
 			const rawCreator = field(row, "created_by");
-			const rawComments = field(row, "comments");
+			let rawComments = field(row, "comments");
 			const createdBy = typeof rawCreator === "string" && rawCreator.trim() !== "" ? rawCreator.trim() : null;
 			const doneAuthors: string[] = [];
 			const comments: { author: string; text: string; createdAt: number }[] = [];
 			const rawAcceptance = field(row, "acceptance_criteria");
-			let known = (rawCreator === null || (typeof rawCreator === "string" && rawCreator.trim() !== ""))
-				&& Array.isArray(rawComments);
+			let known = rawCreator === null || createdBy !== null;
+			// Native show omits empty comments. Prove authorship through its comments endpoint,
+			// never by assuming an absent field means that no implementation author exists.
+			if (known && (rawComments === undefined || rawComments === null)) {
+				try {
+					const listed = await exec(request.bin,
+						["comments", "list", canonical, "--json", "--no-auto-import", "--no-auto-flush", ...(request.db ? ["--db", request.db] : [])],
+						{ cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+					if (listed.code === 0 && !listed.killed) rawComments = JSON.parse(listed.stdout);
+				} catch {
+					known = false;
+				}
+			}
+			known = known && Array.isArray(rawComments);
 			if (Array.isArray(rawComments)) {
 				for (const comment of rawComments) {
 					const author = field(comment, "author");

@@ -1,9 +1,12 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { YAML } from "bun";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
+import { createFlywheelHost, toolCall } from "../fleet-guard/kit-flywheel-host.ts";
+import { installFixtureIdentity, restoreFixtureIdentity } from "./verify-fixture.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const owned = ownedTmp("omp-kit-beads-policy");
@@ -25,7 +28,9 @@ const terminate = () => {
 process.once("exit", cleanup);
 process.once("SIGINT", interrupt);
 process.once("SIGTERM", terminate);
+beforeAll(installFixtureIdentity);
 afterAll(() => {
+	restoreFixtureIdentity();
 	cleanup();
 	process.off("exit", cleanup);
 	process.off("SIGINT", interrupt);
@@ -300,3 +305,75 @@ test("source-ready planted missing close completeness fails the same native cons
 		"a reviewer report must not bypass incomplete acceptance",
 	);
 }, 60000);
+
+type CommentReadFault = "unavailable" | "malformed" | "throws";
+
+function nativeCloseHost(project: string, actor: string, fault?: CommentReadFault) {
+	const decoder = new TextDecoder();
+	return createFlywheelHost(scratch, {
+		env: { AGENT_NAME: actor },
+		respond: async call => {
+			if (call.command !== "br") return { code: 127, stdout: "", stderr: "unexpected fixture command" };
+			if (call.args[0] === "comments" && fault !== undefined) {
+				if (fault === "throws") throw new Error("fixture comment reader unavailable");
+				return fault === "unavailable"
+					? { code: 7, stdout: "", stderr: "fixture comment read failed" }
+					: { code: 0, stdout: '[{"author":null,"text":"DONE invalid authorship"}]', stderr: "" };
+			}
+			const result = await runFixtureAsync([call.command, ...call.args], {
+				cwd: call.options?.cwd ?? project,
+				// Only the request's explicit --db may select the owned tracker.
+				env: { ...process.env, BEADS_DB: join(project, "wrong-binding.db"), RUST_LOG: "warn" },
+			});
+			return { code: result.rc ?? -1, killed: result.killed,
+				stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
+		},
+	});
+}
+
+test("CLOSELOOKUP1 native empty comments admit an independent close, never the filer or DONE author", async () => {
+	const project = scratchTracker(null);
+	const created = br(project, ["create", "--title", "canonical authorship probe", "--actor", "LookupFiler"]);
+	expect(created.rc, created.out).toBe(0);
+	const row: unknown = JSON.parse(created.out);
+	if (row === null || typeof row !== "object" || !("id" in row) || typeof row.id !== "string"
+		|| !("created_by" in row)) throw new Error("native create returned no canonical authorship");
+	expect(row.created_by).toBe("LookupFiler");
+	const id = row.id;
+	const command = `br --db "${join(project, ".beads", "probe.db")}" close ${id} --reason "independent verification complete"`;
+	const filer = await nativeCloseHost(project, "LookupFiler");
+	const denied = await toolCall(filer, project, command);
+	expect(denied?.block).toBe(true);
+	expect(denied?.reason).toContain("SELF_CLOSE_REFUSED");
+	expect(JSON.parse(br(project, ["show", id]).out)[0].status).toBe("open");
+
+	const reviewer = await nativeCloseHost(project, "LookupVerifier");
+	const admitted = await toolCall(reviewer, project, command);
+	expect(admitted?.block ?? false, admitted?.reason).toBe(false);
+	const closed = br(project, ["close", id, "--reason", "independent verification complete", "--actor", "LookupVerifier"]);
+	expect(closed.rc, closed.out).toBe(0);
+	expect(JSON.parse(br(project, ["show", id]).out)[0].status).toBe("closed");
+
+	const implemented = makeBead(project);
+	expect(br(project, ["comments", "add", implemented, "DONE implemented the fixture", "--author", "LookupDoneAuthor"]).rc).toBe(0);
+	const author = await nativeCloseHost(project, "LookupDoneAuthor");
+	const selfClose = await toolCall(author, project,
+		`br --db "${join(project, ".beads", "probe.db")}" close ${implemented} --reason "independent verification complete"`);
+	expect(selfClose?.block).toBe(true);
+	expect(selfClose?.reason).toContain("SELF_CLOSE_REFUSED");
+	expect(JSON.parse(br(project, ["show", implemented]).out)[0].status).toBe("open");
+}, fixtureDeadlineS(60) * 1000);
+
+test("CLOSELOOKUP1 unavailable or malformed secondary authorship never grants a close", async () => {
+	const project = scratchTracker(null);
+	const id = makeBead(project);
+	const faults: CommentReadFault[] = ["unavailable", "malformed", "throws"];
+	for (const fault of faults) {
+		const host = await nativeCloseHost(project, "LookupVerifier", fault);
+		const verdict = await toolCall(host, project,
+			`br --db "${join(project, ".beads", "probe.db")}" close ${id} --reason "independent verification complete"`);
+		expect(verdict?.block, fault).toBe(true);
+		expect(verdict?.reason, fault).toContain("SELF_CLOSE_REFUSED");
+	}
+	expect(JSON.parse(br(project, ["show", id]).out)[0].status).toBe("open");
+}, fixtureDeadlineS(60) * 1000);
