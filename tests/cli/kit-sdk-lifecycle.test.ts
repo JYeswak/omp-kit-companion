@@ -1,8 +1,8 @@
 import { beforeAll, expect, test } from "bun:test";
-import { ensureOmpSource } from "../src/omp-source-cache.ts";
-import { observeOmpLauncherVersion, resolveSeatOmp } from "../src/paths.ts";
-import { ownedTmp } from "../src/kitlib/tmp.ts";
-import { fixtureDeadlineS, runFixtureAsync } from "../tests/cli/fixture-process.ts";
+import { ensureOmpSource } from "../../src/omp-source-cache.ts";
+import { observeOmpLauncherVersion, resolveSeatOmp } from "../../src/paths.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -185,7 +185,7 @@ try {
 }
 `;
 
-const kitRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const kitRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 let sdkRoot: string;
 beforeAll(() => {
 	// This case targets the reviewed 18.21 boundary even on a minimum-version CI lane.
