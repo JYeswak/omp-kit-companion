@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { inspectModelLedger, observeAuthorClaim, observeWorkingModel, MODEL_LEDGER_MAX_READ_BYTES } from "../../src/model-ledger.ts";
-import { appendVerifyCorrection, inspectVerifyLedger } from "../../src/verify-ledger.ts";
+import { appendVerifyCorrection, beginVerifyAttempt, finalizeVerifyAttempt, inspectVerifyLedger } from "../../src/verify-ledger.ts";
 import type { VerifyLedgerInspection } from "../../src/verify-ledger.ts";
 import { verifyBead, type VerifyResult } from "../../src/verify.ts";
 import { run } from "../../src/kitlib/run.ts";
@@ -17,6 +17,8 @@ import type { ActivityEvent, ActivityModel } from "../../src/model-activity-sche
 import { appendActivityEvent, readActivityJournal } from "../../src/model-activity-journal.ts";
 import { ACTIVITY_DIRECTORY, ACTIVITY_MAX_DAY_BYTES, ACTIVITY_MAX_FILES, ACTIVITY_MAX_READ_BYTES, isActivityEvent } from "../../src/model-activity-schema.ts";
 import type { ActivityApi, ActivityContext, default as ActivityExtension } from "../../extensions/kit-model-activity.ts";
+import type { ModelWeekReport } from "../../src/work-doctor.ts";
+import { inspectModelWorkUsage, MODEL_USAGE_MAX_FILE_BYTES, MODEL_USAGE_MAX_READ_BYTES } from "../../src/model-work-usage.ts";
 
 const sessionId = "claimmodel-session";
 const claimCall = "claimmodel-claim-call";
@@ -109,10 +111,15 @@ test("ACTIVECLOCK1 missing processing evidence is UNKNOWN, never zero active hou
 const root = resolve(import.meta.dir, "../..");
 const decoder = new TextDecoder();
 
-async function nativeFixture() {
-	const scratchRoot = join(root, "var/agent-tmp");
+async function nativeFixture(caseWorkspace = root) {
+	const scratchRoot = join(caseWorkspace, "var/agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true });
-	const scratch = ownedTmp("claimmodel-native", { root: scratchRoot });
+	// The certified marker records the actual data workspace. No asynchronous
+	// work runs while the caller's cwd is changed, and it is always restored.
+	const caller = process.cwd();
+	let scratch: OwnedTmp;
+	try { process.chdir(caseWorkspace); scratch = ownedTmp("claimmodel-native", { root: scratchRoot }); }
+	finally { process.chdir(caller); }
 	const release = join(scratch.path, "release"), bin = join(scratch.path, "bin");
 	for (const path of [bin, join(release, "bin"), join(release, "scripts")]) mkdirSync(path, { recursive: true });
 	for (const name of ["br-shim.sh", "br-fixture-scope.py", "model-mutation.py", "kitlib_run.py", "kitlib_jsonl.py", "kitlib_lock.py", "kitlib_proc.py", "pysafe.py"]) {
@@ -131,7 +138,7 @@ async function nativeFixture() {
 		assistant("native-reclaim", "native-close", "reclaim-call", "muse", "anthropic-api"),
 	]);
 	const env: Record<string, string> = { PATH: `${bin}:/usr/bin:/bin`, HOME: scratch.path, TMPDIR: scratch.path,
-		XDG_STATE_HOME: join(scratch.path, "state"), OMP_KIT_CASE_CWD: root, BR_REAL: backend,
+		XDG_STATE_HOME: join(scratch.path, "state"), OMP_KIT_CASE_CWD: caseWorkspace, BR_REAL: backend,
 		PYTHONPYCACHEPREFIX: fixturePycachePrefix(), PI_SESSION_FILE: path, PI_SESSION_ID: sessionId,
 		PI_TOOL_CALL_ID: claimCall, BR_MODEL: "registered-default-must-not-win" };
 	async function call(args: string[], options: { native?: boolean; actor?: string; tool?: string } = {}) {
@@ -375,14 +382,16 @@ test("CLAIMMODEL1 unavailable metadata state never becomes a new native claim re
 	} finally { f.scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1000);
 
-function mutantModule(path: string, name: string, before: string, after: string): string {
-	const original = readFileSync(join(root, "src/model-ledger.ts"), "utf8");
-	let source = original.replace(before, after);
-	if (source === original) throw new Error(`CLAIMMODEL1 ${name} mutation anchor no longer matches`);
-	source = source.replace('"./plane-tern.ts"', JSON.stringify(join(root, "src/plane-tern.ts")))
-		.replace('"./kitlib/jsonl.ts"', JSON.stringify(join(root, "src/kitlib/jsonl.ts")))
-		.replace('"./model-activity.ts"', JSON.stringify(join(root, "src/model-activity.ts")))
-		.replace('"./verify-ledger.ts"', JSON.stringify(join(root, "src/verify-ledger.ts")));
+function mutantModule(path: string, name: string, before: string, after: string,
+	sourceFile: "model-ledger.ts" | "work-doctor.ts" = "model-ledger.ts"): string {
+	const original = readFileSync(join(root, "src", sourceFile), "utf8");
+	const at = original.indexOf(before);
+	if (at < 0 || original.indexOf(before, at + before.length) >= 0) throw new Error(`MODELLEDGER1 ${name} mutation is not uniquely planted`);
+	let source = original.slice(0, at) + after + original.slice(at + before.length);
+	for (const dependency of ["plane-tern.ts", "kitlib/jsonl.ts", "model-activity.ts", "verify-ledger.ts",
+		"work-doctor.ts", "reservation-age.ts", "model-work-usage.ts", "model-ledger.ts", "model-activity-schema.ts"]) {
+		source = source.replaceAll(JSON.stringify(`./${dependency}`), JSON.stringify(join(root, "src", dependency)));
+	}
 	const file = join(path, `${name}.ts`);
 	writeFileSync(file, source);
 	return file;
@@ -969,7 +978,8 @@ function activityMutant(kind: "recorder" | "projector", needle: string, replacem
 		const entry = join(scratch.path, area, file);
 		// This is a disposable synthetic source input, never a second mutable
 		// product home. Every assertion below judges its actual persisted result.
-		writeFileSync(entry, source.slice(0, at) + replacement + source.slice(at + needle.length));
+		writeFileSync(entry, (source.slice(0, at) + replacement + source.slice(at + needle.length))
+			.replace('"./model-work-usage.ts"', JSON.stringify(join(root, "src/model-work-usage.ts"))));
 		return { entry, scratch };
 	} catch (error) { scratch.cleanup(); throw error; }
 }
@@ -1347,3 +1357,274 @@ test("FIRSTVERIFY1 dry run replays the exact export without allocating review cr
 		expect(bead.acceptance_criteria).toContain("- [ ]");
 	} finally { f.scratch.cleanup(); }
 }, fixtureDeadlineS(180) * 1_000);
+
+async function modelWeekFixture(claimTokens: number | null = 1000) {
+	// Durable journals require real hard-link inode identity; source COW mounts
+	// may expose two different inode numbers for one link. Reuse ownedTmp's
+	// portable caller temp root for fixture state, not the source checkout.
+	const physical = ownedTmp("modelweek-native-state");
+	const workspace = realpathSync(physical.path);
+	const f = await nativeFixture(workspace)
+		.catch(error => { physical.cleanup(); throw error; });
+	try {
+		// Start the recorder before this cohort's bead exists, rather than inventing
+		// known pre-recorder history. The setup namespace is outside this tracker.
+		const seed = await beginVerifyAttempt(firstVerifyStateRoot(f), {
+			tracker: join(f.scratch.path, "setup", ".beads/beads.db"), bead: "setup-1",
+			export_requested: "1".repeat(40), export_commit: null, bead_created_at: null,
+			author: { status: "UNKNOWN", reason: "fixture setup", operation_id: null, actor: null,
+				incarnation: null, captured_at: null, intent_sha256: null,
+				attribution: { status: "UNKNOWN", reason: "fixture setup" } },
+			verifier: { actor: "Setup", attribution: { status: "UNKNOWN", reason: "fixture setup" } },
+		});
+		if (seed.status !== "RECORDED") throw new Error(`MODELWEEK1 setup: ${seed.reason}`);
+		await finalizeVerifyAttempt(seed.attempt, { result_code: "SETUP", outcome: "UNJUDGED",
+			reason: "outside the reported tracker", replayed: false, export_commit: null });
+		const created = await f.call(["create", "MODELWEEK1 original authored work", "--json"], { native: true });
+		expect(created.rc, created.err).toBe(0);
+		f.id = JSON.parse(created.out).id;
+		const at = new Date().toISOString();
+		const claim = assistant("native-claim", null, claimCall, "gpt-6.1-sol");
+		const close = assistant("native-close", "role-change", closeCall, "muse", "anthropic-api");
+		journal(f.path, [
+			{ ...claim, timestamp: at, message: { ...claim.message, usage: claimTokens === null ? null : { totalTokens: claimTokens } } },
+			{ type: "model_change", id: "role-change", parentId: "native-claim", timestamp: at,
+				provider: "anthropic-api", modelId: "not-the-working-model", role: "default" },
+			{ ...close, timestamp: at, message: { ...close.message, usage: { totalTokens: 500 } } },
+			{ type: "model_usage", id: "auxiliary", parentId: "native-close", activeLeafId: "native-close",
+				timestamp: at, provider: "anthropic-api", model: "haiku", usage: { totalTokens: 9000 } },
+		]);
+		const failed = "#!/bin/sh\n[ $((1 + 1)) -eq 3 ] || exit 1\nprintf 'right\\n'\n";
+		const { project, sha } = await firstVerifyProject(f, "modelweek-work", failed);
+		await firstVerifyHandoff(f, "- [ ] [a] [build] `sh scripts/t.sh` -> right");
+		// Preserve the real native binary for replay discovery, while mutations
+		// traverse the actual shipped attribution producer rather than bypass it.
+		const capturedBin = join(f.scratch.path, "captured-bin");
+		mkdirSync(capturedBin);
+		f.env.MODELWEEK_BR_SHIM = join(f.release, "scripts/br-shim.sh");
+		writeFileSync(join(capturedBin, "br"), '#!/bin/sh\nexec /bin/sh "$MODELWEEK_BR_SHIM" "$@"\n', { mode: 0o755 });
+		f.env.PATH = `${capturedBin}:${f.env.PATH}`;
+		const first = await verifyBead({ bead: f.id, exportSha: sha, repo: project.dir, actor: "PeerVerifier",
+			env: { ...firstVerifyEnv(f), AGENT_NAME: "PeerVerifier" }, lesson: "MODELWEEK1 original failed attempt" });
+		expect(first.code).toBe("REWORK");
+		await firstVerifyResume(f);
+		const passed = await firstVerifyPublish(f, project, "#!/bin/sh\n[ $((1 + 1)) -eq 2 ] || exit 1\nprintf 'right\\n'\n");
+		const final = await verifyBead({ bead: f.id, exportSha: passed, repo: project.dir, actor: "PeerVerifier",
+			env: { ...firstVerifyEnv(f), AGENT_NAME: "PeerVerifier" }, lesson: "MODELWEEK1 independently verified authored close" });
+		expect(final.code).toBe("CLOSED");
+		const start = Date.now() - 4 * 3600_000;
+		const identity = statSync(f.path);
+		for (const [index, from, to, model] of [
+			[0, start, start + 3600_000, ACTIVITY_A],
+			[1, start + 900_000, start + 2700_000, ACTIVITY_A],
+			[2, start + 3600_000, start + 5400_000, ACTIVITY_B],
+		] as const) {
+			for (const event of activityPair(index, from, to, model)) {
+				event.identity.session_file = f.path;
+				event.identity.session_id = sessionId;
+				event.identity.file_id = `${identity.dev}:${identity.ino}`;
+				const appended = await appendActivityEvent(firstVerifyStateRoot(f), event);
+				expect(appended.appended, appended.problem ?? "activity producer did not append").toBe(true);
+			}
+		}
+		const inspection = f.inspect();
+		expect(inspection.activity, JSON.stringify(inspection.activity)).toMatchObject({ status: "KNOWN", active_ms: 5400_000 });
+		expect(inspection.operations.some(row => row.intent.kind === "close" && row.outcome?.native_rc === 0),
+			"MODELWEEK1 fixture must capture the real peer close").toBe(true);
+		return { ...f, scratch: { path: f.scratch.path,
+			cleanup() { try { f.scratch.cleanup(); } finally { physical.cleanup(); } } }, project, passed };
+	} catch (error) { try { f.scratch.cleanup(); } finally { physical.cleanup(); } throw error; }
+}
+
+interface ModelWeekDoctorInput {
+	scratch: { path: string };
+	release: string;
+	env: Record<string, string>;
+}
+async function modelWeekDoctor(f: ModelWeekDoctorInput): Promise<ModelWeekReport> {
+	const result = await run([process.execPath, join(f.release, "bin/omp-kit"), "doctor",
+		"--scope", "work", "--project", f.scratch.path, "--timeout-ms", "1000", "--jobs", "1", "--json"], {
+		cwd: f.scratch.path, env: f.env, deadline_s: fixtureDeadlineS(60), max_output_bytes: 1024 * 1024,
+	});
+	expect(result.timed_out || result.truncated).toBe(false);
+	expect(result.rc, decoder.decode(result.stderr)).toBe(0);
+	return JSON.parse(decoder.decode(result.stdout)).data.model_ledger.weekly;
+}
+
+test("MODELWEEK1 real doctor separates original author and reviewer and keeps first FAIL after a later close", async () => {
+	const f = await modelWeekFixture();
+	try {
+		const report = await modelWeekDoctor(f);
+		expect(report, "MODELWEEK1 weekly doctor summary is absent").toBeDefined();
+		expect(report.cohort.closes_per_active_hour_numerator).toBe("authored_and_independently_verified_closes");
+		expect(report.by_model).toEqual(expect.arrayContaining([
+			expect.objectContaining({ provider: ACTIVITY_A.provider, model: ACTIVITY_A.model,
+				authored_verified_closes: 1, reviewer_closes: 0, active_hours: 1,
+				closes_per_active_hour: 1, first_pass_pass_rate: 0, rework: 1,
+				work_tokens: 1000, tokens_per_close: 1000 }),
+			expect.objectContaining({ provider: ACTIVITY_B.provider, model: ACTIVITY_B.model,
+				authored_verified_closes: 0, reviewer_closes: 1, active_hours: 0.5,
+				closes_per_active_hour: 0, first_pass_pass_rate: null,
+				work_tokens: 500, tokens_per_close: null }),
+		]));
+		expect(report.counts.closes).toMatchObject({ eligible: 1, known: 1, unknown: 0 });
+		expect(report.counts.first_attempts).toMatchObject({ eligible: 1, known: 1, unknown: 0 });
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(240) * 1000);
+
+test("MODELWEEK1 the same original-author and first-outcome consumer kills both attribution mutants", async () => {
+	const f = await modelWeekFixture();
+	try {
+		const now = Date.now(), snapshot = join(f.scratch.path, "modelweek-evidence.json");
+		writeFileSync(snapshot, JSON.stringify({ now, evidence: inspectModelLedger(firstVerifyStateRoot(f), f.scratch.path, now) }));
+		const oracle = `import {readFileSync} from "node:fs";
+const {now,evidence}=JSON.parse(readFileSync(${JSON.stringify(snapshot)},"utf8"));
+const report=model.inspectModelWeek(evidence,now);
+const author=report.by_model.find(row=>row.provider==="openai-codex"&&row.model==="gpt-6.1-sol");
+const reviewer=report.by_model.find(row=>row.provider==="anthropic-api"&&row.model==="muse");
+const accepted=author?.authored_verified_closes===1&&reviewer?.authored_verified_closes===0
+&&reviewer?.reviewer_closes===1&&author?.first_pass_pass_rate===0&&report.counts.first_attempts.eligible===1;
+console.log(JSON.stringify({accepted,expected:"original author=1, reviewer authored=0, immutable first FAIL",
+observed:{author:author?.authored_verified_closes,reviewer:reviewer?.authored_verified_closes,first_pass:author?.first_pass_pass_rate}}));
+process.exitCode=accepted?0:1;`;
+		const control = await modelOracle(join(root, "src/work-doctor.ts"), oracle, f.scratch.path);
+		expect(control).toMatchObject({ rc: 0, witness: { accepted: true } });
+		for (const [name, before, after] of [
+			["modelweek-closer-author", "const author = weekModel(models, attempt.context.author.attribution);",
+				"const author = weekModel(models, attempt.context.verifier.attribution);"],
+			["modelweek-last-verdict", "for (const attempt of evidence.verification.first_attempts)",
+				"for (const attempt of evidence.verification.attempts)"],
+		]) {
+			const module = mutantModule(f.scratch.path, name!, before!, after!, "work-doctor.ts");
+			const killed = await modelOracle(module, oracle, f.scratch.path);
+			expect(killed).toMatchObject({ rc: 1, witness: { accepted: false } });
+			console.log("MODELWEEK1 attribution mutant", name, JSON.stringify({ control: control.witness, killed: killed.witness }));
+		}
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(240) * 1000);
+
+test("MODELWEEK1 partial assistant usage stays UNKNOWN and the same consumer kills missing-usage zero", async () => {
+	const f = await modelWeekFixture(null);
+	try {
+		const report = await modelWeekDoctor(f);
+		expect(report.status).toBe("UNKNOWN");
+		expect(report.counts.usage).toMatchObject({ eligible: 2, known: 1, unknown: 1, excluded_auxiliary_records: 1 });
+		const author = report.by_model.find(row => row.provider === ACTIVITY_A.provider && row.model === ACTIVITY_A.model);
+		expect(author).toMatchObject({ authored_verified_closes: 1, active_hours: 1, work_tokens: null, tokens_per_close: null });
+		const now = Date.now(), snapshot = join(f.scratch.path, "partial-usage.json");
+		writeFileSync(snapshot, JSON.stringify({ now, evidence: inspectModelLedger(firstVerifyStateRoot(f), f.scratch.path, now) }));
+		const oracle = `import {readFileSync} from "node:fs";
+const {now,evidence}=JSON.parse(readFileSync(${JSON.stringify(snapshot)},"utf8"));
+const report=model.inspectModelWeek(evidence,now),author=report.by_model.find(row=>row.model==="gpt-6.1-sol");
+const accepted=author?.work_tokens===null&&author?.tokens_per_close===null;
+console.log(JSON.stringify({accepted,expected:"missing usage is UNKNOWN, not zero",observed:{work_tokens:author?.work_tokens,tokens_per_close:author?.tokens_per_close}}));
+process.exitCode=accepted?0:1;`;
+		const control = await modelOracle(join(root, "src/work-doctor.ts"), oracle, f.scratch.path);
+		const module = mutantModule(f.scratch.path, "modelweek-missing-zero",
+			"const workTokens = work?.work_tokens ?? null;", "const workTokens = work?.work_tokens ?? 0;", "work-doctor.ts");
+		const killed = await modelOracle(module, oracle, f.scratch.path);
+		expect(control).toMatchObject({ rc: 0, witness: { accepted: true } });
+		expect(killed).toMatchObject({ rc: 1, witness: { accepted: false, observed: { work_tokens: 0, tokens_per_close: 0 } } });
+		console.log("MODELWEEK1 missing-usage mutant", JSON.stringify({ control: control.witness, killed: killed.witness }));
+		appendFileSync(join(firstVerifyStateRoot(f), ACTIVITY_DIRECTORY, "current.jsonl"), "torn");
+		const incomplete = await modelWeekDoctor(f);
+		expect(incomplete.by_model.find(row => row.model === ACTIVITY_A.model)).toMatchObject({
+			active_hours: null, closes_per_active_hour: null, work_tokens: null, tokens_per_close: null,
+		});
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(240) * 1000);
+
+test("MODELWEEK1 unjudged first attempts stay in the declared UNKNOWN denominator", async () => {
+	const f = await modelWeekFixture();
+	try {
+		const created = await f.call(["create", "MODELWEEK1 interrupted eligible work", "--json"], { native: true });
+		expect(created.rc, created.err).toBe(0);
+		const pending = JSON.parse(created.out);
+		const began = await beginVerifyAttempt(firstVerifyStateRoot(f), {
+			tracker: f.database, bead: pending.id, export_requested: f.passed, export_commit: f.passed,
+			bead_created_at: pending.created_at,
+			author: { status: "UNKNOWN", reason: "no successful captured claim", operation_id: null, actor: null,
+				incarnation: null, captured_at: null, intent_sha256: null, attribution: { status: "UNKNOWN", reason: "no claim" } },
+			verifier: { actor: "PeerVerifier", attribution: observe(f.path, closeCall) },
+		});
+		expect(began.status).toBe("RECORDED");
+		const report = await modelWeekDoctor(f);
+		expect(report.counts.first_attempts).toEqual({ eligible: 2, known: 1, unknown: 1 });
+		expect(report.by_model.find(row => row.model === ACTIVITY_A.model)?.first_pass_pass_rate).toBeNull();
+		expect(report.status).toBe("UNKNOWN");
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(240) * 1000);
+
+test("MODELWEEK1 known source fixtures never become live-week or causal staffing proof, and doctor is read-only", async () => {
+	const f = await modelWeekFixture();
+	try {
+		const state = firstVerifyStateRoot(f), before = readdirSync(state, { recursive: true }).sort();
+		const claim = f.inspect().operations.find(row => row.intent.kind === "claim");
+		if (claim === undefined) throw new Error("MODELWEEK1 captured claim missing");
+		const page = evidencePage(f.env, claim.intent.at), original = readFileSync(page);
+		const report = await modelWeekDoctor(f);
+		expect(report.status).toBe("KNOWN");
+		expect(report.qualification).toEqual({ proof_class: "DESCRIPTIVE_SOURCE_COHORT",
+			parent_week_live: "UNVERIFIED", causal_staffing_effect: "UNVERIFIED" });
+		expect(report.usage.sources).toEqual(expect.arrayContaining([
+			expect.objectContaining({ journal: realpathSync(f.path), session_id: sessionId, complete: true }),
+		]));
+		expect(readFileSync(page)).toEqual(original);
+		expect(readdirSync(state, { recursive: true }).sort()).toEqual(before);
+		const now = Date.now(), snapshot = join(f.scratch.path, "source-boundary.json");
+		writeFileSync(snapshot, JSON.stringify({ now, evidence: inspectModelLedger(state, f.scratch.path, now) }));
+		const oracle = `import {readFileSync} from "node:fs";
+const {now,evidence}=JSON.parse(readFileSync(${JSON.stringify(snapshot)},"utf8"));
+const report=model.inspectModelWeek(evidence,now);
+const accepted=report.status==="KNOWN"&&report.qualification.parent_week_live==="UNVERIFIED";
+console.log(JSON.stringify({accepted,expected:"known source cohort does not earn the parent live week",observed:report.qualification.parent_week_live}));
+process.exitCode=accepted?0:1;`;
+		const control = await modelOracle(join(root, "src/work-doctor.ts"), oracle, f.scratch.path);
+		const module = mutantModule(f.scratch.path, "modelweek-fixture-live",
+			'parent_week_live: "UNVERIFIED", causal_staffing_effect:', 'parent_week_live: "PASS", causal_staffing_effect:', "work-doctor.ts");
+		const killed = await modelOracle(module, oracle, f.scratch.path);
+		expect(control).toMatchObject({ rc: 0, witness: { accepted: true } });
+		expect(killed).toMatchObject({ rc: 1, witness: { accepted: false, observed: "PASS" } });
+		console.log("MODELWEEK1 fixture-as-live mutant", JSON.stringify({ control: control.witness, killed: killed.witness }));
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(240) * 1000);
+
+test("MODELWEEK1 empty, explicit zero, replaced sessions and oversized usage remain distinct and bounded", () => {
+	const empty = inspectModelLedger(null).weekly;
+	expect(empty.status).toBe("UNKNOWN");
+	expect(empty.by_model).toEqual([]);
+	const scratch = ownedTmp("modelweek-usage-boundaries");
+	try {
+		const path = join(scratch.path, "usage.jsonl"), now = Date.now();
+		const entry = assistant("usage-entry", null, claimCall, ACTIVITY_A.model, ACTIVITY_A.provider);
+		const records = [{ ...entry, timestamp: new Date(now - 1000).toISOString(),
+			message: { ...entry.message, usage: { totalTokens: 0 } } }];
+		journal(path, records);
+		const info = statSync(path), source = { journal: path, session_id: sessionId, identity: `${info.dev}:${info.ino}` };
+		const window = { start_ms: now - 7 * 86_400_000, end_ms: now };
+		const zero = inspectModelWorkUsage([source], window, true);
+		expect(zero.status).toBe("KNOWN");
+		expect(zero.by_model).toEqual([expect.objectContaining({ eligible: 1, known: 1, unknown: 0, work_tokens: 0 })]);
+		journal(path, records, "replacement-session");
+		const replaced = inspectModelWorkUsage([source], window, true);
+		expect(replaced.status).toBe("UNKNOWN");
+		expect(replaced.by_model).toEqual([]);
+		expect(replaced.problems).toContain("USAGE_SESSION_REPLACED");
+		journal(path, [{ type: "title", title: "x".repeat(MODEL_USAGE_MAX_FILE_BYTES) }, ...records]);
+		const bounded = inspectModelWorkUsage([source], window, true);
+		expect(bounded.status).toBe("UNKNOWN");
+		expect(bounded.bytes_read).toBeLessThanOrEqual(MODEL_USAGE_MAX_READ_BYTES);
+		expect(bounded.problems).toContain("USAGE_JOURNAL_PREFIX_OUTSIDE_WINDOW");
+		for (const row of bounded.by_model) expect(row.work_tokens).toBeNull();
+		const failedSources = [0, 1, 2].map(index => {
+			const dir = join(scratch.path, `non-file-${index}`);
+			mkdirSync(dir);
+			const info = statSync(dir);
+			return { journal: dir, session_id: sessionId, identity: `${info.dev}:${info.ino}` };
+		});
+		const failed = inspectModelWorkUsage(failedSources, window, true);
+		expect(failed.status).toBe("UNKNOWN");
+		expect(failed.problems).toContain("USAGE_READ_LIMIT");
+		expect(failed.read_budget_bytes).toBeLessThanOrEqual(MODEL_USAGE_MAX_READ_BYTES);
+	} finally { scratch.cleanup(); }
+});

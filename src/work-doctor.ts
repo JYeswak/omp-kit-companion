@@ -1,6 +1,11 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { auditStaleReservedEdits, DEFAULT_RESERVATION_LIMIT_MINUTES, type StaleReservedEdit } from "./reservation-age.ts";
+import type { ModelLedgerEvent, WorkingModelEvidence } from "./model-ledger.ts";
+import type { ModelActivityInspection, ActivityWindow } from "./model-activity.ts";
+import type { ActivityModel } from "./model-activity-schema.ts";
+import type { VerifyLedgerInspection, VerifyProjectedAttempt } from "./verify-ledger.ts";
+import { inspectModelWorkUsage, MODEL_USAGE_MAX_FILES, type ModelSessionSource, type ModelWorkUsageInspection, type ModelWorkUsageRow } from "./model-work-usage.ts";
 
 export type WorkRootStatus = "OK" | "UNAVAILABLE";
 export type WorkRepoStatus = "OK" | "WARN" | "UNVERIFIED" | "TIMED_OUT" | "UNKNOWN";
@@ -279,4 +284,228 @@ export async function inspectWorkFleet(input: WorkDoctorInput): Promise<WorkDoct
 	});
 	const elapsedMs = performance.now() - started;
 	return { scope: "work", overall: "REPORT", roots: discovered.map((entry) => entry.root), repos: ordered, concurrency, per_repo_timeout_ms: perRepoTimeoutMs, stale_edit_limit_minutes: staleEditLimitMinutes, elapsed_ms: elapsedMs, timed_out_repos: ordered.filter((repo) => repo.status === "TIMED_OUT" || repo.findings.includes("unverified")).length, text: renderTable(ordered) };
+}
+
+export interface ModelWeekEvidence {
+	status: string;
+	operations: Array<{ intent: ModelLedgerEvent; outcome: ModelLedgerEvent | null; integrity: "KNOWN" | "UNKNOWN" }>;
+	activity: ModelActivityInspection;
+	verification: VerifyLedgerInspection;
+}
+interface WeekCount { eligible: number; known: number; unknown: number; }
+interface WeekModel {
+	provider: string; model: string;
+	authored: number; reviewer: number; first_eligible: number; first_known: number; first_pass: number;
+	attempt_eligible: number; attempt_known: number; rework: number;
+	close_operations: string[]; first_attempts: string[];
+}
+interface WeekModels { rows: Map<string, WeekModel>; truncated: boolean; }
+export interface ModelWeekRow {
+	provider: string; model: string;
+	authored_verified_closes: number | null; reviewer_closes: number | null;
+	active_hours: number | null; closes_per_active_hour: number | null;
+	first_pass_pass_rate: number | null; rework: number | null;
+	work_tokens: number | null; tokens_per_close: number | null;
+	known_authored_verified_closes: number; known_reviewer_closes: number;
+	denominators: { first_attempts: WeekCount; review_attempts: WeekCount };
+	evidence: { close_operations: string[]; first_attempts: string[] };
+}
+export interface ModelWeekReport {
+	status: "KNOWN" | "UNKNOWN";
+	cohort: { start: string; end: string; closes_per_active_hour_numerator: string;
+		closes: string; first_attempts: string; rework: string; work_tokens: string };
+	counts: { closes: WeekCount; first_attempts: WeekCount; review_attempts: WeekCount;
+		activity: WeekCount; usage: ModelWorkUsageInspection["counts"] };
+	coverage: { attribution: string; verification: string; activity: string; usage: string };
+	by_model: ModelWeekRow[];
+	usage: ModelWorkUsageInspection;
+	qualification: { proof_class: "DESCRIPTIVE_SOURCE_COHORT"; parent_week_live: "UNVERIFIED"; causal_staffing_effect: "UNVERIFIED" };
+	limits: { max_models: number; models_truncated: boolean };
+}
+const MODEL_WEEK_MAX_MODELS = 256;
+
+function weekModel(models: WeekModels, model: ActivityModel): WeekModel | null {
+	const key = `${model.provider}\0${model.model}`;
+	let row = models.rows.get(key);
+	if (row !== undefined) return row;
+	if (models.rows.size >= MODEL_WEEK_MAX_MODELS) { models.truncated = true; return null; }
+	row = { provider: model.provider, model: model.model, authored: 0, reviewer: 0,
+		first_eligible: 0, first_known: 0, first_pass: 0, attempt_eligible: 0, attempt_known: 0, rework: 0,
+		close_operations: [], first_attempts: [] };
+	models.rows.set(key, row);
+	return row;
+}
+
+/** The same captured assistant/tool call, actor, tracker, bead and original claim
+ * bind the close to a non-author verification. A second candidate is ambiguous,
+ * not permission to choose the latest verdict or a nearby wall-clock timestamp. */
+function verificationKey(tracker: string, bead: string, actor: string, claim: string | null | undefined, model: WorkingModelEvidence): string | null {
+	if (!claim || model.status !== "KNOWN") return null;
+	return `${tracker}\0${bead}\0${actor}\0${claim}\0${model.source.session_id}\0${model.source.tool_call_id}\0${model.source.entry_sha256}`;
+}
+
+function closedAttemptIndex(attempts: readonly VerifyProjectedAttempt[]): Map<string, VerifyProjectedAttempt | null> {
+	const candidates = new Map<string, VerifyProjectedAttempt | null>();
+	for (const attempt of attempts) {
+		if (attempt.result_code !== "CLOSED" || attempt.outcome !== "PASS" || !attempt.replayed
+			|| attempt.integrity !== "KNOWN" || attempt.coverage !== "KNOWN") continue;
+		const { author, verifier, tracker, bead } = attempt.context;
+		if (author.status !== "KNOWN" || author.attribution.status !== "KNOWN" || author.actor === verifier.actor) continue;
+		const key = verificationKey(tracker, bead, verifier.actor, author.operation_id, verifier.attribution);
+		if (key !== null) candidates.set(key, candidates.has(key) ? null : attempt);
+	}
+	return candidates;
+}
+
+function weekCloses(evidence: ModelWeekEvidence, window: ActivityWindow, models: WeekModels): WeekCount {
+	const candidates = closedAttemptIndex(evidence.verification.attempts);
+	const eligible = new Set<string>(), qualified = new Set<string>();
+	for (const operation of evidence.operations) {
+		const { intent, outcome } = operation;
+		const at = Date.parse(outcome?.at ?? intent.at);
+		if (intent.kind !== "close" || at < window.start_ms || at >= window.end_ms) continue;
+		if (operation.integrity === "KNOWN" && outcome?.native_rc !== null && outcome?.native_rc !== 0) continue;
+		for (const bead of intent.beads) {
+			const beadKey = `${intent.tracker}\0${bead}`;
+			eligible.add(beadKey);
+			if (qualified.has(beadKey) || operation.integrity !== "KNOWN" || outcome?.native_rc !== 0 || outcome.native_timed_out) continue;
+			const key = verificationKey(intent.tracker, bead, intent.actor, intent.claim_incarnations[bead], outcome.attribution);
+			const attempt = key === null ? null : candidates.get(key);
+			if (!attempt || attempt.context.author.attribution.status !== "KNOWN" || attempt.context.verifier.attribution.status !== "KNOWN") continue;
+			const author = weekModel(models, attempt.context.author.attribution);
+			const reviewer = weekModel(models, attempt.context.verifier.attribution);
+			if (author === null || reviewer === null) continue;
+			qualified.add(beadKey);
+			author.authored++; reviewer.reviewer++;
+			author.close_operations.push(intent.operation_id);
+			if (reviewer !== author) reviewer.close_operations.push(intent.operation_id);
+		}
+	}
+	return { eligible: eligible.size, known: qualified.size, unknown: eligible.size - qualified.size };
+}
+
+function weekFirstAttempts(evidence: ModelWeekEvidence, window: ActivityWindow, models: WeekModels): WeekCount {
+	const counts: WeekCount = { eligible: 0, known: 0, unknown: 0 };
+	for (const attempt of evidence.verification.first_attempts) {
+		const at = Date.parse(attempt.began_at);
+		if (at < window.start_ms || at >= window.end_ms) continue;
+		counts.eligible++;
+		const author = attempt.context.author;
+		const row = author.status === "KNOWN" && author.attribution.status === "KNOWN" ? weekModel(models, author.attribution) : null;
+		if (row === null) continue;
+		row.first_eligible++; row.first_attempts.push(attempt.id);
+		if (attempt.integrity !== "KNOWN" || attempt.coverage !== "KNOWN" || !attempt.replayed
+			|| (attempt.outcome !== "PASS" && attempt.outcome !== "FAIL")) continue;
+		counts.known++; row.first_known++;
+		if (attempt.outcome === "PASS") row.first_pass++;
+	}
+	counts.unknown = counts.eligible - counts.known;
+	return counts;
+}
+
+function weekReviewAttempts(evidence: ModelWeekEvidence, window: ActivityWindow, models: WeekModels): WeekCount {
+	const counts: WeekCount = { eligible: 0, known: 0, unknown: 0 };
+	for (const attempt of evidence.verification.attempts) {
+		const at = Date.parse(attempt.finalized_at ?? attempt.began_at);
+		if (at < window.start_ms || at >= window.end_ms) continue;
+		counts.eligible++;
+		const author = attempt.context.author;
+		const row = author.status === "KNOWN" && author.attribution.status === "KNOWN" ? weekModel(models, author.attribution) : null;
+		if (row === null) continue;
+		row.attempt_eligible++;
+		if (attempt.integrity !== "KNOWN" || attempt.coverage !== "KNOWN" || !attempt.replayed
+			|| (attempt.outcome !== "PASS" && attempt.outcome !== "FAIL")) continue;
+		counts.known++; row.attempt_known++;
+		if (attempt.outcome === "FAIL") row.rework++;
+	}
+	counts.unknown = counts.eligible - counts.known;
+	return counts;
+}
+
+function weekSessions(evidence: ModelWeekEvidence, window: ActivityWindow) {
+	const sources = new Map<string, ModelSessionSource>();
+	let complete = evidence.status === "KNOWN" && evidence.activity.status === "KNOWN"
+		&& evidence.activity.session_sources_complete && evidence.verification.status === "KNOWN";
+	function add(source: ModelSessionSource) {
+		const key = `${source.session_id}\0${source.identity}`;
+		if (sources.has(key)) return;
+		if (sources.size >= MODEL_USAGE_MAX_FILES) { complete = false; return; }
+		sources.set(key, source);
+	}
+	function attribution(model: WorkingModelEvidence) {
+		if (model.status === "KNOWN") add(model.source);
+		else complete = false;
+	}
+	for (const source of evidence.activity.session_sources) add(source);
+	for (const operation of evidence.operations) {
+		const at = Date.parse(operation.outcome?.at ?? operation.intent.at);
+		if (at >= window.start_ms && at < window.end_ms) attribution(operation.outcome?.attribution ?? operation.intent.attribution);
+	}
+	for (const attempt of evidence.verification.attempts) {
+		const begin = Date.parse(attempt.began_at), end = Date.parse(attempt.finalized_at ?? attempt.began_at);
+		if (begin >= window.end_ms || end < window.start_ms) continue;
+		attribution(attempt.context.author.attribution); attribution(attempt.context.verifier.attribution);
+	}
+	return { sources: [...sources.values()], complete };
+}
+
+function weekRows(evidence: ModelWeekEvidence, models: WeekModels, closes: WeekCount,
+	verification: { first: WeekCount; attempts: WeekCount }, usage: ModelWorkUsageInspection): ModelWeekRow[] {
+	const activity = new Map<string, number>(), tokens = new Map<string, ModelWorkUsageRow>();
+	for (const row of evidence.activity.by_model) activity.set(`${row.provider}\0${row.model}`, row.known_active_ms);
+	for (const row of usage.by_model) tokens.set(`${row.provider}\0${row.model}`, row);
+	const closeComplete = evidence.status === "KNOWN" && evidence.verification.status === "KNOWN" && closes.eligible > 0 && closes.unknown === 0 && !models.truncated;
+	return Array.from(models.rows.values(), row => {
+		const key = `${row.provider}\0${row.model}`, clock = activity.get(key), work = tokens.get(key);
+		let hours: number | null = null;
+		if (evidence.activity.status === "KNOWN") {
+			if (clock !== undefined) hours = clock / 3600_000;
+			else if (evidence.activity.active_ms === 0) hours = 0;
+		}
+		const authored = closeComplete ? row.authored : null;
+		const firstKnown = evidence.verification.status === "KNOWN" && verification.first.unknown === 0 && row.first_eligible > 0 && !models.truncated;
+		const reworkKnown = evidence.verification.status === "KNOWN" && verification.attempts.unknown === 0 && row.attempt_eligible > 0 && !models.truncated;
+		const workTokens = work?.work_tokens ?? null;
+		return { provider: row.provider, model: row.model, authored_verified_closes: authored,
+			reviewer_closes: closeComplete ? row.reviewer : null, active_hours: hours,
+			closes_per_active_hour: authored !== null && hours !== null && hours > 0 ? authored / hours : null,
+			first_pass_pass_rate: firstKnown ? 100 * row.first_pass / row.first_known : null,
+			rework: reworkKnown ? row.rework : null, work_tokens: workTokens,
+			tokens_per_close: authored !== null && authored > 0 && workTokens !== null ? workTokens / authored : null,
+			known_authored_verified_closes: row.authored, known_reviewer_closes: row.reviewer,
+			denominators: {
+				first_attempts: { eligible: row.first_eligible, known: row.first_known, unknown: row.first_eligible - row.first_known },
+				review_attempts: { eligible: row.attempt_eligible, known: row.attempt_known, unknown: row.attempt_eligible - row.attempt_known },
+			}, evidence: { close_operations: row.close_operations, first_attempts: row.first_attempts } };
+	}).sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model));
+}
+
+/** A read model of existing authorities, never a new ledger or a live/causal
+ * staffing certificate. No clock, outcome, author, or token default is guessed. */
+export function inspectModelWeek(evidence: ModelWeekEvidence, now: number): ModelWeekReport {
+	const window = { start_ms: Math.max(0, now - 7 * 86_400_000), end_ms: now };
+	const models: WeekModels = { rows: new Map(), truncated: false };
+	const closes = weekCloses(evidence, window, models);
+	const verification = { first: weekFirstAttempts(evidence, window, models), attempts: weekReviewAttempts(evidence, window, models) };
+	const sessions = weekSessions(evidence, window);
+	const usage = inspectModelWorkUsage(sessions.sources, window, sessions.complete);
+	for (const model of evidence.activity.by_model) weekModel(models, model);
+	for (const model of usage.by_model) weekModel(models, model);
+	const known = evidence.status === "KNOWN" && evidence.verification.status === "KNOWN" && evidence.activity.status === "KNOWN"
+		&& usage.status === "KNOWN" && closes.eligible > 0 && closes.unknown === 0 && verification.first.eligible > 0
+		&& verification.first.unknown === 0 && verification.attempts.unknown === 0 && !models.truncated;
+	return { status: known ? "KNOWN" : "UNKNOWN",
+		cohort: { start: new Date(window.start_ms).toISOString(), end: new Date(window.end_ms).toISOString(),
+			closes_per_active_hour_numerator: "authored_and_independently_verified_closes",
+			closes: "At most one qualified captured non-author close per tracker/bead in this week; earliest qualifying original claim, never reviewer-as-author or retry credit",
+			first_attempts: "Canonical immutable first begins in this week, attributed to their original author; PASS/(PASS+FAIL) percent only when all eligible outcomes are known; UNJUDGED/INCOMPLETE never PASS",
+			rework: "Known failed verification attempts finalized in this week, attributed to their captured original author; not raw tracker-state churn",
+			work_tokens: usage.definition },
+		counts: { closes, first_attempts: verification.first, review_attempts: verification.attempts,
+			activity: { eligible: evidence.activity.counts.observed_segments, known: evidence.activity.counts.valid_segments, unknown: evidence.activity.counts.unknown_segments },
+			usage: usage.counts },
+		coverage: { attribution: evidence.status, verification: evidence.verification.status, activity: evidence.activity.status, usage: usage.status },
+		by_model: weekRows(evidence, models, closes, verification, usage), usage,
+		qualification: { proof_class: "DESCRIPTIVE_SOURCE_COHORT", parent_week_live: "UNVERIFIED", causal_staffing_effect: "UNVERIFIED" },
+		limits: { max_models: MODEL_WEEK_MAX_MODELS, models_truncated: models.truncated } };
 }

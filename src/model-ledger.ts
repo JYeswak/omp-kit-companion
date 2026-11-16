@@ -5,6 +5,7 @@ import { readJsonl, type ReadResult } from "./kitlib/jsonl.ts";
 import { parseSessionJournalTail, readSessionTail } from "./plane-tern.ts";
 import { inspectModelActivity } from "./model-activity.ts";
 import { inspectVerifyLedger, type OriginalClaimEvidence } from "./verify-ledger.ts";
+import { inspectModelWeek } from "./work-doctor.ts";
 
 export const MODEL_JOURNAL_WINDOW_BYTES = 8 * 1024 * 1024;
 export type WorkingModelEvidence =
@@ -88,7 +89,7 @@ export const MODEL_LEDGER_RETENTION_DAYS = 28;
 export const MODEL_LEDGER_MAX_DAY_BYTES = 1024 * 1024;
 export const MODEL_LEDGER_MAX_EVENT_BYTES = 16 * 1024;
 
-type ModelLedgerEvent = {
+export type ModelLedgerEvent = {
 	schema_version: 1; producer: "omp-kit/model-ledger"; phase: "intent" | "outcome";
 	operation_id: string; at: string; kind: "claim" | "close" | "release"; actor: string;
 	tracker: string; beads: string[]; attribution: WorkingModelEvidence;
@@ -249,8 +250,9 @@ export function observeAuthorClaim(stateRoot: string | null, tracker: string, be
 /** Compose the human-facing inspection without making claim lookup read activity journals. */
 export function inspectModelLedger(stateRoot: string | null, project?: string, now = Date.now()) {
 	const tracker = project === undefined ? null : resolve(project, ".beads/beads.db");
-	return Object.assign(inspectClaimLedger(stateRoot, tracker, now), {
+	const evidence = Object.assign(inspectClaimLedger(stateRoot, tracker, now), {
 		activity: inspectModelActivity(stateRoot, now),
 		verification: inspectVerifyLedger(stateRoot, now, tracker ?? undefined),
 	});
+	return Object.assign(evidence, { weekly: inspectModelWeek(evidence, now) });
 }

@@ -45,6 +45,8 @@ export interface VerifyProjectedAttempt {
 	id: string;
 	key: string;
 	context: VerifyAttemptContext;
+	began_at: string;
+	finalized_at: string | null;
 	outcome: VerifyAttemptOutcome;
 	reason: string;
 	result_code: string | null;
@@ -519,6 +521,7 @@ export function inspectVerifyLedger(stateRoot: string | null, now = Date.now(), 
 		const complete = !!final && integrity === "KNOWN";
 		return { id: begin.id, attempt: stateRoot !== null && isAbsolute(stateRoot) && resolve(stateRoot) === stateRoot ? refFor(begin, stateRoot) : null,
 			key: keyOf(begin.context!), context: begin.context!,
+			began_at: begin.at, finalized_at: complete ? final!.at : null,
 			outcome: !complete ? "INCOMPLETE" : raw!.outcome, reason: complete ? raw!.reason : final ? "FINAL_EVIDENCE_UNRESOLVED" : "BEGIN_WITHOUT_FINALIZE",
 			result_code: complete ? raw!.result_code : null, export_commit: complete ? raw!.export_commit : null,
 			replayed: complete && raw!.replayed, complete, integrity,

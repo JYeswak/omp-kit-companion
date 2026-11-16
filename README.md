@@ -557,7 +557,7 @@ Use repeatable `--done` for explicit reports.
 | `--scope profile` | On-disk settings, with the limits of what they prove | `omp-kit doctor --scope profile` |
 | `--scope lsp` | Language-server configuration layers; `--deep --yes` probes TypeScript in a private fixture | `omp-kit doctor --scope lsp --file src/cli.ts` |
 | `--scope project-loading` | Startup inputs a project would load | `omp-kit doctor --scope project-loading --project PATH` |
-| `--scope work` / `--scope model` | Git/stale edits; claim/activity/verification evidence (source-only) | `omp-kit doctor --scope work` |
+| `--scope work` / `--scope model` | Git; weekly model rates/tokens, UNKNOWN (source-only; no live/causal proof) | `omp-kit doctor --scope work` |
 | `--scope sessions` | Running OMP sessions: `CURRENT`, `STALE`, or `UNVERIFIED` against the install | `omp-kit doctor --scope sessions` |
 | `--scope load` | Load average and memory pressure: `OK` or `CONTENDED` | `omp-kit doctor --scope load` |
 | `--scope memory` | Memory configuration readiness for a profile | `omp-kit doctor --scope memory --profile NAME` |

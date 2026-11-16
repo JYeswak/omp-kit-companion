@@ -3,6 +3,7 @@ import {
 	type ActivityEvent, type ActivityIdentity, type ActivityModel,
 } from "./model-activity-schema.ts";
 import { readActivityJournal } from "./model-activity-journal.ts";
+import { MODEL_USAGE_MAX_FILES, type ModelSessionSource } from "./model-work-usage.ts";
 
 export interface ActivityWindow { start_ms: number; end_ms: number; }
 export interface ModelContribution extends ActivityModel { known_active_ms: number; }
@@ -16,6 +17,8 @@ export interface ModelActivityInspection {
 	problems: string[];
 	cohort: { window: ActivityWindow; definition: string };
 	by_model: ModelContribution[];
+	session_sources: ModelSessionSource[];
+	session_sources_complete: boolean;
 	bytes_read?: number;
 	pages_read?: number;
 }
@@ -27,6 +30,15 @@ interface Boundary { at: number; delta: 1 | -1; model: ActivityModel; key: strin
 const NS_PER_MS = 1_000_000n;
 const segmentKey = (event: ActivityEvent) => `${event.identity.incarnation}\0${event.identity.segment_id}`;
 const modelKey = (model: ActivityModel) => `${model.provider}\0${model.model}`;
+
+/** Journal identity collection has its own bound, independent of interval union. */
+function recordSessionSource(sources: Map<string, ModelSessionSource>, journal: string, identity: string, sessionId: string): boolean {
+	const key = `${sessionId}\0${identity}`;
+	if (sources.has(key)) return true;
+	if (sources.size >= MODEL_USAGE_MAX_FILES) return false;
+	sources.set(key, { journal, identity, session_id: sessionId });
+	return true;
+}
 
 function sameIdentity(a: ActivityIdentity, b: ActivityIdentity): boolean {
 	return a.seat === b.seat && a.session_id === b.session_id && a.session_file === b.session_file
@@ -62,7 +74,8 @@ export function projectActivityRecords(
 			valid_processing_segment_coverage: null,
 			counts: { observed_segments: 0, valid_segments: 0, unknown_segments: 0, duplicate_events: 0 },
 			problems: [...problems, "INVALID_REPORTING_WINDOW"],
-			cohort: { window: { ...window }, definition: "Observed native processing segments; no unrecorded wall-time or request-duration inference" }, by_model: [] };
+			cohort: { window: { ...window }, definition: "Observed native processing segments; no unrecorded wall-time or request-duration inference" },
+			by_model: [], session_sources: [], session_sources_complete: false };
 	}
 	const count = Math.min(records.length, ACTIVITY_MAX_RECORDS);
 	if (records.length > count) { problems.add("RECORD_LIMIT"); trustworthyDenominator = false; }
@@ -117,6 +130,8 @@ export function projectActivityRecords(
 
 	let observed = 0, valid = 0, unknown = 0;
 	const boundaries = new Map<string, Boundary[]>();
+	const sessionSources = new Map<string, ModelSessionSource>();
+	let sessionSourcesComplete = true;
 	for (const [key, segment] of segments) {
 		if (!mayTouchWindow(segment, window)) continue;
 		observed++;
@@ -148,6 +163,8 @@ export function projectActivityRecords(
 		valid++;
 		const startClipped = Math.max(start, window.start_ms), endClipped = Math.min(end, window.end_ms);
 		if (endClipped <= startClipped) continue;
+		sessionSourcesComplete = recordSessionSource(sessionSources, open.identity.session_file,
+			open.identity.file_id, open.identity.session_id) && sessionSourcesComplete;
 		let seat = boundaries.get(open.identity.seat);
 		if (seat === undefined) boundaries.set(open.identity.seat, seat = []);
 		const modelId = modelKey(model);
@@ -204,6 +221,7 @@ export function projectActivityRecords(
 		problems: [...problems],
 		cohort: { window: { ...window }, definition: "Observed native processing segments, unioned per seat; excludes unrecorded time and request-duration inference" },
 		by_model: sumOverflow ? [] : [...contributions.values()],
+		session_sources: [...sessionSources.values()], session_sources_complete: sessionSourcesComplete,
 	};
 }
 
