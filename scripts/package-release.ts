@@ -66,6 +66,7 @@ const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/kit-goal-keepalive.ts": "GOAL_KEEPALIVE_BUNDLE_FAILED",
 	"extensions/kit-inbox-wake.ts": "INBOX_WAKE_BUNDLE_FAILED",
 	"extensions/kit-composer-state.ts": "COMPOSER_STATE_BUNDLE_FAILED",
+	"extensions/kit-model-activity.ts": "MODEL_ACTIVITY_BUNDLE_FAILED",
 	// MAILGUARDSLIM1: the guard reuses src/fleet-guard's shell tokenizer and seat identity.
 	"extensions/kit-agent-mail-guard.ts": "AGENT_MAIL_GUARD_BUNDLE_FAILED",
 	// UNSAVEDAGE1: the turn-end checkpoint imports src/kitlib/tmp.ts; shipped raw it would resolve outside the package.

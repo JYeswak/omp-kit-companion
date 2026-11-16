@@ -16,7 +16,7 @@
 Current release: v0.2.132
 <!-- kit-release:end -->
 
-A tested rule pack, 14 guard extensions, five skills, and a guarded CLI for an
+A tested rule pack, 15 extensions, five skills, and a guarded CLI for an
 existing OMP install.
 
 ```sh
@@ -151,7 +151,7 @@ command it runs.
 
 ### Guard extensions
 
-The repo is an OMP plugin. `package.json` declares 14 extensions:
+The repo is an OMP plugin. `package.json` declares 15 extensions; guards include:
 
 | Extension | Hooks | Behavior |
 |---|---|---|
@@ -557,7 +557,7 @@ Use repeatable `--done` for explicit reports.
 | `--scope profile` | On-disk settings, with the limits of what they prove | `omp-kit doctor --scope profile` |
 | `--scope lsp` | Language-server configuration layers; `--deep --yes` probes TypeScript in a private fixture | `omp-kit doctor --scope lsp --file src/cli.ts` |
 | `--scope project-loading` | Startup inputs a project would load | `omp-kit doctor --scope project-loading --project PATH` |
-| `--scope work` / `--scope model` | Git/stale edits + captured claims / causal model (capture source-only) | `omp-kit doctor --scope work` |
+| `--scope work` / `--scope model` | Git/stale edits + native claim/processing evidence / causal model (source-only) | `omp-kit doctor --scope work` |
 | `--scope sessions` | Running OMP sessions: `CURRENT`, `STALE`, or `UNVERIFIED` against the install | `omp-kit doctor --scope sessions` |
 | `--scope load` | Load average and memory pressure: `OK` or `CONTENDED` | `omp-kit doctor --scope load` |
 | `--scope memory` | Memory configuration readiness for a profile | `omp-kit doctor --scope memory --profile NAME` |

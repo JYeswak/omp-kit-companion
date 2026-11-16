@@ -22,7 +22,8 @@
       "extensions/secret-output-guard.ts",
       "extensions/kit-composer-state.ts",
       "extensions/kit-inbox-wake.ts",
-      "extensions/kit-goal-state.ts"
+      "extensions/kit-goal-state.ts",
+      "extensions/kit-model-activity.ts"
     ],
     "notLoadedExtensions": {
       "extensions/kit-composer-state.session-start-only.ts": "committed history-free test input for bead ompkit-t7cn7.18; loaded only via dynamic import in extensions/kit-composer-state.test.ts, never as a plugin extension",

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { Buffer } from "node:buffer";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { inspectModelLedger, observeWorkingModel, MODEL_LEDGER_MAX_READ_BYTES } from "../../src/model-ledger.ts";
@@ -7,6 +8,12 @@ import { run } from "../../src/kitlib/run.ts";
 import { nativeBr } from "./lib/native-br.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 import { fixturePycachePrefix } from "./lib/fixture-pycache.ts";
+import { projectActivityRecords } from "../../src/model-activity.ts";
+import type { ModelActivityInspection } from "../../src/model-activity.ts";
+import type { ActivityEvent, ActivityModel } from "../../src/model-activity-schema.ts";
+import { appendActivityEvent, readActivityJournal } from "../../src/model-activity-journal.ts";
+import { ACTIVITY_DIRECTORY, ACTIVITY_MAX_DAY_BYTES, ACTIVITY_MAX_FILES, ACTIVITY_MAX_READ_BYTES, isActivityEvent } from "../../src/model-activity-schema.ts";
+import type { ActivityApi, ActivityContext, default as ActivityExtension } from "../../extensions/kit-model-activity.ts";
 
 const sessionId = "claimmodel-session";
 const claimCall = "claimmodel-claim-call";
@@ -78,6 +85,21 @@ test("CLAIMMODEL1 ambiguous, off-branch and auxiliary-only causal matches stay U
 		journal(path, [{ type: "model_usage", id: "aux", parentId: null, activeLeafId: null,
 			model: "gpt-6.1-sol", toolCallId: claimCall }]);
 		expect(observe(path).status).toBe("UNKNOWN");
+	} finally { scratch.cleanup(); }
+});
+
+test("ACTIVECLOCK1 missing processing evidence is UNKNOWN, never zero active hours", () => {
+	const scratch = ownedTmp("activeclock-empty");
+	try {
+		const report = inspectModelLedger(scratch.path, undefined, Date.UTC(2026, 10, 16));
+		expect(report).toMatchObject({
+			activity: {
+				status: "UNKNOWN",
+				active_ms: null,
+				known_active_ms: null,
+				valid_processing_segment_coverage: null,
+			},
+		});
 	} finally { scratch.cleanup(); }
 });
 
@@ -355,7 +377,8 @@ function mutantModule(path: string, name: string, before: string, after: string)
 	let source = original.replace(before, after);
 	if (source === original) throw new Error(`CLAIMMODEL1 ${name} mutation anchor no longer matches`);
 	source = source.replace('"./plane-tern.ts"', JSON.stringify(join(root, "src/plane-tern.ts")))
-		.replace('"./kitlib/jsonl.ts"', JSON.stringify(join(root, "src/kitlib/jsonl.ts")));
+		.replace('"./kitlib/jsonl.ts"', JSON.stringify(join(root, "src/kitlib/jsonl.ts")))
+		.replace('"./model-activity.ts"', JSON.stringify(join(root, "src/model-activity.ts")));
 	const file = join(path, `${name}.ts`);
 	writeFileSync(file, source);
 	return file;
@@ -500,4 +523,532 @@ test("CLAIMMODEL1 supervised native failure preserves its signal and grants no s
 		const rows = JSON.parse(shown.out), bead = Array.isArray(rows) ? rows[0] : rows;
 		expect(bead.status).toBe("open");
 	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1000);
+
+type ActivityOpen = Extract<ActivityEvent, { kind: "open" }>;
+type ActivitySettle = Extract<ActivityEvent, { kind: "settle" }>;
+const ACTIVITY_BASE = Date.UTC(2026, 10, 16);
+const ACTIVITY_A: ActivityModel = { provider: "openai-codex", model: "gpt-6.1-sol" };
+const ACTIVITY_B: ActivityModel = { provider: "anthropic-api", model: "muse" };
+
+function activityPair(
+	index: number, start: number, end: number, model: ActivityModel,
+	seat = "tern:7001",
+): [ActivityOpen, ActivitySettle] {
+	const identity = { seat, session_id: `activity-session-${index}`,
+		session_file: `/activity/session-${index}.jsonl`, file_id: `1:${index + 1}`,
+		incarnation: `activity-epoch-${index}`, run_id: `activity-run-${index}`,
+		segment_id: `activity-segment-${index}`, turn_index: index };
+	return [
+		{ schema: 1, kind: "open", id: `${identity.segment_id}:open`, sequence: 1, identity,
+			clock: { epoch_ms: start, mono_ns: (BigInt(start) * 1_000_000n).toString() },
+			native_timestamp_ms: start },
+		{ schema: 1, kind: "settle", id: `${identity.segment_id}:settle`, sequence: 2, identity,
+			clock: { epoch_ms: end, mono_ns: (BigInt(end) * 1_000_000n).toString() },
+			model, models_seen: [model], reason: null },
+	];
+}
+
+test("ACTIVECLOCK1 clips processing to the week and unions same-seat overlap once by actual model", () => {
+	const rows = [
+		...activityPair(0, ACTIVITY_BASE - 50, ACTIVITY_BASE + 100, ACTIVITY_A),
+		...activityPair(1, ACTIVITY_BASE + 50, ACTIVITY_BASE + 150, ACTIVITY_A),
+		...activityPair(2, ACTIVITY_BASE + 200, ACTIVITY_BASE + 300, ACTIVITY_B),
+	];
+	const report = projectActivityRecords(rows, { start_ms: ACTIVITY_BASE, end_ms: ACTIVITY_BASE + 1000 });
+	expect(report).toMatchObject({ status: "KNOWN", active_ms: 250, known_active_ms: 250,
+		counts: { observed_segments: 3, valid_segments: 3, unknown_segments: 0 } });
+	expect(report.by_model.find(row => row.provider === ACTIVITY_A.provider && row.model === ACTIVITY_A.model))
+		.toMatchObject({ known_active_ms: 150 });
+	expect(report.by_model.find(row => row.provider === ACTIVITY_B.provider && row.model === ACTIVITY_B.model))
+		.toMatchObject({ known_active_ms: 100 });
+	const twoSeats = projectActivityRecords([
+		...activityPair(3, ACTIVITY_BASE, ACTIVITY_BASE + 100, ACTIVITY_A, "tern:7001"),
+		...activityPair(4, ACTIVITY_BASE, ACTIVITY_BASE + 100, ACTIVITY_A, "tern:7002"),
+	], { start_ms: ACTIVITY_BASE, end_ms: ACTIVITY_BASE + 1000 });
+	expect(twoSeats.active_ms).toBe(200);
+});
+
+test("ACTIVECLOCK1 overlapping different models retain unknown attribution without double credit", () => {
+	const report = projectActivityRecords([
+		...activityPair(0, ACTIVITY_BASE, ACTIVITY_BASE + 200, ACTIVITY_A),
+		...activityPair(1, ACTIVITY_BASE + 100, ACTIVITY_BASE + 300, ACTIVITY_B),
+	], { start_ms: ACTIVITY_BASE, end_ms: ACTIVITY_BASE + 1000 });
+	expect(report).toMatchObject({ status: "UNKNOWN", active_ms: null, known_active_ms: 300, unattributed_ms: 100 });
+	expect(report.by_model.reduce((sum, row) => sum + row.known_active_ms, 0)).toBe(200);
+});
+
+test("ACTIVECLOCK1 unpaired, replaced, invalid-clock and unproven-model endpoints never fabricate hours", () => {
+	const [open, settle] = activityPair(0, ACTIVITY_BASE, ACTIVITY_BASE + 100, ACTIVITY_A);
+	const cases: [string, unknown[]][] = [
+		["unmatched open", [open]],
+		["orphan settle", [settle]],
+		["source replaced", [open, { ...settle, identity: { ...settle.identity, file_id: "2:999" } }]],
+		["clock moved backwards", [open, { ...settle, clock: { ...settle.clock, epoch_ms: ACTIVITY_BASE - 1 } }]],
+		["epoch and monotonic disagree", [open, { ...settle, clock: { ...settle.clock, epoch_ms: ACTIVITY_BASE + 900 } }]],
+		["no actual primary model", [open, { ...settle, model: null, models_seen: [] }]],
+		["different primary models", [open, { ...settle, models_seen: [ACTIVITY_A, ACTIVITY_B] }]],
+		["source identity unavailable", [ { ...open, identity: { ...open.identity, file_id: null } },
+			{ ...settle, identity: { ...settle.identity, file_id: null } } ]],
+		["non-finite clock", [open, { ...settle, clock: { ...settle.clock, epoch_ms: Number.NaN } }]],
+	];
+	for (const [label, rows] of cases) {
+		const report = projectActivityRecords(rows, { start_ms: ACTIVITY_BASE, end_ms: ACTIVITY_BASE + 1000 });
+		expect({ label, status: report.status, active_ms: report.active_ms })
+			.toEqual({ label, status: "UNKNOWN", active_ms: null });
+		expect(report.problems.length, label).toBeGreaterThan(0);
+	}
+});
+
+test("ACTIVECLOCK1 replay is idempotent and conflicting replay or appended correction invalidates the segment", () => {
+	const pair = activityPair(0, ACTIVITY_BASE, ACTIVITY_BASE + 100, ACTIVITY_A);
+	const window = { start_ms: ACTIVITY_BASE, end_ms: ACTIVITY_BASE + 1000 };
+	const replayed = projectActivityRecords([...pair, ...pair], window);
+	expect(replayed).toMatchObject({ status: "KNOWN", active_ms: 100,
+		counts: { observed_segments: 1, valid_segments: 1, duplicate_events: 2 } });
+	const conflicting = projectActivityRecords([...pair, { ...pair[1], model: ACTIVITY_B, models_seen: [ACTIVITY_B] }], window);
+	expect(conflicting).toMatchObject({ status: "UNKNOWN", active_ms: null, known_active_ms: null,
+		valid_processing_segment_coverage: null });
+	const correction: ActivityEvent = { schema: 1, kind: "invalidate", id: "activity-correction", sequence: 3,
+		identity: pair[0].identity, clock: pair[1].clock, reason: "SOURCE_REPLACED" };
+	expect(projectActivityRecords([...pair, correction], window)).toMatchObject({
+		status: "UNKNOWN", active_ms: null, known_active_ms: null,
+	});
+	const gap = projectActivityRecords([pair[0], { ...pair[1], sequence: 3 }], window);
+	expect(gap).toMatchObject({ status: "UNKNOWN", active_ms: null, valid_processing_segment_coverage: null });
+});
+
+test("ACTIVECLOCK1 genuine zero-duration epoch-zero work is distinct from missing or unreadable evidence", () => {
+	expect(projectActivityRecords(activityPair(0, 0, 0, ACTIVITY_A), { start_ms: 0, end_ms: 1000 }))
+		.toMatchObject({ status: "KNOWN", active_ms: 0, known_active_ms: 0, counts: { valid_segments: 1 } });
+	expect(projectActivityRecords([], { start_ms: 0, end_ms: 1000 }))
+		.toMatchObject({ status: "UNKNOWN", active_ms: null, known_active_ms: null, valid_processing_segment_coverage: null });
+});
+
+interface ActivityFixtureMessage {
+	role: "assistant";
+	provider: string;
+	model: string;
+	api: string;
+	timestamp: number;
+	duration: number;
+	stopReason: "stop";
+	content: { type: "text"; text: string }[];
+	usage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number;
+		cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number } };
+}
+type ActivityHandler = (event: unknown, ctx: ActivityContext) => void | Promise<void>;
+interface ActivityFixture {
+	scratch: { path: string; cleanup(): void };
+	xdg: string;
+	state: string;
+	path: string;
+	clock: { ms: number; ns: bigint };
+	context: ActivityContext;
+	fire(name: string, data?: Record<string, unknown>): Promise<void>;
+	advance(ms: number): void;
+	message(model: ActivityModel, duration?: number): ActivityFixtureMessage;
+	turn(index: number, model: ActivityModel, elapsed?: number, duration?: number): Promise<void>;
+	inspect(): ModelActivityInspection;
+}
+
+interface ActivityFixtureOptions {
+	entry?: string;
+	stateRoot?: string;
+	sourceFile?: string;
+	incarnation?: string;
+	baseMs?: number;
+	pane?: string | null;
+}
+
+async function activityFixture(options: ActivityFixtureOptions = {}): Promise<ActivityFixture> {
+	const scratch = ownedTmp("activeclock-consumer");
+	const xdg = join(scratch.path, "state"), state = options.stateRoot ?? join(xdg, "omp-kit");
+	const path = options.sourceFile ?? join(scratch.path, "session.jsonl");
+	if (!existsSync(path)) journal(path, [], "activity-session");
+	const clock = { ms: options.baseMs ?? Date.now() - 86_400_000, ns: 1_000_000_000n };
+	const context: ActivityContext = {
+		cwd: scratch.path,
+		sessionManager: { getSessionId: () => "activity-session", getSessionFile: () => path },
+	};
+	const handlers = new Map<string, ActivityHandler[]>();
+	const api: ActivityApi = { on(name, handler) {
+		let list = handlers.get(name);
+		if (list === undefined) handlers.set(name, list = []);
+		list.push(handler);
+	} };
+	const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+	const paths: unknown = manifest.omp?.extensions;
+	if (!Array.isArray(paths)) { scratch.cleanup(); throw new Error("native plugin manifest has no extension entries"); }
+	const entry = paths.find((value: unknown): value is string =>
+		typeof value === "string" && value.endsWith("/kit-model-activity.ts"));
+	if (!entry) { scratch.cleanup(); throw new Error("native plugin manifest does not load the activity recorder"); }
+	try {
+		// The shipped runtime registry, or an owned synthetic mutant, selects the
+		// module. A static import would bypass the actual plugin load boundary.
+		const loaded: { default: typeof ActivityExtension } = await import(options.entry ?? join(root, entry));
+		await loaded.default(api, {
+			...(options.stateRoot === undefined ? {} : { stateRoot: options.stateRoot }),
+			env: { XDG_STATE_HOME: xdg, OMP_MODEL: "selected-default-must-not-supply-processing",
+				...(options.pane === null ? {} : { TERN_PANE: options.pane ?? "7001" }) },
+			now: () => clock.ms, monotonicNs: () => clock.ns,
+			incarnation: options.incarnation ?? "activity-fixture",
+		});
+	} catch (error) { scratch.cleanup(); throw error; }
+	async function fire(name: string, data: Record<string, unknown> = {}): Promise<void> {
+		for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...data }, context);
+	}
+	function advance(ms: number): void { clock.ms += ms; clock.ns += BigInt(ms) * 1_000_000n; }
+	function message(model: ActivityModel, duration = 9_999_999): ActivityFixtureMessage {
+		return { role: "assistant", provider: model.provider, model: model.model, api: "fixture-source",
+			timestamp: clock.ms, duration, stopReason: "stop", content: [{ type: "text", text: "owned fixture response" }],
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+	}
+	async function turn(index: number, model: ActivityModel, elapsed = 100, duration = 9_999_999): Promise<void> {
+		await fire("turn_start", { turnIndex: index, timestamp: clock.ms });
+		const actual = message(model, duration);
+		await fire("message_start", { message: actual });
+		advance(elapsed);
+		await fire("turn_end", { turnIndex: index, message: actual, toolResults: [] });
+	}
+	return { scratch, xdg, state, path, clock, context, fire, advance, message, turn,
+		inspect: () => inspectModelLedger(state, undefined, clock.ms + 1).activity };
+}
+
+test("ACTIVECLOCK1 the actually loaded native recorder excludes wait gaps and attributes each model through the real doctor CLI", async () => {
+	const f = await activityFixture();
+	try {
+		await f.fire("agent_start");
+		await f.turn(0, ACTIVITY_A, 100);
+		f.advance(600_000);
+		await f.turn(1, ACTIVITY_B, 200);
+		await f.fire("agent_end", { messages: [], willContinue: true, awaitingAsyncWork: true });
+		f.advance(600_000);
+		await f.fire("agent_start");
+		await f.turn(0, ACTIVITY_A, 50);
+		await f.fire("agent_end", { messages: [], willContinue: false });
+		expect(f.inspect()).toMatchObject({ status: "KNOWN", active_ms: 350,
+			counts: { observed_segments: 3, valid_segments: 3 } });
+		const wrapper = join(f.scratch.path, "candidate-cli.ts");
+		writeFileSync(wrapper, `import { runCli } from ${JSON.stringify(join(root, "src/cli.ts"))};\nprocess.exitCode = await runCli(process.argv.slice(2));\n`);
+		const observed = await run([process.execPath, wrapper, "doctor", "--scope", "work", "--project", f.scratch.path,
+			"--timeout-ms", "1000", "--jobs", "1", "--json"], {
+			cwd: f.scratch.path,
+			env: { PATH: process.env.PATH ?? "", HOME: f.scratch.path, XDG_STATE_HOME: f.xdg, TMPDIR: f.scratch.path },
+			deadline_s: fixtureDeadlineS(60), max_output_bytes: 1024 * 1024,
+		});
+		expect(observed.timed_out || observed.truncated).toBe(false);
+		expect(observed.rc, decoder.decode(observed.stderr)).toBe(0);
+		const report = JSON.parse(decoder.decode(observed.stdout)).data.model_ledger.activity;
+		expect(report).toMatchObject({ status: "KNOWN", active_ms: 350, known_active_ms: 350 });
+		expect(report.by_model).toEqual(expect.arrayContaining([
+			expect.objectContaining({ provider: ACTIVITY_A.provider, model: ACTIVITY_A.model, known_active_ms: 150 }),
+			expect.objectContaining({ provider: ACTIVITY_B.provider, model: ACTIVITY_B.model, known_active_ms: 200 }),
+		]));
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1000);
+
+test("ACTIVECLOCK1 native callbacks capture clocks before async writes and replayed boundaries do not open new work", async () => {
+	const f = await activityFixture();
+	try {
+		await f.fire("agent_start");
+		const start = { turnIndex: 0, timestamp: f.clock.ms }, actual = f.message(ACTIVITY_A);
+		const opening = f.fire("turn_start", start);
+		const duplicateOpening = f.fire("turn_start", start);
+		const modeling = f.fire("message_start", { message: actual });
+		f.advance(100);
+		const closing = f.fire("turn_end", { turnIndex: 0, message: actual, toolResults: [] });
+		await Promise.all([opening, duplicateOpening, modeling, closing]);
+		await f.fire("turn_end", { turnIndex: 0, message: actual, toolResults: [] });
+		expect(f.inspect()).toMatchObject({ status: "KNOWN", active_ms: 100,
+			counts: { observed_segments: 1, valid_segments: 1 } });
+		const before = readActivityJournal(f.state, f.clock.ms + 1);
+		// Persisted replay exercises the actual decoder without claiming a new
+		// native operation; the shared schema supplies the complete event type.
+		for (const row of before.records) {
+			if (isActivityEvent(row)) await appendActivityEvent(f.state, row, f.clock.ms);
+		}
+		expect(f.inspect()).toMatchObject({ status: "KNOWN", active_ms: 100, counts: { valid_segments: 1 } });
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1000);
+
+test("ACTIVECLOCK1 crash replacement retains incomplete evidence and never joins clocks across incarnations", async () => {
+	const old = await activityFixture({ pane: null, incarnation: "before-crash" });
+	let restarted: ActivityFixture | undefined;
+	try {
+		await old.fire("agent_start");
+		await old.fire("turn_start", { turnIndex: 0, timestamp: old.clock.ms });
+		restarted = await activityFixture({ pane: null, incarnation: "after-crash",
+			stateRoot: old.state, sourceFile: old.path, baseMs: old.clock.ms + 500 });
+		await restarted.fire("agent_start");
+		await restarted.turn(0, ACTIVITY_B, 100);
+		expect(restarted.inspect()).toMatchObject({ status: "UNKNOWN", active_ms: null, known_active_ms: 100,
+			counts: { observed_segments: 2, valid_segments: 1, unknown_segments: 1 } });
+	} finally { restarted?.scratch.cleanup(); old.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1000);
+
+test("ACTIVECLOCK1 a replaced live journal or missing primary-model start is not repaired with the selected role", async () => {
+	for (const replace of [true, false]) {
+		const f = await activityFixture();
+		try {
+			await f.fire("agent_start");
+			await f.fire("turn_start", { turnIndex: 0, timestamp: f.clock.ms });
+			const actual = f.message(ACTIVITY_A);
+			await f.fire("message_start", { message: replace ? actual : { role: "user", provider: "auxiliary", model: "haiku" } });
+			if (replace) { renameSync(f.path, `${f.path}.old`); journal(f.path, [], "activity-session"); }
+			f.advance(100);
+			await f.fire("turn_end", { turnIndex: 0, message: actual, toolResults: [] });
+			expect(f.inspect()).toMatchObject({ status: "UNKNOWN", active_ms: null, known_active_ms: null });
+		} finally { f.scratch.cleanup(); }
+	}
+}, fixtureDeadlineS(120) * 1000);
+
+test("ACTIVECLOCK1 a complete replay after observer restart is unioned once for the same real session seat", async () => {
+	const first = await activityFixture({ pane: null, incarnation: "complete-replay-1" });
+	let replay: ActivityFixture | undefined;
+	try {
+		const start = first.clock.ms;
+		await first.fire("agent_start");
+		await first.turn(0, ACTIVITY_A, 100);
+		replay = await activityFixture({ pane: null, incarnation: "complete-replay-2",
+			stateRoot: first.state, sourceFile: first.path, baseMs: start });
+		await replay.fire("agent_start");
+		await replay.turn(0, ACTIVITY_A, 100);
+		expect(replay.inspect()).toMatchObject({ status: "KNOWN", active_ms: 100, known_active_ms: 100,
+			counts: { observed_segments: 2, valid_segments: 2 } });
+	} finally { replay?.scratch.cleanup(); first.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1000);
+
+async function activityResources(state: string): Promise<string[]> {
+	const resources: string[] = [], prefix = `${ACTIVITY_DIRECTORY}/`;
+	for await (const name of new Bun.Glob("**/*").scan({ cwd: state, onlyFiles: true, dot: true })) {
+		const page = name.startsWith(prefix) && name.length === prefix.length + 16 && name.endsWith(".jsonl");
+		if (!page && name !== `${prefix}current.jsonl`) resources.push(name);
+	}
+	return resources.sort();
+}
+
+test("ACTIVECLOCK1 daily rotation bounds producer pages and persistent resources while doctor never expires data", async () => {
+	const f = await activityFixture();
+	try {
+		await f.fire("agent_start");
+		await f.turn(0, ACTIVITY_A, 100);
+		writeFileSync(join(f.state, "resource-control"), "owned matching resource control\n", { mode: 0o600 });
+		const before = await activityResources(f.state);
+		expect(before).toContain("resource-control");
+		for (let day = 1; day < 35; day++) {
+			f.advance(86_400_000);
+			await f.turn(day, ACTIVITY_A, 100);
+		}
+		const after = await activityResources(f.state);
+		const directory = join(f.state, ACTIVITY_DIRECTORY);
+		const pages = readdirSync(directory).filter((name: string) => name.endsWith(".jsonl") && name !== "current.jsonl");
+		expect(after).toEqual(before);
+		expect(pages.length).toBeLessThanOrEqual(ACTIVITY_MAX_FILES);
+		expect(f.inspect().status).toBe("KNOWN");
+		console.log("ACTIVECLOCK1 rotated resource bound", JSON.stringify({
+			before: before.length, after: after.length, pages: pages.length, bound: ACTIVITY_MAX_FILES,
+		}));
+		const expired = join(directory, "1970-01-01.jsonl"), foreign = join(directory, "1970-01-02.jsonl");
+		writeFileSync(expired, JSON.stringify({ schema: 1, producer: "omp-kit/native-model-activity", day: "1970-01-01" }) + "\n", { mode: 0o600 });
+		writeFileSync(foreign, "foreign evidence must remain byte-identical\n", { mode: 0o600 });
+		const expiredBefore = readFileSync(expired), foreignBefore = readFileSync(foreign), metadata = statSync(expired);
+		const readback = readActivityJournal(f.state, f.clock.ms + 1);
+		expect(readback.complete).toBe(false);
+		expect(readFileSync(expired)).toEqual(expiredBefore);
+		expect(readFileSync(foreign)).toEqual(foreignBefore);
+		expect(statSync(expired).mtimeMs).toBe(metadata.mtimeMs);
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(180) * 1000);
+
+test("ACTIVECLOCK1 a crash before the dated link is recovered without rewriting the captured history", async () => {
+	const f = await activityFixture();
+	try {
+		await f.fire("agent_start");
+		await f.turn(0, ACTIVITY_A, 100);
+		const directory = join(f.state, ACTIVITY_DIRECTORY);
+		const day = new Date(f.clock.ms).toISOString().slice(0, 10), page = join(directory, `${day}.jsonl`);
+		const captured = readFileSync(page, "utf8"), inode = statSync(page).ino;
+		unlinkSync(page);
+		expect(readActivityJournal(f.state, f.clock.ms + 1).complete).toBe(false);
+		await f.turn(1, ACTIVITY_B, 200);
+		expect(statSync(page).ino).toBe(inode);
+		expect(readFileSync(page, "utf8").startsWith(captured)).toBe(true);
+		expect(f.inspect()).toMatchObject({ status: "KNOWN", active_ms: 300, counts: { valid_segments: 2 } });
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1000);
+
+test("ACTIVECLOCK1 the real reader continues beyond its first chunk and capacity never becomes native-operation refusal", async () => {
+	const f = await activityFixture();
+	try {
+		await f.fire("agent_start");
+		await f.turn(0, ACTIVITY_A, 100);
+		const page = join(f.state, ACTIVITY_DIRECTORY, `${new Date(f.clock.ms).toISOString().slice(0, 10)}.jsonl`);
+		const bulk: ActivityEvent[] = [];
+		for (let index = 0; index < 100; index++) bulk.push(...activityPair(index, f.clock.ms - 90, f.clock.ms - 50, ACTIVITY_A));
+		appendFileSync(page, bulk.map(row => JSON.stringify(row)).join("\n") + "\n");
+		expect(statSync(page).size).toBeGreaterThan(64 * 1024);
+		expect(f.inspect()).toMatchObject({ status: "KNOWN", active_ms: 100, counts: { valid_segments: 101 } });
+		const padding = JSON.stringify(bulk[0]) + "\n", target = ACTIVITY_MAX_DAY_BYTES - 32 * 1024;
+		appendFileSync(page, padding.repeat(Math.ceil((target - statSync(page).size) / Buffer.byteLength(padding))));
+		const full = statSync(page).size;
+		expect(full).toBeLessThanOrEqual(ACTIVITY_MAX_DAY_BYTES);
+		await f.turn(1, ACTIVITY_B, 100);
+		expect(statSync(page).size).toBeLessThanOrEqual(ACTIVITY_MAX_DAY_BYTES);
+		expect(f.inspect()).toMatchObject({ status: "UNKNOWN", active_ms: null,
+			valid_processing_segment_coverage: null });
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1000);
+
+test("ACTIVECLOCK1 oversized owned evidence has a hard read budget and cannot receive complete coverage", async () => {
+	const f = await activityFixture();
+	try {
+		await f.fire("agent_start");
+		await f.turn(0, ACTIVITY_A, 100);
+		const page = join(f.state, ACTIVITY_DIRECTORY, `${new Date(f.clock.ms).toISOString().slice(0, 10)}.jsonl`);
+		const header = readFileSync(page, "utf8").split("\n", 1)[0] + "\n";
+		const event = activityPair(0, f.clock.ms - 100, f.clock.ms, ACTIVITY_A)[0];
+		const wide = JSON.stringify({ ...event, identity: { ...event.identity, session_file: `/${"x".repeat(4095)}` } }) + "\n";
+		writeFileSync(page, header + wide.repeat(Math.ceil((ACTIVITY_MAX_READ_BYTES + 64 * 1024) / Buffer.byteLength(wide))));
+		const readback = readActivityJournal(f.state, f.clock.ms + 1);
+		expect(readback.complete).toBe(false);
+		expect(readback.bytes_read).toBeLessThanOrEqual(ACTIVITY_MAX_READ_BYTES);
+		expect(readback.problems).toContain("ACTIVITY_READ_LIMIT");
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1000);
+
+test("ACTIVECLOCK1 unavailable state and a bounded write queue preserve explicit lost coverage without rejecting native callbacks", async () => {
+	const blocked = ownedTmp("activeclock-unavailable");
+	const state = join(blocked.path, "not-a-directory");
+	writeFileSync(state, "preserved foreign state path\n");
+	const unavailable = await activityFixture({ stateRoot: state });
+	try {
+		await unavailable.fire("agent_start");
+		await unavailable.turn(0, ACTIVITY_A, 100);
+		expect(unavailable.inspect()).toMatchObject({ status: "UNKNOWN", active_ms: null, known_active_ms: null });
+		expect(readFileSync(state, "utf8")).toBe("preserved foreign state path\n");
+	} finally { unavailable.scratch.cleanup(); blocked.cleanup(); }
+	const f = await activityFixture();
+	try {
+		await f.fire("agent_start");
+		const calls: Promise<void>[] = [];
+		for (let index = 0; index < 1000; index++) {
+			const actual = f.message(ACTIVITY_A);
+			calls.push(f.fire("turn_start", { turnIndex: index, timestamp: f.clock.ms }));
+			calls.push(f.fire("message_start", { message: actual }));
+			f.advance(1);
+			calls.push(f.fire("turn_end", { turnIndex: index, message: actual, toolResults: [] }));
+		}
+		await Promise.all(calls);
+		const evidence = readActivityJournal(f.state, f.clock.ms + 1);
+		expect(evidence.records.some(row => isActivityEvent(row) && row.kind === "loss" && row.reason === "RECORDER_QUEUE_LIMIT")).toBe(true);
+		expect(f.inspect()).toMatchObject({ status: "UNKNOWN", active_ms: null, valid_processing_segment_coverage: null });
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1000);
+
+interface ActivityMutant { entry: string; scratch: { path: string; cleanup(): void }; }
+function activityMutant(kind: "recorder" | "projector", needle: string, replacement: string): ActivityMutant {
+	const scratch = ownedTmp("activeclock-mutant");
+	try {
+		const area = kind === "recorder" ? "extensions" : "src";
+		const file = kind === "recorder" ? "kit-model-activity.ts" : "model-activity.ts";
+		const source = readFileSync(join(root, area, file), "utf8"), at = source.indexOf(needle);
+		if (at < 0 || source.indexOf(needle, at + needle.length) >= 0) throw new Error("activity mutation is not uniquely planted");
+		mkdirSync(join(scratch.path, area));
+		if (kind === "recorder") symlinkSync(join(root, "src"), join(scratch.path, "src"), "dir");
+		else {
+			symlinkSync(join(root, "src/model-activity-schema.ts"), join(scratch.path, "src/model-activity-schema.ts"));
+			symlinkSync(join(root, "src/model-activity-journal.ts"), join(scratch.path, "src/model-activity-journal.ts"));
+			symlinkSync(join(root, "src/kitlib"), join(scratch.path, "src/kitlib"), "dir");
+		}
+		const entry = join(scratch.path, area, file);
+		// This is a disposable synthetic source input, never a second mutable
+		// product home. Every assertion below judges its actual persisted result.
+		writeFileSync(entry, source.slice(0, at) + replacement + source.slice(at + needle.length));
+		return { entry, scratch };
+	} catch (error) { scratch.cleanup(); throw error; }
+}
+function activityOracle(report: ModelActivityInspection, expected: number): boolean {
+	return report.status === "KNOWN" && report.active_ms === expected;
+}
+async function activityDurationOutcome(entry?: string): Promise<ModelActivityInspection> {
+	const f = await activityFixture({ entry });
+	try {
+		await f.fire("agent_start");
+		await f.turn(0, ACTIVITY_A, 100, 60_000);
+		return inspectModelLedger(f.state, undefined, f.clock.ms + 60_001).activity;
+	} finally { f.scratch.cleanup(); }
+}
+async function activityReplayOutcome(entry?: string): Promise<ModelActivityInspection> {
+	const first = await activityFixture({ entry, pane: null, incarnation: "oracle-replay-1" });
+	let second: ActivityFixture | undefined;
+	try {
+		const start = first.clock.ms;
+		await first.fire("agent_start");
+		await first.turn(0, ACTIVITY_A, 100);
+		second = await activityFixture({ entry, pane: null, incarnation: "oracle-replay-2",
+			stateRoot: first.state, sourceFile: first.path, baseMs: start });
+		await second.fire("agent_start");
+		await second.turn(0, ACTIVITY_A, 100);
+		return second.inspect();
+	} finally { second?.scratch.cleanup(); first.scratch.cleanup(); }
+}
+
+test("ACTIVECLOCK1 the real persisted consumer oracle kills request-duration attribution", async () => {
+	const needle = 'pi.on("turn_end", (value, ctx) => {\n\t\tconst clock = sample(), current = observe(ctx, clock);';
+	const replacement = [
+		'pi.on("turn_end", (value, ctx) => {',
+		"\t\tconst measured = sample();",
+		'\t\tconst requestMs = object(value) && object(value.message) && typeof value.message.duration === "number" ? value.message.duration : 0;',
+		"\t\tconst clock: ActivityClockSample = { epoch_ms: measured.epoch_ms === null ? null : measured.epoch_ms + requestMs,",
+		"\t\t\tmono_ns: measured.mono_ns === null ? null : (BigInt(measured.mono_ns) + BigInt(requestMs) * 1_000_000n).toString() };",
+		"\t\tconst current = observe(ctx, clock);",
+	].join("\n");
+	const mutant = activityMutant("recorder", needle, replacement);
+	try {
+		const control = await activityDurationOutcome(), changed = await activityDurationOutcome(mutant.entry);
+		const witness = { control: { accepted: activityOracle(control, 100), observed: control.active_ms },
+			mutant: { accepted: activityOracle(changed, 100), observed: changed.active_ms, known: changed.known_active_ms }, expected: 100 };
+		console.log("ACTIVECLOCK1 request-duration mutant", JSON.stringify(witness));
+		expect(witness.control.accepted).toBe(true);
+		expect(witness.mutant.accepted).toBe(false);
+	} finally { mutant.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1000);
+
+test("ACTIVECLOCK1 the actual journal consumer oracle kills continuous credit across a waiting gap", async () => {
+	const f = await activityFixture();
+	const mutant = activityMutant("projector", "if (span > 0 && active.size > 0) {", "if (span > 0) {");
+	try {
+		const start = f.clock.ms;
+		await f.fire("agent_start");
+		await f.turn(0, ACTIVITY_A, 100);
+		f.advance(10_000);
+		await f.turn(1, ACTIVITY_A, 100);
+		const source = readActivityJournal(f.state, f.clock.ms + 1);
+		const window = { start_ms: start, end_ms: f.clock.ms + 1 };
+		const context = { complete: source.complete, problems: source.problems };
+		const control = projectActivityRecords(source.records, window, context);
+		// An owned synthetic source path selects the changed production module;
+		// static import would erase the deliberate mutation boundary.
+		const loaded: { projectActivityRecords: typeof projectActivityRecords } = await import(mutant.entry);
+		const changed = loaded.projectActivityRecords(source.records, window, context);
+		const witness = { control: { accepted: activityOracle(control, 200), observed: control.active_ms },
+			mutant: { accepted: activityOracle(changed, 200), observed: changed.active_ms, known: changed.known_active_ms }, expected: 200 };
+		console.log("ACTIVECLOCK1 continuous-wait mutant", JSON.stringify(witness));
+		expect(witness.control.accepted).toBe(true);
+		expect(witness.mutant.accepted).toBe(false);
+	} finally { mutant.scratch.cleanup(); f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1000);
+
+test("ACTIVECLOCK1 the same native session consumer oracle kills duplicate replay credit after restart", async () => {
+	const mutant = activityMutant("recorder", "return `session:${current.session}`;", "return `session:${incarnation}`;");
+	try {
+		const control = await activityReplayOutcome(), changed = await activityReplayOutcome(mutant.entry);
+		const witness = { control: { accepted: activityOracle(control, 100), observed: control.active_ms },
+			mutant: { accepted: activityOracle(changed, 100), observed: changed.active_ms }, expected: 100 };
+		console.log("ACTIVECLOCK1 duplicate-credit mutant", JSON.stringify(witness));
+		expect(witness.control.accepted).toBe(true);
+		expect(witness.mutant.accepted).toBe(false);
+	} finally { mutant.scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1000);

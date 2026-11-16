@@ -3,6 +3,7 @@ import { opendirSync, realpathSync, type Dir } from "node:fs";
 import { join, resolve } from "node:path";
 import { readJsonl, type ReadResult } from "./kitlib/jsonl.ts";
 import { parseSessionJournalTail, readSessionTail } from "./plane-tern.ts";
+import { inspectModelActivity } from "./model-activity.ts";
 
 export const MODEL_JOURNAL_WINDOW_BYTES = 8 * 1024 * 1024;
 export type WorkingModelEvidence =
@@ -207,6 +208,7 @@ export function inspectModelLedger(stateRoot: string | null, project?: string, n
 	return { status: complete ? "KNOWN" : "UNKNOWN", problems: [...new Set(problems)],
 		cohort: { definition: "Captured shim claim invocations with native rc 0; not all tracker writes or active working time",
 			tracker, start: new Date(start).toISOString(), end: new Date(now).toISOString() },
+		activity: inspectModelActivity(stateRoot, now),
 		counts: { successful_claims: claims, known_claims: known, unknown_claims: claims - known, unresolved_claims: pending, unresolved_operations: unresolved, refused_operations: refused },
 		known_claim_model_coverage: complete && claims > 0 ? 100 * known / claims : null,
 		bytes_read: bytesRead, limits: { max_files: MODEL_LEDGER_MAX_FILES, max_read_bytes: MODEL_LEDGER_MAX_READ_BYTES,
