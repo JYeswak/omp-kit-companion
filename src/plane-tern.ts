@@ -183,11 +183,12 @@ export type TernIdentityResult =
 	| { status: "UNKNOWN"; reason: string; agent: null; binding: null; cwdOk: false; runtimeBinding: null };
 
 /** Test seam at the external command and session-file read boundaries. `readSessionFile` returns the whole
- * file within the parse cap; `readSessionTail`, when present, is the bounded fallback for a larger file. */
+ * file within the parse cap; `readSessionTail`, when present, is the bounded fallback for a larger file.
+ * The "bounded" policy keeps a fixed window and any requested proof range rather than recovering idle ancestry. */
 export interface TernObserverIo {
 	run(argv: string[], env?: Record<string, string>): { code: number; out: string };
 	readSessionFile(path: string): string | null;
-	readSessionTail?(path: string, proof?: SessionProofRange): SessionJournalView | null;
+	readSessionTail?(path: string, proof?: SessionProofRange, policy?: "bounded"): SessionJournalView | null;
 	wait(ms: number): Promise<void>;
 }
 
@@ -1053,12 +1054,13 @@ function readAnchoredSessionTail(path: string, proof?: SessionProofRange): Sessi
 }
 
 /** The seat's session file: whole within the parse cap, else the io's bounded tail; null when unreadable.
- * `proof` asks a bounded read to also carry a proof key's pinned range (readSessionTail). */
-export function readSessionView(io: TernObserverIo, path: string, proof?: SessionProofRange): SessionJournalView | null {
+ * `proof` asks a bounded read to also carry a proof key's pinned range (readSessionTail).
+ * The optional "bounded" policy keeps a fixed window when idle-ancestry recovery is not needed. */
+export function readSessionView(io: TernObserverIo, path: string, proof?: SessionProofRange, policy?: "bounded"): SessionJournalView | null {
 	try {
 		const text = io.readSessionFile(path);
 		if (text !== null) return sessionViewOfText(text);
-		return io.readSessionTail ? io.readSessionTail(path, proof) : null;
+		return io.readSessionTail ? io.readSessionTail(path, proof, policy) : null;
 	} catch {
 		return null;
 	}
@@ -1244,8 +1246,8 @@ export function defaultTernIo(): TernObserverIo {
 				return text;
 			} catch { return null; }
 		},
-		readSessionTail(path, proof) {
-			return readAnchoredSessionTail(path, proof);
+		readSessionTail(path, proof, policy) {
+			return policy === "bounded" ? readSessionTail(path, SESSION_TAIL_WINDOW_BYTES, proof) : readAnchoredSessionTail(path, proof);
 		},
 		wait(ms) { return new Promise<void>((resolve) => setTimeout(resolve, ms)); },
 	};

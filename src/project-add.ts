@@ -818,38 +818,42 @@ function goalRecordOf(value: unknown): { mode: unknown; goal: { id?: unknown; ob
 
 /** Latest session mode wins; ordinary messages do not change goal state. A pause also reports its
  * record timestamp (pausedAt) so a reader can tell a restore-caused pause from one made before boot. */
-function scanGoalState(text: string): { activeGoal: { id: string; objective: string } | null; paused: boolean; pausedAt?: string } {
-	let last: { mode: string; id: string; objective: string; status: string; at?: string } | null = null;
-	for (const line of text.split("\n")) {
+function scanGoalState(text: string, complete = true): { activeGoal: { id: string; objective: string } | null; paused: boolean; pausedAt?: string } | null {
+	if (!complete && !text.endsWith("\n")) return null;
+	const lines = text.split("\n");
+	for (let index = lines.length - 1; index >= 0; index--) {
+		const line = lines[index]!;
 		if (line.trim() === "") continue;
 		let value: unknown;
 		try {
 			value = JSON.parse(line);
 		} catch {
+			if (!complete) return null;
 			continue;
 		}
 		const record = goalRecordOf(value);
 		if (record === null) continue;
 		if (typeof value !== "object" || value === null) continue;
 		const id = (value as Record<string, unknown>).id;
-		if (typeof id !== "string" || id === "") continue;
-		if (record.mode !== "goal" && record.mode !== "goal_paused") {
-			last = null;
+		if (typeof id !== "string" || id === "") {
+			if (!complete) return null;
 			continue;
 		}
 		if (record.mode === "goal_paused") {
 			const at = (value as Record<string, unknown>).timestamp;
-			last = { mode: "goal_paused", id, objective: "", status: "paused", ...(typeof at === "string" ? { at } : {}) };
+			return { activeGoal: null, paused: true, ...(typeof at === "string" ? { pausedAt: at } : {}) };
+		}
+		if (record.mode !== "goal") return { activeGoal: null, paused: false };
+		const goal = record.goal;
+		if (goal === null || typeof goal.id !== "string" || goal.id === "" || typeof goal.objective !== "string" || typeof goal.status !== "string") {
+			if (!complete) return null;
 			continue;
 		}
-		const goal = record.goal;
-		if (goal === null || typeof goal.id !== "string" || goal.id === "" || typeof goal.objective !== "string" || typeof goal.status !== "string") continue;
-		last = { mode: "goal", id: goal.id, objective: goal.objective, status: goal.status };
+		return goal.status === "active" ? { activeGoal: { id: goal.id, objective: goal.objective }, paused: false } : { activeGoal: null, paused: false };
 	}
-	if (last === null) return { activeGoal: null, paused: false };
-	if (last.mode === "goal_paused") return { activeGoal: null, paused: true, ...(last.at === undefined ? {} : { pausedAt: last.at }) };
-	return last.status === "active" ? { activeGoal: { id: last.id, objective: last.objective }, paused: false } : { activeGoal: null, paused: false };
+	return complete ? { activeGoal: null, paused: false } : null;
 }
+
 
 async function readDirectorGoalState(input: { session: string; pane: string; repo: string; env: NodeJS.ProcessEnv; io: TernObserverIo }): Promise<{ ok: true; state: DirectorGoalState } | { ok: false; code: string; detail: string; remediation: string }> {
 	const seat: TernSeatBinding = { session: input.session, pane: input.pane, windowKey: "", cwd: input.repo, identityProject: input.repo };
@@ -862,14 +866,12 @@ async function readDirectorGoalState(input: { session: string; pane: string; rep
 	if (observation.state === "DEAD") return failGoal("SEAT_DEAD", "seat pane is dead; zero sends", "Restart the seat, then set the goal again.");
 	const sessionFile = observation.sessionFile;
 	if (sessionFile === null) return failGoal("OBSERVATION_UNKNOWN", "seat has no readable session file; zero sends", "Inspect the seat host; the goal was not changed.");
-	let text: string | null;
-	try {
-		text = input.io.readSessionFile(sessionFile);
-	} catch {
-		text = null;
-	}
-	if (text === null) return failGoal("OBSERVATION_UNKNOWN", "seat session file is unreadable; zero sends", "Inspect the seat host; the goal was not changed.");
-	const scanned = scanGoalState(text);
+	const journal = readSessionView(input.io, sessionFile, undefined, "bounded");
+	if (journal === null) return failGoal("OBSERVATION_UNKNOWN", "seat session file is unreadable; zero sends", "Inspect the seat host; the goal was not changed.");
+	const cut = journal.tailStart > 0 && journal.cutAtRecord !== true;
+	const boundary = cut ? journal.tail.indexOf(0x0a) : -1;
+	const scanned = cut && boundary < 0 ? null : scanGoalState(journal.tail.toString("utf8", cut ? boundary + 1 : 0), journal.tailStart === 0);
+	if (scanned === null) return failGoal("OBSERVATION_UNKNOWN", "goal checkpoint is unavailable in the session window; zero sends", "Wait for a complete native goal checkpoint; the goal was not changed.");
 	return { ok: true, state: { sessionFile, activeGoal: scanned.activeGoal, paused: scanned.paused } };
 }
 
@@ -1272,31 +1274,21 @@ export async function deliverGoalDrop(input: {
 }
 
 function readGoalIdAt(input: { io: TernObserverIo; sessionFile: string; offset: number }): string | null {
-	let text: string | null;
+	if (!Number.isSafeInteger(input.offset) || input.offset < 0) return null;
+	const view = readSessionView(input.io, input.sessionFile, { start: input.offset, cursor: input.offset }, "bounded");
+	if (view === null) return null;
+	const bytes = view.proofRange?.bytes ?? view.tail;
+	const start = input.offset - (view.proofRange?.start ?? view.tailStart);
+	if (start < 0 || start >= bytes.length) return null;
+	const end = bytes.indexOf(0x0a, start);
+	if (end < 0) return null;
 	try {
-		text = input.io.readSessionFile(input.sessionFile);
+		const record = goalRecordOf(JSON.parse(bytes.toString("utf8", start, end)));
+		const id = record?.mode === "goal" ? record.goal?.id : null;
+		return typeof id === "string" && id !== "" ? id : null;
 	} catch {
 		return null;
 	}
-	if (text === null) return null;
-	let position = 0;
-	for (const line of text.split("\n")) {
-		if (line === "") {
-			position += 1;
-			continue;
-		}
-		if (position === input.offset) {
-			try {
-				const record = JSON.parse(line) as { data?: { goal?: { id?: unknown } } };
-				const id = record?.data?.goal?.id;
-				return typeof id === "string" && id !== "" ? id : null;
-			} catch {
-				return null;
-			}
-		}
-		position += Buffer.byteLength(line, "utf8") + 1;
-	}
-	return null;
 }
 
 export async function applyProjectGoal(input: ProjectGoalInput): Promise<{ ok: true; result: ProjectGoalApplied } | { ok: false; code: string; detail: string; remediation: string; partial?: boolean }> {
@@ -1539,9 +1531,9 @@ export async function projectStatus(input: { session: string; env: NodeJS.Proces
 			} catch { lastActivity = null; }
 			try {
 				const scanned = scanGoalState(readFileSync(file, "utf8"));
-				activeGoal = scanned.activeGoal?.objective ?? null;
-				goalPaused = scanned.paused;
-				goalPausedAt = scanned.pausedAt ?? null;
+				activeGoal = scanned?.activeGoal?.objective ?? null;
+				goalPaused = scanned?.paused ?? false;
+				goalPausedAt = scanned?.pausedAt ?? null;
 			} catch { activeGoal = null; goalPaused = false; goalPausedAt = null; }
 		}
 		return {

@@ -24,6 +24,12 @@ export type Fixture = {
 	workerBlock: string;
 	env: Record<string, string>;
 	killDecoys: () => void;
+	mail: {
+		calls: { tool: string; args: Record<string, unknown> }[];
+		minted: string[];
+		port: number | undefined;
+		server: { stop(closeActiveConnections?: boolean): void };
+	};
 };
 
 export const assistantEntry = (id: string, parentId: string | null, text = "ready") =>
