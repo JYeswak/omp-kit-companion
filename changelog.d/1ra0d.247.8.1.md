@@ -1,0 +1,1 @@
+- Capture native claim/close model evidence from the originating OMP journal entry, preserving author/peer identity and native results; inspect bounded, explicit UNKNOWN evidence through `doctor --scope model` and `doctor --scope work`.

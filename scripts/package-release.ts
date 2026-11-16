@@ -29,7 +29,7 @@ for (const file of RELEASE_DATA_FILES) {
 const files = ["CHANGELOG.md", "LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
 	"scripts/package-release.sh", "scripts/receipt.py", "scripts/pysafe.py", "scripts/kitlib_run.py", "scripts/pysafe_check.py", "scripts/pysafe_inline.py", "scripts/pysafe_inline_literals.py", "scripts/check-staged-pysafe.sh",
 	"scripts/br-shim.sh", "scripts/claim_verdict.py",
-	"scripts/br-fixture-scope.py",
+	"scripts/br-fixture-scope.py", "scripts/model-mutation.py",
 	"scripts/br-create-guard.py",
 	"scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py", "scripts/fresh-gate.sh",
 	"scripts/release-preflight.sh", "scripts/fixed-env.sh",

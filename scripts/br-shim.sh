@@ -100,7 +100,7 @@ fi
 # so they retain ownership, publication and Lesson requirements.
  gate_sub=""; gate_id=""; gate_status=""; gate_db=""; gate_claim=0; gate_skip=0; gate_reason=""; gate_want_reason=0; gate_tcomment=""; gate_want_tcomment=0
 gate_comment_id=""; gate_pos_comment=""; gate_literal=0
-gate_extra_ids=0
+gate_extra_ids=0; gate_model_ids=""
 gate_index=0; gate_file=0; gate_want_file=0; gate_file_index=0; gate_file_form=""; gate_file_path=""
 gate_no_auto_flush=0; gate_no_auto_import=0; gate_unsafe_export_mode=0
  for gate_arg in "$@"; do
@@ -153,11 +153,14 @@ gate_no_auto_flush=0; gate_no_auto_import=0; gate_unsafe_export_mode=0
 			if [ "$gate_status" = "next" ]; then gate_status="$gate_arg";
 			elif [ "$gate_db" = "next" ]; then gate_db="$gate_arg";
 			elif [ -z "$gate_sub" ]; then gate_sub="$gate_arg";
-			elif [ -z "$gate_id" ]; then gate_id="$gate_arg";
+			elif [ -z "$gate_id" ]; then gate_id="$gate_arg"; gate_model_ids="$gate_arg";
 			elif [ "$gate_sub" = comments ] && [ "$gate_id" = add ]; then
 				if [ -z "$gate_comment_id" ]; then gate_comment_id=$gate_arg;
 				else gate_pos_comment="${gate_pos_comment:+$gate_pos_comment }$gate_arg"; fi
-			elif [ "$gate_sub" = update ]; then gate_extra_ids=1
+			elif [ "$gate_sub" = update ] || [ "$gate_sub" = close ]; then
+				[ "$gate_sub" != update ] || gate_extra_ids=1
+				gate_model_ids="$gate_model_ids
+$gate_arg"
 			fi ;;
 	esac
 done
@@ -191,6 +194,25 @@ for shim_db in "$gate_db" "${BEADS_DB:-}"; do
 		*'$'*) fail "BR_SHIM_DB_LITERAL refusing tracker path '$shim_db': it holds an unexpanded \$ variable, and br would create a new database there" ;;
 	esac
 done
+# CLAIMMODEL1: only admitted native claim/close/release invocations enter this private
+# callee. It adds evidence, never admission, and preserves native argv and standard IO.
+native_exec() {
+	model_kind=""
+	case "$gate_sub:$gate_claim:$gate_status" in
+		update:1:*) model_kind=claim ;;
+		close:*:*|update:*:closed) model_kind=close ;;
+		update:*:open|reopen:*:*) model_kind=release ;;
+	esac
+	if [ -n "$model_kind" ] && [ -n "$gate_model_ids" ]; then
+		model_helper="$(dirname -- "$self_path")/model-mutation.py"
+		if [ -f "$model_helper" ] && command -v python3 >/dev/null 2>&1; then
+			model_tracker=${tracker_db_path:-${gate_db:-${BEADS_DB:-${fixture_project:-$PWD}/.beads/beads.db}}}
+			model_actor=${found:-${AGENT_NAME:-UNKNOWN}}
+			exec python3 -I -c 'import runpy, sys; helper = sys.argv.pop(1); runpy.run_path(helper, run_name="__main__")' "$model_helper" --kind "$model_kind" --tracker "$model_tracker" --actor "$model_actor" --beads "$gate_model_ids" -- "$real" "$@"
+		fi
+	fi
+	exec "$real" "$@"
+}
 # SHIMHERMETIC1: an owned native fixture has no pane or mail identity requirement.
 # Registered pane identities still take the ordinary policy path. Resolve the
 # actual selected destinations before considering this exception, never just cwd.
@@ -203,12 +225,12 @@ if [ -f "$fixture_scope" ]; then
 fi
 if [ -n "$fixture_project" ]; then
 	if [ -z "${AGENT_NAME:-}" ] || [ "$tracker_write" != 1 ]; then
-		exec "$real" "$@"
+		native_exec "$@"
 	fi
 	identity_out=$(am agents show --project "$fixture_project" --json "$AGENT_NAME" 2>&1)
 	identity_rc=$?
 	if [ "$identity_rc" -ne 0 ]; then
-		exec "$real" "$@"
+		native_exec "$@"
 	fi
 	fixture_identity_project=$fixture_project
 fi
@@ -478,7 +500,7 @@ if [ "$gate_sub" = dep ] && [ "$gate_id" = add ]; then
 	fi
 fi
 if [ -n "$found" ]; then
-	exec "$real" "$@"
+	native_exec "$@"
 else
-	exec "$real" "$@" --actor "$AGENT_NAME"
+	native_exec "$@" --actor "$AGENT_NAME"
 fi

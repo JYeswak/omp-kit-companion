@@ -4,6 +4,7 @@ import { sliceVerify } from "./slice-verify.ts";
 import { liveReadback, liveReadbackAll, verifyBead, verifyProject } from "./verify.ts";
 import { readLoopCloseConfig, runLoopClose, type LoopCloseConfig } from "./loop-close.ts";
 import { gateEventsPath } from "../extensions/gate-events.ts";
+import { inspectModelLedger, observeWorkingModel, MODEL_JOURNAL_WINDOW_BYTES, MODEL_LEDGER_MAX_FILES, MODEL_LEDGER_MAX_READ_BYTES, MODEL_LEDGER_RETENTION_DAYS, MODEL_LEDGER_MAX_DAY_BYTES, MODEL_LEDGER_MAX_EVENT_BYTES } from "./model-ledger.ts";
 import { renderEnvelope } from "./kitlib/findings.ts";
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -544,7 +545,7 @@ async function workDoctor(request: ParsedCommand): Promise<CliResult> {
 	const timeoutMs = typeof timeoutFlag === "string" && Number.isFinite(Number(timeoutFlag)) ? Number(timeoutFlag) : undefined;
 	const concurrency = typeof jobsFlag === "string" && Number.isFinite(Number(jobsFlag)) ? Number(jobsFlag) : undefined;
 	const report = await inspectWorkFleet({ roots: resolveWorkRoots(typeof rootFlag === "string" ? rootFlag : undefined), ...(timeoutMs === undefined ? {} : { perRepoTimeoutMs: timeoutMs }), ...(concurrency === undefined ? {} : { concurrency }) });
-	return { code: 0, data: report, commands: ["omp-kit doctor --scope work --json"], verification: "PERFORMED" };
+	return { code: 0, data: { ...report, model_ledger: inspectModelLedger(receiptStateRoot(), typeof projectFlag === "string" ? resolve(projectFlag) : undefined) }, commands: ["omp-kit doctor --scope work --json"], verification: "PERFORMED" };
 }
 async function workFleetDoctor(request: ParsedCommand): Promise<CliResult> {
 	const fleet = request.flags.has("--fleet");
@@ -558,7 +559,7 @@ async function workFleetDoctor(request: ParsedCommand): Promise<CliResult> {
 	const timeoutMs = typeof timeoutFlag === "string" && Number.isFinite(Number(timeoutFlag)) ? Number(timeoutFlag) : undefined;
 	const concurrency = typeof jobsFlag === "string" && Number.isFinite(Number(jobsFlag)) ? Number(jobsFlag) : undefined;
 	const report = await inspectWorkFleet({ roots: resolveWorkRoots(typeof rootFlag === "string" ? rootFlag : undefined), ...(timeoutMs === undefined ? {} : { perRepoTimeoutMs: timeoutMs }), ...(concurrency === undefined ? {} : { concurrency }), ...(strandedOnly ? { strandedOnly: true } : {}) });
-	return { code: 0, data: { ...report, fleet, stranded_only: strandedOnly }, commands: ["omp-kit doctor --scope work --json"], verification: "PERFORMED" };
+	return { code: 0, data: { ...report, fleet, stranded_only: strandedOnly, model_ledger: inspectModelLedger(receiptStateRoot(), typeof projectFlag === "string" ? resolve(projectFlag) : undefined) }, commands: ["omp-kit doctor --scope work --json"], verification: "PERFORMED" };
 }
 function sessionDoctor(): CliResult {
 	const report = inspectOmpSessions();
@@ -655,6 +656,18 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 			code: report.refusal.code, message: report.refusal.reason,
 			remediation: "Use read-only omp-kit doctor --json; no migratory probe was run or backup created.",
 		}], verification: "UNVERIFIED" };
+	}
+	if (request.command.name === "doctor" && request.flags.get("--scope") === "model") {
+		const model = observeWorkingModel();
+		return { code: model.status === "KNOWN" ? 0 : 3,
+			data: { overall: model.status === "KNOWN" ? "OK" : "UNVERIFIED", scope: "model", model,
+				state_root: receiptStateRoot(), kit: kitIdentity(),
+				omp: { status: "UNVERIFIED", location: null, version: null, reason: "Only the originating tool's journal entry was inspected" },
+				findings: [], limits: { journal_window_bytes: MODEL_JOURNAL_WINDOW_BYTES,
+					max_files: MODEL_LEDGER_MAX_FILES, max_read_bytes: MODEL_LEDGER_MAX_READ_BYTES,
+					retention_days: MODEL_LEDGER_RETENTION_DAYS, max_day_bytes: MODEL_LEDGER_MAX_DAY_BYTES,
+					max_event_bytes: MODEL_LEDGER_MAX_EVENT_BYTES } },
+			verification: model.status === "KNOWN" ? "PERFORMED" : "UNVERIFIED" };
 	}
 	if (request.command.name === "doctor" && request.flags.get("--scope") === "push-latency") {
 		const report = inspectPushLatency();

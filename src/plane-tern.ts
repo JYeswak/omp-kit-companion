@@ -713,6 +713,12 @@ function activeBranch(leafId: string, byId: ReadonlyMap<string, JournalEntry>): 
 
 interface JournalScan { sessionId: string | null; cwd: string | null; entries: JournalEntry[]; byId: Map<string, JournalEntry> }
 
+/** Optional projection shares the validated bounded scan; ordinary state observers allocate nothing extra. */
+export interface SessionJournalProjection {
+	record(row: Readonly<Record<string, unknown>>, startBytes: number, bytes: number): void;
+	branch(ids: ReadonlySet<string>): void;
+}
+
 /** The identity of a valid OMP v3 session header record, else null. */
 function sessionHeader(raw: Record<string, unknown>): { id: string; cwd: string } | null {
 	if (typeof raw.id !== "string" || !raw.id || typeof raw.cwd !== "string" || !isAbsolute(raw.cwd)
@@ -722,7 +728,7 @@ function sessionHeader(raw: Record<string, unknown>): { id: string; cwd: string 
 
 /** Decode the newline-terminated records of `text` (starting at file offset `base`) into `scan`; null on
  * success, else the refusal reason. */
-function scanRecords(text: string, base: number, scan: JournalScan): string | null {
+function scanRecords(text: string, base: number, scan: JournalScan, projection?: SessionJournalProjection): string | null {
 	let offset = base;
 	const lines = text.split("\n");
 	for (let index = 0; index < lines.length; index++) {
@@ -749,6 +755,7 @@ function scanRecords(text: string, base: number, scan: JournalScan): string | nu
 		scan.entries.push(entry);
 		scan.byId.set(entry.id, entry);
 		if (scan.entries.length > MAX_SESSION_RECORDS) return "SESSION_RECORD_LIMIT";
+		projection?.record(raw, start, offset - start - 1);
 	}
 	return null;
 }
@@ -887,7 +894,7 @@ function headSessionHeader(head: Buffer): { id: string; cwd: string; bodyStart: 
  * KNOWN with oracleBusy null, and a settled-looking tail is UNKNOWN (TAIL_STATE_BEYOND_WINDOW, or
  * TAIL_ACTIVE_LEAF_UNPROVEN when only the leaf is missing).
  */
-export function parseSessionJournalTail(view: SessionJournalView): SessionJournalResult {
+export function parseSessionJournalTail(view: SessionJournalView, projection?: SessionJournalProjection): SessionJournalResult {
 	const { head, tail, tailStart, fileSize } = view;
 	if (tailStart < 0 || tailStart + tail.length !== fileSize || head.length > fileSize) {
 		return { status: "UNKNOWN", reason: "TAIL_READ_INCONSISTENT" };
@@ -900,7 +907,7 @@ export function parseSessionJournalTail(view: SessionJournalView): SessionJourna
 	const coversBody = firstRecord <= header.bodyStart;
 	const from = Math.max(firstRecord, header.bodyStart);
 	const scan: JournalScan = { sessionId: header.id, cwd: header.cwd, entries: [], byId: new Map() };
-	const refused = scanRecords(tail.toString("utf8", from - tailStart), from, scan);
+	const refused = scanRecords(tail.toString("utf8", from - tailStart), from, scan, projection);
 	if (refused !== null) return { status: "UNKNOWN", reason: refused };
 	if (scan.entries.length === 0) {
 		return { status: "UNKNOWN", reason: coversBody ? "ACTIVE_BRANCH_UNAVAILABLE" : "TAIL_WINDOW_HAS_NO_ENTRY" };
@@ -927,6 +934,7 @@ export function parseSessionJournalTail(view: SessionJournalView): SessionJourna
 		current = entry.parentId;
 		rooted = current === null;
 	}
+	projection?.branch(seen);
 	suffix.reverse();
 	const state = evaluateBranch(suffix, rooted);
 	const identity: JournalIdentity = { sessionId: header.id, cwd: header.cwd, leafId, cursorBytes: fileSize,
