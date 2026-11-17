@@ -103,7 +103,10 @@ async function shimArgv(options: { session: string | null; panes: Array<{ pane: 
 	const inspectJson = ternInspect(options.panes);
 	writeFileSync(join(bin, "tern"), `#!/bin/sh\nprintf '%s' "$TERN_INSPECT_JSON"\n`, { mode: 0o755 });
 	writeFileSync(join(bin, "br"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${argvLog}"\nexit 0\n`, { mode: 0o755 });
-	const denied = runFixtureAsync(["sh", join(root, "scripts/br-shim.sh"), "list", "--status", "all"], {
+	// This argv-only backend never opens the path. An explicit operator tracker
+	// keeps an enclosing owned export from selecting SHIMHERMETIC1 instead.
+	const operatorDb = resolve("/operator-repo/.beads/beads.db");
+	const denied = runFixtureAsync(["sh", join(root, "scripts/br-shim.sh"), "--db", operatorDb, "list", "--status", "all"], {
 		cwd: dir,
 		env: {
 			PATH: `${bin}:${process.env.PATH}`,
