@@ -24,24 +24,25 @@ const base = testBase("verify-lessons-test");
  * fixture bin whose br is the official native br first, and bind AGENT_NAME to a fixture identity; each case
  * still names its own --actor. The caller's tracker selectors are dropped too: `omp-kit verify` replays with
  * BEADS_DIR bound to the caller's tracker, and native br then resolves every fixture `br init` to it
- * ("Already initialized at <caller>/.beads/beads.db"). Restored after the file so a shared-process suite
- * sees the caller's env. */
+ * ("Already initialized at <caller>/.beads/beads.db"). Verification history is fixture-owned too:
+ * tests must neither depend on nor append to the caller's attempt ledger. Restored after the file
+ * so a shared-process suite sees the caller's env. */
 const FIXTURE_AGENT = "VerifyFixture";
 /** Tracker selectors and identity aliases read by native br (BEADS_*, BD_*, BR_AGENT_NAME, BR_OUTPUT_FORMAT),
  * scripts/br-shim.sh (BR_REAL) and src/ (BR_ACTOR, BR_BIN); each case passes its own explicitly. */
 const INHERITED_SELECTORS = ["BEADS_DIR", "BEADS_DB", "BEADS_JSONL", "BEADS_CACHE_DIR", "BD_DB", "BD_DATABASE", "BR_REAL", "BR_BIN", "BR_ACTOR", "BR_AGENT_NAME", "BR_OUTPUT_FORMAT"] as const;
 const callerPath = process.env.PATH ?? "";
 const callerAgent = process.env.AGENT_NAME;
-const callerSelectors = new Map(INHERITED_SELECTORS.map(key => [key, process.env[key]]));
+const callerSelectors = new Map([...INHERITED_SELECTORS, "XDG_STATE_HOME"].map(key => [key, process.env[key]]));
 const shimDirs = new Set(resolveRealBr(callerPath).skipped.map(p => dirname(p)));
 const shimFreePath = callerPath.split(delimiter).filter(dir => dir !== "" && !shimDirs.has(dir)).join(delimiter);
-function fixtureIdentityEnv(): { PATH: string; AGENT_NAME: string } {
+function fixtureIdentityEnv(): { PATH: string; AGENT_NAME: string; XDG_STATE_HOME: string } {
 	const real = resolveRealBr(callerPath);
 	if (!real.ok) throw new Error(real.reason);
 	const bin = join(base, "fixture-identity-bin");
 	mkdirSync(bin, { recursive: true });
 	if (!existsSync(join(bin, "br"))) symlinkSync(real.path, join(bin, "br"));
-	return { PATH: `${bin}${delimiter}${shimFreePath}`, AGENT_NAME: FIXTURE_AGENT };
+	return { PATH: `${bin}${delimiter}${shimFreePath}`, AGENT_NAME: FIXTURE_AGENT, XDG_STATE_HOME: join(base, "state") };
 }
 export function installFixtureIdentity(): void {
 	for (const key of INHERITED_SELECTORS) delete process.env[key];

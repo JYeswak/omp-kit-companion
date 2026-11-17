@@ -49,6 +49,33 @@ test("LESSONAUTO1 CLOSED verify appends one lessons.local.jsonl row with the bea
 	expect(existsSync(join(dir, ".omp", "lessons.jsonl"))).toBe(false);
 }, fixtureDeadlineS(60) * 1_000);
 
+test("VERIFYLESSONSGREEN1 fixture closes with isolated history and restores untouched caller state", async () => {
+	const callerState = join(base, "caller-state");
+	mkdirSync(join(callerState, "omp-kit"), { recursive: true, mode: 0o755 });
+	const sentinel = join(callerState, "omp-kit", "operator-history");
+	writeFileSync(sentinel, "operator history must stay untouched\n");
+	const script = `
+		import * as fixture from ${JSON.stringify(new URL("./verify-fixture.ts", import.meta.url).href)};
+		import { verifyBead } from ${JSON.stringify(new URL("../../src/verify.ts", import.meta.url).href)};
+		fixture.installFixtureIdentity();
+		let result;
+		try {
+			const { dir, sha } = await fixture.repo("isolated-history", {}, true);
+			const br = fixture.fakeBr(fixture.inReview("- [ ] [a] [build] \`sh scripts/t.sh\` -> 0 fail"));
+			result = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, lesson: "isolated history fixture" });
+		} finally {
+			fixture.restoreFixtureIdentity();
+		}
+		console.log(JSON.stringify({ code: result.code, stateHome: process.env.XDG_STATE_HOME }));
+	`;
+	const result = await run([process.execPath, "-e", script], {
+		cwd: base, env: { ...process.env, XDG_STATE_HOME: callerState }, deadline_s: fixtureDeadlineS(60),
+	});
+	expect(result.rc).toBe(0);
+	expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({ code: "CLOSED", stateHome: callerState });
+	expect(readFileSync(sentinel, "utf8")).toBe("operator history must stay untouched\n");
+}, fixtureDeadlineS(90) * 1_000);
+
 test("LESSONAUTO1 a second verify of the same bead appends none", async () => {
 	const { dir, sha } = await repo("lessonauto-dedup", {}, true);
 	mkdirSync(join(dir, ".omp"), { recursive: true });
