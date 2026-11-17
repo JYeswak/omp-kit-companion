@@ -1,0 +1,1 @@
+- Preserve command-substitution and backtick close IDs as complete arguments while still inspecting nested commands, so unresolved tracker closes cannot disappear from the guard. Keep native verified/unverified literal-close controls unchanged. Make clone fixtures own real Git roots and judge losing child tests by structured pass/fail counts rather than reporter glyphs.

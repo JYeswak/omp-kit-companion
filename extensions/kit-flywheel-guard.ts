@@ -499,7 +499,7 @@ export interface RereadCall {
 	cwd: string;
 }
 
-/** Split shell commands without evaluation; only bead-lint asks the lexer to retain active expansion context. */
+/** Split shell commands without evaluation, retaining substitutions as words and inspecting their command bodies. */
 export function shellCommands(command: string): string[][] {
 	return splitShellCommands(command);
 }
@@ -517,6 +517,24 @@ function splitShellCommands(command: string, expansionFlags?: boolean[][]): stri
 	let wordFlags: boolean[] | undefined = expansionFlags === undefined ? undefined : [];
 	let inWord = false;
 	let quote: "'" | "\"" | null = null;
+	type SubstitutionFrame = {
+		start: number;
+		backtick: boolean;
+		parentheses: number;
+		words: string[];
+		wordFlags: boolean[] | undefined;
+		word: string;
+		quote: "'" | "\"" | null;
+	};
+	let substitutions: SubstitutionFrame[] | undefined;
+	const resumeSubstitution = (frame: SubstitutionFrame, end: number): void => {
+		words = frame.words;
+		wordFlags = frame.wordFlags;
+		word = frame.word + command.slice(frame.start, end);
+		wordExpands = true;
+		inWord = true;
+		quote = frame.quote;
+	};
 	const endWord = (): void => {
 		if (inWord) {
 			words.push(word);
@@ -540,6 +558,29 @@ function splitShellCommands(command: string, expansionFlags?: boolean[][]): stri
 		if (quote === "'") {
 			if (ch === "'") quote = null;
 			else word += ch;
+			continue;
+		}
+		// A substitution is one outer argument, not a command separator.
+		// Its body still passes through this lexer so nested br/bd acts remain visible.
+		const frame = substitutions?.at(-1);
+		if (quote === null && frame !== undefined) {
+			if ((frame.backtick && ch === "`") || (!frame.backtick && ch === ")" && --frame.parentheses === 0)) {
+				endCommand();
+				substitutions?.pop();
+				resumeSubstitution(frame, index + 1);
+				continue;
+			}
+			if (!frame.backtick && ch === "(") frame.parentheses += 1;
+		}
+		if (ch === "`" || (ch === "$" && command[index + 1] === "(")) {
+			(substitutions ??= []).push({ start: index, backtick: ch === "`", parentheses: 1, words, wordFlags, word, quote });
+			words = [];
+			wordFlags = expansionFlags === undefined ? undefined : [];
+			word = "";
+			wordExpands = false;
+			inWord = false;
+			quote = null;
+			if (ch === "$") index += 1;
 			continue;
 		}
 		if (quote === "\"") {
@@ -608,8 +649,7 @@ function splitShellCommands(command: string, expansionFlags?: boolean[][]): stri
 						index = scan - 1;
 					}
 				}
-		}		} else if (ch === ";" || ch === "&" || ch === "|" || ch === "\n" || ch === "(" || ch === ")" || ch === "`") {
-			if (expansionFlags !== undefined && ch === "`") wordExpands = true;
+		}		} else if (ch === ";" || ch === "&" || ch === "|" || ch === "\n" || ch === "(" || ch === ")") {
 			endCommand();
 		} else if (ch === " " || ch === "\t" || ch === "\r") {
 			endWord();
@@ -618,6 +658,12 @@ function splitShellCommands(command: string, expansionFlags?: boolean[][]): stri
 			word += ch;
 			inWord = true;
 		}
+	}
+	// Retain an unfinished substitution too: a close must not lose its unknown id.
+	let unfinished: SubstitutionFrame | undefined;
+	while ((unfinished = substitutions?.pop()) !== undefined) {
+		endCommand();
+		resumeSubstitution(unfinished, command.length);
 	}
 	endCommand();
 	return commands;

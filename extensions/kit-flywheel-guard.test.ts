@@ -12,6 +12,7 @@ import { fixtureDeadlineS, runFixtureAsync } from "../tests/cli/fixture-process.
 import { briefContract, briefHandbackRefusal, briefHasCommitPreflight, briefTargets, checkTaskBrief, isVerifyOnlyBriefTask, renderBrief } from "../src/brief.ts";
 import { check as checkRetiredTaskReservation, clearReservationCache } from "../src/fleet-guard/reservations.ts";
 import { judge } from "../src/verify.ts";
+import { parseBunSummary } from "../src/slice-verify.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -288,12 +289,17 @@ test("EXPORTINDEX1 planted: own .git and a ceiling never authorize explicit outs
 
 // --- CLONEGUARD1 ----------------------------------------------------------
 
-/** A checkout `repo` beside a sibling `companion`, each with only a `.git/config` naming its origin. */
+/** Real checkout roots beside one another; no enclosing developer repository is required. */
 async function cloneGuardFixture() {
 	const parent = freshDir(base, "clone-guard-");
 	const project = join(parent, "repo");
 	for (const [dir, origin] of [[project, "https://github.com/JYeswak/omp-kit"], [join(parent, "companion"), "git@github.com:JYeswak/omp-kit-companion.git"]] as const) {
-		mkdirSync(join(dir, ".git"), { recursive: true });
+		mkdirSync(dir, { recursive: true });
+		const initialized = runSync(["git", "init", "--quiet", "--template=", dir], {
+			deadline_s: fixtureDeadlineS(),
+			env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: base, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+		});
+		if (initialized.rc !== 0) throw new Error(new TextDecoder().decode(initialized.stderr));
 		writeFileSync(join(dir, ".git", "config"), `[core]\n\tbare = false\n[remote "upstream"]\n\turl = https://github.com/someone/other\n[remote "origin"]\n\turl = ${origin}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`);
 	}
 	const scratch = join(project, "var", "agent-tmp", "a.1");
@@ -754,6 +760,18 @@ test("SELFCLOSEVAR1: br closes nested in loop bodies and xargs surface with thei
 	// xargs: the nested br runs at runtime.
 	expect(ids("printf '%s\\n' a | xargs br close id1 --reason ok")).toEqual(["id1"]);
 	expect(ids("printf '%s\\n' a | xargs -I{} br close {} --reason ok")).toEqual(["{}"]);
+	expect(ids("br close $(printf cfs-f867u) --reason ok")).toEqual(["$(printf cfs-f867u)"]);
+	expect(ids("br close `printf cfs-f867u` --reason ok")).toEqual(["`printf cfs-f867u`"]);
+	expect(ids("br close \"$(printf '%s' 'cfs-f867u)')\" --reason ok")).toEqual(["$(printf '%s' 'cfs-f867u)')"]);
+	expect(ids("br close $(printf '%s' \"$(printf cfs-f867u)\") --reason ok")).toEqual(["$(printf '%s' \"$(printf cfs-f867u)\")"]);
+	expect(ids("br close cfs-$(printf f867u)-x --reason ok")).toEqual(["cfs-$(printf f867u)-x"]);
+	expect(ids("br close $(cat <<'EOF'\ncfs-f867u\nEOF\n) --reason ok")).toEqual(["$(cat <<'EOF'\ncfs-f867u\nEOF\n)"]);
+	// Looking inside a substitution must still expose a nested mutating call.
+	expect(ids("echo $(br close cfs-f867u --reason ok)")).toEqual(["cfs-f867u"]);
+	expect(ids("echo `br close cfs-f867u --reason ok`")).toEqual(["cfs-f867u"]);
+	expect(ids("echo 'br close $(printf cfs-f867u)'")).toEqual([]);
+	expect(ids("echo \\`br close cfs-f867u\\`")).toEqual([]);
+	expect(ids("br close $(printf cfs-f867u")).toEqual(["$(printf cfs-f867u"]);
 	// Controls: non-br bodies surface nothing; literal closes and updates unchanged.
 	expect(ids("for b in a c; do echo $b; done")).toEqual([]);
 	expect(ids("br close real-id --reason ok")).toEqual(["real-id"]);
@@ -762,14 +780,51 @@ test("SELFCLOSEVAR1: br closes nested in loop bodies and xargs surface with thei
 
 test("SELFCLOSEVAR1: a loop-variable close is refused naming the id and the remedy (ompkit-l2e1t)", async () => {
 	const project = freshDir(base, "proj-");
-	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
-	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: brTable({ "kit-9": bead("kit-9", "BlueFox") }) });
-	const result = await toolCall(h, project, "for b in kit-9; do br close $b --reason ok; done");
-	expect(result?.block).toBe(true);
-	expect(result?.reason).toContain("CLOSE_UNRESOLVED_ID");
-	expect(result?.reason).toContain("$b");
-	expect(result?.reason).toContain("one literal br close per bead");
-	expect(result?.reason).toContain("No close was executed");
+	const home = identityHome(project, "77", "{\"name\":\"VerifyFollowup\"}");
+	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: brTable({}) });
+	for (const [id, command] of [
+		["$b", "for b in cfs-f867u cfs-1wi63 cfs-rxf06.2 cfs-rxf06.3 cfs-wq1kh.2; do RUST_LOG=error br --actor VerifyFollowup close $b --reason ok; done"],
+		["${b}", "br --actor VerifyFollowup close ${b} --reason ok"],
+		["$(printf cfs-f867u)", "br --actor VerifyFollowup close $(printf cfs-f867u) --reason ok"],
+		["`printf cfs-f867u`", "br --actor VerifyFollowup close `printf cfs-f867u` --reason ok"],
+		["{}", "printf '%s\\n' cfs-f867u | xargs -I{} br --actor VerifyFollowup close {} --reason ok"],
+		["$b", "for b in cfs-f867u; do br --actor VerifyFollowup update $b --status closed --reason ok; done"],
+		["$(cat <<'EOF'\ncfs-f867u\nEOF\n)", "br --actor VerifyFollowup close $(cat <<'EOF'\ncfs-f867u\nEOF\n) --reason ok"],
+	] as const) {
+		const result = await toolCall(h, project, command);
+		expect(result?.block, command).toBe(true);
+		expect(result?.reason, command).toContain("CLOSE_UNRESOLVED_ID");
+		expect(result?.reason, command).toContain(id);
+		expect(result?.reason, command).toContain("one literal br close per bead");
+		expect(result?.reason, command).toContain("No close was executed");
+	}
+});
+
+test("SELFCLOSEVAR1 restored admit-on-unresolved loses the original handler oracle", async () => {
+	const allocation = ownedTmp("self-close-variable-mutant", { root: base });
+	try {
+		const preload = join(allocation.path, "admit-unresolved.ts");
+		writeFileSync(preload, `
+Bun.plugin({ name: "admit-unresolved-close", setup(build) {
+	build.onLoad({ filter: /[.]ts$/ }, async ({ path }) => {
+		const source = await Bun.file(path).text();
+		if (!path.endsWith("/extensions/kit-flywheel-guard.ts")) return { contents: source, loader: "ts" };
+		const site = 'if (shellExpands(id) || id.includes("{}")) {';
+		if (source.split(site).length !== 2) throw new Error("MUTATION_SITE_NOT_UNIQUE");
+		return { contents: source.replace(site, site + " return undefined;"), loader: "ts" };
+	});
+} });
+`);
+		const result = await run([process.execPath, "test", "--preload", preload, import.meta.path,
+			"-t", "SELFCLOSEVAR1: a loop-variable close"], {
+			deadline_s: fixtureDeadlineS(30), max_output_bytes: 65536,
+			cwd: import.meta.dir, env: { ...process.env, TMPDIR: allocation.path },
+		});
+		expect(result.timed_out).toBe(false);
+		expect(result.rc).toBe(1);
+		const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
+		expect(parseBunSummary(Bun.stripANSI(output))).toEqual({ pass: 0, fail: 1, found: true });
+	} finally { allocation.cleanup(); }
 });
 
 
@@ -1943,8 +1998,7 @@ Bun.plugin({ name: "disable-retire-plant-mechanism", setup(build) {
 			const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
 			expect(result.timed_out).toBe(false);
 			expect(result.rc).toBe(1);
-			expect(output).toContain("(fail) RETIREGUARD1 legitimate work");
-			expect(output).not.toContain("MUTATION_SITE_NOT_UNIQUE");
+			expect(parseBunSummary(Bun.stripANSI(output))).toEqual({ pass: 0, fail: 1, found: true });
 		} finally { allocation.cleanup(); }
 	});
 }
