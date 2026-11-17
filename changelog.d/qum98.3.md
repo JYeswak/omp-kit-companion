@@ -1,0 +1,1 @@
+- Exercise OMP 18.22 lifecycle and real-terminal drain, cancellation and shutdown compatibility while retaining the original 18.21 and isolated stock controls.

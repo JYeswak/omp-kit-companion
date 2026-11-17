@@ -186,11 +186,12 @@ try {
 `;
 
 const kitRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+const sdkVersion = process.env.KIT_SDK_LIFECYCLE_VERSION ?? "18.21.0";
 let sdkRoot: string;
 beforeAll(() => {
-	// This case targets the reviewed 18.21 boundary even on a minimum-version CI lane.
-	// Reuse the stock verified-source cache; never alter the installed OMP or profiles.
-	sdkRoot = ensureOmpSource("18.21.0", process.env);
+	// Default21 remains the original contract; the upgrade cut explicitly selects22.
+	// Reuse the verified-source cache; never alter the installed OMP or profiles.
+	sdkRoot = ensureOmpSource(sdkVersion, process.env);
 	const seat = resolveSeatOmp();
 	console.error("SDKLIFECYCLE_IDENTITY", JSON.stringify({
 		launcher: seat?.launcher ?? null,
@@ -236,6 +237,9 @@ for (const paused of [false, true]) {
 		const result = await runNativeCase("healthy", paused);
 		expect(result.rc, result.output).toBe(0);
 		expect(result.output).toContain("SDKLIFECYCLE_RESULT");
+		const record = result.output.split("\n").find(line => line.startsWith("SDKLIFECYCLE_RESULT "));
+		if (!record) throw new Error("Native SDK result record is missing");
+		expect(JSON.parse(record.slice("SDKLIFECYCLE_RESULT ".length)).sdkVersion).toBe(sdkVersion);
 		console.error(result.output);
 	}, fixtureDeadlineS(90) * 1000);
 }
