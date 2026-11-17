@@ -282,6 +282,9 @@ test("AMGUARDSOFT1 body: an over-cap send carries a truncated body plus a pointe
 	if (typeof path !== "string") throw new Error("expected the attachment to name the overflow file");
 	expect(path.startsWith(root)).toBe(true);
 	expect(body).toContain(path);
+	// il5z3: the server WebP-decodes every attachment_paths entry, so the overflow
+	// completion must force convert_images:false (raw-stored, never decoded).
+	expect(args.convert_images).toBe(false);
 	expect(readFileSync(path, "utf8")).toBe(full);
 	expect(lstatSync(path).mode & 0o777).toBe(0o600);
 	expect(lstatSync(root).mode & 0o777).toBe(0o700);
@@ -294,6 +297,7 @@ test("AMGUARDSOFT1 body: an over-cap send carries a truncated body plus a pointe
 	const replyAttachments = sentArgs(replied)?.attachment_paths;
 	if (!Array.isArray(replyAttachments) || typeof replyAttachments[0] !== "string") throw new Error("expected the reply to attach the overflow file");
 	expect(readFileSync(replyAttachments[0], "utf8")).toBe("r".repeat(AM_BODY_CAP * 8));
+	expect(sentArgs(replied)?.convert_images).toBe(false);
 });
 
 test("AMGUARDSOFT1 body: an over-cap body carrying a credential still refuses and stores nothing", async () => {

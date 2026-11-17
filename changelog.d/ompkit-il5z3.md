@@ -1,0 +1,1 @@
+- Fix over-cap Agent Mail completion to force convert_images:false on the rewritten send so the overflow Markdown file is raw-stored instead of WebP-decoded (il5z3); truncation pointer and 0600 overflow retention unchanged.

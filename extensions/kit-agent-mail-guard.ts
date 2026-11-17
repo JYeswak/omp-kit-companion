@@ -977,6 +977,8 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		// retired). The hook can rewrite arguments but cannot fetch the file back later, so the
 		// full text is stored now in an owned bounded overflow file, attached via
 		// attachment_paths, and the send carries the first cap characters plus a pointer line.
+		// il5z3: the server WebP-decodes every attachment_paths entry, so the rewrite also
+		// forces convert_images:false and the overflow .md is raw-stored instead of decoded.
 		if (fullBody.length > AM_BODY_CAP) {
 			const stored = storeOverflow(fullBody);
 			if (stored === null) {
@@ -990,6 +992,7 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 				...record,
 				body_md: `${fullBody.slice(0, AM_BODY_CAP)}\n\n[kit-agent-mail-guard AM_BODY_OVERFLOW: ${pointer}]`,
 				attachment_paths: attachments,
+				convert_images: false,
 			};
 			await queueNotice("AM_BODY_NOTICE", `the body is ${fullBody.length} characters, over the ${AM_BODY_CAP} cap; the full text is stored at ${stored.path} and attached, and the send carries the first ${AM_BODY_CAP} characters plus a pointer.`);
 		}
