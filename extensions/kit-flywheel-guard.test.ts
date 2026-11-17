@@ -741,6 +741,37 @@ test("SELF_CLOSE_REFUSED with redirection: assignee match still blocks, lookup u
 	expect(result?.reason).toContain("SELF_CLOSE_REFUSED");
 });
 
+test("SELFCLOSEVAR1: br closes nested in loop bodies and xargs surface with their literal ids (ompkit-l2e1t)", () => {
+	const ids = (command: string) => trackerRequests(command, "/tmp", "/tmp").flatMap(r => r.ids);
+	const ops = (command: string) => trackerRequests(command, "/tmp", "/tmp").map(r => [r.operation, ...r.ids]);
+	// Loop bodies run once per value, so the guard must see the nested close.
+	expect(ids("for b in a c; do br close $b --reason ok; done")).toEqual(["$b"]);
+	expect(ids("for b in a c; do RUST_LOG=error br --actor X close $b --reason ok; done")).toEqual(["$b"]);
+	expect(ids("while read b; do br close $b --reason ok; done")).toEqual(["$b"]);
+	expect(ids("if staged; then br close $b --reason ok; fi")).toEqual(["$b"]);
+	expect(ids("{ br close $b --reason ok; }")).toEqual(["$b"]);
+	expect(ids("! br close kit-1 --reason ok")).toEqual(["kit-1"]);
+	// xargs: the nested br runs at runtime.
+	expect(ids("printf '%s\\n' a | xargs br close id1 --reason ok")).toEqual(["id1"]);
+	expect(ids("printf '%s\\n' a | xargs -I{} br close {} --reason ok")).toEqual(["{}"]);
+	// Controls: non-br bodies surface nothing; literal closes and updates unchanged.
+	expect(ids("for b in a c; do echo $b; done")).toEqual([]);
+	expect(ids("br close real-id --reason ok")).toEqual(["real-id"]);
+	expect(ops("for b in a c; do br update $b --status closed --reason ok; done")).toEqual([["close", "$b"]]);
+});
+
+test("SELFCLOSEVAR1: a loop-variable close is refused naming the id and the remedy (ompkit-l2e1t)", async () => {
+	const project = freshDir(base, "proj-");
+	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
+	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: brTable({ "kit-9": bead("kit-9", "BlueFox") }) });
+	const result = await toolCall(h, project, "for b in kit-9; do br close $b --reason ok; done");
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("CLOSE_UNRESOLVED_ID");
+	expect(result?.reason).toContain("$b");
+	expect(result?.reason).toContain("one literal br close per bead");
+	expect(result?.reason).toContain("No close was executed");
+});
+
 
 test("DEADLINEAUTO1: finite async bash jobs with timeout zero are admitted with the input patched to the default", async () => {
 	const h = await createFlywheelHost(base);

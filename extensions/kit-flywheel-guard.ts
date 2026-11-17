@@ -180,6 +180,7 @@ export interface FlywheelGuardDeps {
 export const FLYWHEEL_EXEC_TIMEOUT_MS = 3000;
 export const COMPACTION_REREAD = "COMPACTION_REREAD";
 export const SELF_CLOSE_REFUSED = "SELF_CLOSE_REFUSED";
+export const CLOSE_UNRESOLVED_ID = "CLOSE_UNRESOLVED_ID";
 export const SCRATCH_DISPOSAL_NOTICE = "SCRATCH_DISPOSAL_NOTICE";
 export const EXPORT_INDEX_REFUSED = "EXPORT_INDEX_REFUSED";
 export const GOAL_SEND_REFUSED = "GOAL_SEND_REFUSED";
@@ -200,6 +201,8 @@ const BR_VALUE_FLAGS: Record<string, true> = {
 	"--external-ref": true, "--source-repo": true, "--source-repo-path": true, "--agent-context": true,
 };
 const WRAPPERS: Record<string, true> = { env: true, command: true, exec: true, nohup: true, time: true, builtin: true };
+/** Shell block openers whose body is a normal command (`for ...; do <cmd>; done`, `if ...; then <cmd>; fi`, `{ <cmd>; }`, `! <cmd>`): the guard reads through them so a nested br/bd is still checked (ompkit-l2e1t). */
+const SHELL_BLOCK_WORDS: Record<string, true> = { do: true, then: true, else: true, "{": true, "!": true };
 
 /** Only a verified absence is not applicable; discovery failures stay fail-closed. */
 function rereadPathExists(path: string): boolean {
@@ -732,11 +735,18 @@ function brCommandLines(command: string, cwd: string, home: string, depth = 0, t
 						for (const key of new Set([...Object.keys(process.env), ...Object.keys(environment)])) environment[key] = undefined;
 					}
 				}
-			} else if (WRAPPERS[word] === true) at += 1;
-			else break;
-		}
-		const argv = raw.slice(at);
-		const expansionFlags = rawExpansionFlags?.slice(at);
+		} else if (WRAPPERS[word] === true || SHELL_BLOCK_WORDS[word] === true) at += 1;
+		else break;
+	}
+	let argv = raw.slice(at);
+	let expansionFlags = rawExpansionFlags?.slice(at);
+	// SELFCLOSEVAR1 (ompkit-l2e1t): a br/bd nested in `xargs` runs at runtime, so parse the nested argv.
+	if (basename(argv[0] ?? "") === "xargs") {
+		const nested = argv.findIndex((word, index) => index > 0 && bins.includes(basename(word)));
+		if (nested < 0) continue;
+		argv = argv.slice(nested);
+		expansionFlags = expansionFlags?.slice(nested);
+	}
 		if (argv.length === 0) continue;
 		if (argv[0] === "export") {
 			for (const word of argv.slice(1)) if (isAssignment(word)) {
@@ -2465,6 +2475,18 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 			if (refusal !== undefined) return refusal;
 			continue;
 		}
+		for (const id of request.ids) {
+			// SELFCLOSEVAR1 (ompkit-l2e1t): an id the guard cannot resolve names no bead to verify.
+			if (shellExpands(id) || id.includes("{}")) {
+				// The refusal is still recorded (CLOSEGUARDBEAD1): a missing
+				// refused-close record dead-letters downstream.
+				attempts.push({ id, fromStatus: null, assignee: null, actor: resolveCloseActor(request, envIdentities, pane), evidence: parseEvidenceIds(request.reason), bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
+				return {
+					block: true,
+				reason: `kit-flywheel-guard ${CLOSE_UNRESOLVED_ID}: cannot verify authorship of unresolvable bead id '${id}' (a shell expansion, loop variable, command substitution or xargs placeholder hides the real id): run one literal br close per bead, or omp-kit verify <bead> --export <sha>. No close was executed.`,
+				};
+			}
+		}
 		const incomplete = incompleteCloseClause(request.reason);
 		if (incomplete !== null) {
 			return {
@@ -2890,7 +2912,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		if (result?.additionalContext) ctx.ui?.notify(result.additionalContext, "warning");
 		if (typeof event.toolCallId === "string" && attempts.length > 0) {
 			if (result?.block === true) {
-				if (typeof result.reason === "string" && result.reason.includes(SELF_CLOSE_REFUSED)) {
+				// Both self-close-family refusal codes spool refused-close records (CLOSEGUARDBEAD1).
+				if (typeof result.reason === "string" && (result.reason.includes(SELF_CLOSE_REFUSED) || result.reason.includes(CLOSE_UNRESOLVED_ID))) {
 					try {
 						await emitRefusedCloseRecords({ exec: pi.exec, notify: (message) => ctx.ui?.notify(message, "warning") },
 							attempts, event.toolCallId, Date.now() - started);
