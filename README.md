@@ -159,7 +159,7 @@ The repo is an OMP plugin. `package.json` declares 15 extensions; guards include
 | `kit-guard-optin.ts` | `tool_call` | Loads the guard from `KIT_GUARD_SRC` for repos with `.omp/kit-guard.json`; a missing guard blocks every tool call |
 | `fleet-guard.ts` | `tool_call` | Always refuses in-place `plutil` and system-temp writes. Opt-in: home writes, source copies, branches/worktrees, writes without exclusive reservations, mail-guard bypasses and overlong reservations |
 | `kit-save-guard.ts` | session and tool hooks | Opt-in only: tracks session writes, reprompts at most twice for unsaved work, then warns. Never commits, stashes or pushes |
-| `kit-flywheel-guard.ts` | `session_compact`, `tool_call` | Re-reads instructions and the active bead after compaction; refuses self-closes, blocking without an open fix, and closes that strand blocked beads |
+| `kit-flywheel-guard.ts` | session and native tool hooks | Re-reads held work; refuses self-closes and stranded work; records causal model/provider and bounded native attempts |
 | `kit-agent-mail-guard.ts` | `tool_call`, `tool_result` | Opt-in: refuses mail not sent as the seat, off-list subjects, untyped `ack_required`, long or secret bodies, bulk reads |
 | `kit-composer-state.ts` | session and turn hooks | Opt-in: publishes draft presence, never text, for reloads and arms |
 | `kit-inbox-wake.ts` | session start, timer | Opt-in: delivers the seat's new Agent Mail at its next step |

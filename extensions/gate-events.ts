@@ -1,4 +1,4 @@
-	import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readSync, realpathSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { appendJsonl } from "../src/kitlib/jsonl.ts";
@@ -36,6 +36,105 @@ export interface GateEvent {
 	/** Actual producer exit status, never a synthesized refusal status. */
 	rc?: number;
 	detail?: string;
+	/** Native causal evidence, never the registration/default model or auxiliary usage. */
+	attribution?: NativeToolAttribution;
+}
+
+export interface NativeToolSource {
+	session_id: string; entry_id: string; tool_call_id: string; leaf_id: string;
+	journal: string; journal_identity: string; assistant_at: string | null;
+}
+
+export type NativeToolAttribution =
+	| { status: "UNKNOWN"; reason: string; source?: Partial<NativeToolSource> }
+	| { status: "KNOWN"; model: string; provider: string; source: NativeToolSource };
+
+interface NativeSessionContext {
+	sessionManager?: {
+		getSessionId?(): string;
+		getSessionFile?(): string | undefined;
+		getLeafId?(): string | null;
+		getEntry?(id: string): unknown;
+	};
+}
+
+const nativeObject = (value: unknown): Record<string, unknown> | null =>
+	typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+const nativeId = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 512;
+
+/** Walk only the native active branch, with a fixed cap and no journal scan or model-default fallback. */
+export function observeNativeToolModel(ctx: NativeSessionContext, toolCallId: unknown, toolName?: unknown): NativeToolAttribution {
+	let source: Partial<NativeToolSource> | undefined;
+	const unknown = (reason: string): NativeToolAttribution => ({ status: "UNKNOWN", reason, ...(source ? { source } : {}) });
+	const manager = ctx.sessionManager;
+	if (!manager?.getSessionId || !manager.getSessionFile || !manager.getLeafId || !manager.getEntry || !nativeId(toolCallId))
+		return unknown("NATIVE_CAUSAL_API_UNAVAILABLE");
+	let fd: number | undefined;
+	try {
+		const sessionId = manager.getSessionId(), sessionFile = manager.getSessionFile(), leafId = manager.getLeafId();
+		if (!nativeId(sessionId)) return unknown("NATIVE_SESSION_UNBOUND");
+		source = { session_id: sessionId, tool_call_id: toolCallId };
+		if (!sessionFile) return unknown("NATIVE_SESSION_UNBOUND");
+		const journal = realpathSync(sessionFile);
+		fd = openSync(journal, constants.O_RDONLY | constants.O_NOFOLLOW);
+		const identity = fstatSync(fd, { bigint: true });
+		if (!identity.isFile()) return unknown("NATIVE_JOURNAL_NOT_REGULAR");
+		source = { ...source, journal, journal_identity: `${identity.dev}:${identity.ino}` };
+		if (!nativeId(leafId)) return unknown("NATIVE_ASSISTANT_NOT_PERSISTED");
+		source.leaf_id = leafId;
+		const visited = new Set<string>();
+		let cursor: unknown = leafId;
+		for (let depth = 0; depth < 64 && nativeId(cursor); depth++) {
+			if (visited.has(cursor)) return unknown("NATIVE_BRANCH_CYCLE");
+			visited.add(cursor);
+			const entry = nativeObject(manager.getEntry(cursor));
+			if (!entry || entry.id !== cursor) return unknown("NATIVE_BRANCH_ENTRY_MISSING");
+			const message = entry.type === "message" ? nativeObject(entry.message) : null;
+			if (message?.role === "assistant" && Array.isArray(message.content)) {
+				if (message.content.length > 256) return unknown("NATIVE_TOOL_BLOCK_BOUND_EXCEEDED");
+				let calls = 0, matches = 0;
+				for (const value of message.content) {
+					const block = nativeObject(value);
+					if (block?.type === "toolCall") {
+						calls++;
+						if (block.id === toolCallId && (toolName === undefined || block.name === toolName)) matches++;
+					}
+				}
+				// Do not search past a different primary assistant invocation for a coincidental old ID.
+				if (calls > 0) {
+					if (matches !== 1) return unknown(matches > 1 ? "NATIVE_TOOL_CALL_AMBIGUOUS" : "NATIVE_TURN_MISMATCH");
+					const proof: NativeToolSource = { session_id: sessionId, entry_id: cursor, tool_call_id: toolCallId, leaf_id: leafId,
+						journal, journal_identity: `${identity.dev}:${identity.ino}`,
+						assistant_at: typeof entry.timestamp === "string" && Number.isFinite(Date.parse(entry.timestamp)) ? entry.timestamp : null };
+					source = proof;
+					if (!nativeId(message.model) || !nativeId(message.provider)) return unknown("NATIVE_MODEL_NOT_REPORTED");
+					const model = message.model, provider = message.provider;
+					const parentId = entry.parentId, timestamp = entry.timestamp;
+					const after = statSync(journal, { bigint: true });
+					const current = nativeObject(manager.getEntry(cursor));
+					const currentMessage = nativeObject(current?.message);
+					let currentMatches = 0;
+					if (Array.isArray(currentMessage?.content) && currentMessage.content.length <= 256) {
+						for (const value of currentMessage.content) {
+							const block = nativeObject(value);
+							if (block?.type === "toolCall" && block.id === toolCallId && (toolName === undefined || block.name === toolName)) currentMatches++;
+						}
+					}
+					if (after.dev !== identity.dev || after.ino !== identity.ino || realpathSync(sessionFile) !== journal
+						|| manager.getSessionId() !== sessionId || manager.getSessionFile() !== sessionFile || manager.getLeafId() !== leafId
+						|| current?.id !== cursor || current.type !== "message" || current.parentId !== parentId || current.timestamp !== timestamp
+						|| currentMessage?.role !== "assistant" || currentMessage.model !== model || currentMessage.provider !== provider || currentMatches !== 1)
+						return unknown("NATIVE_SOURCE_REPLACED");
+					return { status: "KNOWN", model, provider, source: proof };
+				}
+			}
+			cursor = entry.parentId;
+		}
+		return unknown(cursor === null ? "NATIVE_TOOL_CALL_NOT_OBSERVED" : "NATIVE_BRANCH_BOUND_EXCEEDED");
+	} catch { return unknown("NATIVE_CAUSAL_EVIDENCE_UNREADABLE"); }
+	finally {
+		if (fd !== undefined) try { closeSync(fd); } catch { return unknown("NATIVE_CAUSAL_EVIDENCE_CLOSE_FAILED"); }
+	}
 }
 
 export function gateEventsPath(env: Record<string, string | undefined> = process.env, home: string = homedir()): string {
@@ -151,10 +250,21 @@ export async function recordGateEvent(event: GateEvent, options: { env?: Record<
 		metadataTruncated ||= captured.truncated;
 		return captured.message ?? "[OMITTED]";
 	};
+	let attribution: NativeToolAttribution = event.attribution ?? { status: "UNKNOWN", reason: "NATIVE_ATTRIBUTION_NOT_OBSERVED" };
+	if (attribution.status === "KNOWN") {
+		const model = clean(attribution.model), provider = clean(attribution.provider);
+		const source = Object.fromEntries(Object.entries(attribution.source).map(([key, value]) => [key, clean(value)]));
+		if (model !== attribution.model || provider !== attribution.provider
+			|| Object.entries(attribution.source).some(([key, value]) => source[key] !== value))
+			attribution = { status: "UNKNOWN", reason: "NATIVE_ATTRIBUTION_METADATA_REDACTED" };
+	}
 	const row = { ts: recordedAt, seat: clean(event.seat), act: clean(event.act), target: clean(event.target), gate: clean(event.gate),
 		repo: clean(event.repo === null ? null : eventRepo(event.repo ?? replay?.cwd ?? process.cwd())),
 		member: clean(event.member ?? event.gate), started_at: startedAt, duration_s: duration,
 		kind: event.rc === 0 && event.kind === "refuse" ? "pass" : clean(event.kind),
+		model: attribution.status === "KNOWN" ? attribution.model : null,
+		provider: attribution.status === "KNOWN" ? attribution.provider : null,
+		attribution: attribution.status === "KNOWN" ? attribution : { status: "UNKNOWN", reason: clean(attribution.reason) },
 		...(event.attempt ? { attempt: clean(event.attempt) } : {}),
 		...(event.event_id ? { event_id: clean(event.event_id) } : {}),
 		...(typeof event.rc === "number" ? { rc: event.rc } : {}),

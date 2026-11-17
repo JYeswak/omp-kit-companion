@@ -26,12 +26,13 @@ type CompactHandler = (event: { type: "session_compact" }, ctx: FlywheelContext)
 type ToolHandler = (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown;
 type EndHandler = (event: Record<string, unknown>, ctx: FlywheelContext) => unknown;
 type ResultHandler = (event: FlywheelToolResultEvent, ctx: FlywheelContext) => unknown;
-type HostRegistration = ["session_start", SessionStartHandler] | ["session_compact", CompactHandler] | ["tool_call", ToolHandler] | ["tool_execution_end", EndHandler] | ["tool_result", ResultHandler];
+type HostRegistration = ["session_start", SessionStartHandler] | ["session_compact", CompactHandler] | ["tool_call", ToolHandler] | ["tool_execution_start", EndHandler] | ["tool_execution_end", EndHandler] | ["tool_result", ResultHandler];
 /** Fake omp host: records handlers, sent messages and every exec the guard makes. */
 export async function createFlywheelHost(base: string, opts: { env?: Record<string, string | undefined>; home?: string; respond?: Responder } = {}): Promise<FakeHost> {
 	const starts: SessionStartHandler[] = [];
 	const compacts: CompactHandler[] = [];
 	const tools: ToolHandler[] = [];
+	const executionStarts: EndHandler[] = [];
 	const ends: EndHandler[] = [];
 	const resultHandlers: ResultHandler[] = [];
 	const sent: FakeHost["sent"] = [];
@@ -45,6 +46,7 @@ export async function createFlywheelHost(base: string, opts: { env?: Record<stri
 			return;
 		}
 		if (args[0] === "session_compact") compacts.push(args[1]);
+		else if (args[0] === "tool_execution_start") executionStarts.push(args[1]);
 		else if (args[0] === "tool_execution_end") ends.push(args[1]);
 		else if (args[0] === "tool_result") resultHandlers.push(args[1]);
 		else tools.push(args[1]);
@@ -76,6 +78,8 @@ export async function createFlywheelHost(base: string, opts: { env?: Record<stri
 			for (const handler of compacts) results.push(await handler({ type: "session_compact" }, ctx));
 		} else if (type === "tool_call") {
 			for (const handler of tools) results.push(await handler({ ...event, type: "tool_call" }, ctx));
+		} else if (type === "tool_execution_start") {
+			for (const handler of executionStarts) results.push(await handler({ ...event, type: "tool_execution_start" }, ctx));
 		} else if (type === "tool_execution_end") {
 			for (const handler of ends) results.push(await handler({ ...event, type: "tool_execution_end" }, ctx));
 		} else if (type === "tool_result") {

@@ -2,6 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gateEventsPath, gateFromReason, recordGateEvent, trackerAct } from "./gate-events";
+import { recordNativeToolAttempt, type NativeToolAttemptInput } from "../src/native-tool-attempts.ts";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { captureMineReplay } from "../src/mine-replay.ts";
 
@@ -166,4 +167,101 @@ test("LEDGERCLASS1 planted negative: a passing act writes one pass row and no re
 	const rows = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line));
 	expect(rows).toHaveLength(1);
 	expect(rows[0]).toMatchObject({ gate: "kit-flywheel-guard", kind: "pass" });
+});
+
+const nativeNow = Date.parse("2026-11-16T00:00:00.000Z");
+test("native tool attempts count successful, refused, and error lifecycles once across reopen", async () => {
+	const path = join(base, "native-attempts.json");
+	const input = nativeInput({ tool_call_id: "call-one" });
+	await recordNativeToolAttempt({ ...input, phase: "start", is_error: null }, { path, now: () => nativeNow });
+	await recordNativeToolAttempt({ ...input, phase: "end", is_error: false }, { path, now: () => nativeNow + 1 });
+	await recordNativeToolAttempt({ ...input, phase: "end", own_guard: "UNOBSERVED", is_error: false }, { path, now: () => nativeNow + 2 });
+	await recordNativeToolAttempt({ ...input, phase: "start", is_error: null }, { path, now: () => nativeNow + 3 });
+	const refusal = nativeInput({ tool_call_id: "call-two", own_guard: "REFUSED" });
+	await recordNativeToolAttempt({ ...refusal, phase: "start", is_error: null }, { path, now: () => nativeNow + 4 });
+	await recordNativeToolAttempt({ ...refusal, phase: "end", is_error: true }, { path, now: () => nativeNow + 5 });
+	await recordNativeToolAttempt({ ...nativeInput({ tool_call_id: "call-three" }), phase: "end", is_error: true }, { path, now: () => nativeNow + 6 });
+	const rows = JSON.parse(readFileSync(path, "utf8"));
+	expect(rows.windows[0].buckets).toContainEqual(expect.objectContaining({
+		seat: "seat-a", tool: "shell", model: "model-a", attempted: 3, own_guard_observed: 3,
+		own_guard_refused: 1, native_error_results: 2, own_guard_refusal_rate: 1 / 3, all_guard_refusal_rate: null,
+	}));
+});
+
+test("native tool attempts separate buckets and keep incomplete rates unknown", async () => {
+	const path = join(base, "native-attempts-separate.json");
+	for (const input of [
+		nativeInput({ tool_call_id: "one" }),
+		nativeInput({ tool_call_id: "two", tool: "read" }),
+		nativeInput({ tool_call_id: "three", model: "model-b" }),
+		nativeInput({ tool_call_id: "four", seat: "seat-b" }),
+		nativeInput({ tool_call_id: "five", model: null }),
+	]) await recordNativeToolAttempt(input, { path, now: () => nativeNow });
+	const state = JSON.parse(readFileSync(path, "utf8"));
+	expect(state.windows[0].buckets).toHaveLength(5);
+	const unknown = state.windows[0].buckets.find((bucket: { model: string | null }) => bucket.model === null);
+	expect(unknown).toMatchObject({ attempted: 1, own_guard_refusal_rate: null, all_guard_refusal_rate: null });
+	expect(state.windows[0].coverage.status).toBe("INCOMPLETE");
+});
+
+function nativeInput(overrides: Partial<NativeToolAttemptInput> = {}): NativeToolAttemptInput {
+	return {
+		seat: "seat-a", tool: "shell", tool_call_id: "call", session_id: "session-a", journal_identity: "journal-a",
+		assistant_id: "assistant-a", assistant_at: "2026-11-16T00:00:00.000Z",
+		model: "model-a", provider: "provider-a", attribution_reason: "bound-assistant",
+		own_guard: "ALLOWED", phase: "end", is_error: false, observer_id: "observer-a", ...overrides,
+	};
+}
+test("native tool attempts preserve corrupt state and report identity conflicts as incomplete", async () => {
+	const path = join(base, "native-attempts-conflict.json");
+	const first = nativeInput({ tool_call_id: "shared" });
+	await recordNativeToolAttempt(first, { path, now: () => nativeNow });
+	await recordNativeToolAttempt({ ...first, model: "model-b" }, { path, now: () => nativeNow + 1 });
+	const state = JSON.parse(readFileSync(path, "utf8"));
+	expect(state.windows[0].coverage).toMatchObject({ status: "INCOMPLETE", reasons: ["IDENTITY_BINDING_CONFLICT"] });
+	const corrupt = join(base, "native-attempts-corrupt.json");
+	writeFileSync(corrupt, "{not-json");
+	expect(await recordNativeToolAttempt(nativeInput(), { path: corrupt, now: () => nativeNow })).toMatchObject({ ok: false });
+	expect(readFileSync(corrupt, "utf8")).toBe("{not-json");
+});
+
+test("native tool attempts serialize concurrent writers without losing successful attempts", async () => {
+	const path = join(base, "native-attempts-concurrent.json");
+	await Promise.all(Array.from({ length: 16 }, (_, index) =>
+		recordNativeToolAttempt(nativeInput({ tool_call_id: `parallel-${index}` }), { path, now: () => nativeNow })));
+	const state = JSON.parse(readFileSync(path, "utf8"));
+	expect(state.windows[0].buckets[0]).toMatchObject({ attempted: 16, own_guard_observed: 16 });
+});
+test("native tool attempts cap identifiers and preserve a lower-bound incomplete rate", async () => {
+	const path = join(base, "native-attempts-cap.json");
+	for (let index = 0; index < 129; index++) {
+		await recordNativeToolAttempt(nativeInput({ tool_call_id: `cap-${index}` }), { path, now: () => nativeNow });
+	}
+	const state = JSON.parse(readFileSync(path, "utf8"));
+	expect(state.windows[0].attempts).toHaveLength(128);
+	expect(state.windows[0].coverage.status).toBe("INCOMPLETE");
+	expect(state.windows[0].buckets[0]).toMatchObject({ attempted: 128, own_guard_refusal_rate: null });
+});
+test("native tool attempts deduplicate retained identities across changed windows", async () => {
+	const path = join(base, "native-attempts-cross-window.json");
+	const first = nativeInput({ tool_call_id: "same" });
+	await recordNativeToolAttempt(first, { path, now: () => nativeNow });
+	await recordNativeToolAttempt({ ...first, assistant_at: "2026-11-16T00:10:00.000Z" },
+		{ path, now: () => nativeNow + 600_000 });
+	const state = JSON.parse(readFileSync(path, "utf8"));
+	expect(state.windows).toHaveLength(1);
+	expect(state.windows[0].coverage).toMatchObject({ status: "INCOMPLETE", reasons: ["IDENTITY_BINDING_CONFLICT"] });
+	expect(state.windows[0].buckets[0]).toMatchObject({ attempted: 1 });
+});
+test("native tool attempt persistence drops extra runtime fields and redacted metadata", async () => {
+	const path = join(base, "native-attempts-redacted.json");
+	const unsafe = {
+		...nativeInput({ tool_call_id: "redacted-call", model: "api_key=sentinel-secret" }),
+		prompt: "sentinel-secret",
+		native_args: { password: "sentinel-secret" },
+	} as NativeToolAttemptInput;
+	await recordNativeToolAttempt(unsafe, { path, now: () => nativeNow });
+	const serialized = readFileSync(path, "utf8");
+	expect(serialized).not.toContain("sentinel-secret");
+	expect(JSON.parse(serialized).windows[0].attempts[0]).not.toHaveProperty("prompt");
 });

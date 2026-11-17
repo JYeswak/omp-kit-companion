@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -8,7 +8,8 @@ import type { PullRefusal } from "../src/fleet-watch";
 import { ccSpool } from "../src/cc-spool.ts";
 import { holderVerdict, readLivenessSourcesAsync } from "../src/holder-liveness.ts";
 import type { HolderVerdict } from "../src/holder-liveness.ts";
-import { gateFromReason, recordGateEvent, trackerAct } from "./gate-events";
+import { gateFromReason, observeNativeToolModel, recordGateEvent, trackerAct, type NativeToolAttribution } from "./gate-events";
+import { recordNativeToolAttempt, type NativeToolAttemptInput } from "../src/native-tool-attempts.ts";
 import { parseCommit, planAutocomplete, reservationProjectKey } from "./commit-autocomplete";
 import { renderEnvelope } from "../src/kitlib/findings.ts";
 import { agentMailStorageRoot } from "../src/holder-liveness.ts";
@@ -94,7 +95,10 @@ export interface FlywheelContext {
 	cwd: string;
 	isIdle?(): boolean;
 	ui?: { notify(message: string, type?: "info" | "warning" | "error"): void };
-	sessionManager?: { getEntries?(): readonly unknown[]; getSessionId?(): string; getSessionFile?(): string | undefined };
+	sessionManager?: {
+		getEntries?(): readonly unknown[]; getSessionId?(): string; getSessionFile?(): string | undefined;
+		getLeafId?(): string | null; getEntry?(id: string): unknown;
+	};
 	agent?: NativeContext["agent"];
 	model?: SpawnModelIdentity;
 	models?: { resolve(patterns: string): SpawnModelIdentity | undefined };
@@ -154,6 +158,7 @@ export interface FlywheelGuardApi {
 	on(event: "session_start", handler: (event: { type: "session_start" }, ctx: FlywheelContext) => unknown): void;
 	on(event: "tool_call", handler: (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown): void;
 	on(event: "tool_execution_end", handler: (event: FlywheelToolExecutionEndEvent, ctx: FlywheelContext) => unknown): void;
+	on(event: "tool_execution_start", handler: (event: { toolCallId?: unknown; toolName?: unknown }, ctx: FlywheelContext) => unknown): void;
 	on(event: "tool_result", handler: (event: FlywheelToolResultEvent, ctx: FlywheelContext) => unknown): void;
 	getAllTools?(): readonly { name: string }[];
 	registerTool?: ExtensionAPI["registerTool"];
@@ -2648,6 +2653,41 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	const pendingCalls = new Map<string, RereadCall>();
 	const pendingReplays = new Map<string, MineReplay>();
 	const pendingClocks = new Map<string, { started_at: string; monotonic: number }>();
+	// Keep only our own admission verdict; native errors cannot classify other guards' refusals.
+	const nativeAdmissions = new Map<string, { session_id: string | null; journal_identity: string | null;
+		tool: string; own_guard: NativeToolAttemptInput["own_guard"] }>();
+	const nativeObserver = randomUUID();
+	let nativeMetadataGap = false;
+	const observeNativeLifecycle = async (event: { toolCallId?: unknown; toolName?: unknown; isError?: unknown }, ctx: FlywheelContext, phase: "start" | "end") => {
+		const attribution = observeNativeToolModel(ctx, event.toolCallId, event.toolName);
+		const admission = typeof event.toolCallId === "string" ? nativeAdmissions.get(event.toolCallId) : undefined;
+		const tool = typeof event.toolName === "string" ? event.toolName : "unknown";
+		const source = attribution.source;
+		const boundAdmission = admission !== undefined && admission.session_id !== null && admission.journal_identity !== null
+			&& admission.session_id === source?.session_id && admission.journal_identity === source?.journal_identity && admission.tool === tool;
+		const mixedOrigin = admission !== undefined && !boundAdmission;
+		try {
+			const recorded = await recordNativeToolAttempt({
+				seat: admissionOwner(env) ?? selfDeclared, tool,
+				tool_call_id: typeof event.toolCallId === "string" ? event.toolCallId : null,
+				session_id: source?.session_id ?? null, journal_identity: source?.journal_identity ?? null,
+				assistant_id: source?.entry_id ?? null, assistant_at: source?.assistant_at ?? null,
+				model: !mixedOrigin && attribution.status === "KNOWN" ? attribution.model : null,
+				provider: !mixedOrigin && attribution.status === "KNOWN" ? attribution.provider : null,
+				attribution_reason: mixedOrigin ? "NATIVE_ATTEMPT_ORIGIN_MISMATCH" : attribution.status === "UNKNOWN" ? attribution.reason : null,
+				own_guard: boundAdmission ? admission.own_guard : "UNOBSERVED",
+				phase, is_error: phase === "end" && typeof event.isError === "boolean" ? event.isError : null,
+				observer_id: nativeObserver, coverage_gap: nativeMetadataGap || mixedOrigin,
+			}, { env, home });
+			if (!recorded.ok) {
+				nativeMetadataGap = true;
+				ctx.ui?.notify(`kit-flywheel-guard NATIVE_TOOL_COVERAGE_UNKNOWN: ${recorded.why}; the native verdict and result stand.`, "warning");
+			}
+		} catch {
+			nativeMetadataGap = true;
+			ctx.ui?.notify("kit-flywheel-guard NATIVE_TOOL_COVERAGE_UNKNOWN: metadata observation failed; the native verdict and result stand.", "warning");
+		}
+	};
 	let buildWorkObserved = false;
 	// Observation only: no write-tree, tracker mutation, reservation or custody --reserve.
 	const replayFor = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<MineReplay> => {
@@ -2733,6 +2773,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		pendingCalls.clear();
 		pendingReplays.clear();
 		pendingClocks.clear();
+		if (nativeAdmissions.size > 0) nativeMetadataGap = true;
+		nativeAdmissions.clear();
 		closeIntents.clear();
 		const envIdentities = IDENTITY_ENV.map(name => env[name]?.trim()).filter((value): value is string => Boolean(value));
 		let identities: string[];
@@ -2873,7 +2915,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			return { block: true, reason: warning };
 		}
 	};
-	pi.on("tool_call", async (event, ctx) => {
+	const nativeGuardCall = async (event: FlywheelToolCallEvent, ctx: FlywheelContext, attribution: NativeToolAttribution): Promise<FlywheelToolCallResult | undefined> => {
 		const clock = { started_at: new Date().toISOString(), monotonic: performance.now() };
 		const timing = () => ({ started_at: clock.started_at, duration_s: (performance.now() - clock.monotonic) / 1000 });
 		if (typeof event.toolCallId === "string") pendingClocks.set(event.toolCallId, clock);
@@ -2895,7 +2937,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 				briefNotice = `kit-flywheel-guard LOOKUP_NOTICE: brief check failed (${error instanceof Error ? error.message : String(error)}); the task spawned without the appended gate contract.`;
 			}
 			if (completion.refusal) {
-				await recordGateEvent({ ...timing(), seat: admissionOwner(env) ?? selfDeclared, act: "task", target: null, gate: gateFromReason(completion.refusal), kind: "refuse", replay, detail: completion.refusal,
+				await recordGateEvent({ ...timing(), attribution, seat: admissionOwner(env) ?? selfDeclared, act: "task", target: null, gate: gateFromReason(completion.refusal), kind: "refuse", replay, detail: completion.refusal,
 					...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId, event_id: event.toolCallId } : {}) }, { env, home });
 				if (typeof event.toolCallId === "string") { pendingCalls.delete(event.toolCallId); pendingReplays.delete(event.toolCallId); pendingClocks.delete(event.toolCallId); }
 				return { block: true, reason: completion.refusal };
@@ -2903,7 +2945,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (completion.context !== undefined && typeof event.input === "object" && event.input !== null) {
 				briefed = { ...(event.input as Record<string, unknown>), context: completion.context };
 				for (const repo of completion.repos) {
-					await recordGateEvent({ ...timing(), repo, seat: admissionOwner(env) ?? selfDeclared, act: "task", target: null, gate: "brief-autocomplete", kind: "auto_complete", detail: `appended the current gate contract for ${repo}`,
+					await recordGateEvent({ ...timing(), attribution, repo, seat: admissionOwner(env) ?? selfDeclared, act: "task", target: null, gate: "brief-autocomplete", kind: "auto_complete", detail: `appended the current gate contract for ${repo}`,
 						...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId } : {}) }, { env, home });
 					ctx.ui?.notify(`AUTO_COMPLETED:brief: appended the current gate contract for ${repo} to the task context`, "info");
 				}
@@ -2935,13 +2977,13 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 				const plan = await planAutocomplete({ command, repo: top.stdout.trim(), agent: seat, projectKey, storagePath: root ? join(root, "storage.sqlite3") : null, nowMs: Date.now(), exec });
 				if (plan !== null) {
 					for (const done of plan.completed) {
-						await recordGateEvent({ ...timing(), repo: top.stdout.trim(), seat, act: "commit", target: plan.bead, gate: "commit-autocomplete", kind: "auto_complete", detail: `${done.what}: ${done.detail}`.slice(0, 200), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId } : {}) }, { env, home });
+						await recordGateEvent({ ...timing(), attribution, repo: top.stdout.trim(), seat, act: "commit", target: plan.bead, gate: "commit-autocomplete", kind: "auto_complete", detail: `${done.what}: ${done.detail}`.slice(0, 200), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId } : {}) }, { env, home });
 						ctx.ui?.notify(`AUTO_COMPLETED:${done.what}: ${done.detail}`, "info");
 					}
 					if (plan.findings.length > 0) {
 						const envelope = renderEnvelope({ ok: false, act: "commit", target: plan.bead, snapshot: `tree:${(await git(["write-tree"], repo)).stdout.trim()}`, findings: plan.findings });
 						const reason = `kit-flywheel-guard COMMIT_INCOMPLETE: ${envelope}\nNothing was completed and nothing was run.`;
-						await recordGateEvent({ ...timing(), repo: top.stdout.trim(), seat, act: "commit", target: plan.bead, gate: "COMMIT_INCOMPLETE", kind: "refuse", replay, detail: plan.findings.map(f => f.code).join(","), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId, event_id: event.toolCallId } : {}) }, { env, home });
+						await recordGateEvent({ ...timing(), attribution, repo: top.stdout.trim(), seat, act: "commit", target: plan.bead, gate: "COMMIT_INCOMPLETE", kind: "refuse", replay, detail: plan.findings.map(f => f.code).join(","), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId, event_id: event.toolCallId } : {}) }, { env, home });
 						if (typeof event.toolCallId === "string") { pendingReplays.delete(event.toolCallId); pendingCalls.delete(event.toolCallId); pendingClocks.delete(event.toolCallId); }
 						return { block: true, reason };
 					}
@@ -2961,6 +3003,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		if (act !== null || verdict?.block === true) {
 			const row = await recordGateEvent({
 				...timing(),
+				attribution,
 				seat: admissionOwner(env) ?? selfDeclared ?? await paneIdentities(pi.exec, env, home, [ctx.cwd]).then(names => names[0] ?? null).catch(() => null),
 				act: act?.act ?? (typeof event.toolName === "string" ? event.toolName.toLowerCase() : "unknown"),
 				target: act?.target ?? null,
@@ -2974,6 +3017,27 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		}
 		if (verdict?.block === true && typeof event.toolCallId === "string") { pendingCalls.delete(event.toolCallId); pendingReplays.delete(event.toolCallId); pendingClocks.delete(event.toolCallId); }
 		return verdict;
+	};
+	pi.on("tool_call", async (event, ctx) => {
+		const attribution = observeNativeToolModel(ctx, event.toolCallId, event.toolName);
+		const verdict = await nativeGuardCall(event, ctx, attribution);
+		if (typeof event.toolCallId === "string" && event.toolCallId.length > 0 && event.toolCallId.length <= 512
+			&& typeof event.toolName === "string" && event.toolName.length <= 512) {
+			const previous = nativeAdmissions.get(event.toolCallId);
+			const own_guard = verdict?.block === true ? "REFUSED" : "ALLOWED";
+			const session_id = attribution.source?.session_id ?? null, journal_identity = attribution.source?.journal_identity ?? null;
+			if (previous && (previous.session_id !== session_id || previous.journal_identity !== journal_identity || previous.tool !== event.toolName || previous.own_guard !== own_guard)) {
+				nativeMetadataGap = true;
+				previous.own_guard = "UNOBSERVED";
+			} else if (previous === undefined) {
+				if (nativeAdmissions.size >= 256) nativeMetadataGap = true;
+				else nativeAdmissions.set(event.toolCallId, { session_id, journal_identity, tool: event.toolName, own_guard });
+			}
+		}
+		return verdict;
+	});
+	pi.on("tool_execution_start", async (event, ctx) => {
+		await observeNativeLifecycle(event, ctx, "start");
 	});
 	// This is the parent's actual tool-result boundary, not an agent_end observer.
 	// Async auto-delivery and arbitrary final text do not pass through this hook.
@@ -3016,6 +3080,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		if (refusals.length > 0) return { isError: true, content: [{ type: "text", text: `${refusals.join("\n")}\nThe child output below is kept unchanged; its work is not accepted until the preflight evidence is supplied.` }, ...event.content], details: { code: "BRIEF_PREFLIGHT_REFUSED", accepted: false } };
 	});
 	pi.on("tool_execution_end", async (_event, ctx) => {
+		await observeNativeLifecycle(_event, ctx, "end");
+		if (typeof _event.toolCallId === "string") nativeAdmissions.delete(_event.toolCallId);
 		try {
 			if (typeof _event.toolCallId !== "string") return;
 			const clock = pendingClocks.get(_event.toolCallId);
@@ -3033,7 +3099,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (cause !== null) {
 				const gate = budgetLedgerGate(cause.class_id);
 				if (gate !== null) {
-					await recordGateEvent({ seat: admissionOwner(env) ?? selfDeclared, act: call?.toolName.toLowerCase() ?? "unknown", target: null,
+					await recordGateEvent({ attribution: observeNativeToolModel(ctx, _event.toolCallId, _event.toolName),
+						seat: admissionOwner(env) ?? selfDeclared, act: call?.toolName.toLowerCase() ?? "unknown", target: null,
 						...(clock ? { started_at: clock.started_at, duration_s: (performance.now() - clock.monotonic) / 1000 } : {}),
 						gate, kind: "refuse", event_id: _event.toolCallId, attempt: _event.toolCallId,
 						detail: cause.summary, replay: replay ?? captureMineReplay({ tool: typeof _event.toolName === "string" ? _event.toolName : "unknown", cwd: ctx.cwd }),
