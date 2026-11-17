@@ -205,7 +205,7 @@ function statusHarness(plant: {
 	worker?: string;
 	blocks: unknown;
 	panes: unknown[];
-	inspectOut?: string;
+	inspectOut?: (repo: string) => string;
 	am: (pane: string) => StatusRun;
 	br: (sub: string[]) => StatusRun;
 }): {
@@ -226,10 +226,10 @@ function statusHarness(plant: {
 	}] }));
 	const exec = { run: async (argv: readonly string[]): Promise<StatusRun> => {
 		if (argv[0] === "tern") {
-			if (plant.inspectOut !== undefined) return { code: 0, out: plant.inspectOut, err: "" };
+			if (plant.inspectOut !== undefined) return { code: 0, out: plant.inspectOut(repo), err: "" };
 			return { code: 0, out: JSON.stringify({
 				sessions: [{ id: "2", name: "skillgrowth", tabs: [{ name: "skillgrowth", blocks: plant.blocks }] }],
-				panes: plant.panes,
+				panes: plant.panes.map(row => row !== null && typeof row === "object" ? { cwd: repo, ...row } : row),
 			}), err: "" };
 		}
 		if (argv[0] === "am") {
@@ -323,6 +323,20 @@ test("PROJECTSTATUS108 planted dead panes read not alive", async () => {
 	}
 }, fixtureDeadlineS(60) * 1000);
 
+test("PROJECTSTATUS108 out-of-project panes remain unknown despite matching ids", async () => {
+	const h = statusHarness({ blocks: [5, 6],
+		panes: [{ pane: 5, cwd: "/unrelated-project", exited: null }, { pane: 6, cwd: "/unrelated-project", exited: null }],
+		am: statusNames, br: statusCounts });
+	try {
+		const reported = await projectStatus({ session: "skillgrowth", env: h.env, deps: { exec: h.exec } });
+		if (!reported.ok) throw new Error(reported.detail);
+		expect(reported.status.seats.map(seat => seat.alive)).toEqual([null, null]);
+		expect(reported.status.coverage.state).toBe("UNKNOWN");
+	} finally {
+		h.cleanup();
+	}
+}, fixtureDeadlineS(60) * 1000);
+
 test("PROJECTSTATUS108 resolve-pane failure reports nameError instead of bare false", async () => {
 	const h = statusHarness({ blocks: [5, 6],
 		panes: [{ pane: 5, exited: null }, { pane: 6, exited: null }],
@@ -364,9 +378,9 @@ test("PROJECTSTATUS108 br shim refusal reports the beads reason", async () => {
 test("PROJECTSTATUS108 odd id beyond 2^53 resolves and reads alive", async () => {
 	const director = "9374092541034498";
 	const worker = "9374096836001793";
-	const inspectOut = `{"sessions": [{"id": "2", "name": "skillgrowth", "tabs": [{"name": "skillgrowth", "blocks": [{"id": ${director}}, {"id": ${worker}}]}]}], `
-		+ `"panes": [{"pane": ${director}, "program": "/bin/zsh", "working": true, "exited": null, "omp_session_file": null}, `
-		+ `{"pane": ${worker}, "program": "/bin/zsh", "working": true, "exited": null, "omp_session_file": null}]}`;
+	const inspectOut = (repo: string) => `{"sessions": [{"id": "2", "name": "skillgrowth", "tabs": [{"name": "skillgrowth", "blocks": [{"id": ${director}}, {"id": ${worker}}]}]}], `
+		+ `"panes": [{"pane": ${director}, "cwd": ${JSON.stringify(repo)}, "program": "/bin/zsh", "working": true, "exited": null, "omp_session_file": null}, `
+		+ `{"pane": ${worker}, "cwd": ${JSON.stringify(repo)}, "program": "/bin/zsh", "working": true, "exited": null, "omp_session_file": null}]}`;
 	const h = statusHarness({ director, worker, blocks: [], panes: [], inspectOut,
 		am: (pane) => ({ code: 0, out: JSON.stringify({ agent_name: pane === `tern:${director}` ? "Director" : "Worker" }), err: "" }),
 		br: statusCounts });

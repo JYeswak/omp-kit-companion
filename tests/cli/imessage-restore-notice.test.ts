@@ -167,7 +167,7 @@ test("RESTORENOTICE1 projectStatus reports goalPaused per seat", async () => {
 	const exec = {
 		run: async (argv: readonly string[]) => {
 			if (argv[0] === "tern") {
-				return { code: 0, out: JSON.stringify({ sessions: [{ name: "s", tabs: [{ name: "t", blocks: [5, 6] }] }], panes: [{ pane: "5", omp_session_file: directorFile, exited: null }, { pane: "6", omp_session_file: workerFile, exited: null }] }), err: "" };
+				return { code: 0, out: JSON.stringify({ sessions: [{ name: "s", tabs: [{ name: "skillgrowth", blocks: [5, 6] }] }], panes: [{ pane: "5", cwd: repo, omp_session_file: directorFile, exited: null }, { pane: "6", cwd: repo, omp_session_file: workerFile, exited: null }] }), err: "" };
 			}
 			if (argv[0] === "am") {
 				const pane = String(argv[argv.indexOf("--pane") + 1] ?? "");
