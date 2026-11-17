@@ -1297,7 +1297,7 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		for (const h of [brHash, srcHash, shimSrcHash, ompHash, acHash]) expect(h).toMatch(/^[0-9a-f]{64}$/);
 		expect(revision).toMatch(/^[0-9a-f]{40}$/);
 		const fam = `guard-native src=${srcHash.slice(0, 12)} shim=${shimSrcHash.slice(0, 12)} br=${brHash.slice(0, 12)} omp=${ompHash.slice(0, 12)} ac=${acHash.slice(0, 12)} tree=${revision.slice(0, 12)}`;
-		const verifyEnv = { ...envT, PATH: officialPath };
+		const verifyEnv = { ...envT, PATH: officialPath, XDG_STATE_HOME: join(root, "state") };
 		const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: verifyEnv, dryRun: true, family: fam, lesson: "native replay-barrier fixture" });
 		expect(res.code, res.log).toBe("DRY_RUN");
 		expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true]]);
@@ -1329,6 +1329,13 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const finalRow: unknown = Array.isArray(finalParsed) ? finalParsed[0] : finalParsed;
 		const finalStatus = typeof finalRow === "object" && finalRow !== null && "status" in finalRow && typeof finalRow.status === "string" ? finalRow.status : null;
 		expect(finalStatus).toBe("closed");
+		// Drop the shim from this owned-fixture write: the same guard oracle must lose.
+		const guardless = await brOut(["update", id, "--add-label", "guardless-mutant"], tdir);
+		expect(guardless.rc).toBe(0);
+		expect(guardless.out).not.toContain("READONLY_TRACKER");
+		const mutantShow = await brOut(["show", id, "--json"], tdir);
+		const mutantRows: unknown = JSON.parse(mutantShow.out);
+		expect(Array.isArray(mutantRows) ? mutantRows[0] : mutantRows).toMatchObject({ labels: expect.arrayContaining(["guardless-mutant"]) });
 	}, 600_000);
 	test("copyTreeExceptGit skips a var/agent-tmp subtree deleted mid-walk; scripts/ still copied", async () => {
 		const root = ownedTmp("replaybr1-copy-race", { bead: "ompkit-t7cn7.21" }).path;
