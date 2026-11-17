@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { gateEventsPath, gateFromReason, recordGateEvent, trackerAct } from "./gate-events";
+import { gateEventsPath, gateFromReason, observeNativeToolModel, recordGateEvent, trackerAct } from "./gate-events";
 import { recordNativeToolAttempt, type NativeToolAttemptInput } from "../src/native-tool-attempts.ts";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { captureMineReplay } from "../src/mine-replay.ts";
@@ -186,6 +186,7 @@ test("native tool attempts count successful, refused, and error lifecycles once 
 		seat: "seat-a", tool: "shell", model: "model-a", attempted: 3, own_guard_observed: 3,
 		own_guard_refused: 1, native_error_results: 2, own_guard_refusal_rate: 1 / 3, all_guard_refusal_rate: null,
 	}));
+	requireNativeCohort(rows.windows[0].buckets[0]);
 });
 
 test("native tool attempts separate buckets and keep incomplete rates unknown", async () => {
@@ -264,4 +265,80 @@ test("native tool attempt persistence drops extra runtime fields and redacted me
 	const serialized = readFileSync(path, "utf8");
 	expect(serialized).not.toContain("sentinel-secret");
 	expect(JSON.parse(serialized).windows[0].attempts[0]).not.toHaveProperty("prompt");
+});
+
+/** Compile the real module/IO closure, changing only the named production statement.
+ * A runtime-selected bundled mutant cannot use a static import or a shared module mock.
+ * Compilation, import and IO errors stay outside the semantic mutant-kill assertion. */
+async function nativeImplementation<T>(path: string, before: string, after: string): Promise<T> {
+	const original = readFileSync(path, "utf8");
+	const contents = original.replace(before, after);
+	if (contents === original) throw new Error("Native mutant target unavailable");
+	const built = await Bun.build({
+		entrypoints: [path], target: "bun", write: false,
+		plugins: [{ name: "native-attempt-negative", setup(build) {
+			build.onLoad({ filter: /[.]ts$/ }, args => args.path === path ? { contents, loader: "ts" } : undefined);
+		} }],
+	});
+	if (!built.success || built.outputs.length !== 1) throw new Error("Native mutant compilation failed");
+	return await import(`data:text/javascript;base64,${Buffer.from(await built.outputs[0]!.text()).toString("base64")}`);
+}
+
+function requireNativeCohort(bucket: Record<string, unknown>): void {
+	if (bucket.attempted !== 3 || bucket.own_guard_observed !== 3 || bucket.own_guard_refused !== 1
+		|| bucket.native_error_results !== 2 || bucket.own_guard_refusal_rate !== 1 / 3 || bucket.all_guard_refusal_rate !== null)
+		throw new Error("NATIVE_ATTEMPT_COHORT_MISMATCH");
+}
+
+for (const mutant of ["omitted-success", "double-count"] as const) {
+	test(`GATEMODELRATE1: executed ${mutant} production mutant loses the native cohort oracle`, async () => {
+		const path = join(base, `executed-${mutant}.json`);
+		const implementation = await nativeImplementation<{ recordNativeToolAttempt: typeof recordNativeToolAttempt }>(
+			join(import.meta.dir, "../src/native-tool-attempts.ts"),
+			mutant === "omitted-success" ? "const captured = sanitizeInput(input);" : "bucket.attempted++;",
+			mutant === "omitted-success"
+				? 'if (input.own_guard === "ALLOWED" && input.is_error !== true) return { ok: true, path: options.path! };\n\tconst captured = sanitizeInput(input);'
+				: "bucket.attempted += 2;",
+		);
+		for (const input of [
+			nativeInput({ tool_call_id: "issued-refusal", own_guard: "REFUSED", is_error: true }),
+			nativeInput({ tool_call_id: "issued-success", is_error: false }),
+			nativeInput({ tool_call_id: "issued-error", is_error: true }),
+		]) {
+			const result = await implementation.recordNativeToolAttempt(input, { path, now: () => nativeNow });
+			if (!result.ok) throw new Error(`Native mutant failed before the cohort oracle: ${result.why}`);
+		}
+		const bucket = JSON.parse(readFileSync(path, "utf8")).windows[0].buckets[0];
+		expect(() => requireNativeCohort(bucket)).toThrow("NATIVE_ATTEMPT_COHORT_MISMATCH");
+	});
+}
+
+test("GATEMODELRATE1: executed default-model production mutant loses the real refusal-row oracle", async () => {
+	const sessionFile = join(base, "executed-model-session.jsonl");
+	const assistant = { id: "served-assistant", parentId: null, type: "message", timestamp: new Date(nativeNow).toISOString(),
+		message: { role: "assistant", model: "native-served", provider: "native-provider",
+			content: [{ type: "toolCall", id: "issued-model-call", name: "bash" }] } };
+	writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: "served-session" })}\n${JSON.stringify(assistant)}\n`);
+	const ctx = { sessionManager: {
+		getSessionId: () => "served-session", getSessionFile: () => sessionFile,
+		getLeafId: () => assistant.id, getEntry: () => assistant,
+	} };
+	const healthy = { observeNativeToolModel, recordGateEvent };
+	const faulty = await nativeImplementation<typeof healthy>(join(import.meta.dir, "gate-events.ts"),
+		'return { status: "KNOWN", model, provider, source: proof };',
+		'return { status: "KNOWN", model: "registration-default", provider, source: proof };');
+	const requireCausalRow = (row: Record<string, unknown>) => {
+		if (row.kind !== "refuse" || row.model !== "native-served" || row.provider !== "native-provider")
+			throw new Error("NATIVE_CAUSAL_MODEL_MISMATCH");
+	};
+	for (const [label, implementation] of [["healthy", healthy], ["default-model", faulty]] as const) {
+		const path = join(base, `executed-${label}.jsonl`);
+		const attribution = implementation.observeNativeToolModel(ctx, "issued-model-call", "bash");
+		const result = await implementation.recordGateEvent({ seat: "seat-a", act: "close", target: "kit-a",
+			gate: "SELF_CLOSE_REFUSED", kind: "refuse", attribution, attempt: "issued-model-call" }, { path });
+		if (!result.ok) throw new Error(`Native model case failed before the row oracle: ${result.why}`);
+		const row = JSON.parse(readFileSync(path, "utf8").trim());
+		if (label === "healthy") { requireCausalRow(row); expect(row.attribution).toMatchObject({ status: "KNOWN", source: { tool_call_id: "issued-model-call" } }); }
+		else expect(() => requireCausalRow(row)).toThrow("NATIVE_CAUSAL_MODEL_MISMATCH");
+	}
 });
