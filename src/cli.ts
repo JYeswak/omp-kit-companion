@@ -61,7 +61,7 @@ import { claudeSaveServiceConfig, claudeSaveUserConfigPath, runClaudeSaveJob, ru
 import { ensureMutationStateRoot, writePrivate, type PendingInspection } from "./mutations.ts";
 import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
 import { inspectProjectTrust } from "./project-trust.ts";
-import { applyProjectAdd, applyProjectGoal, planProjectAdd, planProjectGoal, projectStatus, undoProjectAdd } from "./project-add.ts";
+import { applyProjectAdd, applyProjectGoal, planProjectAdd, planProjectGoal, projectStatus, projectStatusAll, undoProjectAdd } from "./project-add.ts";
 import { PROFILE_RECIPE_KINDS, renderRecipe } from "./profile-recipes.ts";
 import { confirmMutation, renderOutput, type PresentationResult } from "./output.ts";
 import { redactFullTestCause, runFullTest, type FullTestCause, type FullTestReport } from "./full-test-runner.ts";
@@ -1749,20 +1749,37 @@ async function projectAddCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 }
 
+async function projectStatusOneCommand(session: string): Promise<CliResult> {
+	const result = await projectStatus({ session, env: process.env });
+	if (!result.ok) return { code: 2, data: { overall: "UNKNOWN", scope: "project", action: "STATUS" },
+		errors: [{ code: result.code, message: result.detail, remediation: result.remediation }], verification: "UNVERIFIED" };
+	const status = result.status, named = status.seats.filter(seat => seat.named).length;
+	const complete = status.coverage.state === "OBSERVED";
+	return { code: complete ? 0 : 1, data: { overall: complete ? "OBSERVED" : "UNKNOWN", scope: "project", action: "STATUS",
+		session: status.session, repo: status.repo, panesRecorded: status.panesRecorded, seats: status.seats, beads: status.beads, sources: status.sources,
+		coverage: status.coverage, last_commit: status.lastCommit, census: { named: `${named}/${status.seats.length}` }, observation_only: true }, verification: "UNVERIFIED" };
+}
+
+async function projectStatusAllCommand(): Promise<CliResult> {
+	const result = await projectStatusAll({ env: process.env });
+	if (!result.ok) return { code: 2, data: { overall: "UNKNOWN", scope: "project", action: "STATUS" },
+		errors: [{ code: result.code, message: result.detail, remediation: result.remediation }], verification: "UNVERIFIED" };
+	return { code: result.complete ? 0 : 1, data: { overall: result.complete ? "OBSERVED" : "UNKNOWN", scope: "project", action: "STATUS",
+		expected: result.expected, observed: result.observed, sessions: result.sessions, sources: result.sources, observation_only: true }, verification: "UNVERIFIED" };
+}
+
 async function projectStatusCommand(request: ParsedCommand): Promise<CliResult> {
 	const home = process.env.HOME;
 	if (!home || !isAbsolute(home) || resolve(home) !== home) {
 		return refusal("PROJECT_HOME_UNAVAILABLE", "A canonical absolute HOME is required", "Set HOME to an absolute path with no symlinks.");
 	}
 	const session = request.argument;
-	if (!session) return refusal("PROJECT_SESSION_MISSING", "A session name is required", "Pass project status SESSION.");
+	const all = request.flags.has("--all");
+	if (session && all) return refusal("PROJECT_STATUS_AMBIGUOUS", "Choose a session or --all, not both", "Remove the session name or --all.");
 	try {
-		const status = await projectStatus({ session, env: process.env });
-		if (!status.ok) {
-			return { code: 2, data: { overall: "FAIL", scope: "project", action: "STATUS" }, errors: [{ code: status.code, message: status.detail, remediation: status.remediation }], verification: "UNVERIFIED" };
-		}
-		const named = status.status.seats.filter((seat) => seat.named).length;
-		return { code: 0, data: { overall: "OK", scope: "project", action: "STATUS", session: status.status.session, repo: status.status.repo, seats: status.status.seats, beads: status.status.beads, last_commit: status.status.lastCommit, census: { named: `${named}/${status.status.seats.length}` } }, verification: "UNVERIFIED" };
+		if (all) return await projectStatusAllCommand();
+		if (!session) return refusal("PROJECT_SESSION_MISSING", "A session name or --all is required", "Pass project status SESSION or project status --all.");
+		return await projectStatusOneCommand(session);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		const code = /^[A-Z][A-Z_0-9]+$/.test(message) ? message : "PROJECT_FAILED";
@@ -4301,8 +4318,10 @@ async function readRestoreNotice(home: string, config: BridgeConfig, imsgBin: st
 		for (const entry of fleet.sessions) {
 			if (typeof entry.session !== "string" || entry.session === "") return { status: "SKIPPED" };
 			const status = await projectStatus({ session: entry.session, env: process.env });
-			if (!status.ok) return { status: "SKIPPED" };
-			for (const seat of status.status.seats) seats.push({ session: status.status.session, seat: seat.name ?? seat.pane, goalPaused: seat.goalPaused, goalPausedAt: seat.goalPausedAt });
+			if (!status.ok || status.status.coverage.state !== "OBSERVED") return { status: "SKIPPED" };
+			// OBSERVED coverage already requires known boolean goal state for every seat.
+			for (const seat of status.status.seats) seats.push({ session: status.status.session, seat: seat.name ?? seat.pane,
+				goalPaused: seat.goalPaused === true, goalPausedAt: seat.goalPausedAt });
 		}
 		const noticed = restoreNotice({ home, config, imsgBin, bootTimeS, seats });
 		return { status: noticed.status, key: noticed.key };

@@ -3,8 +3,8 @@
  * and their latest recorded mail wake; registration is not a monitoring service.
  */
 import { closeSync, existsSync, fdatasyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { buildNativeInterruptTurn, buildNativeSendTurn, deliverFirstSeatGoal, deliverToTernSeat, ternCtlBin, type TernSendGate } from "./send.ts";
 import type { TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
 import { defaultTernIo, identifyTernSeat, observeTernSeat, parseSessionView, readSessionView, ternPaneId } from "./plane-tern.ts";
@@ -41,6 +41,11 @@ export interface ProjectAddPaths {
 }
 
 const SESSION_NAME = /^[a-z0-9][a-z0-9-]*$/;
+/** Reuse native exact identity validation; an already-rounded unsafe Number is unavailable. */
+function barePaneId(value: unknown): string | null {
+	if (typeof value === "string") return ternPaneId(value);
+	return typeof value === "number" && Number.isSafeInteger(value) ? ternPaneId(String(value)) : null;
+}
 const MAX_OPAQUE_LEN = 128;
 
 
@@ -1375,12 +1380,14 @@ export interface ProjectSeatStatus {
 	role: "director" | "worker";
 	name: string | null;
 	pane: string;
-	alive: boolean;
+	alive: boolean | null;
 	named: boolean;
 	nameError: string | null;
 	lastActivity: string | null;
+	/** Ms from lastActivity to the read; null when the seat never recorded one. */
+	quietMs: number | null;
 	activeGoal: string | null;
-	goalPaused: boolean;
+	goalPaused: boolean | null;
 	/** Timestamp of the pause record when goalPaused, else null. */
 	goalPausedAt: string | null;
 	wake: { outcome: string; at: string | null };
@@ -1389,9 +1396,143 @@ export interface ProjectSeatStatus {
 export interface ProjectStatusResult {
 	session: string;
 	repo: string;
+	/** Missing pane slots stay explicit even when other recorded seats can be read. */
+	panesRecorded: boolean;
 	seats: ProjectSeatStatus[];
 	beads: { ready: number | null; inProgress: number | null; error: string | null };
+	coverage: { state: "OBSERVED" | "UNKNOWN"; expectedPanes: string[]; observedPanes: string[]; reasons: string[] };
+	sources: ProjectStatusSource[];
 	lastCommit: { sha: string; at: number; subject: string } | null;
+}
+
+/** A cursor bounds the bytes read from this snapshot; it is not a native event sequence. */
+export interface ProjectStatusSource {
+	kind: string;
+	revision: string | null;
+	cursor: { kind: "snapshot-bytes"; bytes: number; start?: number } | null;
+	observedAt: string;
+	freshnessMs: number;
+	reason: string | null;
+	argv?: readonly string[];
+	exitCode?: number;
+}
+
+type StatusInput = { env: NodeJS.ProcessEnv; deps?: ProjectAddDeps };
+type StatusEntry = { session: string; repo: string; coordinatorSession: string; coordinatorPane: unknown; workerPanes: unknown };
+type StatusInspect = {
+	sessions: { name?: string; tabs?: { name?: string; blocks?: ({ id?: unknown } | string | number)[] }[] }[];
+	panes: { pane?: unknown; id?: unknown; cwd?: unknown; exited?: unknown; live?: unknown; omp_session_file?: unknown }[];
+};
+type StatusFrame = {
+	entries: StatusEntry[];
+	exec: ProjectAddExec;
+	io: TernObserverIo;
+	env: NodeJS.ProcessEnv;
+	stateRoot: string;
+	sources: ProjectStatusSource[];
+	inspect: StatusInspect | null;
+	scopes: Map<string, Set<string>>;
+};
+
+function statusSource(kind: string, raw: string | null, reason: string | null, freshnessMs = 30_000): ProjectStatusSource {
+	return { kind, revision: raw === null ? null : createHash("sha256").update(raw).digest("hex"),
+		cursor: raw === null ? null : { kind: "snapshot-bytes", bytes: Buffer.byteLength(raw) },
+		observedAt: new Date().toISOString(), freshnessMs, reason };
+}
+
+/** Decode only the status projection; the control loader retains its own admission rules. */
+function statusEntries(raw: string): StatusEntry[] {
+	const value: unknown = JSON.parse(raw, (_key: string, value: unknown, context?: { source?: string }) => {
+		if (typeof value !== "number" || !Number.isInteger(value) || Number.isSafeInteger(value)) return value;
+		if (typeof context?.source !== "string") throw new Error("native JSON source precision is unavailable");
+		return context.source;
+	});
+	if (value === null || typeof value !== "object" || !("sessions" in value) || !Array.isArray(value.sessions)) throw new Error("sessions is not an array");
+	const entries: StatusEntry[] = [];
+	const names = new Set<string>();
+	for (const row of value.sessions) {
+		if (row === null || typeof row !== "object" || typeof row.session !== "string" || row.session === "" ||
+			typeof row.repo !== "string" || !isAbsolute(row.repo) || names.has(row.session)) throw new Error("managed session identity is missing or ambiguous");
+		names.add(row.session);
+		entries.push({ session: row.session, repo: row.repo,
+			coordinatorSession: typeof row.coordinatorSession === "string" && row.coordinatorSession !== "" ? row.coordinatorSession : row.session,
+			coordinatorPane: row.coordinatorPane, workerPanes: row.workerPanes });
+	}
+	return entries;
+}
+
+function statusScopes(inspect: StatusInspect | null): Map<string, Set<string>> {
+	const scopes = new Map<string, Set<string>>();
+	const add = (name: unknown, ids: string[]) => {
+		if (typeof name !== "string" || name === "") return;
+		const known = scopes.get(name) ?? new Set<string>();
+		for (const id of ids) known.add(id);
+		scopes.set(name, known);
+	};
+	for (const session of inspect?.sessions ?? []) {
+		if (session === null || typeof session !== "object") continue;
+		const sessionIds: string[] = [];
+		for (const tab of Array.isArray(session.tabs) ? session.tabs : []) {
+			if (tab === null || typeof tab !== "object") continue;
+			const ids: string[] = [];
+			for (const block of Array.isArray(tab.blocks) ? tab.blocks : []) {
+				const id = barePaneId(block !== null && typeof block === "object" ? block.id : block);
+				if (id !== null) ids.push(id);
+			}
+			add(tab.name, ids);
+			sessionIds.push(...ids);
+		}
+		add(session.name, sessionIds);
+	}
+	return scopes;
+}
+
+async function readStatusInspect(input: StatusInput, exec: ProjectAddExec): Promise<{ inspect: StatusInspect | null; source: ProjectStatusSource }> {
+	const argv = [input.env.TERN_CTL_BIN?.trim() || "tern", "inspect", "--json"];
+	try {
+		const result = await exec.run(argv, { deadlineMs: 30_000 });
+		const source = { ...statusSource("tern", result.code === 0 ? result.out : null, result.code === 0 ? null : `tern inspect exited ${result.code}`), argv, exitCode: result.code };
+		if (result.code !== 0) return { inspect: null, source };
+		const parsed = parseTernJson(result.out);
+		if (parsed === null || typeof parsed !== "object" || !("sessions" in parsed) || !Array.isArray(parsed.sessions) ||
+			!("panes" in parsed) || !Array.isArray(parsed.panes)) return { inspect: null, source: { ...source, reason: "tern inspect returned no covered sessions/panes snapshot" } };
+		return { inspect: parsed as StatusInspect, source };
+	} catch (error) {
+		return { inspect: null, source: { ...statusSource("tern", null, `tern inspect unavailable: ${error instanceof Error ? error.message : String(error)}`), argv } };
+	}
+}
+
+async function readStatusFrame(input: StatusInput): Promise<{ ok: true; frame: StatusFrame } | { ok: false; code: string; detail: string; remediation: string }> {
+	const home = input.env.HOME ?? "";
+	if (!home || !isAbsolute(home) || resolve(home) !== home) return fail("PROJECT_HOME_UNAVAILABLE", "a canonical absolute HOME is required", "Set HOME to a canonical absolute path.");
+	const paths = resolveProjectAddPaths(input.env, home);
+	let raw: string, entries: StatusEntry[];
+	try {
+		if (statSync(paths.fleetWatchPath).size > (1 << 20)) throw new Error("configuration exceeds the status read budget");
+		raw = readFileSync(paths.fleetWatchPath, "utf8");
+		entries = statusEntries(raw);
+	} catch (error) {
+		return fail("PROJECT_FLEET_WATCH_INVALID", `status cannot read ${paths.fleetWatchPath}: ${error instanceof Error ? error.message : String(error)}`, "Repair the named source; missing configuration is not an empty fleet.");
+	}
+	const configurationSource = statusSource("configuration", raw, null);
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(input.env)) if (value !== undefined) env[key] = value;
+	const base = input.deps?.exec ?? { run: defaultExec };
+	const exec: ProjectAddExec = { run: (argv, options) => base.run(argv, { ...options, env }) };
+	const native = await readStatusInspect(input, exec);
+	return { ok: true, frame: { entries, exec, io: input.deps?.io ?? defaultTernIo(), env: input.env, stateRoot: paths.stateRoot,
+		sources: [configurationSource, native.source], inspect: native.inspect, scopes: statusScopes(native.inspect) } };
+}
+
+export async function projectStatusAll(input: StatusInput) {
+	const read = await readStatusFrame(input);
+	if (!read.ok) return read;
+	const { frame } = read;
+	const sessions = [];
+	for (const entry of frame.entries) sessions.push({ session: entry.session, ...await statusForEntry(entry, frame) });
+	return { ok: true as const, expected: frame.entries.map(entry => entry.session),
+		observed: frame.entries.filter(entry => frame.scopes.has(entry.coordinatorSession)).map(entry => entry.session),
+		sources: frame.sources, sessions, complete: sessions.length > 0 && frame.sources.every(source => source.reason === null) && sessions.every(row => row.status.coverage.state === "OBSERVED") };
 }
 
 function tryParseJson(text: string): unknown {
@@ -1422,164 +1563,145 @@ function latestSeatWakes(stateRoot: string): Map<string, { outcome: string; at: 
 }
 
 export async function projectStatus(input: { session: string; env: NodeJS.ProcessEnv; deps?: ProjectAddDeps }): Promise<{ ok: true; status: ProjectStatusResult } | { ok: false; code: string; detail: string; remediation: string }> {
-	const home = input.env.HOME ?? "";
-	if (!home || !isAbsolute(home) || resolve(home) !== home) {
-		return fail("PROJECT_HOME_UNAVAILABLE", "a canonical absolute HOME is required", "Set HOME to an absolute path with no symlinks.");
+	const read = await readStatusFrame(input);
+	if (!read.ok) return read;
+	const entry = read.frame.entries.find(row => row.session === input.session);
+	if (entry === undefined) return fail("PROJECT_SESSION_UNKNOWN", `session ${input.session} is not a managed project`, "Add it first with project add.");
+	return statusForEntry(entry, read.frame);
+}
+
+type StatusSlot = { id: string; role: "director" | "worker" };
+
+function statusPaneRows(entry: StatusEntry, frame: StatusFrame): Map<string, StatusInspect["panes"][number]> {
+	const scope = frame.scopes.get(entry.coordinatorSession);
+	const rows = new Map<string, StatusInspect["panes"][number]>();
+	const repo = resolve(entry.repo);
+	for (const row of frame.inspect?.panes ?? []) {
+		if (row === null || typeof row !== "object") continue;
+		const id = barePaneId(row.pane ?? row.id);
+		const cwd = typeof row.cwd === "string" && isAbsolute(row.cwd) ? resolve(row.cwd) : null;
+		if (id !== null && scope?.has(id) && cwd !== null && (cwd === repo || cwd.startsWith(repo + sep))) rows.set(id, row);
 	}
-	const paths = resolveProjectAddPaths(input.env, home);
-	const exec = input.deps?.exec ?? { run: defaultExec };
-	const failed = (code: string, detail: string, remediation: string) => ({ ok: false as const, code, detail, remediation });
-	let config: { sessions: FleetWatchSession[] };
+	return rows;
+}
+
+async function statusSeatName(entry: StatusEntry, frame: StatusFrame, id: string): Promise<{ name: string | null; error: string | null }> {
+	const argv = [frame.env.AM_BIN?.trim() || "am", "agents", "resolve-pane", "--project", entry.repo, "--pane", `tern:${id}`, "--json"];
 	try {
-		config = loadFleetWatchConfig(paths.fleetWatchPath);
-	} catch (error) {
-		return failed("PROJECT_FLEET_WATCH_INVALID", `fleet-watch config ${paths.fleetWatchPath} is invalid: ${error instanceof Error ? error.message : String(error)}`, "Repair the file.");
-	}
-	const entry = config.sessions.find((row) => row.session === input.session) ?? null;
-	if (entry === null) return failed("PROJECT_SESSION_UNKNOWN", `session ${input.session} is not a managed project`, "Add it first with project add.");
-	const bare = (pane: string): string | null => {
-		const text = pane.startsWith("tern:") ? pane.slice("tern:".length) : pane;
-		return /^[0-9]+$/.test(text) ? text : null;
-	};
-	const coordinator = bare(entry.coordinatorPane);
-	const workerIds = entry.workerPanes.map(bare);
-	if (coordinator === null || workerIds.some((id) => id === null)) {
-		return failed("PROJECT_PANES_UNRECORDED", `session ${input.session} has no recorded panes yet`, "Wait for project add to finish recording them.");
-	}
-	const ternBin = input.env.TERN_CTL_BIN?.trim() || "tern";
-	const amBin = input.env.AM_BIN?.trim() || "am";
-	let inspect: { sessions: { name?: unknown; tabs?: { name?: unknown; blocks?: ({ id?: unknown; live?: unknown } | number | string)[] }[] }[]; panes: { pane?: unknown; live?: unknown; omp_session_file?: unknown; exited?: unknown }[] } | null = null;
-	try {
-		// Pane ids exceed 2^53, so the inspect parse must not round them.
-		const probed = await exec.run([ternBin, "inspect", "--json"], { deadlineMs: 30_000 });
-		let parsed: unknown = null;
-		try { parsed = probed.code === 0 ? parseTernJson(probed.out) : null; } catch { parsed = null; }
-		inspect = parsed !== null && typeof parsed === "object" ? parsed as typeof inspect : null;
-	} catch { inspect = null; }
-	// Liveness lives in the panes entries keyed by block id; the tab block
-	// list may be bare numbers with no liveness of their own.
-	const liveByPane = new Map<string, boolean>();
-	if (inspect !== null) {
-		for (const row of inspect.panes ?? []) {
-			const key = typeof row.pane === "number" || typeof row.pane === "string" ? String(row.pane) : "";
-			if (key === "") continue;
-			// Real pane entries carry no `live` field: present with
-			// exited == null means alive; a present `live` field vetoes only
-			// when it is exactly false.
-		liveByPane.set(key, row.exited == null && (!("live" in row) || row.live !== false));
-		}
-	}
-	const blockLive = (id: string): boolean => {
-		const known = liveByPane.get(id);
-		if (known !== undefined) return known;
-		if (inspect === null) return false;
-		for (const session of inspect.sessions ?? []) {
-			for (const tab of session.tabs ?? []) {
-				for (const block of tab.blocks ?? []) {
-					const bid = typeof block === "number" || typeof block === "string" ? String(block) : String(block.id ?? "");
-					if (bid === id) return typeof block === "object" && block !== null && block.live === true;
-				}
-			}
-		}
-		return false;
-	};
-	const paneFile = (id: string): string | null => {
-		if (inspect === null) return null;
-		for (const row of inspect.panes ?? []) {
-			if (String(row.pane ?? "") === id && typeof row.omp_session_file === "string" && row.exited === null) return row.omp_session_file;
-		}
-		return null;
-	};
-	// Seat names come from the `am agents resolve-pane` CLI under a deadline,
-	// the same path land uses, so status works from any shell. A seat whose
-	// pane does not resolve keeps its reason in nameError instead of a bare
-	// false/null.
-	const resolveSeatName = async (id: string): Promise<{ name: string } | { error: string }> => {
-		let result: { code: number; out: string; err: string };
-		try {
-			result = await exec.run([amBin, "agents", "resolve-pane", "--project", entry.repo, "--pane", `tern:${id}`, "--json"], { deadlineMs: 30_000 });
-		} catch (error) {
-			const cause = error instanceof Error ? error.message : String(error);
-			return { error: `am agents resolve-pane could not run (${cause.slice(0, 200)})` };
-		}
-		if (result.code !== 0) {
-			const detail = (result.err !== "" ? result.err : result.out).split("\n")[0]?.trim().slice(0, 200) ?? "";
-			return { error: detail === "" ? `am agents resolve-pane exited ${result.code}` : `am agents resolve-pane exited ${result.code}: ${detail}` };
-		}
+		const result = await frame.exec.run(argv, { deadlineMs: 30_000 });
+		if (result.code !== 0) return { name: null, error: `am agents resolve-pane exited ${result.code}: ${(result.err || result.out).split("\n")[0]?.slice(0, 200) ?? ""}` };
 		const parsed = tryParseJson(result.out);
-		const record = (Array.isArray(parsed) ? parsed[0] : parsed) as Record<string, unknown> | null;
-		const candidate = record === null || typeof record !== "object" ? null : (record.agent_name ?? record.name);
-		if (typeof candidate !== "string" || candidate === "") return { error: "am agents resolve-pane answered without a name" };
-		return { name: candidate };
-	};
-	const resolvedNames: ({ name: string } | { error: string })[] = [];
-	for (const id of [coordinator, ...(workerIds as string[])]) resolvedNames.push(await resolveSeatName(id));
-	const wakes = latestSeatWakes(paths.stateRoot);
-	const seats: ProjectSeatStatus[] = [coordinator, ...(workerIds as string[])].map((id, index) => {
-		const resolved = resolvedNames[index]!;
-		const seatName = "name" in resolved ? resolved.name : null;
-		const nameError = "error" in resolved ? resolved.error : null;
-		const file = paneFile(id);
-		let lastActivity: string | null = null;
-		let activeGoal: string | null = null;
-		let goalPaused = false;
-		let goalPausedAt: string | null = null;
-		if (file !== null) {
-			try {
-				const stat = statSync(file);
-				lastActivity = new Date(stat.mtimeMs).toISOString();
-			} catch { lastActivity = null; }
-			try {
-				const scanned = scanGoalState(readFileSync(file, "utf8"));
-				activeGoal = scanned?.activeGoal?.objective ?? null;
-				goalPaused = scanned?.paused ?? false;
-				goalPausedAt = scanned?.pausedAt ?? null;
-			} catch { activeGoal = null; goalPaused = false; goalPausedAt = null; }
-		}
-		return {
-			role: index === 0 ? "director" : "worker", name: seatName, pane: `tern:${id}`,
-			alive: blockLive(id), named: seatName !== null, nameError, lastActivity, activeGoal, goalPaused, goalPausedAt,
-			wake: wakes.get(seatName ?? "") ?? { outcome: "no wake recorded", at: null },
-		};
-	});
-	const brBin = input.env.BR_BIN?.trim() || "br";
-	const count = async (argv: string[]): Promise<{ value: number } | { error: string }> => {
-		let result: { code: number; out: string; err: string };
-		try {
-			result = await exec.run([brBin, ...argv, "--json", "--no-auto-import", "--no-auto-flush"], { cwd: entry.repo, deadlineMs: 60_000 });
-		} catch (error) {
-			const cause = error instanceof Error ? error.message : String(error);
-			return { error: `br ${argv.join(" ")} could not run (${cause.slice(0, 200)})` };
-		}
-		// The agent-pane br shim refuses without AGENT_NAME
-		// (BR_SHIM_IDENTITY_REQUIRED); never bypass it, report the refusal.
-		if (result.code !== 0) {
-			const detail = (result.err !== "" ? result.err : result.out).split("\n")[0]?.trim().slice(0, 200) ?? "";
-			const reason = detail === "" ? `br ${argv.join(" ")} exited ${result.code}` : `br ${argv.join(" ")} exited ${result.code}: ${detail}`;
-			return { error: reason };
-		}
-		const parsed: unknown = tryParseJson(result.out);
-		if (parsed === null) return { error: `br ${argv.join(" ")} answered unparseable JSON` };
-		if (Array.isArray(parsed)) return { value: parsed.length };
-		if (typeof parsed === "object") {
-			const rows = parsed as { issues?: unknown; total?: unknown };
-			if (Array.isArray(rows.issues)) return { value: rows.issues.length };
-			if (typeof rows.total === "number") return { value: rows.total };
-		}
-		return { error: `br ${argv.join(" ")} answered without a count` };
-	};
-	const ready = await count(["ready"]);
-	const inProgress = await count(["list", "--status", "in_progress"]);
-	const beadErrors = [ready, inProgress].filter((row): row is { error: string } => "error" in row).map((row) => row.error);
-	const beadError = beadErrors.length > 0 ? beadErrors.join("; ") : null;
-	let lastCommit: ProjectStatusResult["lastCommit"] = null;
+		const name = agentNameOf(Array.isArray(parsed) ? parsed[0] : parsed);
+		return { name, error: name === null ? "am agents resolve-pane answered without a name" : null };
+	} catch (error) {
+		return { name: null, error: `am agents resolve-pane unavailable: ${error instanceof Error ? error.message : String(error)}` };
+	}
+}
+
+function statusJournal(file: string | null, sources: ProjectStatusSource[], io: TernObserverIo): Pick<ProjectSeatStatus, "lastActivity" | "activeGoal" | "goalPaused" | "goalPausedAt" | "quietMs"> {
+	const state: Pick<ProjectSeatStatus, "lastActivity" | "activeGoal" | "goalPaused" | "goalPausedAt" | "quietMs"> =
+		{ lastActivity: null, activeGoal: null, goalPaused: null, goalPausedAt: null, quietMs: null };
+	if (file === null) return state;
 	try {
-		const logged = await exec.run(["git", "-C", entry.repo, "log", "-1", "--format=%H%n%ct%n%s"], { deadlineMs: 30_000 });
-		if (logged.code === 0) {
-			const [sha, at, subject] = logged.out.split("\n");
-			if (sha && at && /^\d+$/.test(at.trim())) lastCommit = { sha: sha.trim(), at: Number(at.trim()), subject: (subject ?? "").trim() };
-		}
-	} catch { lastCommit = null; }
-	return { ok: true, status: { session: entry.session, repo: entry.repo, seats,
-		beads: { ready: "value" in ready ? ready.value : null, inProgress: "value" in inProgress ? inProgress.value : null, error: beadError }, lastCommit } };
+		const journal = readSessionView(io, file, undefined, "bounded");
+		if (journal === null) throw new Error("bounded native journal view is unavailable");
+		const cut = journal.tailStart > 0 && journal.cutAtRecord !== true;
+		const boundary = cut ? journal.tail.indexOf(0x0a) : -1;
+		const skip = cut ? boundary + 1 : 0;
+		const raw = journal.tail.toString("utf8", skip);
+		const scanned = cut && boundary < 0 ? null : scanGoalState(raw, journal.tailStart === 0);
+		const source = statusSource("journal", raw, scanned === null ? "SESSION_STATE_UNAVAILABLE" : null);
+		source.cursor = { kind: "snapshot-bytes", bytes: Buffer.byteLength(raw), start: journal.tailStart + skip };
+		sources.push(source);
+		state.lastActivity = new Date(statSync(file).mtimeMs).toISOString();
+		state.quietMs = Math.max(0, Date.parse(source.observedAt) - Date.parse(state.lastActivity));
+		state.activeGoal = scanned?.activeGoal?.objective ?? null;
+		state.goalPaused = scanned?.paused ?? null;
+		state.goalPausedAt = scanned?.pausedAt ?? null;
+	} catch (error) {
+		sources.push(statusSource("journal", null, `SESSION_STATE_UNAVAILABLE: ${error instanceof Error ? error.message : String(error)}`));
+	}
+	return state;
+}
+
+async function statusSeat(entry: StatusEntry, frame: StatusFrame, slot: StatusSlot,
+	row: StatusInspect["panes"][number] | undefined, sources: ProjectStatusSource[]): Promise<ProjectSeatStatus> {
+	const name = await statusSeatName(entry, frame, slot.id);
+	const alive = row === undefined || (!("exited" in row) && typeof row.live !== "boolean") ? null : row.exited == null && row.live !== false;
+	const file = row !== undefined && row.exited == null && typeof row.omp_session_file === "string" && isAbsolute(row.omp_session_file) ? row.omp_session_file : null;
+	return { role: slot.role, pane: `tern:${slot.id}`, name: name.name, named: name.name !== null, nameError: name.error,
+		alive, ...statusJournal(file, sources, frame.io), wake: { outcome: "no wake recorded", at: null } };
+}
+
+function statusCountValue(parsed: unknown): number | null {
+	if (Array.isArray(parsed)) return parsed.length;
+	if (parsed === null || typeof parsed !== "object") return null;
+	const rows = parsed as { issues?: unknown; total?: unknown; has_more?: unknown };
+	if ("total" in rows) {
+		if (typeof rows.total !== "number" || !Number.isSafeInteger(rows.total) || rows.total < 0) return null;
+		if (Array.isArray(rows.issues) && rows.total < rows.issues.length) return null;
+		return rows.total;
+	}
+	if (rows.has_more !== undefined && rows.has_more !== false) return null;
+	return Array.isArray(rows.issues) ? rows.issues.length : null;
+}
+
+async function statusTrackerCount(entry: StatusEntry, frame: StatusFrame, args: string[], sources: ProjectStatusSource[]): Promise<{ value: number } | { error: string }> {
+	const argv = [frame.env.BR_BIN?.trim() || "br", ...args, "--json", "--no-auto-import", "--no-auto-flush"];
+	try {
+		const result = await frame.exec.run(argv, { cwd: entry.repo, deadlineMs: 60_000 });
+		sources.push({ ...statusSource("tracker", result.code === 0 ? result.out : null, result.code === 0 ? null : `br exited ${result.code}`, 60_000), argv, exitCode: result.code });
+		if (result.code !== 0) return { error: `br ${args.join(" ")} exited ${result.code}: ${(result.err || result.out).split("\n")[0]?.slice(0, 200) ?? ""}` };
+		const value = statusCountValue(tryParseJson(result.out));
+		return value === null ? { error: `br ${args.join(" ")} answered without a count` } : { value };
+	} catch (error) {
+		return { error: `br ${args.join(" ")} unavailable: ${error instanceof Error ? error.message : String(error)}` };
+	}
+}
+
+async function statusLastCommit(entry: StatusEntry, frame: StatusFrame, sources: ProjectStatusSource[]): Promise<ProjectStatusResult["lastCommit"]> {
+	const argv = ["git", "-C", entry.repo, "log", "-1", "--format=%H%n%ct%n%s"];
+	try {
+		const result = await frame.exec.run(argv, { deadlineMs: 30_000 });
+		sources.push({ ...statusSource("git", result.code === 0 ? result.out : null, result.code === 0 ? null : `git log exited ${result.code}`), argv, exitCode: result.code });
+		if (result.code !== 0) return null;
+		const [sha, at, subject] = result.out.split("\n");
+		return sha && at && /^\d+$/.test(at.trim()) ? { sha: sha.trim(), at: Number(at.trim()), subject: (subject ?? "").trim() } : null;
+	} catch (error) {
+		sources.push(statusSource("git", null, `git log unavailable: ${error instanceof Error ? error.message : String(error)}`));
+		return null;
+	}
+}
+
+async function statusForEntry(entry: StatusEntry, frame: StatusFrame): Promise<{ ok: true; status: ProjectStatusResult }> {
+	const sources = [...frame.sources], reasons: string[] = [];
+	const coordinator = barePaneId(entry.coordinatorPane);
+	const workers = Array.isArray(entry.workerPanes) ? entry.workerPanes.map(barePaneId) : [];
+	const panesRecorded = coordinator !== null && Array.isArray(entry.workerPanes) && workers.every(id => id !== null);
+	if (!panesRecorded) reasons.push("PANES_UNRECORDED");
+	if (!frame.scopes.has(entry.coordinatorSession)) reasons.push("NATIVE_SCOPE_UNAVAILABLE");
+	const slots: StatusSlot[] = [];
+	if (coordinator !== null) slots.push({ id: coordinator, role: "director" });
+	for (const id of workers) if (id !== null) slots.push({ id, role: "worker" });
+	const panes = statusPaneRows(entry, frame), wakes = latestSeatWakes(frame.stateRoot);
+	const seats: ProjectSeatStatus[] = [];
+	for (const slot of slots) {
+		const seat = await statusSeat(entry, frame, slot, panes.get(slot.id), sources);
+		seat.wake = wakes.get(seat.name ?? "") ?? seat.wake;
+		seats.push(seat);
+		if (seat.alive === null) reasons.push(`NATIVE_PANE_UNAVAILABLE:${seat.pane}`);
+		if (!seat.named) reasons.push(`NAME_UNAVAILABLE:${seat.pane}`);
+		if (seat.goalPaused === null) reasons.push(`SESSION_STATE_UNAVAILABLE:${seat.pane}`);
+	}
+	const ready = await statusTrackerCount(entry, frame, ["ready"], sources);
+	const inProgress = await statusTrackerCount(entry, frame, ["list", "--status", "in_progress"], sources);
+	const errors = [ready, inProgress].filter((row): row is { error: string } => "error" in row).map(row => row.error);
+	const lastCommit = await statusLastCommit(entry, frame, sources);
+	if (errors.length > 0) reasons.push("TRACKER_UNAVAILABLE");
+	if (lastCommit === null) reasons.push("LAST_COMMIT_UNAVAILABLE");
+	return { ok: true, status: { session: entry.session, repo: entry.repo, panesRecorded, seats, sources,
+		coverage: { state: reasons.length === 0 ? "OBSERVED" : "UNKNOWN", expectedPanes: slots.map(slot => `tern:${slot.id}`),
+			observedPanes: seats.filter(seat => seat.alive !== null).map(seat => seat.pane), reasons },
+		beads: { ready: "value" in ready ? ready.value : null, inProgress: "value" in inProgress ? inProgress.value : null,
+			error: errors.length > 0 ? errors.join("; ") : null }, lastCommit } };
 }
