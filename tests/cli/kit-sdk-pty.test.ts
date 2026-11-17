@@ -3,6 +3,7 @@ import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureOmpSource } from "../../src/omp-source-cache.ts";
+import { sdkSourceVersion } from "./kit-sdk-source.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 
@@ -95,7 +96,7 @@ try:
     saturated = next(row for row in records if row.get("phase") == "saturated")
     done = next(row for row in records if row.get("phase") == "done")
     assert saturated["pending"] > 256 * 1024, "real native backpressure was not exercised"
-    assert done["sdkVersion"] == "18.22.0" and done["aborted"] is True
+    assert done["sdkVersion"] == os.environ["PTY_EXPECTED_SDK_VERSION"] and done["aborted"] is True
     assert done["drains"] > 0 and done["drainsAfterStop"] == 0
     assert b"SDK22_VISIBLE_AFTER_DRAIN" in output, "deferred native frame was not repainted after draining"
     assert b"\x1b[?25h" in output and b"\x1b[?2004l" in output, "terminal ownership was not restored"
@@ -224,8 +225,9 @@ try {
 `;
 
 const kitRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+const sdkVersion = sdkSourceVersion("pty", process.env);
 let sdkRoot: string;
-beforeAll(() => { sdkRoot = ensureOmpSource("18.22.0", process.env); });
+beforeAll(() => { sdkRoot = ensureOmpSource(sdkVersion, process.env); });
 
 async function runPty(variant: "healthy" | "late-write-mutant") {
 	const scratch = ownedTmp("sdk22-pty");
@@ -238,7 +240,7 @@ async function runPty(variant: "healthy" | "late-write-mutant") {
 			env: {
 				PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: scratch.path,
 				TMPDIR: scratch.path, TMP: scratch.path, TEMP: scratch.path, KITLIB_TMP_ROOT: scratch.path,
-				PTY_ROOT: scratch.path, PTY_KIT: kitRoot, PTY_SDK: sdkRoot,
+				PTY_ROOT: scratch.path, PTY_KIT: kitRoot, PTY_SDK: sdkRoot, PTY_EXPECTED_SDK_VERSION: sdkVersion,
 				PTY_BUN: process.execPath, PTY_VARIANT: variant, PTY_DEADLINE_S: String(fixtureDeadlineS(45)),
 			},
 		});

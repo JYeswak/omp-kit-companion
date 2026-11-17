@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import unittest
 
@@ -44,6 +45,37 @@ class SuiteHermeticEnvironmentTests(unittest.TestCase):
                 child = json.loads(result.stdout.decode().splitlines()[-1])
                 self.assertEqual(child["gate"], [], "a nested fixture must not borrow parent gate authority")
                 self.assertEqual(child["control"], "retained")
+
+    def test_invalid_sdk_override_refuses_before_consumer_runs(self) -> None:
+        # SDKOFFLINE1: a malformed lifecycle override must fail closed in setup:
+        # no consumer execution and no exec marker, in both environment modes.
+        self.assertIsNotNone(shutil.which("bun"), "SDK preparation requires the pinned Bun runtime")
+        for mode, override in (("0", "not-a-version"), ("1", "not-a-version"), ("0", ""), ("1", "")):
+            with self.subTest(hermetic=mode, override=override), owned_tmp(
+                "suite-sdk-refuse-test", root=str(ROOT / "var/agent-tmp")
+            ) as directory:
+                archive, scratch = Path(directory) / "archive", Path(directory) / "scratch"
+                archive.mkdir()
+                scratch.mkdir()
+                sentinel = scratch / "consumer-ran"
+                marker = scratch / "exec-boundary.ns"
+                result = run([
+                    "sh", str(ROOT / "scripts/suite-hermetic-env.sh"),
+                    "--archive", str(archive), "--scratch", str(scratch),
+                    "--suite", "tests/cli/kit-sdk-lifecycle.test.ts",
+                    "--exec-marker", str(marker), "--allow-env", "KIT_SDK_LIFECYCLE_VERSION", "--",
+                    sys.executable, "-c",
+                    "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()",
+                    str(sentinel),
+                ], cwd=str(archive), deadline_s=60, env={
+                    **os.environ, "KIT_SDK_LIFECYCLE_VERSION": override,
+                    "OMP_KIT_SUITE_HERMETIC_ENABLE": mode, "OMP_KIT_SUITE_FENCE_ENABLE": "0",
+                })
+                self.assertEqual(result.rc, 125, result.stderr)
+                self.assertIn("SUITE-HERMETIC: REFUSED", result.stderr.decode())
+                self.assertIn("non-release version: " + override, result.stderr.decode())
+                self.assertFalse(sentinel.exists(), "refused setup still ran the consumer")
+                self.assertFalse(marker.exists(), "refused setup still marked exec")
 
 
 if __name__ == "__main__":

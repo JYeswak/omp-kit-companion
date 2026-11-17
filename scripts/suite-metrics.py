@@ -33,7 +33,8 @@ JUDGING_FILES = (
     "scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py",
     "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
     "scripts/fresh-gate-ledger.py",
-    "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
+    "scripts/suite-hermetic-env.sh", "scripts/seed-sdk-source.ts", "tests/cli/kit-sdk-source.ts",
+    "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
     "scripts/fixed-env.sh",
     "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/kitlib-proc.sh", "scripts/kitlib-shimpath.sh",
     # SUITESERIAL1 (ompkit-fp72.120.16.264): the suite lease the runner takes and the kitlib lock and process
@@ -80,6 +81,7 @@ GATE_INPUTS = (
 SUITE_INPUTS = (
     "FULL_SUITE_RUNTIME_ID", "FULL_SUITE_TIMEOUT_SECS", "OMP_KIT_OMP_SRC_CACHE",
     "OMP_KIT_SUITE_HERMETIC_ENABLE", "OMP_KIT_SUITE_FENCE_ENABLE",
+    "KIT_SDK_LIFECYCLE_VERSION",
 )
 
 
@@ -320,6 +322,10 @@ def execute(args: argparse.Namespace) -> int:
         # The suite fence still denies writes outside its scratch and archive.
         if os.environ.get("OMP_KIT_OMP_SRC_CACHE"):
             wrapped.extend(["--allow-env", "OMP_KIT_OMP_SRC_CACHE"])
+        # SDKOFFLINE1: the lifecycle selector reads its override in the isolated
+        # consumer as well as in wrapper setup; forward it like other suite inputs.
+        if "KIT_SDK_LIFECYCLE_VERSION" in os.environ:
+            wrapped.extend(["--allow-env", "KIT_SDK_LIFECYCLE_VERSION"])
         # The gate's own worker count reaches fixtures' TIMEOUT_UNDER_LOAD diagnostics (GATEFLAKE1).
         if os.environ.get("OMP_KIT_TEST_WORKERS"):
             wrapped.extend(["--allow-env", "OMP_KIT_TEST_WORKERS"])

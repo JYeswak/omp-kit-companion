@@ -1,8 +1,9 @@
 import { beforeAll, expect, test } from "bun:test";
 import { ensureOmpSource } from "../../src/omp-source-cache.ts";
+import { sdkSourceVersion } from "./kit-sdk-source.ts";
 import { observeOmpLauncherVersion, resolveSeatOmp } from "../../src/paths.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixture, runFixtureAsync } from "./fixture-process.ts";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -186,7 +187,7 @@ try {
 `;
 
 const kitRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-const sdkVersion = process.env.KIT_SDK_LIFECYCLE_VERSION ?? "18.21.0";
+const sdkVersion = sdkSourceVersion("lifecycle", process.env);
 let sdkRoot: string;
 beforeAll(() => {
 	// Default21 remains the original contract; the upgrade cut explicitly selects22.
@@ -204,6 +205,17 @@ beforeAll(() => {
 async function runNativeCase(variant: "healthy" | "terminal-mutant", paused: boolean) {
 	const scratch = ownedTmp("sdk-lifecycle-native");
 	try {
+		// A release export has no enclosing Git repository; this workspace owns its fleet opt-in.
+		const repository = runFixture(["git", "init", "--quiet", join(scratch.path, "workspace")], {
+			cwd: scratch.path,
+			env: {
+				PATH: process.env.PATH ?? "/usr/bin:/bin",
+				HOME: scratch.path,
+				GIT_CONFIG_NOSYSTEM: "1",
+				GIT_CONFIG_GLOBAL: "/dev/null",
+			},
+		});
+		expect(repository.rc, new TextDecoder().decode(repository.stderr)).toBe(0);
 		const script = join(scratch.path, "control.mjs");
 		writeFileSync(script, nativeScript);
 		const result = await runFixtureAsync([process.execPath, "--no-env-file", script], {

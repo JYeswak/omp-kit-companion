@@ -122,6 +122,74 @@ def mark_exec() -> None:
     except OSError as error:
         refuse("cannot write exec marker: " + str(error))
 
+# SDKOFFLINE1 (ompkit-upgradeloop-qum98.5): the two native SDK suites consume an
+# exact-version TypeScript source that the isolated consumer (FETCH=0) cannot fetch
+# itself. Prepare only these suite paths, in both environment modes, before the
+# fence/exec boundary; every other suite keeps its existing environment byte-identical.
+SDK_SUITE_KINDS = {
+    "tests/cli/kit-sdk-lifecycle.test.ts": "lifecycle",
+    "tests/cli/kit-sdk-pty.test.ts": "pty",
+}
+
+
+def prepare_sdk_source(env_dict: dict[str, str]) -> None:
+    """Point env_dict at a verified exact SDK source for the two native suites.
+
+    Reuses a forwarded verified cache read-only when it already holds the exact
+    version; otherwise provisions that one version into the file's owned scratch
+    via scripts/seed-sdk-source.ts (the existing ensureOmpSource verifier, with
+    fetch enabled only in that setup child). Sets only OMP_KIT_OMP_SRC_CACHE and
+    leaves the consumer FETCH=0 refusal intact. Runs as a normal inherited-group
+    subprocess so setup shares the unchanged outer deadline and cleanup; any
+    failure refuses before the consumer runs, with the setup stderr retained.
+    """
+    kind = SDK_SUITE_KINDS.get(options.suite)
+    if kind is None:
+        return
+    bun = shutil.which("bun", path=env_dict["PATH"])
+    if bun is None:
+        refuse("bun is unavailable for SDK source preparation")
+    seed_home = scratch / "sdk-seed-home"
+    cache_root = scratch / "omp-sdk-src"
+    try:
+        seed_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(seed_home, 0o700)
+    except OSError as error:
+        refuse("cannot create SDK seed home: " + str(error))
+    seed_env = {
+        "PATH": env_dict["PATH"],
+        "HOME": str(seed_home),
+        "TMPDIR": str(scratch),
+        "TMP": str(scratch),
+        "TEMP": str(scratch),
+        "OMP_KIT_OMP_SRC_CACHE": str(cache_root),
+        "OMP_KIT_OMP_SRC_FETCH": "1",
+    }
+    if "KIT_SDK_LIFECYCLE_VERSION" in env_dict:
+        seed_env["KIT_SDK_LIFECYCLE_VERSION"] = env_dict["KIT_SDK_LIFECYCLE_VERSION"]
+    seed_argv = [bun, "--no-env-file", str(helper.with_name("seed-sdk-source.ts")),
+                 "--kind", kind, "--cache-root", str(cache_root)]
+    reuse = env_dict.get("OMP_KIT_OMP_SRC_CACHE")
+    if reuse:
+        seed_argv += ["--reuse-root", reuse]
+    try:
+        completed = subprocess.run(seed_argv, cwd=str(scratch), env=seed_env,  # pysafe(subprocess-no-timeout): per-file kitlib_run owns the deadline and this inherited group, including setup
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except OSError as error:
+        refuse("SDK source preparation failed to start: " + str(error))
+    if completed.stderr:
+        sys.stderr.write(completed.stderr)
+        sys.stderr.flush()
+    if completed.returncode != 0:
+        refuse("SDK source preparation failed for " + options.suite + " (rc=" + str(completed.returncode) + ")")
+    try:
+        rooted = json.loads(completed.stdout)
+    except ValueError:
+        refuse("SDK source preparation returned invalid JSON for " + options.suite)
+    if not isinstance(rooted, str) or rooted not in {str(cache_root), reuse or ""}:
+        refuse("SDK source preparation returned an unexpected cache root for " + options.suite)
+    env_dict["OMP_KIT_OMP_SRC_CACHE"] = rooted
+
 # The scratch-HOME/write fence remains opt-in: it hides operator OMP installs
 # and changes umask. Environment allowlisting does not depend on that opt-in.
 # Candidate-authored overrides after this boundary remain real test failures.
@@ -141,6 +209,7 @@ if os.environ.get("OMP_KIT_SUITE_HERMETIC_ENABLE") != "1":
     for name in options.allow_env:
         if name in os.environ:
             inherited[name] = os.environ[name]
+    prepare_sdk_source(inherited)
     print("SUITE-HERMETIC suite=" + options.suite + " env=allowlisted fence=off-optin", flush=True)
     mark_exec()
     os.execvpe(command[0], command, inherited)
@@ -284,6 +353,7 @@ if bun_config.is_file():
 for name in options.allow_env:
     if name in os.environ:
         env[name] = os.environ[name]
+prepare_sdk_source(env)
 
 allow_names = sorted(env)
 policy = "\n".join((
