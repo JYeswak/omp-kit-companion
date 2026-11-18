@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.134] - 2026-11-18
+
+### Fixed
+
+- Keep normal kit log appends from aborting a macOS update when its isolated checks cannot write to the same existing daily log. Replaced or aliased files still fail the postcheck.
+
 ## [0.2.133] - 2026-11-18
 
 ### Added
