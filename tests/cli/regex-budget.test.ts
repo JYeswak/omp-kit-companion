@@ -354,11 +354,10 @@ async function runGateCli(args: readonly string[], label: string): Promise<GateC
 	return { rc: result.rc, verdict: lines[0] ?? "", liveLine, liveStatus: liveLine.split(" ")[2] ?? "", totalMs: Number(totals[1]), budgetMs: Number(totals[2]), ratio: ratio ? Number(ratio[1]) : null, text };
 }
 
-/** Heavy plant: copies until the quiet total is at least 2x the base budget. kit-no-gh-poll#1's calibration-run median
- * (rule_baseline.live in the reference fixture) is 111.548 ms: ceil(2 x 500 / 111.548) = 9 copies gives about 1004 ms,
- * on the boundary, so one more: 10 copies, about 1115 ms (2.23x). Past the 1.6x divergence bound, it FAILs on any host. */
+/** Ten copies put the calibrated quiet cost above twice the base budget.
+ * The test verifies that margin against the current committed calibration. */
 const HEAVY_SLOW_RULE_COPIES = 10;
-/** Near-budget plant: 5 copies, about 560-570 ms, 1.14x over budget: inside the measured reference/rule divergence. */
+/** Five copies put the calibrated quiet cost between the base budget and the tracking band. */
 const NEAR_BUDGET_SLOW_RULE_COPIES = 5;
 
 /** Rules that each carry the frozen kit-no-gh-poll#1 condition: a real slow stream rule set. */
@@ -398,9 +397,11 @@ function expectSlowRuleFails(run: GateCliRun): void {
 }
 
 test("REGEXREF1 planted slow rule: ten copies of kit-no-gh-poll#1 (2x over budget) FAIL on a quiet host by more than the divergence bound", async () => {
-	const slowRuleQuietMs = loadReference().baseline?.live.find(row => row.rule === "kit-no-gh-poll" && row.condition_index === 1)?.ms;
-	expect(slowRuleQuietMs).toBe(111.548);
-	expect(Math.ceil(2 * STREAM_BUDGET_MS / slowRuleQuietMs!)).toBe(HEAVY_SLOW_RULE_COPIES - 1);
+	const slowRuleQuietMs = loadReference().baseline?.live.find(row => row.rule === "kit-no-gh-poll" && row.condition_index === 1)?.ms ?? 0;
+	expect(HEAVY_SLOW_RULE_COPIES * slowRuleQuietMs).toBeGreaterThan(2 * STREAM_BUDGET_MS);
+	const nearQuietMs = NEAR_BUDGET_SLOW_RULE_COPIES * slowRuleQuietMs;
+	expect(nearQuietMs).toBeGreaterThan(STREAM_BUDGET_MS);
+	expect(nearQuietMs).toBeLessThan(STREAM_BUDGET_MS * TRACKING_BAND);
 	const dir = plantedSlowRules(HEAVY_SLOW_RULE_COPIES);
 	try {
 		const run = await runGateCli(["--rules", dir], "heavy-slow-rule-quiet");
@@ -409,11 +410,10 @@ test("REGEXREF1 planted slow rule: ten copies of kit-no-gh-poll#1 (2x over budge
 	} finally { cleanup(dir); }
 }, fixtureDeadlineS(120) * 1000);
 
-// A 1.14x-over plant sits inside the measured reference/rule divergence (up to 1.385x): at reference ratio 1 (a quiet
-// host) it must FAIL; on a slower host the scaled budget can cover it and the tracking guard reads INCONCLUSIVE. It must
-// never PASS on any host. The suite runs on loaded hosts too (6d7575c212's verdict ran at ratio 2.69 and the gate
-// correctly said INCONCLUSIVE rc 75), so the FAIL is required only when the run's own reference ratio is 1.
-test("REGEXREF1 planted slow rule: five copies of kit-no-gh-poll#1 (1.14x over budget) FAIL on a quiet host and never PASS on a loaded one", async () => {
+// This plant sits inside the tracking band: at reference ratio 1 (a quiet host) it must FAIL. On a slower host
+// the scaled budget can cover it and the tracking guard reads INCONCLUSIVE. It must never PASS.
+// 6d7575c212 ran at ratio 2.69 and correctly reported INCONCLUSIVE rc 75.
+test("REGEXREF1 planted slow rule: five copies of kit-no-gh-poll#1 FAIL on a quiet host and never PASS on a loaded one", async () => {
 	const dir = plantedSlowRules(NEAR_BUDGET_SLOW_RULE_COPIES);
 	try {
 		const run = await runGateCli(["--rules", dir], "near-budget-slow-rule-quiet");
@@ -512,6 +512,51 @@ test("REGEXREF1 seam: a reference slowed 2.0x past the unchanged rules reads INC
 		expect(report.status).toBe("INCONCLUSIVE");
 		expect(gateExitCode(report)).toBe(INCONCLUSIVE_EXIT_CODE);
 		expect(verdictLine(report).startsWith("REGEX-BUDGET: INCONCLUSIVE REFERENCE_TRACKING_DIVERGED")).toBe(true);
+	} finally { cleanup(fixture.dir); }
+}, fixtureDeadlineS(60) * 1000);
+
+test("REGEXREF1 paired write/edit seam: captured divergence refuses while a tracking reference passes", async () => {
+	const fixture = seamFixture(0);
+	try {
+		const pattern = "^a+b$";
+		const writeRuleFile = join(fixture.dir, "fixture-write.md");
+		writeFileSync(writeRuleFile, "---\ncondition: " + JSON.stringify(pattern) + "\nscope: tool:write(**/*.ts)\ninterruptMode: never\n---\nwrite/edit seam fixture\n");
+		const writeRule = loadRuleFile(writeRuleFile);
+		const reference = JSON.parse(readFileSync(fixture.referenceFile, "utf8"));
+		writeFileSync(join(fixture.dir, "ref-write.md"), "tiny write/edit reference content\n");
+		reference.write_edit_wire_file = "ref-write.md";
+		reference.write_edit_conditions = [{ rule: writeRule.name, condition_index: 0, pattern }];
+		reference.rule_baseline.live[0].ms = 345.293;
+		reference.rule_baseline.write_edit = [{
+			rule: writeRule.name,
+			condition_index: 0,
+			pattern_sha256: createHash("sha256").update(pattern).digest("hex"),
+			ms: 217.546,
+		}];
+		writeFileSync(fixture.referenceFile, JSON.stringify(reference));
+		// The positive is a synthetic logic control, not a replacement calibration or a target ratio.
+		for (const control of [
+			{ name: "captured write/edit divergence", ratio: 4.629104658818315, tracking: "DIVERGED", status: "INCONCLUSIVE", exit: INCONCLUSIVE_EXIT_CODE },
+			{ name: "both streams track", ratio: 4, tracking: "OK", status: "PASS", exit: 0 },
+		]) {
+			const report = await runGate(fixture.dir, fixture.streamFile, undefined, {
+				referenceFile: fixture.referenceFile,
+				referenceSampleSeam: () => SEAM_CALIBRATED_MS * control.ratio,
+				streamTimingSeam: (_sample, _rule, _index, _measured, stream) => stream === "live" ? 1675.549227 : 581.5211989999997,
+			});
+			// Scaling is decisive for both streams; dropping write/edit tracking would falsely admit the captured case.
+			expect(failsStreamBudget(report.stream.total_ms)).toBe(true);
+			expect(failsWriteEditStreamBudget(report.write_edit.total_ms)).toBe(true);
+			expect(report.stream.tracking).toMatchObject({ status: "OK", matched_conditions: 1 });
+			expect(report.write_edit.tracking).toMatchObject({ status: control.tracking, matched_conditions: 1 });
+			expect(report.status, control.name).toBe(control.status);
+			expect(gateExitCode(report)).toBe(control.exit);
+		}
+		writeFileSync(fixture.referenceFile, JSON.stringify({ ...reference, write_edit_wire_file: "missing-write-reference.md" }));
+		const missingWriteReference = await runGate(fixture.dir, fixture.streamFile, undefined, { referenceFile: fixture.referenceFile });
+		expect(missingWriteReference.status).toBe("FAIL");
+		expect(missingWriteReference.reference.reason).toBe("REFERENCE_MISSING");
+		expect(gateExitCode(missingWriteReference)).toBe(1);
 	} finally { cleanup(fixture.dir); }
 }, fixtureDeadlineS(60) * 1000);
 

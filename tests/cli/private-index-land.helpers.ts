@@ -221,8 +221,10 @@ try {
 	const gateFiles = [...new Set([...new TextDecoder().decode(judgingFiles.stdout).trim().split("\n"),
 		"scripts/pre-push-gate.sh", "scripts/regexploit-gate.py", "scripts/kitlib_io.py", "scripts/kitlib_jsonl.py", "scripts/kitlib_lock.py"])];
 	if (existsSync(join(repoRoot, "scripts", "gate-ci-only.tsv"))) gateFiles.push("scripts/gate-ci-only.tsv");
-	for (const path of gateFiles)
+	for (const path of gateFiles) {
+		mkdirSync(join(templateWork, path, ".."), { recursive: true });
 		writeFileSync(join(templateWork, path), readFileSync(join(repoRoot, path)), { mode: path.endsWith(".sh") ? 0o755 : 0o644 });
+	}
 	git(templateWork, ["add", "-A"], true);
 	git(templateWork, ["commit", "-m", "base [test]"], true);
 	git(templateWork, ["push", "-u", "origin", "HEAD:refs/heads/main"], true);

@@ -7,6 +7,7 @@ import { resolveOmpIdentity } from "../../src/paths.ts";
 import { previewKitRelease, stageKitRelease, validateReleaseManifest } from "../../src/kit-release.ts";
 import type { ReleaseAsset } from "../../src/kit-release.ts";
 import { packageSourceRevision, packageSecretOutputGuard, checkPackagedExtensionLoads, checkPackagedScriptDependencies } from "../../scripts/package-release.ts";
+import { GATE_DEADLINE_MS, TIMING_SAMPLE_COUNT } from "../../scripts/regex-budget.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
@@ -62,7 +63,7 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(staged.executable).toBe(join(staged.root, "bin", "omp-kit"));
 	expect(staged.manifest.files.map(file => file.path)).toEqual([...staged.manifest.files.map(file => file.path)].sort());
 	expect(lstatSync(join(staged.root, "scripts", "runtime-adapter.sh")).mode & 0o111).toBeGreaterThan(0);
-	for (const forbidden of ["reports/", ".git/", ".beads/", "var/", "src/", "private/"])
+	for (const forbidden of ["reports/", ".git/", ".beads/", "var/", "private/"])
 		expect(staged.files.some(file => file.startsWith(forbidden))).toBe(false);
 	for (const asset of ["cc-credential-shapes.v1.json", "secret-output-policy.v1.json"]) {
 		expect(staged.files).toContain(`scripts/${asset}`);
@@ -107,8 +108,19 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(JSON.parse(compiled.stdout.toString()).data.release.source_tag).toBe("v1.2.3");
 	const judging = await runBounded(["python3", "-m", "suite-metrics", "judging-files"], { env: { ...process.env, PYTHONPATH: join(repo, "scripts") }, deadline_s: 10 });
 	expect(judging.rc).toBe(0);
-	for (const judgeFile of [...Buffer.from(judging.stdout).toString().trim().split("\n"), "scripts/gate-ci-only.tsv"])
+	const judgingFiles = Buffer.from(judging.stdout).toString().trim().split("\n");
+	for (const judgeFile of [...judgingFiles, "scripts/gate-ci-only.tsv"])
 		expect(staged.files).toContain(judgeFile);
+	// Only the declared SDK judging implementation may cross the source-tree exclusion.
+	for (const file of staged.files)
+		if (file.startsWith("src/")) expect(judgingFiles, `unrelated packaged source: ${file}`).toContain(file);
+	const sdkSeed = await runBounded([process.execPath, "--no-env-file", join(staged.root, "scripts/seed-sdk-source.ts")], {
+		cwd: output, env: { HOME: output, TMPDIR: output, PATH: process.env.PATH ?? "" }, deadline_s: fixtureDeadlineS(10),
+	});
+	const sdkSeedError = new TextDecoder().decode(sdkSeed.stderr);
+	expect(sdkSeed.rc, sdkSeedError).toBe(2);
+	expect(sdkSeed.timed_out || sdkSeed.killed).toBe(false);
+	expect(sdkSeedError).toContain("usage: seed-sdk-source.ts");
 	const verdictRepo = join(output, "verdict-reader-repo");
 	mkdirSync(verdictRepo);
 	sourceGit(verdictRepo, ["init", "-q"]);
@@ -335,6 +347,8 @@ test("installer boundary excludes operator credentials and tool configuration fr
 });
 
 
+// Five RX1 rounds have separate producer bounds; retain the existing 120s for install,
+// fast proof and the other stages so the real claim-selftest oracle remains reachable.
 test("native full-test retains a real named failing case without counting later stages as skips", async () => {
 	const { home, installedBinary } = await installCandidate("named-failure-home");
 	const identity = resolveOmpIdentity(process.env);
@@ -350,7 +364,10 @@ test("native full-test retains a real named failing case without counting later 
 	expect(failed.exitCode, failed.stdout.toString() + failed.stderr.toString()).toBe(1);
 	const report = JSON.parse(failed.stdout.toString()).data.test;
 	expect(report.status).toBe("FAIL");
-	expect(report.stages["claim-selftest"]).toMatchObject({ status: "FAIL", producer_rc: 1 });
+	expect(report.stages["claim-selftest"], JSON.stringify({
+		failures: report.failures, cause: report.cause, stages: report.stages,
+		fast_status: report.fast.status, fast_failures: report.fast.failures, producer: report.producer,
+	})).toMatchObject({ status: "FAIL", producer_rc: 1 });
 	expect(report.stages["cli-crosscheck"].status).toBe("NOT_RUN");
 	const reference = report.producer.result_ref;
 	expect(reference).toMatchObject({
@@ -369,7 +386,7 @@ test("native full-test retains a real named failing case without counting later 
 		expect(stream.capture_complete).toBe(true);
 	}
 	expect(readFileSync(reference.stdout.path, "utf8")).toContain("SELFTEST_FAIL: planted unmatched enforce=yes row was accepted");
-}, fixtureDeadlineS(120) * 1_000);
+}, fixtureDeadlineS(120 + (GATE_DEADLINE_MS * TIMING_SAMPLE_COUNT) / 1_000) * 1_000);
 
 test("installed integrations refuse a planted missing tests/live/integrations.json and name the matrix", async () => {
 	const { home, installedRoot, installedBinary } = await installCandidate("missing-matrix-home");
@@ -414,11 +431,14 @@ test("installed candidate fast proof and planted rule drift fail the full check 
 		run([installedBinary, "test", "--json"], { cwd: output, env: candidateEnv(home, { OMP_KIT_CASE_CWD: caseCwd }) }),
 		run([drifted.installedBinary, "test", "--full", "--json"], { cwd: output, env: candidateEnv(drifted.home, { OMP_KIT_CASE_CWD: caseCwd }) }),
 	]);
-	expect(fast.exitCode, fast.stdout + fast.stderr).toBe(0);
+	const fastReport = JSON.parse(fast.stdout).data.test;
+	expect(fast.exitCode, JSON.stringify({
+		blocker: fastReport.blocker, failures: fastReport.failures, status: fastReport.status, stderr: fast.stderr,
+	})).toBe(0);
 	const corpus = countCaseRows(readFileSync(join(installedRoot, "cases", "cases.tsv"), "utf8"));
 	const ruleCount = readdirSync(join(installedRoot, "rules")).filter((name) => name.endsWith(".md")).length;
 	expect(ruleCount).toBeGreaterThan(0);
-	expect(JSON.parse(fast.stdout).data.test.proofs).toMatchObject({
+	expect(fastReport.proofs).toMatchObject({
 		G1_registration: { status: "PASS", observed_rules: ruleCount },
 		G2_payload: { status: "PASS", expected_cases: corpus.cases, observed_cases: corpus.cases },
 		G3_quiet_prefix: { status: "PASS", expected_cases: corpus.cases, expected_quiet_cases: corpus.quietCases,

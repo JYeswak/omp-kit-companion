@@ -178,7 +178,7 @@ export function packageSecretOutputGuard(source: Buffer): Buffer {
 
 /**
  * Packaged sources that live beside their consumer under a different path than in
- * the checkout: the release has no src/ tree, so these ship under scripts/.
+ * the checkout: runtime replay data ships under scripts/, independently of SDK judging sources.
  */
 export const RELOCATED_SOURCES: Readonly<Record<string, string>> = {
 	"src/cc-credential-shapes.v1.json": "scripts/cc-credential-shapes.v1.json",
@@ -386,6 +386,12 @@ async function run(): Promise<void> {
 	} catch (error) {
 		fail(error instanceof Error ? error.message : String(error));
 	}
+	const judging = await runBounded(["python3", "-B", "-m", "suite-metrics", "judging-files"], {
+		cwd: root, env: { ...process.env, PYTHONPATH: join(root, "scripts") }, deadline_s: 10,
+	});
+	if (judging.rc !== 0 || judging.timed_out || judging.killed || judging.truncated)
+		fail(`JUDGING_FILES_FAILED: ${new TextDecoder().decode(judging.stderr)}`);
+	const judgingFiles = new TextDecoder().decode(judging.stdout).trim().split("\n");
 	await checkInstallerBootstrap(root);
 	const sourcePackage = safeSource("package.json");
 	const initialSourceRevision = packageSourceRevision(root, sourcePackage);
@@ -412,11 +418,17 @@ async function run(): Promise<void> {
 		const names = [...files, ...RELEASE_DATA_FILES.filter(path => dirname(path) === ".")];
 		for (const path of roots) expand(path, names);
 		names.push(RELEASE_BINARY_NAME, "MANIFEST.tsv", "licenses/tern-sdk/LICENSE", "release-components.json");
+		const namedSources = new Set(names);
+		if (namedSources.size !== names.length) fail("DUPLICATE_RELEASE_SOURCE");
+		for (const name of judgingFiles) {
+			if (namedSources.has(name)) continue;
+			namedSources.add(name);
+			names.push(name);
+		}
 		// Ship every file a shipped installer copies or runs (ompkit-fp72.120.16.151:
 		// 0.2.86/0.2.87 installers named check-deploy-step.sh, absent from the package).
 		closeOverInstallerReferences(names, name => safeSource(name).toString("utf8"));
 		names.sort();
-		if (new Set(names).size !== names.length) fail("DUPLICATE_RELEASE_SOURCE");
 		const content = new Map<string, Buffer>();
 		for (const name of names) {
 			if (name === RELEASE_BINARY_NAME) content.set(name, safeCompiled(binary));

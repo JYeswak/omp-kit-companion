@@ -265,11 +265,12 @@ def plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def package(repo: str, commit: str, scratch: Path) -> tuple[bytes, bytes, bytes]:
+def package(repo: str, commit: str, scratch: Path,
+            judging_files: tuple[str, ...]) -> tuple[bytes, bytes, bytes]:
     """The exact `git archive` of the commit; a .git holding only its depth-1 commit object (what
-    full-suite-verdict.sh fetches into its own archive for the main role); and this judge's own
-    scripts/ and .github/test-budget.json, so every shard judges with the bytes this host's judge
-    identity hashes (each shard reports its identity, and a different one is refused)."""
+    full-suite-verdict.sh fetches into its own archive for the main role); and this judge's scripts/
+    plus every declared non-script input, so shards receive the bytes this host's judge identity
+    hashes (each shard reports its identity, and a different one is refused)."""
     environment = {key: value for key, value in os.environ.items()
                    if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")}
     archive = scratch / "cand.tar"
@@ -293,9 +294,9 @@ def package(repo: str, commit: str, scratch: Path) -> tuple[bytes, bytes, bytes]
         return None if "__pycache__" in info.name.split("/") else info
     with tarfile.open(fileobj=judge, mode="w") as bundle:
         bundle.add(str(SCRIPTS), arcname="scripts", filter=no_cache)
-        budget = SCRIPTS.parent / ".github" / "test-budget.json"
-        if budget.is_file():
-            bundle.add(str(budget), arcname=".github/test-budget.json")
+        for name in judging_files:
+            if not name.startswith("scripts/"):
+                bundle.add(str(SCRIPTS.parent / name), arcname=name)
     with archive.open("rb") as handle:
         return handle.read(), gitdir.getvalue(), judge.getvalue()
 
@@ -394,7 +395,8 @@ def run_plan(args: argparse.Namespace) -> int:
     deadline_at = time.monotonic() + args.deadline
     metrics = load_module("omp_kit_suite_metrics", "suite-metrics.py")
     with owned_tmp("full-suite-remote", root=str(out)) as scratch:
-        candidate, gitdir, judge = package(plan_doc["repo"], plan_doc["commit"], Path(scratch))
+        candidate, gitdir, judge = package(
+            plan_doc["repo"], plan_doc["commit"], Path(scratch), metrics.JUDGING_FILES)
     run_id = "run-" + hashlib.sha256(f"{plan_doc['tree']}:{os.getpid()}:{time.time_ns()}".encode()).hexdigest()[:16]
     shards = plan_doc["shards"]
     say(f"shipping {len(candidate)} archive bytes for {plan_doc['commit']} to {len(shards)} workers ({run_id})")

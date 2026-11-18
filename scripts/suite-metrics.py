@@ -34,6 +34,7 @@ JUDGING_FILES = (
     "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
     "scripts/fresh-gate-ledger.py",
     "scripts/suite-hermetic-env.sh", "scripts/seed-sdk-source.ts", "tests/cli/kit-sdk-source.ts",
+    "src/omp-source-cache.ts", "src/kitlib/run.ts", "src/kitlib/pysafe-source.ts",
     "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
     "scripts/fixed-env.sh",
     "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/kitlib-proc.sh", "scripts/kitlib-shimpath.sh",

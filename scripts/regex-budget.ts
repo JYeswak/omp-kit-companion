@@ -24,7 +24,7 @@ export const STREAM_BUDGET_MS = 500;
 export const WRITE_EDIT_STREAM_BUDGET_MS = 500;
 /** Committed write/edit live-stream fixture; non-authors replay the same bytes. A missing file fails the gate loudly instead of passing vacuously. */
 export const DEFAULT_WRITE_EDIT_STREAM_FILE = path.join(KIT, "scripts/fixtures/rx-write-edit-stream.md");
-/** Frozen stream reference (REGEXREF1): two backtracking-heavy conditions and a pinned wire, timed in every worker
+/** Frozen native stream reference: each condition family is swept over its declared tool-argument wire
  * beside the conditions so the stream budget follows how fast this host runs regexes right now. */
 export const DEFAULT_REFERENCE_FILE = path.join(KIT, "scripts/fixtures/rx-reference-conditions.json");
 /** Beyond this reference ratio the host is too slow to judge: INCONCLUSIVE, never PASS. Measured 2026-11-04 under
@@ -47,9 +47,9 @@ const REFERENCE_SWEEPS_PER_SAMPLE = 8;
 export const INCONCLUSIVE_EXIT_CODE = 75;
 /** A single 16k near-miss check may not exceed a tenth of the whole stream budget (also 10x the noise floor): flat catastrophics fail here even when their growth ratio looks innocent. */
 export const SINGLE_CHECK_CEILING_MS = STREAM_BUDGET_MS / 10;
-const GATE_DEADLINE_MS = 57_000;
+export const GATE_DEADLINE_MS = 57_000;
 const DEFAULT_WORKER_TIMEOUT_MS = 20_000;
-const TIMING_SAMPLE_COUNT = 5;
+export const TIMING_SAMPLE_COUNT = 5;
 
 type Shape = typeof DEFAULT_SHAPES[number];
 type Encoding = typeof DEFAULT_ENCODINGS[number];
@@ -74,8 +74,8 @@ type WorkerRequest = {
 	reference?: StreamReference;
 	ompSource: string;
 };
-/** Reference conditions and their encoded wire, swept exactly like a stream condition. */
-export type StreamReference = { patterns: string[]; wire: string };
+/** Reference conditions and their encoded wires, swept exactly like the corresponding stream conditions. */
+export type StreamReference = { patterns: string[]; wire: string; write_edit?: { patterns: string[]; wire: string } };
 export type ProbeSample = {
 	shape: Shape;
 	encoding: Encoding;
@@ -425,9 +425,14 @@ async function workerMain(): Promise<void> {
 	let referenceMs: number | undefined;
 	if (request.reference !== undefined) {
 		const referenceRes = request.reference.patterns.map(pattern => compileRuleCondition(pattern));
+		const writeEditReference = request.reference.write_edit;
+		const writeEditReferenceRes = writeEditReference?.patterns.map(pattern => compileRuleCondition(pattern));
 		process.stderr.write("RX_BUDGET_REFERENCE_START\n");
 		referenceMs = 0;
 		for (const referenceRe of referenceRes) referenceMs += measureStreamWire(referenceRe, request.reference.wire).ms;
+		if (writeEditReference && writeEditReferenceRes) {
+			for (const referenceRe of writeEditReferenceRes) referenceMs += measureStreamWire(referenceRe, writeEditReference.wire).ms;
+		}
 	}
 	let streamMs: number | undefined;
 	let streamLoad1: number | undefined;
@@ -671,20 +676,31 @@ function baselineRows(value: unknown): TrackingRow[] | undefined {
  * a missing or malformed rule baseline only leaves tracking UNVERIFIED, so scaling can never decide a PASS without it. */
 export function loadReference(file: string = DEFAULT_REFERENCE_FILE): LoadedReference {
 	try {
-		const fixture = JSON.parse(readFileSync(file, "utf8")) as { conditions?: unknown; wire_file?: unknown; ref_calibrated_ms?: unknown; rule_baseline?: { live?: unknown; write_edit?: unknown } };
+		const fixture = JSON.parse(readFileSync(file, "utf8")) as { conditions?: unknown; wire_file?: unknown; write_edit_conditions?: unknown; write_edit_wire_file?: unknown; ref_calibrated_ms?: unknown; rule_baseline?: { live?: unknown; write_edit?: unknown } };
 		const conditions = Array.isArray(fixture.conditions) ? fixture.conditions as Array<{ pattern?: unknown }> : [];
 		const patterns = conditions.map(condition => typeof condition?.pattern === "string" ? condition.pattern : "");
 		if (!patterns.length || patterns.some(pattern => !pattern)) throw new Error("reference conditions must list non-empty patterns");
 		if (typeof fixture.wire_file !== "string" || !fixture.wire_file) throw new Error("reference wire_file is missing");
 		const wire = JSON.stringify({ command: readFileSync(path.resolve(path.dirname(file), fixture.wire_file), "utf8") });
+		let writeEditReference: StreamReference["write_edit"];
+		if (fixture.write_edit_conditions !== undefined || fixture.write_edit_wire_file !== undefined) {
+			const writeEditConditions = Array.isArray(fixture.write_edit_conditions) ? fixture.write_edit_conditions as Array<{ pattern?: unknown }> : [];
+			const writeEditPatterns = writeEditConditions.map(condition => typeof condition?.pattern === "string" ? condition.pattern : "");
+			if (!writeEditPatterns.length || writeEditPatterns.some(pattern => !pattern)) throw new Error("write/edit reference conditions must list non-empty patterns");
+			if (typeof fixture.write_edit_wire_file !== "string" || !fixture.write_edit_wire_file) throw new Error("write/edit reference wire_file is missing");
+			writeEditReference = {
+				patterns: writeEditPatterns,
+				wire: buildWriteEditWire(readFileSync(path.resolve(path.dirname(file), fixture.write_edit_wire_file), "utf8")),
+			};
+		}
 		const live = baselineRows(fixture.rule_baseline?.live);
 		const writeEdit = baselineRows(fixture.rule_baseline?.write_edit);
 		return {
 			file,
-			reference: { patterns, wire },
+			reference: { patterns, wire, ...(writeEditReference ? { write_edit: writeEditReference } : {}) },
 			calibratedMs: typeof fixture.ref_calibrated_ms === "number" ? fixture.ref_calibrated_ms : undefined,
 			...(live && writeEdit ? { baseline: { live, write_edit: writeEdit } } : {}),
-			wireBytes: Buffer.byteLength(wire, "utf8"),
+			wireBytes: Buffer.byteLength(wire, "utf8") + (writeEditReference ? Buffer.byteLength(writeEditReference.wire, "utf8") : 0),
 		};
 	} catch (error) {
 		return { file, wireBytes: null, loadError: String(error) };
@@ -723,7 +739,7 @@ function gateStatus(ruleFailed: boolean, reference: ReferenceVerdict, stream: St
 	return "PASS";
 }
 
-async function runGateSample(rulesDir: string, streamFile: string, writeEditStreamFile: string, reference: LoadedReference, streamSeam?: (rule: string, conditionIndex: number, measuredMs: number) => number): Promise<GateReport> {
+async function runGateSample(rulesDir: string, streamFile: string, writeEditStreamFile: string, reference: LoadedReference, streamSeam?: (rule: string, conditionIndex: number, measuredMs: number, stream: "live" | "write_edit") => number): Promise<GateReport> {
 	const started = performance.now();
 	const deadline = Date.now() + GATE_DEADLINE_MS;
 	const before = loadavg();
@@ -758,11 +774,13 @@ async function runGateSample(rulesDir: string, streamFile: string, writeEditStre
 			...(reference.reference && index % referenceStride === 0 ? { reference: reference.reference } : {}),
 			workerTimeoutMs: Math.min(DEFAULT_WORKER_TIMEOUT_MS, remaining - 500),
 		});
-		const streamMs = streamSeam && typeof measurement.stream_ms === "number" ? streamSeam(condition.rule, condition.conditionIndex, measurement.stream_ms) : measurement.stream_ms;
+		const streamMs = streamSeam && typeof measurement.stream_ms === "number" ? streamSeam(condition.rule, condition.conditionIndex, measurement.stream_ms, "live") : measurement.stream_ms;
+		const writeEditMs = streamSeam && typeof measurement.write_edit_ms === "number" ? streamSeam(condition.rule, condition.conditionIndex, measurement.write_edit_ms, "write_edit") : undefined;
 		// The pattern hash matches this condition to its calibration-run baseline for the tracking guard.
 		measurements.push({
 			...measurement,
 			...(streamMs === undefined ? {} : { stream_ms: streamMs, sample_stream_ms: [streamMs] }),
+			...(writeEditMs === undefined ? {} : { write_edit_ms: writeEditMs, sample_write_edit_ms: [writeEditMs] }),
 			pattern_sha256: createHash("sha256").update(condition.pattern).digest("hex"),
 		});
 	}
@@ -968,8 +986,8 @@ export type GateOptions = {
 	referenceFile?: string;
 	/** Test seam: replaces each sample's measured reference mean before judging. Not reachable from the CLI. */
 	referenceSampleSeam?: (sampleIndex: number, measuredMs: number | null) => number | null | undefined;
-	/** Test seam: replaces each condition's measured live-stream time in each sample before judging. Not reachable from the CLI. */
-	streamTimingSeam?: (sampleIndex: number, rule: string, conditionIndex: number, measuredMs: number) => number;
+	/** Test seam: replaces each condition's applicable live or write/edit stream time in each sample before judging. Not reachable from the CLI. */
+	streamTimingSeam?: (sampleIndex: number, rule: string, conditionIndex: number, measuredMs: number, stream: "live" | "write_edit") => number;
 };
 
 /** Run every case once per round so samples for each case are separated by a full pass over the others. */
@@ -978,7 +996,7 @@ export async function runGate(rulesDir: string, streamFile: string, writeEditStr
 	const reports: GateReport[] = [];
 	for (let sample = 0; sample < TIMING_SAMPLE_COUNT; sample++) {
 		const streamSeam = options.streamTimingSeam;
-		const report = await runGateSample(rulesDir, streamFile, writeEditStreamFile, reference, streamSeam && ((rule, conditionIndex, measuredMs) => streamSeam(sample, rule, conditionIndex, measuredMs)));
+		const report = await runGateSample(rulesDir, streamFile, writeEditStreamFile, reference, streamSeam && ((rule, conditionIndex, measuredMs, stream) => streamSeam(sample, rule, conditionIndex, measuredMs, stream)));
 		if (options.referenceSampleSeam) report.reference.sample_ref_ms = [options.referenceSampleSeam(sample, report.reference.sample_ref_ms[0] ?? null) ?? null];
 		reports.push(report);
 	}

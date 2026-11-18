@@ -1,7 +1,7 @@
 diff --git b/scripts/suite-metrics.py a/scripts/suite-metrics.py
 --- b/scripts/suite-metrics.py
 +++ a/scripts/suite-metrics.py
-@@ -26,12 +26,21 @@ from typing import Sequence
+@@ -26,12 +26,23 @@ from typing import Sequence
  
  sys.path.insert(0, str(Path(__file__).resolve().parent))
  from kitlib_run import run
@@ -14,7 +14,9 @@ diff --git b/scripts/suite-metrics.py a/scripts/suite-metrics.py
 -    "scripts/kitlib_run.py", "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
 +    "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
 +    "scripts/fresh-gate-ledger.py",
-+    "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
++    "scripts/suite-hermetic-env.sh", "scripts/seed-sdk-source.ts", "tests/cli/kit-sdk-source.ts",
++    "src/omp-source-cache.ts", "src/kitlib/run.ts", "src/kitlib/pysafe-source.ts",
++    "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
 +    "scripts/fixed-env.sh",
 +    "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/kitlib-proc.sh", "scripts/kitlib-shimpath.sh",
 +    # SUITESERIAL1 (ompkit-fp72.120.16.264): the suite lease the runner takes and the kitlib lock and process
@@ -25,7 +27,7 @@ diff --git b/scripts/suite-metrics.py a/scripts/suite-metrics.py
      ".github/test-budget.json",
  )
  
-@@ -243,22 +251,43 @@ def execute(args: argparse.Namespace) -> int:
+@@ -300,22 +311,47 @@ def execute(args: argparse.Namespace) -> int:
      # The native process writes directly to a retained file, never through a
      # helper-owned pipe/sink thread: even SIGKILL of this helper cannot discard
      # bytes the native process already flushed. Exec preserves its PID/group.
@@ -56,6 +58,10 @@ diff --git b/scripts/suite-metrics.py a/scripts/suite-metrics.py
 +        # The suite fence still denies writes outside its scratch and archive.
 +        if os.environ.get("OMP_KIT_OMP_SRC_CACHE"):
 +            wrapped.extend(["--allow-env", "OMP_KIT_OMP_SRC_CACHE"])
++        # SDKOFFLINE1: the lifecycle selector reads its override in the isolated
++        # consumer as well as in wrapper setup; forward it like other suite inputs.
++        if "KIT_SDK_LIFECYCLE_VERSION" in os.environ:
++            wrapped.extend(["--allow-env", "KIT_SDK_LIFECYCLE_VERSION"])
 +        # The gate's own worker count reaches fixtures' TIMEOUT_UNDER_LOAD diagnostics (GATEFLAKE1).
 +        if os.environ.get("OMP_KIT_TEST_WORKERS"):
 +            wrapped.extend(["--allow-env", "OMP_KIT_TEST_WORKERS"])

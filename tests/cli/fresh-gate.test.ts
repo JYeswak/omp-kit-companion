@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { writeBundledHarness } from "./release-manifest-fixture.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { runSync } from "../../src/kitlib/run";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 import { AMPLE, SKIP_BUDGET, candidateRepo, gate, gateFunctions, root, scratchRoot } from "./fresh-gate.helpers.ts";
 
@@ -64,6 +65,17 @@ function pinnedGate(dir: string): string {
 	const copy = join(dir, "gate-copy");
 	cpSync(join(root, "scripts"), join(copy, "scripts"), { recursive: true });
 	cpSync(join(root, ".github"), join(copy, ".github"), { recursive: true }); // the gate reads its test budget beside scripts/
+	const judging = runSync(["python3", "-B", "-m", "suite-metrics", "judging-files"], {
+		env: { ...process.env, PYTHONPATH: join(root, "scripts") }, deadline_s: fixtureDeadlineS(10),
+	});
+	if (judging.rc !== 0 || judging.timed_out || judging.killed || judging.truncated)
+		throw new Error(`manifest judging inputs: ${new TextDecoder().decode(judging.stderr)}`);
+	for (const name of new TextDecoder().decode(judging.stdout).trim().split("\n")) {
+		const target = join(copy, name);
+		if (existsSync(target)) continue; // scripts/ and .github/ were already copied, not linked.
+		mkdirSync(join(target, ".."), { recursive: true });
+		cpSync(join(root, name), target);
+	}
 	const policy = readFileSync(join(root, "scripts/fixed-env.sh"), "utf8");
 	if (!policy.includes('\nPATH="')) throw new Error("fixed-env.sh PATH line moved");
 	writeFileSync(join(copy, "scripts/fixed-env.sh"), policy.replace('\nPATH="', `\nPATH="${join(dir, "bin")}:`));
