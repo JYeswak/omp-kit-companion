@@ -22,6 +22,20 @@ const CONCURRENT_WRITER_PROBE_MS = 1_000; // Timeout never counts as writer evid
 const EMPTY_CONCURRENT_WRITER_PATHS: ReadonlySet<string> = new Set();
 const MAX_LIVE_WRITER_CANDIDATES = 5_000;
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+// cc-spool writes one UTC day file directly under its kit producer directory.
+const KIT_DAY_FILE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl$/;
+
+function kitDayFile(directory: string, path: string): boolean {
+	if (!path.startsWith(directory) || dirname(path) !== directory) return false;
+	const name = basename(path);
+	return name.length === 16 && KIT_DAY_FILE.test(name);
+}
+
+function spoolFileIdentity(stat: Stats): string | undefined {
+	if (!stat.isFile() || !Number.isSafeInteger(stat.dev) || !Number.isSafeInteger(stat.ino) ||
+		!Number.isSafeInteger(stat.nlink)) return undefined;
+	return `${stat.nlink}:${stat.dev}:${stat.ino}:${stat.mode}`;
+}
 
 /**
  * Volatile browser cache directory names: regenerable HTTP/GPU/code caches a browser rewrites on its own
@@ -86,7 +100,8 @@ export function isOwnedState(owned: readonly OwnedStatePath[], path: string): bo
 }
 
 export type WatchedPaths = string[] & { owned?: readonly OwnedStatePath[]; liveState?: readonly string[]; stateRoot?: string | null };
-export type WatchedSnapshot = { entries: Map<string, string>; incomplete: string[]; liveState?: string[] };
+type KitSpoolSnapshot = { directory: string; physical: string | null; files: Map<string, string> };
+export type WatchedSnapshot = { entries: Map<string, string>; incomplete: string[]; liveState?: string[]; kitSpool?: KitSpoolSnapshot };
 export type WatchedComparison = {
 	unchanged: boolean; complete: boolean; watched: number;
 	changed_paths: string[]; incomplete_paths: string[];
@@ -128,11 +143,13 @@ export function operatorWatchedPaths(home: string, stateRoot: string | null, own
 	return paths;
 }
 
-/** Content and mode only: an mtime-only touch is not a change. An absent path is a recorded state, not an error. */
+/** Compare content and mode; kit day files also pin file identity for out-of-process writer attribution. */
 export function snapshotWatched(paths: readonly string[] & { owned?: readonly OwnedStatePath[]; liveState?: readonly string[]; stateRoot?: string | null }): WatchedSnapshot {
 	const entries = new Map<string, string>();
 	const incomplete: string[] = [];
 	const liveState = new Set<string>();
+	const kitSpool: KitSpoolSnapshot | undefined = paths.stateRoot
+		? { directory: fenceNamespaces(paths.stateRoot).kitSpool, physical: null, files: new Map() } : undefined;
 	for (const root of paths) {
 		if (!isAbsolute(root)) throw new Error("watched paths must be absolute");
 		// Only the state root relaxes: every profile, rule, extension and plugin root keeps the strict caps.
@@ -160,19 +177,24 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 			const mode = (stat.mode & 0o7777).toString(8);
 			if (stat.isSymbolicLink()) { entries.set(path, `link:${readlinkSync(path)}`); return; }
 			if (stat.isFile()) {
+				const spoolIdentity = kitSpool && kitDayFile(kitSpool.directory, path) ? spoolFileIdentity(stat) : undefined;
 				// A large state file is recorded by stable metadata, never content-hashed: an append or
 				// rewrite still changes size or mtime, while the bulk never counts toward a byte budget.
 				// The `file:` prefix keeps concurrent-writer attribution working on these entries.
 				if (relaxed && stat.size > MAX_STATE_FILE_HASH_BYTES) {
 					entries.set(path, `file:${mode}:meta:${stat.size}:${stat.mtimeMs}`);
+					if (spoolIdentity !== undefined) kitSpool!.files.set(path, spoolIdentity);
 					return;
 				}
 				if (!relaxed) {
 					bytes += stat.size;
 					if (bytes > MAX_BYTES_PER_ROOT) { overflow = true; incomplete.push(root); return; }
 				}
-				try { entries.set(path, `file:${mode}:${createHash("sha256").update(readFileSync(path)).digest("hex")}`); }
-				catch { incomplete.push(path); }
+				try {
+					entries.set(path, `file:${mode}:${createHash("sha256").update(readFileSync(path)).digest("hex")}`);
+					if (spoolIdentity !== undefined && spoolIdentity === spoolFileIdentity(lstatSync(path)))
+						kitSpool!.files.set(path, spoolIdentity);
+				} catch { incomplete.push(path); }
 				return;
 			}
 		if (stat.isDirectory()) {
@@ -181,6 +203,9 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 			// The watched root itself is by construction kit-relevant and is never skipped.
 			if (path !== root && VOLATILE_CACHE_DIR_NAMES[basename(path)] === true) return;
 			entries.set(path, `dir:${mode}`);
+			if (kitSpool && path === kitSpool.directory) {
+				try { kitSpool.physical = realpathSync(path); } catch { incomplete.push(path); }
+			}
 			let children: string[];
 			try { children = readdirSync(path).sort(); } catch { incomplete.push(path); return; }
 			for (const child of children) visit(join(path, child));
@@ -190,19 +215,24 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 		};
 		visit(root);
 	}
-	return { entries, incomplete, ...(liveState.size ? { liveState: [...liveState].sort() } : {}) };
+	return { entries, incomplete, ...(liveState.size ? { liveState: [...liveState].sort() } : {}), ...(kitSpool && { kitSpool }) };
 }
 function changedWatchedPaths(before: WatchedSnapshot, after: WatchedSnapshot): string[] {
 	const changed = new Set<string>();
 	for (const [path, value] of before.entries) if (after.entries.get(path) !== value) changed.add(path);
 	for (const path of after.entries.keys()) if (!before.entries.has(path)) changed.add(path);
+	for (const [path, identity] of before.kitSpool?.files ?? [])
+		if (after.kitSpool?.files.get(path) !== identity) changed.add(path);
+	for (const path of after.kitSpool?.files.keys() ?? [])
+		if (!before.kitSpool?.files.has(path)) changed.add(path);
 	return [...changed];
 }
 
 /** Only a post-run content hash change marks a changed file as concurrent; timed-out or unobserved changes remain failures. */
 export async function activeConcurrentWriterPaths(before: WatchedSnapshot, after: WatchedSnapshot): Promise<ReadonlySet<string>> {
 	const candidates = changedWatchedPaths(before, after)
-		.filter(path => after.entries.get(path)?.startsWith("file:"))
+		.filter(path => after.entries.get(path)?.startsWith("file:") &&
+			!(after.kitSpool && kitDayFile(after.kitSpool.directory, path)))
 		.sort()
 		.slice(0, MAX_CONCURRENT_WRITER_CANDIDATES);
 	if (!candidates.length) return EMPTY_CONCURRENT_WRITER_PATHS;
@@ -315,7 +345,7 @@ function physicalPath(path: string): string {
 
 function fenceNamespaces(stateRoot: string) {
 	return { composer: join(stateRoot, "composer"), verdicts: join(stateRoot, "full-suite-verdicts"),
-		receipts: join(stateRoot, "disk-stage", "receipts.jsonl") };
+		receipts: join(stateRoot, "disk-stage", "receipts.jsonl"), kitSpool: join(stateRoot, "cc", "spool", "kit") };
 }
 
 /** The write fence for an isolated run, or null where it cannot be applied (not darwin, or no sandbox-exec). */
@@ -323,14 +353,16 @@ export function operatorWriteFence(stateRoot: string | null, platform: NodeJS.Pl
 	executable: string = SANDBOX_EXEC): WriteFence | null {
 	if (!stateRoot || !isAbsolute(stateRoot) || platform !== "darwin" || !existsSync(executable)) return null;
 	const physical = fenceNamespaces(physicalPath(stateRoot));
-	const denied = [physical.composer, physical.verdicts, physical.receipts];
-	const ancestors: string[] = [];
-	for (let dir = dirname(physical.receipts); dir !== dirname(dir); dir = dirname(dir)) ancestors.push(dir);
+	const denied = [physical.composer, physical.verdicts, physical.receipts, physical.kitSpool];
+	const parents = new Set<string>();
+	for (const leaf of [physical.receipts, physical.kitSpool])
+		for (let dir = dirname(leaf); dir !== dirname(dir); dir = dirname(dir)) parents.add(dir);
+	const ancestors = [...parents];
 	const quote = (path: string) => JSON.stringify(path);
 	const profile = [
 		"(version 1)",
 		"(allow default)",
-		`(deny file-write* (subpath ${quote(physical.composer)}) (subpath ${quote(physical.verdicts)}) (literal ${quote(physical.receipts)}))`,
+		`(deny file-write* (subpath ${quote(physical.composer)}) (subpath ${quote(physical.verdicts)}) (literal ${quote(physical.receipts)}) (subpath ${quote(physical.kitSpool)}))`,
 		`(deny file-write-unlink ${ancestors.map(dir => `(literal ${quote(dir)})`).join(" ")})`,
 		'(allow process-exec (literal "/bin/ps") (with no-sandbox))',
 		"",
@@ -349,11 +381,31 @@ export function liveWriterPaths(before: WatchedSnapshot, after: WatchedSnapshot,
 	if (!stateRoot || !fence || fence.stateRoot !== stateRoot) return attributed;
 	const namespaces = fenceNamespaces(stateRoot);
 	const within = (root: string, path: string) => { const rel = relative(root, path); return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel)); };
-	const namespaceOf = (path: string) => path === namespaces.receipts ? namespaces.receipts
-		: within(namespaces.composer, path) ? namespaces.composer : within(namespaces.verdicts, path) ? namespaces.verdicts : null;
-	const candidates = changedWatchedPaths(before, after).filter(path => !exclude.has(path) && namespaceOf(path) !== null)
-		.sort().slice(0, MAX_LIVE_WRITER_CANDIDATES);
-	for (const path of candidates) attributed.set(path, { source: "write-fence", namespace: namespaceOf(path)!, profile_sha256: fence.profile_sha256 });
+	// An existing external hard link can bypass a path fence. Pin a single-link inode and
+	// mode across both observations, inside the physical directory actually fenced. As
+	// elsewhere, the private child has no live write descriptors or broker credentials;
+	// the fence does not authenticate arbitrary outside IPC.
+	const physicalSpool = before.kitSpool?.physical;
+	const spoolFenced = fence?.executable === SANDBOX_EXEC && physicalSpool !== null && physicalSpool !== undefined &&
+		after.kitSpool?.physical === physicalSpool && fence.denied.includes(physicalSpool) &&
+		before.kitSpool?.directory === namespaces.kitSpool && after.kitSpool.directory === namespaces.kitSpool;
+	const namespaceOf = (path: string) => {
+		if (path === namespaces.receipts) return namespaces.receipts;
+		if (within(namespaces.composer, path)) return namespaces.composer;
+		if (within(namespaces.verdicts, path)) return namespaces.verdicts;
+		if (spoolFenced && kitDayFile(namespaces.kitSpool, path)) {
+			const identity = before.kitSpool?.files.get(path);
+			if (identity?.startsWith("1:") && identity === after.kitSpool?.files.get(path)) return namespaces.kitSpool;
+		}
+		return null;
+	};
+	for (const path of changedWatchedPaths(before, after).sort()) {
+		if (exclude.has(path)) continue;
+		const namespace = namespaceOf(path);
+		if (namespace === null) continue;
+		attributed.set(path, { source: "write-fence", namespace, profile_sha256: fence.profile_sha256 });
+		if (attributed.size === MAX_LIVE_WRITER_CANDIDATES) break;
+	}
 	return attributed;
 }
 

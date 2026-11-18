@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { afterAll, afterEach, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { compareWatched, liveWriterPaths, operatorWatchedPaths, operatorWriteFence, snapshotWatched } from "../../src/operator-snapshot.ts";
+import { activeConcurrentWriterPaths, compareWatched, liveWriterPaths, operatorWatchedPaths, operatorWriteFence, snapshotWatched } from "../../src/operator-snapshot.ts";
 import { ccStateDir, KNOWN_JOBS, plistPath, serviceLabel, type OwnedStatePath } from "../../src/service.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
@@ -474,16 +474,12 @@ async function fleetWrites(home: string, stateRoot: string) {
 	};
 }
 
-/** The real comparison with the fence guard removed: every namespace change counts as fenced. */
-async function fenceCheckRemoved() {
+async function operatorSnapshotMutant(transform: (source: string) => string) {
 	const src = join(import.meta.dir, "..", "..", "src");
 	const source = readFileSync(join(src, "operator-snapshot.ts"), "utf8");
-	const guard = "if (!stateRoot || !fence || fence.stateRoot !== stateRoot) return attributed;";
-	const evidence = "profile_sha256: fence.profile_sha256 }";
-	expect(source).toContain(guard);
-	expect(source).toContain(evidence);
-	const mutated = source.replace(guard, "if (!stateRoot) return attributed;").replace(evidence, 'profile_sha256: fence?.profile_sha256 ?? "" }')
-		.replaceAll('from "./', `from "${src}/`);
+	const changed = transform(source);
+	expect(changed).not.toBe(source);
+	const mutated = changed.replaceAll('from "./', `from "${src}/`);
 	const dir = ownedTmp("operator-snapshot-mutant", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	roots.push(dir);
 	writeFileSync(join(dir, "operator-snapshot.mutant.ts"), mutated);
@@ -510,6 +506,71 @@ darwinTest("POSTFENCE planted: under the run's write fence, live-fleet writes to
 	expect(createHash("sha256").update(fence!.profile).digest("hex")).toBe(fence!.profile_sha256);
 }, fixtureDeadlineS(30) * 1000);
 
+darwinTest("UPDPOST1 only attributes an existing single-link kit day file under the applied Darwin fence", async () => {
+	const { home, paths, stateRoot } = liveHome();
+	const spool = join(stateRoot, "cc", "spool", "kit");
+	mkdirSync(spool, { recursive: true });
+	const eligible = join(spool, "2026-11-18.jsonl");
+	const linked = join(spool, "2026-11-17.jsonl");
+	const replaced = join(spool, "2026-11-16.jsonl");
+	const added = join(spool, "2026-11-19.jsonl");
+	const symlink = join(spool, "2026-11-20.jsonl");
+	const sibling = join(spool, "not-a-day.jsonl");
+	for (const path of [eligible, linked, replaced, sibling]) writeFileSync(path, "before\n");
+	const originalSize = 2 * 1024 * 1024;
+	truncateSync(eligible, originalSize); // Production's current day file uses the metadata tier.
+	const otherProducer = join(stateRoot, "cc", "spool", "other");
+	mkdirSync(otherProducer);
+	const neighbor = join(otherProducer, "2026-11-18.jsonl");
+	writeFileSync(neighbor, "before\n");
+	const alias = join(home, "outside-hard-link");
+	linkSync(linked, alias);
+	expect(statSync(alias).ino).toBe(statSync(linked).ino);
+	expect(statSync(linked).nlink).toBe(2);
+	symlinkSync(eligible, symlink);
+	const fence = operatorWriteFence(stateRoot)!;
+	const appendInChild = (path: string) => run(
+		[fence.executable, "-p", fence.profile, "/bin/sh", "-c", 'printf "sandboxed\\n" >> "$1"', "postcheck", path],
+		{ deadline_s: fixtureDeadlineS(), env: { PATH: "/bin:/usr/bin", HOME: home } },
+	);
+	const before = snapshotWatched(paths);
+	const direct = await appendInChild(eligible);
+	expect(new TextDecoder().decode(direct.stderr)).toContain("Operation not permitted");
+	expect(statSync(eligible).size).toBe(originalSize);
+	const throughAlias = await appendInChild(alias);
+	expect(throughAlias.rc, new TextDecoder().decode(throughAlias.stderr)).toBe(0);
+	expect(readFileSync(linked, "utf8")).toBe("before\nsandboxed\n");
+	expect((await appendInChild(neighbor)).rc).toBe(0);
+
+	appendFileSync(eligible, "outside writer\n");
+	appendFileSync(sibling, "outside writer\n");
+	writeFileSync(added, "new day\n");
+	writeFileSync(join(home, "replacement"), "before\n"); // Equal bytes do not make a replacement eligible.
+	renameSync(join(home, "replacement"), replaced);
+	rmSync(symlink);
+	symlinkSync(linked, symlink);
+	const after = snapshotWatched(paths);
+	const display = (path: string) => `~/.local/state/omp-kit/cc/spool/kit/${path.slice(spool.length + 1)}`;
+	const result = compareWatched(before, after, home, undefined, liveWriterPaths(before, after, { stateRoot, fence }));
+	expect(result.complete).toBe(true);
+	expect(result.changed_paths).toEqual([
+		...[replaced, linked, added, symlink, sibling].map(display),
+		"~/.local/state/omp-kit/cc/spool/other/2026-11-18.jsonl",
+	]);
+	expect(result.skipped_live_writer_paths).toEqual([{
+		path: display(eligible), reason: "skipped-live-writer",
+		evidence: { source: "write-fence", namespace: spool, profile_sha256: fence.profile_sha256 },
+	}]);
+	expect(liveWriterPaths(before, after, { stateRoot, fence: null }).has(eligible)).toBe(false);
+	expect(liveWriterPaths(before, after, { stateRoot, fence: operatorWriteFence(join(home, "other-state")) }).has(eligible)).toBe(false);
+	const pathOnly = await operatorSnapshotMutant(source => source.replace('identity?.startsWith("1:")', "identity !== undefined"));
+	expect(pathOnly.liveWriterPaths(before, after, { stateRoot, fence }).has(linked)).toBe(true);
+	// A subsequent outside append cannot retroactively authenticate the aliased write.
+	const concurrent = activeConcurrentWriterPaths(before, after);
+	appendFileSync(linked, "later outside writer\n");
+	expect((await concurrent).has(linked)).toBe(false);
+}, fixtureDeadlineS(30) * 1000);
+
 test("POSTFENCE negative: with no fence (Linux, no sandbox-exec) or a fence for another state root, every live-fleet write fails", async () => {
 	const { home, paths, stateRoot } = liveHome();
 	const fleet = await fleetWrites(home, stateRoot);
@@ -524,7 +585,9 @@ test("POSTFENCE negative: with no fence (Linux, no sandbox-exec) or a fence for 
 	const other = operatorWriteFence(join(home, "other-state"), "darwin", process.execPath);
 	expect([...liveWriterPaths(before, after, { stateRoot, fence: other }).keys()]).toEqual([]);
 	// Mutant: with the fence guard removed, the unfenced writes wrongly pass.
-	const mutant = await fenceCheckRemoved();
+	const mutant = await operatorSnapshotMutant(source => source
+		.replace("if (!stateRoot || !fence || fence.stateRoot !== stateRoot) return attributed;", "if (!stateRoot) return attributed;")
+		.replace("profile_sha256: fence.profile_sha256 }", 'profile_sha256: fence?.profile_sha256 ?? "" }'));
 	expect(mutant.compareWatched(before, after, home, undefined, mutant.liveWriterPaths(before, after, { stateRoot, fence: null })).changed_paths).toEqual([]);
 }, fixtureDeadlineS(30) * 1000);
 
