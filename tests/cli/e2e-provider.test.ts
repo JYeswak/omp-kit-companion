@@ -1,8 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { join, resolve } from "node:path";
+import { run } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 afterAll(() => cleanupAllOwnedTmp());
@@ -76,9 +78,30 @@ exec "$OMP_KIT_PROVIDER_NATIVE" "$@"
 }
 
 test("unpinned OMP probes OLLAMA_HOST; the e2e pin silences it", async () => {
-	const recorder = await startRecorder();
-	const host = `http://127.0.0.1:${recorder.port}`;
+	const dotGit = join(REPO_ROOT, ".git");
+	let gitDir: string | null = null;
+	if (!existsSync(dotGit)) {
+		// Match the fresh/full suite's contributor checkout setup, but only for
+		// the native verifier's disposable source export, never an installed kit.
+		const parent = process.env.GRADE_WAVE_SCRATCH;
+		if (!parent || realpathSync(REPO_ROOT) !== join(realpathSync(parent), "export") ||
+			!readFileSync(join(parent, ".owner"), "utf8").split("\n").includes("label=verify")) {
+			throw new Error("provider isolation needs a checkout or an owned native verify export");
+		}
+		const scratch = ownedTmp("e2e-provider-git", { root: parent, bead: "ompkit-upgradeloop-qum98.10" });
+		const privateGit = join(realpathSync(scratch.path), "git");
+		const env = Object.fromEntries(Object.entries(process.env)
+			.filter((entry): entry is [string, string] => !entry[0].startsWith("GIT_") && entry[1] !== undefined));
+		const result = await run(["git", "init", "--quiet", "--template=", "--separate-git-dir", privateGit], {
+			cwd: REPO_ROOT, env, deadline_s: fixtureDeadlineS(30),
+		});
+		if (result.rc !== 0) throw new Error(`provider isolation fixture git init: ${new TextDecoder().decode(result.stderr)}`);
+		gitDir = privateGit;
+	}
+	let recorder: Recorder | undefined;
 	try {
+		recorder = await startRecorder();
+		const host = `http://127.0.0.1:${recorder.port}`;
 		const endpoints = { OLLAMA_HOST: host, OLLAMA_BASE_URL: host, LLAMA_CPP_BASE_URL: host, LM_STUDIO_BASE_URL: `${host}/v1` };
 		const mutant = await runE2e({ ...endpoints, OMP_KIT_TEST_NO_PROVIDER_PIN: "1" });
 		expect(mutant.code, mutant.stderr).toBe(0);
@@ -89,6 +112,10 @@ test("unpinned OMP probes OLLAMA_HOST; the e2e pin silences it", async () => {
 		expect(pinned.code, pinned.stderr).toBe(0);
 		expect(recorder.requests).toEqual([]);
 	} finally {
-		recorder.stop();
+		recorder?.stop();
+		if (gitDir !== null) {
+			if (readFileSync(dotGit, "utf8") !== `gitdir: ${gitDir}\n`) throw new Error("provider isolation fixture Git pointer changed");
+			unlinkSync(dotGit);
+		}
 	}
 }, 300_000);
