@@ -1,8 +1,11 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import process from "node:process";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
+afterAll(() => cleanupAllOwnedTmp());
 
 // Integration test: exercises real OMP provider discovery against a
 // recording listener on the platform clock. Fake timers cannot work: the
@@ -39,9 +42,28 @@ async function startRecorder(): Promise<Recorder> {
 }
 
 async function runE2e(extraEnv: Record<string, string>): Promise<{ code: number | null; stderr: string }> {
+	const nativeOmp = process.env.OMP || Bun.which("omp");
+	if (!nativeOmp) throw new Error("real OMP is required for provider isolation");
+	const work = ownedTmp("e2e-provider-discovery", { root: process.env.TMPDIR, bead: "ompkit-upgradeloop-qum98.10" });
+	const launcher = join(work.path, "omp");
+	// Startup discovery is fire-and-forget. Explicit listing awaits the real
+	// registry under the E2E child's own HOME and disabledProviders policy.
+	writeFileSync(launcher, `#!/bin/sh
+for arg do
+  case "$arg" in
+    -p|--print)
+      "$OMP_KIT_PROVIDER_NATIVE" models ls ollama --json --no-extensions || exit "$?"
+      break
+      ;;
+  esac
+done
+exec "$OMP_KIT_PROVIDER_NATIVE" "$@"
+`, { mode: 0o755 });
 	const child = Bun.spawn(["sh", "scripts/e2e-live.sh"], {
 		cwd: REPO_ROOT,
-		env: { ...process.env, ONLY: "unsafe-router-fire" /* the discovery canary retired in 906ebd0746 */, OMP_KIT_TEST_NO_COVERAGE: "1", ...extraEnv },
+		// Machine-readable scenario IDs must survive a caller forcing ANSI color.
+		env: { ...process.env, NO_COLOR: undefined, FORCE_COLOR: "1", ONLY: "unsafe-router-fire", OMP_KIT_TEST_NO_COVERAGE: "1",
+			OMP: launcher, OMP_KIT_PROVIDER_NATIVE: nativeOmp, ...extraEnv },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -57,13 +79,14 @@ test("unpinned OMP probes OLLAMA_HOST; the e2e pin silences it", async () => {
 	const recorder = await startRecorder();
 	const host = `http://127.0.0.1:${recorder.port}`;
 	try {
-		const mutant = await runE2e({ OLLAMA_HOST: host, OMP_KIT_TEST_NO_PROVIDER_PIN: "1" });
-		expect(mutant.code).toBe(0);
+		const endpoints = { OLLAMA_HOST: host, OLLAMA_BASE_URL: host, LLAMA_CPP_BASE_URL: host, LM_STUDIO_BASE_URL: `${host}/v1` };
+		const mutant = await runE2e({ ...endpoints, OMP_KIT_TEST_NO_PROVIDER_PIN: "1" });
+		expect(mutant.code, mutant.stderr).toBe(0);
 		expect(recorder.requests.length).toBeGreaterThan(0);
 		expect(recorder.requests.some(line => line.includes("/api/tags"))).toBe(true);
 		recorder.requests.length = 0;
-		const pinned = await runE2e({ OLLAMA_HOST: host });
-		expect(pinned.code).toBe(0);
+		const pinned = await runE2e(endpoints);
+		expect(pinned.code, pinned.stderr).toBe(0);
 		expect(recorder.requests).toEqual([]);
 	} finally {
 		recorder.stop();

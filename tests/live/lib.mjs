@@ -299,7 +299,7 @@ switch (cmd) {
 		break;
 	case "select":
 		scenarios.forEach((s, i) => {
-			if (args[0] === "plant" ? s.plant : !s.plant) console.log(i);
+			if (args[0] === "plant" ? s.plant : !s.plant) console.log(String(i));
 		});
 		break;
 	case "name":

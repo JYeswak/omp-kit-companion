@@ -232,3 +232,135 @@ test("AC2 planted refusal: a commit stating the published version is still refus
 	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(main);
 	expect(originMain(f)).toBe(main);
 }, fixtureDeadlineS(120) * 1_000);
+
+test("CALLERCOMMIT1 prepares owned files without committing peer bytes and reuses the caller's published marker", () => {
+	const { f, source } = publishedFixture("caller-commit", true);
+	// The outer fresh gate runs this test from an archive with source_revision expanded.
+	// Seed the inner repository's raw checkout value and its real Git export behavior.
+	const packagePath = join(f.repo, "package.json");
+	const seedPackage = JSON.parse(readFileSync(packagePath, "utf8"));
+	writeFileSync(packagePath, JSON.stringify({ ...seedPackage, source_revision: "$Format:%H$" }, null, 2) + "\n");
+	writeFileSync(join(f.repo, ".gitattributes"), "package.json export-subst\n");
+	writeFileSync(join(f.repo, "changelog.d/shipped.md"), "### Fixed\n\n- Shipped in the tagged source.\n- Residual added after the tag.\n");
+	f.git(f.repo, "add", "--", "changelog.d/shipped.md", "package.json", ".gitattributes");
+	f.git(f.repo, "commit", "-qm", "seed raw release metadata and later fragment revision");
+	f.git(f.repo, "push", "-q", "origin", "main");
+	const before = originMain(f);
+	writeFileSync(join(f.repo, "peer.txt"), "Unrelated staged peer bytes.\n");
+	f.git(f.repo, "add", "peer.txt");
+	const peerIndex = f.git(f.repo, "ls-files", "--stage", "--", "peer.txt");
+	publishEvidence(f);
+	copyFileSync(join(ROOT, "scripts/release-local.sh"), join(f.repo, "scripts/release-local.sh"));
+	const result = runFixture(["bash", join(f.repo, "scripts/release-local.sh"), "--advance-only", "--version", "1.2.4", "--caller-commit-next-version"],
+		{ cwd: f.repo, env: f.env, floor_s: 180 });
+	const stdout = decode(result.stdout);
+	expect(result.rc, `${stdout}\n${decode(result.stderr)}`).toBe(3);
+	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(before);
+	expect(originMain(f)).toBe(before);
+	expect(f.git(f.repo, "ls-files", "--stage", "--", "peer.txt")).toBe(peerIndex);
+	const pkg = JSON.parse(readFileSync(packagePath, "utf8"));
+	expect([pkg.version, pkg.omp.version]).toEqual(["1.2.5", "1.2.5"]);
+	expect(pkg.source_revision).toBe("$Format:%H$");
+	expect(readFileSync(join(f.repo, "README.md"), "utf8")).toContain("Current release: v1.2.4");
+	const changelog = readFileSync(join(f.repo, "CHANGELOG.md"), "utf8");
+	expect(changelog).toContain("## [1.2.4]");
+	expect(changelog).toContain("Shipped in the tagged source.");
+	expect(changelog).not.toContain("Residual added after the tag.");
+	expect(readFileSync(join(f.repo, "changelog.d/shipped.md"), "utf8")).toContain("Residual added after the tag.");
+	expect(readFileSync(join(f.repo, "changelog.d/shipped.md"), "utf8")).not.toContain("Shipped in the tagged source.");
+	expect(existsSync(join(f.repo, "changelog.d/owned.md"))).toBe(false);
+	expect(readFileSync(join(f.repo, "changelog.d/later.md"), "utf8")).toContain("Landed after the tag.");
+	expect(stdout).toContain(`NEXT_VERSION_PREPARED: base=${before} source=${source} next=1.2.5`);
+	const paths = ["package.json", "README.md", "CHANGELOG.md", "changelog.d/owned.md", "changelog.d/shipped.md"];
+	expect(stdout.split("\n").filter(line => line.startsWith("NEXT_VERSION_PATH: ")).map(line => line.slice("NEXT_VERSION_PATH: ".length)).sort()).toEqual([...paths].sort());
+	const message = stdout.split("NEXT_VERSION_COMMIT_MESSAGE_BEGIN\n")[1]?.split("NEXT_VERSION_COMMIT_MESSAGE_END\n")[0] ?? "";
+	expect(message).toContain(`NEXTVERSION1: v1.2.4 is published from ${source};`);
+	const messagePath = join(f.work, "caller-commit-message");
+	writeFileSync(messagePath, message);
+	// The fixture caller, not the release runner, owns this real selective commit.
+	f.git(f.repo, "commit", "-q", "--only", "-F", messagePath, "--", ...paths);
+	const callerSha = f.git(f.repo, "rev-parse", "HEAD");
+	expect(f.git(f.repo, "rev-list", "--count", `${before}..${callerSha}`)).toBe("1");
+	const unpublished = runFixture(["bash", join(f.repo, "scripts/release-local.sh"), "--advance-only", "--version", "1.2.4", "--caller-commit-next-version"],
+		{ cwd: f.repo, env: f.env, floor_s: 180 });
+	expect(unpublished.rc, `${decode(unpublished.stdout)}\n${decode(unpublished.stderr)}`).toBe(3);
+	expect(decode(unpublished.stdout)).toContain(`NEXT_VERSION_PUBLICATION_PENDING: ${callerSha}`);
+	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(callerSha);
+	expect(originMain(f)).toBe(before);
+	expect(f.git(f.repo, "ls-files", "--stage", "--", "peer.txt")).toBe(peerIndex);
+	f.git(f.repo, "push", "-q", "origin", "main");
+	writeFileSync(join(f.repo, "changelog.d/newer.md"), "### Added\n\n- Newer published main work.\n");
+	f.git(f.repo, "add", "changelog.d/newer.md");
+	f.git(f.repo, "commit", "-q", "--only", "-m", "newer main work", "--", "changelog.d/newer.md");
+	f.git(f.repo, "push", "-q", "origin", "main");
+	const newer = originMain(f);
+	const retry = advanceOnly(f);
+	expect(retry.rc, decode(retry.stderr)).toBe(0);
+	expect(decode(retry.stdout)).toContain(`ADVANCE_ALREADY_DONE: v1.2.4 advanced in ${callerSha}`);
+	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(newer);
+	expect(originMain(f)).toBe(newer);
+	expect(f.git(f.repo, "ls-files", "--stage", "--", "peer.txt")).toBe(peerIndex);
+}, fixtureDeadlineS(180) * 1_000);
+
+test("CALLERCOMMIT1 leaves the normal release receipt pending rather than claiming bookkeeping complete", () => {
+	const { f, source, before } = publishedFixture("caller-pending-receipt");
+	const body = `${prelude}${helpers()}
+. "$ROOT/scripts/kitlib-tmp.sh"
+${segment("receipt() {", "\n}\n")}
+${segment("# NEXTVERSION1 (ompkit-d8qic", "\n}\n")}
+VERSION=1.2.4; SOURCE=${source}; INSTALL=0; INSTALLED=0
+CALLER_COMMIT_NEXT_VERSION=1; NEXT_VERSION_COMMIT_PENDING=0
+STARTED=$(date +%s); BASE_TAG=v1.2.3; NOTARY_ID=fixture
+TAG_PUSH_SECONDS=''; PUSH_STARTED=''; URL=https://example.invalid/release; RUN_ID=fixture
+DIST="$WORK/dist"; mkdir -p "$DIST"; : >"$DIST/SHA256SUMS"
+${segment("RELEASED_AT=$(date +%s)\n", '\nelse receipt released "$URL" "$RUN_ID"; fi')}
+`;
+	const entry = join(f.work, "caller-receipt.sh");
+	writeFileSync(entry, body);
+	const result = runFixture(["bash", entry, f.repo, f.work], { cwd: f.repo, env: f.env, floor_s: 180 });
+	const stdout = decode(result.stdout);
+	expect(result.rc, `${stdout}\n${decode(result.stderr)}`).toBe(3);
+	const receiptLine = stdout.split("\n").find(line => line.startsWith("== receipt "));
+	expect(receiptLine).toBeDefined();
+	const receipt = JSON.parse(readFileSync((receiptLine ?? "").slice("== receipt ".length), "utf8"));
+	expect(receipt.phase).toBe("released-pending-next-version-commit");
+	expect(receipt.installed).toBe(false);
+	expect(receipt.source_sha).toBe(source);
+	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(before);
+	expect(originMain(f)).toBe(before);
+}, fixtureDeadlineS(120) * 1_000);
+
+test("CALLERCOMMIT1 preserves the original install-refusal exit and uncommitted next-version state", () => {
+	const { f, source, before } = publishedFixture("caller-install-refusal");
+	const refusal = segment("ADVANCE_PENDING=0\nadvance_after_refusal() {", "\nsay() {").slice(0, -"\nsay() {".length);
+	const entry = join(f.work, "caller-refusal.sh");
+	writeFileSync(entry, `${prelude}${helpers()}\n${refusal}\n${segment("# NEXTVERSION1 (ompkit-d8qic", "\n}\n")}
+VERSION=1.2.4; SOURCE=${source}; INSTALLED=0; INSTALL_PREFIX=/fixture/kit; DARWIN=fixture.tar.gz
+CALLER_COMMIT_NEXT_VERSION=1; NEXT_VERSION_COMMIT_PENDING=0; ADVANCE_PENDING=1
+die "planted updater PARTIAL refusal"
+`);
+	const result = runFixture(["bash", entry, f.repo, f.work], { cwd: f.repo, env: f.env, floor_s: 180 });
+	const stderr = decode(result.stderr);
+	expect(result.rc, `${decode(result.stdout)}\n${stderr}`).toBe(4);
+	expect(stderr).toContain("planted updater PARTIAL refusal");
+	expect(stderr).toContain("next-version files are prepared but not committed");
+	expect(stderr).toContain("not installed");
+	expect(stderr).not.toContain("main states the next version");
+	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(before);
+	expect(originMain(f)).toBe(before);
+	expect(JSON.parse(readFileSync(join(f.repo, "package.json"), "utf8")).version).toBe("1.2.5");
+	const message = decode(result.stdout).split("NEXT_VERSION_COMMIT_MESSAGE_BEGIN\n")[1]?.split("NEXT_VERSION_COMMIT_MESSAGE_END\n")[0] ?? "";
+	expect(message).toContain(`NEXTVERSION1: v1.2.4 is published from ${source};`);
+	const messagePath = join(f.work, "refusal-caller-message");
+	writeFileSync(messagePath, message);
+	f.git(f.repo, "commit", "-q", "--only", "-F", messagePath, "--", "package.json", "README.md", "CHANGELOG.md", "changelog.d/shipped.md");
+	const saved = f.git(f.repo, "rev-parse", "HEAD");
+	const savedRefusal = runFixture(["bash", entry, f.repo, f.work], { cwd: f.repo, env: f.env, floor_s: 180 });
+	const savedStderr = decode(savedRefusal.stderr);
+	expect(savedRefusal.rc, `${decode(savedRefusal.stdout)}\n${savedStderr}`).toBe(4);
+	expect(savedStderr).toContain(`next-version commit ${saved} awaits caller publication`);
+	expect(savedStderr).toContain("not installed");
+	expect(savedStderr).not.toContain("prepared but not committed");
+	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(saved);
+	expect(originMain(f)).toBe(before);
+}, fixtureDeadlineS(120) * 1_000);

@@ -30,10 +30,12 @@
 #   9. install    default for real cuts: updater, narrow browser-state reconcile, all-profile relink,
 #                 real align and CLI version readback. --no-install explicitly stops at released.
 #
-# Usage: scripts/release-local.sh [--version X.Y.Z | --next] [--source SHA] [--dry-run] [--install | --no-install]
+# Usage: scripts/release-local.sh [--version X.Y.Z | --next] [--source SHA] [--dry-run] [--install | --no-install] [--caller-commit-next-version]
 # Resume only the next-version advance of a published release: --advance-only --version X.Y.Z
 # Resume a release stranded after its draft (tag and draft exist, attest failed):
 #   --resume-from-draft --version X.Y.Z (adopts the tag and draft, re-dispatches attest, then verify/install/next-version)
+# --caller-commit-next-version prepares the next-version paths/message without committing or pushing them.
+# It exits 3 while that caller-owned commit is pending; it does not change the bootstrap prepare step.
 # Environment:
 #   TMPDIR                             an owned scratch directory (required); the build tree is removed on exit
 #   OMP_KIT_REPO                       GitHub repository (default: JYeswak/omp-kit-companion)
@@ -42,7 +44,7 @@
 #   OMP_KIT_SIGNING_KEYCHAIN           signing keychain (default: ~/Library/Keychains/uds-signing.keychain-db)
 #   OMP_KIT_SIGNING_KEYCHAIN_PASSWORD  file holding its password (default: ~/.config/uds/signing-keychain.pw)
 #   OMP_KIT_INSTALL_PREFIX             installed kit prefix (default: ~/.local/opt/omp-kit)
-# Exit: 0 installed/released (or dry run complete), 2 usage, 4 refused (a prepare may already be published).
+# Exit: 0 installed/released (or dry run complete), 2 usage, 3 caller-owned next-version commit pending, 4 refused (a prepare may already be published).
 # bash only, never `sh`: macOS /bin/sh is bash in POSIX mode, which runs the early stages, then aborts on the process
 # substitution at the sign stage with no failing command, so the EXIT trap re-exited 0 (2026-10-22 lead run of 0.2.73).
 ROOT="$(cd "$(/usr/bin/dirname "$0")/.." && pwd -P)"
@@ -93,9 +95,18 @@ INSTALL_PREFIX="${OMP_KIT_INSTALL_PREFIX:-$HOME/.local/opt/omp-kit}"
 ADVANCE_PENDING=0
 advance_after_refusal() {
 	ADVANCE_PENDING=0
-	echo "release-local: v$VERSION is published; advancing main to the next version before exiting" >&2
+	if [ "${CALLER_COMMIT_NEXT_VERSION:-0}" = 1 ]; then
+		echo "release-local: v$VERSION is published; checking caller-owned next-version bookkeeping before exiting" >&2
+	else
+		echo "release-local: v$VERSION is published; advancing main to the next version before exiting" >&2
+	fi
 	advance_next_version
-	echo "release-local: refused: v$VERSION is published and main states the next version, but it is not installed (refusal above); install it with: ${INSTALL_REMEDY:-$INSTALL_PREFIX/bin/omp-kit update --apply --yes --version $VERSION --index <abs release-index.json> --archive <abs $DARWIN>}" >&2
+	local advance_state="main states the next version"
+	if [ "${NEXT_VERSION_COMMIT_PENDING:-0}" = 1 ]; then
+		if [ -n "$NEXT_SHA" ]; then advance_state="next-version commit $NEXT_SHA awaits caller publication"
+		else advance_state="next-version files are prepared but not committed"; fi
+	fi
+	echo "release-local: refused: v$VERSION is published and $advance_state, but it is not installed (refusal above); install it with: ${INSTALL_REMEDY:-$INSTALL_PREFIX/bin/omp-kit update --apply --yes --version $VERSION --index <abs release-index.json> --archive <abs $DARWIN>}" >&2
 }
 die() { echo "release-local: refused: $*" >&2; [ "${ADVANCE_PENDING:-0}" = 0 ] || advance_after_refusal; exit 4; }
 say() { echo "== $*"; }
@@ -103,6 +114,8 @@ say() { echo "== $*"; }
 DRY_RUN=0
 ADVANCE_ONLY=0
 RESUME_FROM_DRAFT=0
+CALLER_COMMIT_NEXT_VERSION=0
+NEXT_VERSION_COMMIT_PENDING=0
 VERSION=''
 SOURCE=''
 NEXT=0
@@ -116,12 +129,13 @@ while [ "$#" -gt 0 ]; do
 		--dry-run) DRY_RUN=1; shift ;;
 		--advance-only) ADVANCE_ONLY=1; shift ;;
 		--resume-from-draft) RESUME_FROM_DRAFT=1; shift ;;
+		--caller-commit-next-version) CALLER_COMMIT_NEXT_VERSION=1; shift ;;
 		--version) VERSION="${2:-}"; shift 2 ;;
 		--next) NEXT=1; shift ;;
 		--source) SOURCE="${2:-}"; shift 2 ;;
 		--install) INSTALL=1; shift ;;
 		--no-install) INSTALL=0; shift ;;
-		-h|--help) sed -n '2,39p' "${BASH_SOURCE[0]}"; exit 0 ;;
+		-h|--help) sed -n '2,41p' "${BASH_SOURCE[0]}"; exit 0 ;;
 		*) echo "release-local: unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
@@ -911,6 +925,7 @@ fi # normal release preparation
 advance_next_version() {
 	stage next-version
 	ADVANCE_PENDING=0
+	NEXT_VERSION_COMMIT_PENDING=0
 	# Every file whose bytes return to $ROOT (package.json, README.md, CHANGELOG.md, the fragments) is read as its raw
 	# blob, never through `git archive`: .gitattributes marks package.json export-subst, so an archive expands
 	# "source_revision": "$Format:%H$" to a literal sha, and 1a24cb94af committed b55c98c0dc there (main RED until
@@ -923,7 +938,7 @@ advance_next_version() {
 			git -C "$ROOT" cat-file blob "$ref:$blob" >"$dest/$blob" || return 1
 		done
 	}
-	local next agent export="$WORK/next" date promote_rc path dirty supersedes
+	local next agent export="$WORK/next" date promote_rc path dirty supersedes prepared_base
 	local resume="release-local --advance-only --version $VERSION"
 	local converge="${OMP_KIT_GIT_CONVERGE:-$HOME/Developer/omp-kit/scripts/git_converge.py}"
 	local -a fragments=() paths=(package.json README.md CHANGELOG.md)
@@ -946,6 +961,11 @@ advance_next_version() {
 		say "ADVANCE_ALREADY_DONE: v$VERSION advanced in $NEXT_SHA"
 		return 0
 	fi
+	if [ -n "$NEXT_SHA" ] && [ "${CALLER_COMMIT_NEXT_VERSION:-0}" = 1 ]; then
+		NEXT_VERSION_COMMIT_PENDING=1
+		say "NEXT_VERSION_PUBLICATION_PENDING: $NEXT_SHA is only on local main; publish it, then retry: $resume"
+		return 0
+	fi
 	if [ -z "$NEXT_SHA" ]; then
 	# Fold exactly the fragments the tagged source shipped that main still holds.
 	while IFS= read -r path; do
@@ -954,6 +974,9 @@ advance_next_version() {
 	paths+=(${fragments[@]+"${fragments[@]}"})
 	dirty="$(git -C "$ROOT" status --porcelain --untracked-files=all -- "${paths[@]}")" || die "v$VERSION is published; cannot inspect the next-version paths"
 	[ -z "$dirty" ] || die "v$VERSION is published; NEXT_VERSION_PATHS_DIRTY: ${dirty//$'\n'/; }; nothing was written. Once those paths are clean, retry: $resume"
+	if [ "${CALLER_COMMIT_NEXT_VERSION:-0}" = 1 ]; then
+		prepared_base="$(git -C "$ROOT" rev-parse HEAD)" || die "v$VERSION is published; cannot bind the caller-owned next-version changes"
+	fi
 	rm -rf "$export" "$WORK/next-head" "$WORK/next-residual"; mkdir -p "$export" "$WORK/next-head" "$WORK/next-residual"
 	git -C "$ROOT" archive HEAD -- scripts/release-notes.sh scripts/release-notes.ts scripts/stamp-release-line.sh \
 		scripts/kitlib-tmp.sh | tar -xf - -C "$export" || die "v$VERSION is published; cannot export the next-version scripts"
@@ -1012,6 +1035,16 @@ PY
 		"Gap-Bead: none (release metadata)
 Bead: ompkit-d8qic
 Agent: $agent" >"$message"
+	if [ "${CALLER_COMMIT_NEXT_VERSION:-0}" = 1 ]; then
+		NEXT_VERSION_COMMIT_PENDING=1
+		say "NEXT_VERSION_PREPARED: base=$prepared_base source=$SOURCE next=$next"
+		printf 'NEXT_VERSION_PATH: %s\n' "${paths[@]}"
+		printf 'NEXT_VERSION_COMMIT_MESSAGE_BEGIN\n'
+		cat "$message"
+		printf 'NEXT_VERSION_COMMIT_MESSAGE_END\n'
+		say "NEXT_VERSION_COMMIT_PENDING: commit only the listed paths with this message, then publish and retry: $resume"
+		return 0
+	fi
 	if ! release_commit_preflight "$message" "${paths[@]}" ||
 		! bounded 900 git -C "$ROOT" commit -q --only -F "$message" -- "${paths[@]}"; then
 		# Only this step's own bytes are put back: every path was clean before it wrote them.
@@ -1090,6 +1123,7 @@ for name in required:
 	[ "$SOURCE" = "${peeled_source:-$tag_source}" ] ||
 		die "ADVANCE_ONLY_NOT_PUBLISHED: origin tag changed during admission; retry: $resume"
 	advance_next_version
+	[ "$NEXT_VERSION_COMMIT_PENDING" = 0 ] || exit 3
 	exit 0
 fi
 # RELRESUME1 (ompkit-1ra0d.191): the tag and draft already exist, so the tag and draft stages below are
@@ -1290,5 +1324,10 @@ RELEASED_AT=$(date +%s)
 ADVANCE_PENDING=1
 if [ "$INSTALL" = 1 ]; then install_release; fi
 advance_next_version
+if [ "$NEXT_VERSION_COMMIT_PENDING" = 1 ]; then
+	if [ "$INSTALLED" = 1 ]; then receipt installed-pending-next-version-commit "$URL" "$RUN_ID"
+	else receipt released-pending-next-version-commit "$URL" "$RUN_ID"; fi
+	exit 3
+fi
 if [ "$INSTALLED" = 1 ]; then receipt installed "$URL" "$RUN_ID"
 else receipt released "$URL" "$RUN_ID"; fi

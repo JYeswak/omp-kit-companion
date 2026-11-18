@@ -297,6 +297,25 @@ through the normal convergence route and resume with that printed SHA, rather
 than preparing another version. `--next` cannot be combined with `--source`.
 Dry runs never install or relink, even when `--install` is specified.
 
+If the operator must own commits, add `--caller-commit-next-version`. After
+publication and the optional install, the runner prepares the same next-version
+files but does not commit or push them. It prints the pre-write HEAD, published
+source SHA, next version, exact paths and complete commit message. Save those
+paths with your required selective committer and that message, publish normally,
+then run `--advance-only --version X.Y.Z` without the option. The existing
+`NEXTVERSION1` marker makes that retry reuse the real published commit.
+
+Pending bookkeeping exits **3**. A normal-cut receipt uses
+`installed-pending-next-version-commit` or
+`released-pending-next-version-commit`; its `installed` boolean still records the
+actual install outcome. An install refusal remains exit **4**, not success.
+Neither state claims the next-version commit is published. Caller mode also
+leaves an already-saved local commit pending publication instead of pushing it.
+The option does not change
+the initial bootstrap prepare commit: use `--source <full-sha>` for an unused
+version when the entire cut must avoid runner-owned commits. Dirty next-version
+paths and unpublished, incomplete or unattested releases still refuse.
+
 A cut stranded after its draft (tag and draft exist, attest-local failed, e.g.
 a transient runner verifier outage) resumes with
 `--resume-from-draft --version X.Y.Z` instead of re-tagging. The resume adopts
