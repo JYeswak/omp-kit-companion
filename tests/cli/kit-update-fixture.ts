@@ -334,6 +334,20 @@ async function copyReleaseSource(sourceRoot: string, destination: string, option
 		mkdirSync(dirname(target), { recursive: true });
 		copyFileSync(join(sourceRoot, file), target);
 	}
+	// The packager also consumes judging inputs outside the copied directories.
+	const judging = await runBounded(["python3", "-B", "-m", "suite-metrics", "judging-files"], {
+		deadline_s: fixtureDeadlineS(30), cwd: sourceRoot, env: { ...process.env, PYTHONPATH: join(sourceRoot, "scripts") },
+	});
+	const decoder = new TextDecoder();
+	if (judging.rc !== 0 || judging.timed_out || judging.truncated)
+		throw new Error("candidate judging closure failed: " + decoder.decode(judging.stderr));
+	for (const file of decoder.decode(judging.stdout).trim().split("\n")) {
+		const target = join(destination, file);
+		if (existsSync(target)) continue;
+		mkdirSync(dirname(target), { recursive: true });
+		copyFileSync(join(sourceRoot, file), target);
+	}
+
 	if (options.minimal) minimizeCorpus(destination);
 	// MANIFEST.tsv is generated and gitignored, so an exact-commit export has
 	// no copy to take. Regenerate it from the candidate's own rules with the

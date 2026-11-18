@@ -12,8 +12,8 @@ import { LIFECYCLE_PHASES } from "../../src/lifecycle.ts";
 const NOW = Date.parse("2026-11-12T00:00:00Z");
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-function ledgerRow(gate: string, daysAgo: number, kind = "refuse"): string {
-	return JSON.stringify({ gate, kind, ts: new Date(NOW - daysAgo * DAY_MS).toISOString(), event_id: `ev-${gate}-${daysAgo}` });
+function ledgerRow(gate: string, daysAgo: number, kind = "refuse", now = NOW): string {
+	return JSON.stringify({ gate, kind, ts: new Date(now - daysAgo * DAY_MS).toISOString(), event_id: `ev-${gate}-${daysAgo}` });
 }
 
 interface FakeBead { id: string; title: string; labels: string[]; status: string }
@@ -496,27 +496,34 @@ test("LOOPCLOSEWIRE1: configured service run files into the loopClose repo and a
 	const bin = join(root, "bin");
 	mkdirSync(bin, { recursive: true });
 	symlinkSync(real.path, join(bin, "br"));
+	const argvLog = join(root, "am-argv.txt");
+	writeFileSync(join(bin, "am"), '#!/bin/sh\nprintf "%s\\n" "$@" > "$LOOP_CLOSE_MAIL_TRACE"\nexit 42\n', { mode: 0o755 });
 	const configPath = join(root, ".config", "omp-kit", "fleet-watch.json");
 	mkdirSync(dirname(configPath), { recursive: true });
 	writeFileSync(configPath, JSON.stringify({ loopClose: { repo, mailTo: "lead-test", mailProject: "proj-test" } }));
 	const ledgerPath = join(root, "gate-events.jsonl");
-	writeFileSync(ledgerPath, [ledgerRow("SILENT-SVC", 45), ledgerRow("NEW-HOT", 1)].join("\n"));
 	const childEnv = wireServiceEnv(root, configPath, {
 		PATH: `${bin}:${process.env.PATH ?? ""}`, AGENT_NAME: "LoopCloseWireFixture",
 		BEADS_DB: join(repo, ".beads", "beads.db"), LOOP_CLOSE_LEDGER: ledgerPath,
+		LOOP_CLOSE_MAIL_TRACE: argvLog,
 	});
 	mkdirSync(childEnv.TMPDIR, { recursive: true });
 	const init = await run(["br", "init", "--db", join(repo, ".beads", "beads.db")], { cwd: repo, deadline_s: fixtureDeadlineS(60), env: childEnv });
 	expect(init.rc).toBe(0);
+	// The spawned CLI uses the wall clock; the fixed NOW only belongs to unit tests.
+	const now = Date.now();
+	writeFileSync(ledgerPath, [ledgerRow("SILENT-SVC", 45, "refuse", now), ledgerRow("NEW-HOT", 1, "refuse", now)].join("\n"));
 	const child = await runFixtureAsync([process.execPath, resolve(import.meta.dir, "..", "..", "src", "cli.ts"), "service", "run", "loop-close", "--json"], {
 		cwd: root, env: childEnv, floor_s: 60, label: "service run loop-close wire",
 	});
 	const envelope = JSON.parse(new TextDecoder().decode(child.stdout));
-	// The retire bead files into the configured repo; the REPORT is attempted at the
-	// configured mailbox and fails inside the fixture (no am route there), never skipped.
+	// The retire bead files into the configured repo; the fixture mailer records
+	// the real dispatch arguments and returns a controlled failure.
 	expect(envelope.data.retiredFiled).toHaveLength(1);
 	expect(envelope.data.mail).toBe("FAILED");
-	expect(envelope.data.findings.some((finding: string) => finding.startsWith("MAIL_FAILED"))).toBe(true);
+	expect(envelope.data.findings.some((finding: string) => finding.startsWith("MAIL_FAILED") && finding.includes("rc 42"))).toBe(true);
+	const argv = readFileSync(argvLog, "utf8").split("\n");
+	expect(argv.slice(0, 8)).toEqual(["mail", "send", "--project", "proj-test", "--from", "LoopCloseWireFixture", "--to", "lead-test"]);
 	expect(existsSync(join(repo, ".beads", "beads.db"))).toBe(true);
 	expect(existsSync(join(root, ".beads"))).toBe(false);
 }, fixtureDeadlineS(120) * 1_000);

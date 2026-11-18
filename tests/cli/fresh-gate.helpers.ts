@@ -4,7 +4,7 @@
 // scripts/suite-hermetic-env.sh, scripts/kitlib_run.py, scripts/kitlib_tmp.py, scripts/pysafe.py,
 // scripts/kitlib-tmp.sh, src/cli.ts, src/kitlib/run.ts, src/kitlib/tmp.ts.
 import { expect } from "bun:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp";
 import { runSync } from "../../src/kitlib/run.ts";
@@ -85,10 +85,13 @@ export function copyJudgingFiles(destination: string, exclude: string[] = []): v
 	if (result.rc !== 0) throw new Error(Buffer.from(result.stderr).toString());
 	for (const path of Buffer.from(result.stdout).toString().trim().split("\n")) {
 		if (exclude.includes(path)) continue;
-		mkdirSync(resolve(destination, path, ".."), { recursive: true });
+		const source = join(root, path);
+		const target = join(destination, path);
+		mkdirSync(resolve(target, ".."), { recursive: true });
 		// Preserve script-relative imports through the source checkout, as the original fixture did.
-		if (path.startsWith("scripts/")) symlinkSync(join(root, path), join(destination, path));
-		else cpSync(join(root, path), join(destination, path));
+		if (path.startsWith("scripts/")) symlinkSync(source, target);
+		// gateTree already exposes the checkout's src/ through its directory symlink.
+		else if (!existsSync(target) || realpathSync(source) !== realpathSync(target)) cpSync(source, target);
 	}
 }
 export const SKIP_BUDGET = { FRESH_GATE_SKIP_REGEX: "manifest fixture does not assess regex cost" };

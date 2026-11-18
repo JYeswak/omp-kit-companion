@@ -1496,19 +1496,22 @@ fi
 # full-suite verdict. The verdict fixtures below carry the real judging script,
 # and each seeds its cache by running that script once (the suite runs at seed
 # time, never inside the tag push). The gate reads the entry back.
+tag_judge_closure="$TMP/tag-judge-closure"
+judge_closure "$KITREPO" > "$tag_judge_closure" || exit 1
 mktagverdictrepo() {
 	name=$1
 	failing_suite=${2:-}
 	repo=$(mktagrepo "$name")
 	# The canonical judge closure includes verdict, store and their PIDGUARD1 helper.
-	carry_measurement "$KITREPO" "$repo"
+	carry_measurement "$KITREPO" "$repo" || return 1
 	# The judge asks the gate for its worker count (fresh-gate.sh --test-workers) when it records timings.
 	# shellcheck disable=SC2016 # literal $#/$1: the generated stub script expands them, not this shell
 	printf '#!/bin/sh\nif [ "$#" -eq 1 ] && [ "$1" = "--test-workers" ]; then printf "1\\n"; exit 0; fi\necho FRESH-GATE-RAN\n' > "$repo/scripts/fresh-gate.sh"
 	if [ -n "$failing_suite" ]; then
 		printf '#!/bin/sh\necho RED-FAIL; exit 1\n' > "$repo/tests/cli/$failing_suite"
+		git -C "$repo" add -- "tests/cli/$failing_suite" || return 1
 	fi
-	git -C "$repo" add scripts tests .github
+	git -C "$repo" --literal-pathspecs add --pathspec-from-file="$tag_judge_closure" || return 1
 	git -C "$repo" commit -qm "[test] tag verdict judge"
 	git -C "$repo" push -q origin HEAD:refs/heads/main
 	printf '%s' "$repo"
