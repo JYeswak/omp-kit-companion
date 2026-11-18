@@ -1,2 +1,0 @@
-- Make `project status SESSION|--all` preserve configured projects and exact native pane identities, including pane-less, missing-metadata and case-sensitive tab coverage. Incomplete reads return explicit UNKNOWN and a nonzero exit instead of empty success.
-- Retain read-only goal/pause observations and source snapshot revisions, byte cursors, observation times and freshness bounds. Status-read success does not assert fleet health or execute a project's value command.

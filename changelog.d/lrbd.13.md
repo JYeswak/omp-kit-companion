@@ -1,1 +1,0 @@
-- Restore independent bead closure when the native tracker omits empty comments, while preserving filer, implementation-author and unreadable-authorship protections.

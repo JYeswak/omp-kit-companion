@@ -1,3 +1,0 @@
-- Release qualification now provisions the exact verified SDK source (lifecycle 18.21.0 by default, PTY 18.22.0) into each file's owned scratch before the offline SDK consumers run, reusing a forwarded verified cache read-only when it already holds that version.
-- `KIT_SDK_LIFECYCLE_VERSION` is honored and bound into the qualification identity, so selecting 22 provisions and verifies 22 instead of silently testing the default.
-- The native lifecycle fixture owns a real Git repository for its fleet opt-in, so Git-free release exports exercise the same composer and guard assertions without borrowing the operator's enclosing checkout.

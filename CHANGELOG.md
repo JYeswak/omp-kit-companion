@@ -4,6 +4,62 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.133] - 2026-11-18
+
+### Added
+
+- `doctor --scope work` reports source-only weekly model throughput, first-pass outcomes, rework and assistant tokens with original-author/reviewer separation and explicit UNKNOWN coverage; it does not certify a live week or causal staffing gains.
+- Release operators can use `--caller-commit-next-version` to prepare published-release bookkeeping for their required selective committer. The runner leaves the exact paths and message pending without creating or pushing that commit, preserves the real install outcome, and reuses the caller's published commit on an ordinary `--advance-only` retry.
+
+### Changed
+
+- Fix goal planning and replacement for large session journals with bounded checkpoint and goal-id reads.
+- Make `project status SESSION|--all` preserve configured projects and exact native pane identities, including pane-less, missing-metadata and case-sensitive tab coverage. Incomplete reads return explicit UNKNOWN and a nonzero exit instead of empty success.
+- Retain read-only goal/pause observations and source snapshot revisions, byte cursors, observation times and freshness bounds. Status-read success does not assert fleet health or execute a project's value command.
+- Capture native claim/close model evidence from the originating OMP journal entry, preserving author/peer identity and native results; inspect bounded, explicit UNKNOWN evidence through `doctor --scope model` and `doctor --scope work`.
+- Add source-backed native processing intervals to `doctor --scope work` model-ledger evidence: session/run/turn identity, actual primary provider/model, integer wall/monotonic clock validity and clipped per-seat unions. Continuation/async gaps are excluded; incomplete, replaced, conflicting, clock-invalid and replayed sources remain explicit UNKNOWN, never request-duration or guessed idle-hour accounting.
+- The event-driven recorder uses canonical durable JSONL with no daemon: 1 MiB/day, 32 dated-page limit, current UTC day plus 28 prior-day retention, 16 MiB/65,536-record reads and 64 pending writes. Loss cannot reject the native agent operation. The original source consumer passes 19 cases/72 assertions and rejects three actual duration/wait/replay source mutants. Independent acceptance, release/install/loaded-agent proof and the parent one-week measurement remain separate obligations.
+- Preserve the first non-author verification outcome and original claim/model evidence across retries and corrections, with explicit incomplete evidence and no dry-run review credit.
+- Keep Tern journal reads bounded when the tail already proves an active turn, preserving strict idle and message-delivery proof checks.
+- Honor native acceptance check/uncheck flags during review admission, preserving checklist bytes and unfinished-item safeguards.
+- Keep eval-seat identity fixtures on the operator-policy path inside owned suite exports, preserving actor binding and ambiguous-pane refusal without changing the native-fixture exemption.
+- Preserve command-substitution and backtick close IDs as complete arguments while still inspecting nested commands, so unresolved tracker closes cannot disappear from the guard. Keep native verified/unverified literal-close controls unchanged. Make clone fixtures own real Git roots and judge losing child tests by structured pass/fail counts rather than reporter glyphs.
+- `doctor --scope lsp --deep --yes` now waits for initialized native capabilities and a fresh diagnostic response from its private TypeScript fixture. Ready-status text alone cannot qualify the route. The signal-wait budget is at most 90 seconds within the existing bounded whole-probe deadline; native calls respect the supported timeout range. Missing readiness reports `LSP_READINESS_CEILING_EXCEEDED`.
+- Real-server notification gating replaces host CPU busy loops: a delayed diagnostic above the retired 25-second startup budget succeeds, while withheld diagnostics/progress-end cannot pass. Per-status attempt/elapsed evidence, known references, absent-symbol and alternative-root preservation controls remain. Flat and grouped native diagnostic rendering both retain the unique fixture witness.
+- J-2026-11-16-05 replaces the old ten-run campaign with one official Ubuntu CI result on the new exact candidate. Prior 2/10 and cancelled attempts remain historical evidence; local source tests are not hosted qualification, an installed-runtime or release claim.
+- Restore independent bead closure when the native tracker omits empty comments, while preserving filer, implementation-author and unreadable-authorship protections.
+- Include the existing measured byte count in successful quarantine-deletion events, preserving explicit zero without another directory traversal.
+- Allow verification in parentless trackers to retain live readback work through a related link without requiring omp-kit's private lane; explicit lane requirements and existing kit-lane placement remain unchanged. Keep the native portability regression in its own file so the existing verifier suite retains its per-file budget and all original assertions.
+- Bind native gate-event model/provider to the matching assistant tool call on the active session branch. Registration defaults and auxiliary model usage are not authority; missing, changed or unbound evidence remains `UNKNOWN`. Immediate pre-persistence rows are not backfilled.
+- Record observed native execution-start/end attempts in `$XDG_STATE_HOME/omp-kit/native-tool-attempts.json` (else `~/.local/state/omp-kit/`). Buckets share seat/tool/native-model/provider and ten-minute origin-assistant UTC windows. Session/call identities deduplicate lifecycle callbacks and restoration.
+- `rate_scope: own-kit-guard-observed-admissions` identifies the distinct subset: `own_guard_refusal_rate` divides observed kit-guard refusals by observed kit-guard admissions, not all native attempts. `all_guard_refusal_rate` remains null: a native error result cannot prove another guard's refusal. Observer changes, attribution gaps, missing identities and capacity/IO failures never manufacture a zero rate or full-session coverage.
+- Keep one atomic, locked stock bounded to six windows, 128 retained attempt records per window and 512 KiB. Expired-origin replays are outside the retained cohort; incomplete counts are not a complete denominator. No per-call collector process, full-journal scan, SDK installation or native verdict/result change.
+- The original test command executes bounded real-production default-model, omitted-success and double-count mutants against the same persisted-output oracles; compilation and IO failures cannot count as semantic mutant kills.
+- Fix over-cap Agent Mail completion to force convert_images:false on the rewritten send so the overflow Markdown file is raw-stored instead of WebP-decoded (il5z3); truncation pointer and 0600 overflow retention unchanged.
+- Refuse br/bd closes whose bead id is unresolvable at guard time (shell expansion, loop variable, command substitution or xargs placeholder) with CLOSE_UNRESOLVED_ID; read through shell block bodies and xargs nesting so the nested close is checked (l2e1t). Literal-id behavior unchanged.
+- Release qualification now provisions the exact verified SDK source (lifecycle 18.21.0 by default, PTY 18.22.0) into each file's owned scratch before the offline SDK consumers run, reusing a forwarded verified cache read-only when it already holds that version.
+- `KIT_SDK_LIFECYCLE_VERSION` is honored and bound into the qualification identity, so selecting 22 provisions and verifies 22 instead of silently testing the default.
+- The native lifecycle fixture owns a real Git repository for its fleet opt-in, so Git-free release exports exercise the same composer and guard assertions without borrowing the operator's enclosing checkout.
+- Isolate verifier regression history from the operator’s state, preserving real recorder integrity refusals and restoring the caller’s environment afterward.
+- Keep the official replay-barrier fixture’s verification history private; retain native source/binary checks and prove an unguarded owned-tracker write defeats the refusal oracle. Node-summary fixtures reuse the shared history isolation.
+- Verify OMP 18.21 lifecycle compatibility with real native pause, queued-mail, draft, callback, guard, goal-preservation and model-activity controls.
+- Generate the extension-doctor fixture manifest from candidate rules so clean source exports exercise every compiled-extension check without ignored checkout files.
+- Keep native SDK lifecycle controls at the CLI integration boundary so stock extension qualification never installs an SDK or requires an operator cache.
+- Exercise OMP 18.22 lifecycle and real-terminal drain, cancellation and shutdown compatibility while retaining the original 18.21 and isolated stock controls.
+- Carry the complete SDK-source judging dependency chain into release archives and remote judges, including only explicitly declared SDK judging sources from `src/`. Keep manifest, native full-test failure and helperless historical-judge controls executable. Surface packaged fast-proof blockers before verbose state diagnostics. Support paired Bash and write/edit reference measurement through the existing native compiler and wire encoders, with fail-closed captured-divergence and missing-reference controls. Freeze the representative dual-stream reference from one measured five-run cohort; preserve the existing budgets and refuse untracked scaling.
+- Validate immutable v* tag protection from each ruleset's detail response instead of summary fields, preserving deletion, update, and include-pattern enforcement.
+- Report the validator fixture's counted pass/fail summary for native acceptance replay after all original checks complete.
+- Keep workflow-validator fixtures portable to fresh exact exports by using the owned-temp helper's provided root instead of assuming an ignored repository directory exists.
+- Retain each repository's hook refresh outcome and member digests in unattended update records instead of keeping only aggregate counters.
+- Stop granting the removed `seance` selector an intrinsic read-only build-brief exemption. Editing assignments follow the existing repo-bound contract; supported read-only agents and explicit read-only/no-edit declarations are unchanged. This does not restore the removed agent or deprecated task fields. Normal release and OMP adoption remain separate from the source-tested fix.
+- Migrate legacy project-status and restore-notice fixtures to native repo/tab identity without weakening live/dead, goal or paused-state assertions. Add an out-of-project pane counterexample; production scope guards and UNKNOWN behavior remain unchanged.
+
+### Fixed
+
+- Exercise provider isolation through awaited native model discovery in the E2E child's own configuration, rather than assuming background startup discovery has completed. Keep the real no-pin counterfactual and route all local-provider endpoint aliases to the fixture recorder.
+- Keep the scenario-selector's numeric protocol uncolored even when the caller forces ANSI color; exercise that condition through both real provider-isolation cases.
+- Replay the same provider-isolation fixture in a native verifier export by giving only that disposable source an owned Git directory. Keep the packaged runtime's checkout-only fallback check unchanged.
+
 ## [0.2.132] - 2026-11-15
 
 ### Added

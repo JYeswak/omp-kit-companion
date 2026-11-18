@@ -1,1 +1,0 @@
-- Refuse br/bd closes whose bead id is unresolvable at guard time (shell expansion, loop variable, command substitution or xargs placeholder) with CLOSE_UNRESOLVED_ID; read through shell block bodies and xargs nesting so the nested close is checked (l2e1t). Literal-id behavior unchanged.

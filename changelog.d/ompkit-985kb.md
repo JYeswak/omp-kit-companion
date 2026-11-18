@@ -1,1 +1,0 @@
-- Allow verification in parentless trackers to retain live readback work through a related link without requiring omp-kit's private lane; explicit lane requirements and existing kit-lane placement remain unchanged. Keep the native portability regression in its own file so the existing verifier suite retains its per-file budget and all original assertions.

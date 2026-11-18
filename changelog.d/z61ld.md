@@ -1,1 +1,0 @@
-- Migrate legacy project-status and restore-notice fixtures to native repo/tab identity without weakening live/dead, goal or paused-state assertions. Add an out-of-project pane counterexample; production scope guards and UNKNOWN behavior remain unchanged.

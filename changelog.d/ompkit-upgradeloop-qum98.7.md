@@ -1,1 +1,0 @@
-- Keep the official replay-barrier fixture’s verification history private; retain native source/binary checks and prove an unguarded owned-tracker write defeats the refusal oracle. Node-summary fixtures reuse the shared history isolation.

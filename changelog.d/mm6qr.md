@@ -1,1 +1,0 @@
-- Include the existing measured byte count in successful quarantine-deletion events, preserving explicit zero without another directory traversal.

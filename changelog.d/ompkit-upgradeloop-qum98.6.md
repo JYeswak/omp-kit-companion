@@ -1,1 +1,0 @@
-- Isolate verifier regression history from the operator’s state, preserving real recorder integrity refusals and restoring the caller’s environment afterward.

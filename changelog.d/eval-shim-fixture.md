@@ -1,1 +1,0 @@
-- Keep eval-seat identity fixtures on the operator-policy path inside owned suite exports, preserving actor binding and ambiguous-pane refusal without changing the native-fixture exemption.

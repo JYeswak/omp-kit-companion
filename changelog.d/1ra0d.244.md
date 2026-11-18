@@ -1,1 +1,0 @@
-- Fix goal planning and replacement for large session journals with bounded checkpoint and goal-id reads.
