@@ -1520,8 +1520,17 @@ esac
 # update line directly, so no bespoke hook in the chain sees a synthetic
 # update; nothing is moved and the probe commit is a dangling object.
 if HEAD_SHA=$(git -C "$TARGET" rev-parse HEAD 2>/dev/null); then
-	if [ "$PUSHED_BEADS" = 1 ] && ! printf 'refs/heads/main %s refs/heads/main %s\n' "$HEAD_SHA" "$HEAD_SHA" | (CDPATH='' cd -- "$TARGET" && sh "$(chain_dir pre-push)/40-omp-kit-pushed-beads") >/dev/null 2>&1; then
-		rollback "pre-push member rejects the current range in $TARGET"
+	if [ "$PUSHED_BEADS" = 1 ] && ! printf 'refs/heads/main %s refs/heads/main %s\n' "$HEAD_SHA" "$HEAD_SHA" |
+		(CDPATH='' cd -- "$TARGET" && sh "$(chain_dir pre-push)/40-omp-kit-pushed-beads") >"$PROBE" 2>&1; then
+		# Report the typed tip mismatch, not arbitrary hook output. The leg-2 probe file
+		# is no longer needed and is already covered by the installer's cleanup.
+		refusal=$(LC_ALL=C awk -v tip="$HEAD_SHA" '
+			NF == 8 && $1 == "ref-txn-witness:" && $2 == "REFUSED" &&
+			$3 == "PUSH_TIP_NOT_REVIEWED_NEW_ROOT" && $4 == tip &&
+			$5 == "(reviewed" && $6 ~ /^[0-9a-f]+$/ && length($6) == length(tip) &&
+			$7 == "for" && $8 == "refs/heads/main)" { print $1,$2,$3,$4,$5,$6,$7,$8; exit }
+		' "$PROBE")
+		rollback "pre-push member rejects the current range in $TARGET${refusal:+: $refusal}"
 	fi
 	GUARD="$(chain_dir reference-transaction)/40-omp-kit-ref-txn-bead"
 	PLANT=$(printf 'probe: id-less ref-guard plant\n' | GIT_AUTHOR_NAME=probe GIT_AUTHOR_EMAIL=probe@invalid GIT_COMMITTER_NAME=probe GIT_COMMITTER_EMAIL=probe@invalid \
