@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, writeFileSync, type BigIntStats } from "node:fs";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { activeConcurrentWriterPaths, compareWatched, liveWriterPaths, operatorWatchedPaths, operatorWriteFence, snapshotWatched, type WatchedComparison } from "./operator-snapshot.ts";
 import { resolveOmpIdentity } from "./paths.ts";
@@ -349,55 +349,62 @@ function fullTestSourceRevision(root: string): string | null {
  } catch { return null; }
 }
 
-type Snapshot = { digest: string | null; complete: boolean };
-function snapshot(root: string | undefined, release: boolean): Snapshot {
- if (!root) return { digest: null, complete: true };
+function sameObservedEntry(before: BigIntStats, after: BigIntStats): boolean {
+ return before.dev === after.dev && before.ino === after.ino
+  && before.mode === after.mode && before.mtimeNs === after.mtimeNs;
+}
+
+/** Fingerprint a complete release-tree observation, not an assertion about writes between scans. */
+function snapshotRelease(root: string): string | null {
  const hash = createHash("sha256");
  const block = Buffer.allocUnsafe(64 * 1024);
- const maxBytes = release ? Number.MAX_SAFE_INTEGER : 256 * 1024 * 1024;
- let count = 0, bytes = 0, complete = true;
- const visit = (path: string, depth: number): void => {
-  if (!existsSync(path)) {
-   hash.update(`missing:${relative(root, path)}\n`);
-   complete = false;
-   return;
-  }
-  const stat = lstatSync(path);
+ const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+ let count = 0, remaining = Number.MAX_SAFE_INTEGER;
+ const visit = (path: string, stat: BigIntStats, device: bigint, depth: number): boolean => {
+  if (++count > 5000 || stat.dev !== device || stat.ino <= 0n) return false;
   const name = relative(root, path) || ".";
-  hash.update(`${name}:${stat.mode}:${stat.size}:${stat.mtimeMs}:${stat.isSymbolicLink()}\n`);
-  if (++count > 5000) { complete = false; return; }
-  if (stat.isSymbolicLink()) {
-   const target = readlinkSync(path);
-   hash.update(target);
-   const resolved = resolve(dirname(path), target);
-   const withinRoot = relative(root, resolved);
-   if (release || !existsSync(resolved) || withinRoot === ".." || withinRoot.startsWith("../") || isAbsolute(withinRoot))
-    complete = false;
-   return;
-  }
-  if (stat.isFile()) {
-   if (stat.size > maxBytes - bytes) { complete = false; return; }
-   const fd = openSync(path, "r");
-   let size = 0;
-   try {
-    for (let read = readSync(fd, block, 0, block.length, null); read > 0; read = readSync(fd, block, 0, block.length, null)) {
-     hash.update(block.subarray(0, read));
-     size += read;
-    }
-   } finally { closeSync(fd); }
-   bytes += size;
-   if (size !== stat.size) complete = false;
-  } else if (stat.isDirectory()) {
+  if (stat.isDirectory()) {
+   // Directory st_size measures filesystem allocation, not membership (POSIX leaves it
+   // unspecified). Replace it with a stable inventory bound to the same directory object.
    const children = readdirSync(path).sort();
-   if (depth === 0 && children.length) complete = false;
-   else for (const child of children) {
-    if (count >= 5000) { complete = false; break; }
-    visit(join(path, child), depth - 1);
+   if ((depth === 0 && children.length > 0) || children.length > 5000 - count) return false;
+   hash.update(JSON.stringify([name, String(stat.dev), String(stat.ino), String(stat.mode), String(stat.mtimeNs), children.length]) + "\n");
+   for (const child of children) {
+    const childPath = join(path, child);
+    if (!visit(childPath, lstatSync(childPath, { bigint: true }), device, depth - 1)) return false;
    }
-  } else complete = false;
+   const after = readdirSync(path).sort();
+   return after.length === children.length && children.every((child, index) => child === after[index])
+    && sameObservedEntry(stat, lstatSync(path, { bigint: true }));
+  }
+  // No symlinks, other special files, or unknown file observations in a release.
+  if (!stat.isFile() || stat.size < 0n || stat.size > BigInt(remaining)) return false;
+  const size = Number(stat.size);
+  remaining -= size;
+  const fd = openSync(path, flags);
+  const stable = (after: BigIntStats) => sameObservedEntry(stat, after)
+   && stat.size === after.size && stat.ctimeNs === after.ctimeNs;
+  try {
+   if (!stable(fstatSync(fd, { bigint: true }))) return false;
+   hash.update(JSON.stringify([name, String(stat.dev), String(stat.ino), String(stat.mode), String(stat.mtimeNs), size]) + "\n");
+   let total = 0;
+   for (let read = readSync(fd, block, 0, block.length, null); read > 0; read = readSync(fd, block, 0, block.length, null)) {
+    total += read;
+    if (total > size) return false;
+    hash.update(block.subarray(0, read));
+   }
+   return total === size && stable(lstatSync(path, { bigint: true })) && stable(fstatSync(fd, { bigint: true }));
+  } finally { closeSync(fd); }
  };
- try { visit(root, 16); } catch { complete = false; }
- return { digest: hash.digest("hex"), complete };
+ try {
+  const stat = lstatSync(root, { bigint: true });
+  return stat.isDirectory() && visit(root, stat, stat.dev, 16) ? hash.digest("hex") : null;
+ } catch { return null; }
+}
+
+function compareReleaseSnapshots(before: string | null, after: string | null): FullTestReport["snapshots"]["release"] {
+ if (before === null || after === null) return { unchanged: null, complete: false };
+ return { unchanged: before === after, complete: true };
 }
 
 /**
@@ -555,7 +562,7 @@ export async function runFullTest(input: FullTestInput, expectedCounts?: FastTes
  const fence = operatorWriteFence(stateRoot);
  const liveWriter = { stateRoot, fence };
  const writeFence = fence ? { profile: fence.profile, profile_sha256: fence.profile_sha256 } : null;
- const before = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
+ const before = { release: snapshotRelease(input.root), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
 	await holdPostcheckWindowForTestWrite();
 	const fastStarted = performance.now();
 	const fastInput = { ...input, writeFence: fence };
@@ -564,15 +571,16 @@ export async function runFullTest(input: FullTestInput, expectedCounts?: FastTes
  const defaults = Object.fromEntries(STAGES.map(name => [name, { status: "NOT_RUN", producer_rc: null, duration_ms: null }])) as Record<FullStageName, FullStage>;
  const empty = describeFullTestProducer(null, { source_revision: sourceRevision, references, roots: [input.root, input.home] });
  if (fast.status !== "PASS") {
-  const after = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
+  const after = { release: snapshotRelease(input.root), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
   const [homeWriters, projectWriters] = await Promise.all([
    activeConcurrentWriterPaths(before.home, after.home), activeConcurrentWriterPaths(before.project, after.project),
   ]);
-  const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
+  const snapshots = { release: compareReleaseSnapshots(before.release, after.release),
    home: compareWatched(before.home, after.home, input.home, homeWriters, liveWriterPaths(before.home, after.home, liveWriter, homeWriters)),
    project: compareWatched(before.project, after.project, input.home, projectWriters), write_fence: writeFence };
   const failures = [...fast.failures];
-  if (!snapshots.release.unchanged) failures.push("Release snapshot changed during failed fast stage");
+  if (!snapshots.release.complete) failures.push("Release snapshot was incomplete");
+  else if (!snapshots.release.unchanged) failures.push("Release snapshot changed during failed fast stage");
   for (const path of [...snapshots.home.changed_paths, ...snapshots.project.changed_paths]) failures.push(`Operator file changed during failed fast stage: ${path}`);
   const status = failures.length > fast.failures.length ? "FAIL" : fast.status;
   return { status, exitCode: status === "FAIL" ? 1 : 3, fast, fast_duration_ms, omp_version: null,
@@ -605,11 +613,11 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
   cause = interrupted.cause;
   result = interrupted.result;
  }
- const after = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
+ const after = { release: snapshotRelease(input.root), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
  const [homeWriters, projectWriters] = await Promise.all([
   activeConcurrentWriterPaths(before.home, after.home), activeConcurrentWriterPaths(before.project, after.project),
  ]);
- const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
+ const snapshots = { release: compareReleaseSnapshots(before.release, after.release),
   home: compareWatched(before.home, after.home, input.home, homeWriters, liveWriterPaths(before.home, after.home, liveWriter, homeWriters)),
   project: compareWatched(before.project, after.project, input.home, projectWriters), write_fence: writeFence };
  const redact = (text: string) => redactFullTestText(text, privateRoots);
@@ -619,8 +627,8 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
  const classified = classifyLadder(result, ids, { stdout, stderr });
  const currentStage = currentStageReport(result.in_flight_stage ?? null);
  const failures = [...classified.failures];
- if (!snapshots.release.unchanged) failures.push("Release snapshot changed during isolated test");
  if (!snapshots.release.complete) failures.push("Release snapshot was incomplete");
+ else if (!snapshots.release.unchanged) failures.push("Release snapshot changed during isolated test");
  for (const path of [...snapshots.home.changed_paths, ...snapshots.project.changed_paths]) failures.push(`Operator file changed during isolated test: ${path}`);
  for (const path of [...snapshots.home.incomplete_paths, ...snapshots.project.incomplete_paths]) failures.push(`Operator file could not be read completely: ${path}`);
  const incomplete = !snapshots.release.complete || !snapshots.project.complete || !snapshots.home.complete;

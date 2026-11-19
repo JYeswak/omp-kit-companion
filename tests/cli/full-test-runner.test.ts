@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,7 @@ import { BundledRunInterruptedError } from "../../src/runtime.ts";
 import { classifyLadder, currentStageReport, describeFullTestProducer, fullTestVerdict, recoverInterruptedRun, redactFullTestCause, retainProducerOutput } from "../../src/full-test-runner.ts";
 import { LADDER_CASE_SCOPES, LADDER_NONCASE_SCOPES, readTestCaseReports, summarizeTestCaseReports } from "../../src/test-case-report.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 
 const names = ["manifest", "harness-gate", "harness-selftest", "flywheel-invariants", "regex-budget", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"];
 const successful = names.map(name => `GREEN ${name} producer_rc=0 duration_ms=120`).join("\n");
@@ -618,5 +619,115 @@ test("a lost shell outcome write cannot shrink into a completed execution window
   expect(result.failing_names).toBe(null);
  } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test.each([
+ ["unchanged", true, true], ["root replacement", true, false], ["member added", true, false],
+ ["member removed", true, false], ["member renamed", true, false], ["file replaced", true, false],
+ ["same-length bytes", true, false], ["file mode", true, false], ["directory mode", true, false],
+ ["file mtime", true, false], ["directory mtime", true, false], ["symlink escape", false, null],
+ ["missing root", false, null], ["vanishing member", false, null], ["unstable inventory", false, null],
+ // The native proof lane opts in only on a volume where the directory retains allocated blocks.
+ ...(process.env.NFSRELEASESNAP1_ALLOCATION === "1" ? [["directory allocation", true, true] as const] : []),
+] as const)("NFSRELEASESNAP1: release snapshot %s", async (change: string, complete: boolean, unchanged: boolean | null) => {
+ const temp = ownedTmp("omp-kit-release-root-identity");
+ try {
+  const base = realpathSync(temp.path), root = join(base, "release"), replacement = join(base, "replacement");
+  const home = join(base, "home"), window = join(base, "window"), stateRoot = join(home, "state");
+  for (const path of [root, replacement, home, window]) mkdirSync(path, { mode: 0o700 });
+  // Keep count, byte length, permissions, and timestamps identical. Only the root object differs.
+  for (const tree of [root, replacement]) {
+   writeFileSync(join(tree, "payload"), "identical\n", { mode: 0o600 });
+   for (const path of [join(tree, "payload"), tree]) utimesSync(path, 1700000000, 1700000000);
+  }
+  const before = lstatSync(root, { bigint: true }), other = lstatSync(replacement, { bigint: true });
+  expect([before.dev, before.size, before.mode, before.mtimeNs]).toEqual([other.dev, other.size, other.mode, other.mtimeNs]);
+  expect(other.ino).not.toBe(before.ino);
+  const runner = fileURLToPath(new URL("../../src/full-test-runner.ts", import.meta.url));
+  const plant = change === "vanishing member" || change === "unstable inventory";
+  const preload = join(base, "snapshot-mutation.ts");
+  if (plant) writeFileSync(preload, `
+import { mock } from "bun:test";
+import * as realFs from "node:fs";
+import { join } from "node:path";
+const original = { ...realFs }, root = ${JSON.stringify(root)}, go = ${JSON.stringify(join(window, "postcheck-go"))};
+let planted = false;
+function readDirectory(path, options) {
+ const observed = original.readdirSync(path, options);
+ if (!planted && path === root && original.existsSync(go)) {
+  planted = true;
+  if (${JSON.stringify(change)} === "vanishing member") original.unlinkSync(join(root, "payload"));
+  else original.writeFileSync(join(root, "arrived-during-scan"), "actual new member\\n");
+  original.utimesSync(root, 1700000000, 1700000000);
+ }
+ return observed;
+}
+// Time a real mutation between native reads; do not replace either observed result.
+mock.module("node:fs", () => ({ ...original, default: { ...original, readdirSync: readDirectory }, readdirSync: readDirectory }));
+`);
+  const command = [process.execPath, ...(plant ? ["--preload", preload] : []), "--eval", `
+import { runFullTest } from ${JSON.stringify(runner)};
+const [root, home, stateRoot] = process.argv.slice(-3);
+const report = await runFullTest({ root, home, stateRoot, executablePath: process.execPath });
+console.log(JSON.stringify({ release: report.snapshots.release, live: report.proofs.G4_live.status }));
+`, "--", root, home, stateRoot];
+  const run = runFixtureAsync(command, { cwd: base, floor_s: 20, label: "release root identity",
+   env: { ...process.env, HOME: home, TMPDIR: base, XDG_STATE_HOME: stateRoot,
+    XDG_DATA_HOME: join(home, "data"), XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"),
+    OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", OMP_KIT_POSTCHECK_WINDOW_DIR: window } });
+  let result: Awaited<typeof run>;
+  try {
+   const ready = join(window, "postcheck-before"), deadline = performance.now() + fixtureDeadlineS(10) * 1000;
+   // The child owns a real filesystem rendezvous; fake timers cannot observe its marker.
+   while (!existsSync(ready) && performance.now() < deadline) await Bun.sleep(10);
+   expect(existsSync(ready)).toBe(true);
+   const payload = join(root, "payload");
+   switch (change) {
+    case "directory allocation": {
+     const entries = Array.from({ length: 512 }, (_, i) => join(root, `allocation-probe-${i}`));
+     for (const entry of entries) writeFileSync(entry, "");
+     for (const entry of entries) unlinkSync(entry);
+     utimesSync(root, 1700000000, 1700000000);
+     const allocated = lstatSync(root, { bigint: true });
+     expect(allocated.size).not.toBe(before.size);
+     expect([allocated.dev, allocated.ino, allocated.mode, allocated.mtimeNs]).toEqual([before.dev, before.ino, before.mode, before.mtimeNs]);
+     break;
+    }
+    case "root replacement":
+     renameSync(root, join(base, "original"));
+     renameSync(replacement, root);
+     break;
+    case "member added": writeFileSync(join(root, "added"), "new\n"); break;
+    case "member removed": unlinkSync(payload); break;
+    case "member renamed": renameSync(payload, join(root, "renamed")); break;
+    case "file replaced":
+     renameSync(join(replacement, "payload"), payload);
+     utimesSync(root, 1700000000, 1700000000);
+     break;
+    case "same-length bytes":
+     writeFileSync(payload, "tampered!\n");
+     utimesSync(payload, 1700000000, 1700000000);
+     break;
+    case "file mode": chmodSync(payload, 0o640); break;
+    case "directory mode": chmodSync(root, 0o750); break;
+    case "file mtime": utimesSync(payload, 1700000001, 1700000001); break;
+    case "directory mtime": utimesSync(root, 1700000001, 1700000001); break;
+    case "symlink escape":
+     unlinkSync(payload);
+     symlinkSync(join(replacement, "payload"), payload);
+     break;
+    case "missing root": renameSync(root, join(base, "original")); break;
+    case "vanishing member": case "unstable inventory": break;
+    case "unchanged": break;
+   }
+  } finally {
+   writeFileSync(join(window, "postcheck-go"), "go\n");
+   result = await run;
+  }
+  expect(result.rc, Buffer.from(result.stderr).toString()).toBe(0);
+  const report = JSON.parse(Buffer.from(result.stdout).toString());
+  expect(report.live).toBe("NOT_RUN");
+  expect(report.release, JSON.stringify(report)).toEqual({ complete, unchanged });
+ } finally { temp.cleanup(); }
+}, fixtureDeadlineS(25) * 1000);
 
 afterAll(() => cleanupAllOwnedTmp());

@@ -6,6 +6,8 @@ import { countCaseRows } from "../../src/test-runner.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { previewKitRelease, stageKitRelease, validateReleaseManifest } from "../../src/kit-release.ts";
 import type { ReleaseAsset } from "../../src/kit-release.ts";
+import { judgeKitPostcheck } from "../../src/kit-update.ts";
+import type { FullTestReport } from "../../src/full-test-runner.ts";
 import { packageSourceRevision, packageSecretOutputGuard, checkPackagedExtensionLoads, checkPackagedScriptDependencies } from "../../scripts/package-release.ts";
 import { GATE_DEADLINE_MS, TIMING_SAMPLE_COUNT } from "../../scripts/regex-budget.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -477,6 +479,95 @@ test("oversized operator files bound the watched snapshot only where the kit cou
 	expect(bounded!.exitCode, bounded!.stdout + bounded!.stderr).toBe(1);
 	expect(JSON.parse(bounded!.stdout).data.test.snapshots.home).toMatchObject({ unchanged: true, complete: false, incomplete_paths: ["~/.agents/rules"] });
 }, fixtureDeadlineS(130) * 1_000);
+
+// The independent Darwin reference supplies a real, already-owned ovnfs root.
+// Ordinary package tests do not need a mount, and cannot award this qualification.
+const snapshotNfs = process.env.NFSRELEASESNAP1_OVNFS_SCRATCH;
+test.skipIf(snapshotNfs === undefined)("NFSRELEASESNAP1: same-archive native APFS and ovnfs postcheck decisions", async () => {
+	expect(process.platform).toBe("darwin");
+	const nfs = lstatSync(snapshotNfs!);
+	expect(nfs.isDirectory()).toBe(true);
+	expect(nfs.dev).not.toBe(lstatSync(output).dev);
+	const archive = join(output, asset.filename);
+	expect(createHash("sha256").update(readFileSync(archive)).digest("hex")).toBe(asset.sha256);
+	const nativeRoot = ownedTmp("p21-snapshot-ovnfs", { root: snapshotNfs });
+	try {
+		for (const [volume, parent] of [["apfs", output], ["ovnfs", nativeRoot.path]] as const) {
+			const home = join(parent, "reference-home"), window = join(parent, "snapshot-window");
+			mkdirSync(home, { mode: 0o700 });
+			mkdirSync(window, { mode: 0o700 });
+			const prefix = join(home, ".local", "opt", "omp-kit");
+			const installed = await run(["sh", join(repo, "installer", "install.sh"), "--version", "1.2.3",
+				"--index", indexPath, "--offline", archive, "--prefix", prefix],
+			{ cwd: output, env: candidateEnv(home, { PATH: authorityPath }) });
+			expect(installed.exitCode, installed.stdout + installed.stderr).toBe(0);
+
+			const binary = join(prefix, "bin", "omp-kit");
+			const env = { ...candidateEnv(home), OMP_KIT_POSTCHECK_WINDOW_DIR: undefined };
+			const selectedVersion = () => JSON.parse(readFileSync(join(resolveOmpIdentity(env).packageRoot, "package.json"), "utf8")).version;
+			const version = selectedVersion();
+			// No observer lstat/readdir of the installed release on the clean arm.
+			const clean = await run([binary, "test", "--full", "--json"], { cwd: output, env });
+			expect(clean.exitCode, clean.stdout + clean.stderr).toBe(0);
+			const report: FullTestReport = JSON.parse(clean.stdout).data.test;
+			expect(report.snapshots.release).toEqual({ complete: true, unchanged: true });
+			expect(judgeKitPostcheck(report, { identityKnown: report.omp_version === version, changed: selectedVersion() !== version }).status).toBe("PASS");
+
+			const drift = run([binary, "test", "--full", "--json"], { cwd: output,
+				env: { ...env, OMP_KIT_POSTCHECK_WINDOW_DIR: window } });
+			let rejected: Awaited<typeof drift>;
+			try {
+				const marker = join(window, "postcheck-before"), deadline = performance.now() + fixtureDeadlineS(30) * 1_000;
+				// The real child process publishes this marker after its first snapshot.
+				while (!existsSync(marker) && performance.now() < deadline) await Bun.sleep(10);
+				expect(existsSync(marker)).toBe(true);
+				appendFileSync(join(prefix, "releases", "1.2.3", "rules", "kit-close-needs-evidence.md"), "\n# release snapshot drift control\n");
+			} finally {
+				writeFileSync(join(window, "postcheck-go"), "go\n");
+				rejected = await drift;
+			}
+			expect(rejected.exitCode, rejected.stdout + rejected.stderr).toBe(1);
+			const red: FullTestReport = JSON.parse(rejected.stdout).data.test;
+			expect(red.proofs.G4_live.status).toBe("NOT_RUN");
+			expect(red.snapshots.release).toEqual({ complete: true, unchanged: false });
+			expect(judgeKitPostcheck(red, { identityKnown: red.omp_version === version, changed: selectedVersion() !== version }).status).toBe("FAIL");
+			console.info(JSON.stringify({ volume, archive_sha256: asset.sha256, source_revision: sourceRevision, clean: report.snapshots.release, drift: red.snapshots.release }));
+			// A separate install observes allocation at the real promotion syscall.
+			// It cannot warm or otherwise perturb the no-read packaged control above.
+			const observationHome = join(parent, "observed-home");
+			mkdirSync(observationHome, { mode: 0o700 });
+			const observationPrefix = join(observationHome, ".local", "opt", "omp-kit");
+			const observed = await run(["python3", "-c", `
+import json, os, runpy, sys
+sys.argv = sys.argv[1:]
+target = os.path.join(sys.argv[-2], "releases", sys.argv[3])
+rename = os.rename
+def attrs(path):
+    s = os.lstat(path)
+    return dict(size=s.st_size, mode=s.st_mode, mtime=s.st_mtime_ns, dev=s.st_dev, ino=s.st_ino)
+def observe(src, dst, *args, **kwargs):
+    if os.fspath(dst) != target:
+        return rename(src, dst, *args, **kwargs)
+    before = attrs(src)
+    result = rename(src, dst, *args, **kwargs)
+    print("NFSRELEASESNAP1_OBSERVATION " + json.dumps([before, attrs(dst)]), file=sys.stderr)
+    return result
+os.rename = observe
+runpy.run_path(sys.argv[0], run_name="__main__")
+`, join(repo, "installer", "install.py"), "install", indexPath, "1.2.3", key, archive, observationPrefix, "0"],
+			{ cwd: output, env: candidateEnv(observationHome, { PATH: authorityPath, PYTHONDONTWRITEBYTECODE: "1" }) });
+			expect(observed.exitCode, observed.stdout + observed.stderr).toBe(0);
+			const tag = "NFSRELEASESNAP1_OBSERVATION ";
+			const rows = observed.stderr.split("\n").filter(line => line.startsWith(tag));
+			expect(rows).toHaveLength(1);
+			const [{ size: beforeSize, ...before }, { size: afterSize, ...after }] = JSON.parse(rows[0]!.slice(tag.length));
+			expect(after).toEqual(before);
+			if (volume === "apfs") expect(afterSize).toBe(beforeSize);
+			else expect(afterSize).not.toBe(beforeSize);
+			console.info(JSON.stringify({ volume, archive_sha256: asset.sha256, beforeSize, afterSize }));
+		}
+	} finally { nativeRoot.cleanup(); }
+}, fixtureDeadlineS(550) * 1_000);
 
 test("release SBOM is SPDX 2.3 and names the exact archive, runtime, binary, and every manifest file", () => {
 	const sbomPath = join(output, `${asset.filename}.sbom.spdx.json`);
