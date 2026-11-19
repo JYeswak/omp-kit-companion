@@ -14,7 +14,7 @@
  * unreadable exports are refused without replay or tracker acts.
  *
  * CLOSEPASS1 (ompkit-774u.52): when every box it ran passes, unticked [live] and [after] boxes (which no export
- * can run) move word for word into one open `LIVEREADBACK: <title>` bead labelled live-readback, created under the
+ * can run) move word for word into one open `LIVEREADBACK: <obligation key>` bead labelled live-readback, created under the
  * closing bead's own active parent or the available constraint lane, otherwise parentless, with a `related` link back.
  * An unchecked [v][build] judgement is required evidence, not rollout debt: it stays on the parent and makes the
  * result PENDING. The closing bead keeps its original acceptance in its description and closes holding only ticked
@@ -29,6 +29,7 @@
  * This grammar is defined only here: scripts/box-lint.ts runs parseBoxes and unreplayableReason
  * for bead_lint's create and update admission (REPLAYABLE1 ompkit-fp72.135.3.71).
  */
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -1057,22 +1058,44 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const ticks = boxes.filter(b => ranIndexes.has(b.index)).map(b => b.item - deferred.filter(d => d.item < b.item).length);
 	const family = input.family ?? "unknown (set --family)";
 	const deferredTags = deferred.map(b => tag(b)).join(" ");
-	const reuse = deferred.length > 0 ? row?.readbacks[0] : undefined;
 	const deferredAcceptance = deferred.map(box => box.line).join("\n");
-	const reused = reuse === undefined ? null : await showBead(reuse, input.repo, env);
-	if (reuse !== undefined && reused === null) return await finishAttempt({ ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: existing readback ${reuse} is unreadable; no tracker act ran`).join("\n"), acts });
-	const resume = reused?.status === "deferred" ? await readbackResume(row.id, reused, deferredAcceptance, input.repo, env) : null;
-	if (resume !== null && "reason" in resume) return await finishAttempt({ ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${resume.reason}; no tracker act ran`).join("\n"), acts });
+	let reuse: string | undefined;
+	let resume: ReadbackResume | null = null;
+	let readbackKey = "";
+	let readbackRef = "";
+	if (deferred.length > 0) {
+		if (exportCommit === null || row.readbacks.length > 1) return await finishAttempt({
+			ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays,
+			log: log.concat("pending: readback export identity or unique linked obligation is unproven; no tracker act ran").join("\n"), acts,
+		});
+		// External refs are unique within the selected tracker, even if it moves.
+		readbackKey = createHash("sha256").update(JSON.stringify([row.id, exportCommit, deferredAcceptance])).digest("hex");
+		readbackRef = `urn:omp-kit:live-readback:sha256:${readbackKey}`;
+		reuse = row.readbacks[0];
+		if (reuse !== undefined) {
+			const child = await showBead(reuse, input.repo, env);
+			const legacy = child?.externalRef === null && child.title === `LIVEREADBACK: ${title}`
+				&& child.description.includes(`when it closed ${row.id} on export ${exportCommit}:`);
+			if (child === null || child.acceptance !== deferredAcceptance || !child.labels.includes(LIVE_READBACK_LABEL)
+				|| child.related.length !== 1 || child.related[0] !== row.id || (child.externalRef !== readbackRef && !legacy)) {
+				return await finishAttempt({ ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays,
+					log: log.concat(`pending: linked readback ${reuse} is unreadable or does not match this exact export and obligation; no tracker act ran`).join("\n"), acts });
+			}
+			if (child.status === "deferred") resume = await readbackResume(row.id, child, deferredAcceptance, input.repo, env);
+			if (resume !== null && "reason" in resume) return await finishAttempt({ ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${resume.reason}; no tracker act ran`).join("\n"), acts });
+		}
+	}
 	const childRef = reuse ?? CHILD;
 	const reason = `verified by ${input.actor} (family: ${family}) on export ${input.exportSha}: ${ran.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}${deferred.length ? `; deferred ${deferredTags} to ${childRef} (LIVEREADBACK, ${home ? `child of ${homeNote || home}` : "parentless"}, related to ${input.bead})` : ""}`;
 	if (deferred.length > 0) {
 		const moved = new Set(deferred.map(b => b.item));
 		let item = 0;
 		const remaining = acceptance.split("\n").filter(raw => !CHECKLIST_ITEM.test(raw.trim()) || !moved.has(++item)).join("\n");
-		const childDescription = `WHAT: read back, on the installed kit, the boxes omp-kit verify deferred when it closed ${input.bead} on export ${input.exportSha}: \`omp-kit verify <this bead> --live-readback\`. A pass ticks them and closes this bead; a failure reopens ${input.bead} with REWORK naming the box.\n\nWHY: ${input.bead}'s executed boxes passed, and br closes a bead only with every box ticked (CLOSEPASS1 ompkit-774u.52, J-2026-10-29-20), so these boxes stay open, visible debt until they are read back.\n\nVerified bead: ${input.bead} (related link)`;
-		if (reuse === undefined) acts.push(["br", "create", `LIVEREADBACK: ${title}`, "-t", "task", "-l", LIVE_READBACK_LABEL, ...(home ? ["--parent", home] : []), "--deps", `related:${input.bead}`, "--description", childDescription, "--acceptance-criteria", deferredAcceptance, "--json", "--actor", input.actor]);
-		else if (resume !== null && "revision" in resume) acts.push(["br", "update", reuse, "--status", "open", "--transition-comment", `verify resumed its unchanged withdrawn readback for ${input.bead}`, "--if-unchanged", resume.revision, "--json", "--actor", input.actor]);
-		else acts.push(["br", "update", reuse, "--acceptance-criteria", deferredAcceptance, "--actor", input.actor]);
+		const childDescription = `WHAT: read back, on the installed kit, the boxes omp-kit verify deferred when it closed ${row.id} on export ${exportCommit}: \`omp-kit verify <this bead> --live-readback\`. A pass ticks them and closes this bead; a failure reopens ${row.id} with REWORK naming the box.\n\nWHY: ${row.id}'s executed boxes passed, and br closes a bead only with every box ticked (CLOSEPASS1 ompkit-774u.52, J-2026-10-29-20), so these boxes stay open, visible debt until they are read back.\n\nVerified bead: ${row.id} (related link)\nVerified title: ${title}`;
+		if (reuse === undefined) acts.push(["br", "create", `LIVEREADBACK: ${readbackKey}`, "-t", "task", "-l", LIVE_READBACK_LABEL,
+			...(home ? ["--parent", home] : []), "--deps", `related:${row.id}`, "--external-ref", readbackRef,
+			"--description", childDescription, "--acceptance-criteria", deferredAcceptance, "--json", "--actor", input.actor]);
+		else if (resume !== null && "revision" in resume) acts.push(["br", "update", reuse, "--status", "open", "--transition-comment", `verify resumed its unchanged withdrawn readback for ${row.id}`, "--if-unchanged", resume.revision, "--json", "--actor", input.actor]);
 		// br refuses, without --force, a rewrite that keeps less than half of a field's length; only acceptance shrinks.
 		const shrinks = [...remaining].length * 2 < [...acceptance].length + 4;
 		acts.push(["br", "update", input.bead, "--description", `${description}\n\n## Original acceptance (before omp-kit verify moved ${deferredTags} to ${childRef})\n${acceptance}`, "--acceptance-criteria", remaining, ...(shrinks ? ["--force"] : []), "--actor", input.actor]);
@@ -1149,8 +1172,10 @@ export interface ChildWithdrawal { status: "NOT_NEEDED" | "WITHDRAWN" | "STATE_U
 
 const READBACK_ROLLBACK_PREFIX = "verify-rollback:";
 
+type ReadbackResume = { child: string; revision: string } | { reason: string };
+
 /** A receipt's exact child revision prevents a later peer edit or operator pause being resumed. */
-async function readbackResume(parent: string, child: BeadRow, acceptance: string, cwd: string, env: Record<string, string>): Promise<{ child: string; revision: string } | { reason: string }> {
+async function readbackResume(parent: string, child: BeadRow, acceptance: string, cwd: string, env: Record<string, string>): Promise<ReadbackResume> {
 	if (child.updatedAt === null || child.assignee !== null || child.acceptance !== acceptance
 		|| !child.labels.includes(LIVE_READBACK_LABEL) || child.related.length !== 1 || child.related[0] !== parent)
 		return { reason: `STATE_UNPROVEN: deferred readback ${child.id} does not match the current parent obligations` };
@@ -1286,7 +1311,7 @@ async function executeActs(acts: string[][], cwd: string, env: Record<string, st
 }
 
 /** The fields verify reads from one bead. Deferred readback candidates require an exact native withdrawal receipt before reactivation. */
-interface BeadRow { id: string; title: string; description: string; acceptance: string; status: string; assignee: string | null; createdBy: string | null; createdAt: string | null; updatedAt: string | null; labels: string[]; parent: string | null; related: string[]; readbacks: string[] }
+interface BeadRow { id: string; title: string; description: string; acceptance: string; status: string; assignee: string | null; createdBy: string | null; createdAt: string | null; updatedAt: string | null; labels: string[]; parent: string | null; related: string[]; readbacks: string[]; externalRef: string | null }
 
 async function showBead(id: string, repo: string, env: Record<string, string>): Promise<BeadRow | null> {
 	const show = await run(["br", "show", id, "--json"], { cwd: repo, deadline_s: 60, env, max_output_bytes: 4 * 1024 * 1024 });
@@ -1302,14 +1327,14 @@ async function showBead(id: string, repo: string, env: Record<string, string>): 
 		.map((dep: unknown) => dep !== null && typeof dep === "object" && "dependency_type" in dep && dep.dependency_type === "related" && "id" in dep && typeof dep.id === "string" ? dep.id : "")
 		.filter(dep => dep !== "");
 	const title = field("title") ?? "";
-	// READBACKREUSE1: a verify whose later act failed left its created child behind (.68 -> .91), and every
-	// retry then hit br's duplicate refusal. An open child titled exactly for this bead is reused instead.
+	// Related edges identify candidates, not authority to reuse one.
 	const readbacks = (Array.isArray(record.dependents) ? record.dependents : [])
 		.map((dep: unknown) => dep !== null && typeof dep === "object" && "dependency_type" in dep && dep.dependency_type === "related"
-			&& "title" in dep && dep.title === `LIVEREADBACK: ${title}` && "status" in dep && (dep.status === "open" || dep.status === "in_progress" || dep.status === "deferred")
+			&& "title" in dep && typeof dep.title === "string" && dep.title.startsWith("LIVEREADBACK: ")
+			&& "status" in dep && (dep.status === "open" || dep.status === "in_progress" || dep.status === "deferred")
 			&& "id" in dep && typeof dep.id === "string" ? dep.id : "")
 		.filter(dep => dep !== "");
-	return { id: field("id") ?? id, title, description: field("description") ?? "", acceptance: field("acceptance_criteria") ?? "", status: field("status") ?? "", assignee: field("assignee"), createdBy: field("created_by"), createdAt: field("created_at"), updatedAt: field("updated_at"), labels, parent: field("parent"), related, readbacks };
+	return { id: field("id") ?? id, title, description: field("description") ?? "", acceptance: field("acceptance_criteria") ?? "", status: field("status") ?? "", assignee: field("assignee"), createdBy: field("created_by"), createdAt: field("created_at"), updatedAt: field("updated_at"), labels, parent: field("parent"), related, readbacks, externalRef: field("external_ref") };
 }
 
 export interface LiveReadbackInput { bead: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; lesson?: string }
