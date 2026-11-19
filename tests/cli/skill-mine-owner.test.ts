@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import {
-	cleanOwnerText, loadOwnerCursor, ownerCursorPath, ownerMsgId, ownerSyntheticReason,
+	cleanOwnerText, defaultOwnerSessionsRoots, loadOwnerCursor, ownerCursorPath, ownerMsgId, ownerSyntheticReason,
 	scanOwnerSessions,
 } from "../../src/skill-mine-owner.ts";
 import { normalizeSkillMineSources, runSkillMine, type SkillMineOptions } from "../../src/skill-mine.ts";
@@ -218,3 +218,41 @@ test("RULESKILL1-owner: CLI --source owner mines journals and refuses unknown so
 	expect(JSON.stringify(badEnvelope)).toMatch(/must be one of cass, mail, git, owner/);
 	expect(normalizeSkillMineSources(["owner"])).toEqual(["owner"]);
 }, fixtureDeadlineS() * 1000);
+
+function writeProfileJournal(home: string, profile: string, slug: string, file: string, lines: string[]): string {
+	const dir = join(home, ".omp", "profiles", profile, "agent", "sessions", slug);
+	mkdirSync(dir, { recursive: true });
+	const sess = join(dir, file);
+	writeFileSync(sess, `${lines.join("\n")}\n`, "utf8");
+	return sess;
+}
+
+test("RULESKILL1-owner: default roots inventory every existing profile sessions dir", () => {
+	const f = makeOwnerFixture("skill-mine-owner-profiles");
+	expect(defaultOwnerSessionsRoots(join(f.root, "no-home-here"))).toEqual([]);
+	writeProfileJournal(f.home, "claude", "-Developer-cfs", "a.jsonl", [userLine("claude words")]);
+	writeProfileJournal(f.home, "codex", "-Developer-cfs", "b.jsonl", [userLine("codex words")]);
+	writeFileSync(join(f.home, ".omp", "profiles", "stray-file"), "not a dir\n", "utf8");
+	mkdirSync(join(f.home, ".omp", "profiles", "empty-profile", "agent"), { recursive: true });
+	expect(defaultOwnerSessionsRoots(f.home)).toEqual([
+		join(f.home, ".omp", "profiles", "claude", "agent", "sessions"),
+		join(f.home, ".omp", "profiles", "codex", "agent", "sessions"),
+	]);
+});
+
+test("RULESKILL1-owner: default run finds both profiles and replays the shared cursor", async () => {
+	const f = makeOwnerFixture("skill-mine-owner-multiprofile");
+	writeProfileJournal(f.home, "claude", "-Developer-cfs", "a.jsonl", [userLine("claude rule words")]);
+	writeProfileJournal(f.home, "codex", "-Developer-cfs", "b.jsonl", [userLine("codex rule words")]);
+	const { sessionsRoot: _dropped, ...rest } = f.options;
+	const first = await runSkillMine({ ...rest, sources: ["owner"] });
+	expect(first.overall).toBe("OK");
+	expect(first.sources.owner.status).toBe("OK");
+	expect(first.candidates).toHaveLength(2);
+	const refs = first.candidates.map(candidate => candidate.evidence[0]!.ref).sort();
+	expect(refs[0]).toContain(join(".omp", "profiles", "claude"));
+	expect(refs[1]).toContain(join(".omp", "profiles", "codex"));
+	const second = await runSkillMine({ ...rest, sources: ["owner"] });
+	expect(second.candidates).toHaveLength(0);
+	expect(sinkLines(f.sink)).toHaveLength(2);
+});

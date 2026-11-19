@@ -632,7 +632,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--apply", description: "File at most --max-new SKILLCAND beads in the owning projects; asks for confirmation first" },
 		{ name: "--yes", description: "Confirm the apply in noninteractive mode; valid only with --apply" },
 		{ name: "--source", value: "cass|mail|git|owner", repeatable: true, description: "Mine only these sources (default cass, mail, git; owner reads the OMP session journals; comma-separated or repeat), values are case-sensitive; Git keeps a reserved share of the wall budget" },
-		{ name: "--sessions-root", value: "DIR", description: "OMP session journals root for the owner source (default <home>/.omp/profiles/claude/agent/sessions)" },
+		{ name: "--sessions-root", value: "DIR", description: "OMP session journals root for the owner source (default: every existing ~/.omp/profiles/*/agent/sessions)" },
 		{ name: "--wall-budget-s", value: "S", description: "Wall budget in seconds for the whole pass (default 600); each enabled source gets a reserved share and Git keeps at least 40%; stops early with coverage reported" },
 	], subcommands: [
 		{ name: "status", description: "Show the last skill-mine run: per-source status, per-repository Git month coverage, candidate totals, beads filed", usage: "skill-mine status [--json]", flags: [], example: "omp-kit skill-mine status --json", runnable: false },

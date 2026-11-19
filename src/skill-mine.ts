@@ -3,7 +3,7 @@ import { createInterface } from "node:readline";
 import { createHash, randomBytes } from "node:crypto";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { run } from "./kitlib/run.ts";
-import { defaultOwnerSessionsRoot, loadOwnerCursor, ownerCursorPath, saveOwnerCursor, scanOwnerSessions, type OwnerScanRow } from "./skill-mine-owner.ts";
+import { defaultOwnerSessionsRoots, loadOwnerCursor, ownerCursorPath, saveOwnerCursor, scanOwnerSessions, type OwnerScanRow } from "./skill-mine-owner.ts";
 import { captureMineReplay } from "./mine-replay.ts";
 import { scrubText } from "../extensions/secret-output-guard.ts";
 // Read-only by default. Every external read is bounded (session caps, file
@@ -2085,28 +2085,46 @@ function ownerCandidate(row: OwnerScanRow, nowISO: string): SkillMineCandidate {
 }
 
 async function mineOwner(options: SkillMineOptions, sinceMs: number, deadlineMs: number): Promise<{ status: SkillMineSourceReport; candidates: SkillMineCandidate[] }> {
-	const root = options.sessionsRoot ?? defaultOwnerSessionsRoot(options.home);
-	let isDir = false;
-	try {
-		isDir = statSync(root).isDirectory();
-	} catch {
-		isDir = false;
-	}
-	if (!isDir) {
-		return { status: { status: "UNAVAILABLE", reason: `owner sessions root not found at ${root}; pass --sessions-root DIR` }, candidates: [] };
+	const roots = options.sessionsRoot !== undefined ? [options.sessionsRoot] : defaultOwnerSessionsRoots(options.home);
+	const live = roots.filter(root => {
+		try {
+			return statSync(root).isDirectory();
+		} catch {
+			return false;
+		}
+	});
+	if (live.length === 0) {
+		const where = options.sessionsRoot ?? join(options.home, ".omp", "profiles");
+		return { status: { status: "UNAVAILABLE", reason: `no owner session roots under ${where}; pass --sessions-root DIR` }, candidates: [] };
 	}
 	const cursorPath = ownerCursorPath(options.stateDir);
-	const cursor = loadOwnerCursor(cursorPath);
-	const scanned = scanOwnerSessions(root, sinceMs, null, cursor, { deadlineMs });
-	saveOwnerCursor(cursorPath, scanned.cursor);
+	let merged = loadOwnerCursor(cursorPath);
+	const rows: OwnerScanRow[] = [];
+	let files = 0;
+	let stoppedEarly = false;
+	for (const root of live) {
+		if (Date.now() > deadlineMs) {
+			stoppedEarly = true;
+			break;
+		}
+		const scanned = scanOwnerSessions(root, sinceMs, null, merged, { deadlineMs });
+		for (const row of scanned.rows) rows.push(row);
+		merged = { ...merged, ...scanned.cursor };
+		files += scanned.files;
+		if (scanned.stoppedEarly) {
+			stoppedEarly = true;
+			break;
+		}
+	}
+	saveOwnerCursor(cursorPath, merged);
 	const nowISO = new Date(options.now ?? Date.now()).toISOString();
-	const candidates = scanned.rows.map(row => ownerCandidate(row, nowISO));
-	const wallSuffix = scanned.stoppedEarly ? "; wall budget reached" : "";
+	const candidates = rows.map(row => ownerCandidate(row, nowISO));
+	const wallSuffix = stoppedEarly ? "; wall budget reached" : "";
 	return {
 		status: {
 			status: "OK",
-			reason: `scanned ${scanned.files} file(s), ${scanned.rows.length} new owner message(s)${wallSuffix}`,
-			threads: scanned.files, files: scanned.files,
+			reason: `scanned ${files} file(s) across ${live.length} profile(s), ${rows.length} new owner message(s)${wallSuffix}`,
+			threads: files, files,
 		},
 		candidates,
 	};

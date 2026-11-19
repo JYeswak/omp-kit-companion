@@ -31,8 +31,39 @@ export const OWNER_MAX_LINE_BYTES = 64 << 20;
 /** Stored candidate text is truncated to this many code points; the sha covers the full text. */
 export const OWNER_MAX_TEXT_CHARS = 4000;
 
-export function defaultOwnerSessionsRoot(home: string): string {
-	return join(home, ".omp", "profiles", "claude", "agent", "sessions");
+/** Cap on profile directories listed for the default roots: a bounded
+ * inventory, never a home-tree scan. */
+export const OWNER_MAX_PROFILES = 32;
+
+/**
+ * Default owner session roots: every existing
+ * `<home>/.omp/profiles/<profile>/agent/sessions` directory, sorted.
+ * Only immediate profile directories are listed; entries that are not
+ * directories, or lack an agent sessions dir, are skipped. An explicit
+ * `--sessions-root` bypasses this inventory entirely.
+ */
+export function defaultOwnerSessionsRoots(home: string): string[] {
+	const base = join(home, ".omp", "profiles");
+	let names: string[];
+	try {
+		names = readdirSync(base).sort();
+	} catch {
+		return [];
+	}
+	const roots: string[] = [];
+	for (const name of names) {
+		if (roots.length >= OWNER_MAX_PROFILES) break;
+		if (name === "." || name === "..") continue;
+		const sessions = join(base, name, "agent", "sessions");
+		let isDir = false;
+		try {
+			isDir = statSync(sessions).isDirectory();
+		} catch {
+			isDir = false;
+		}
+		if (isDir) roots.push(sessions);
+	}
+	return roots;
 }
 
 export function ownerCursorPath(stateDir: string): string {
