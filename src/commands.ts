@@ -622,7 +622,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--project", value: "P", description: "Fleet name, repository basename or absolute checkout path (default: current directory)" },
 		{ name: "--all", description: "Every configured and observed project" },
 	], example: "omp-kit mine --since 2026-10-01 --until 2026-11-01 --all --json", runnable: false },
-	{ name: "skill-mine", description: "Mine agent history (cass sessions, the Agent Mail archive, plus Git history month cursors per repository) for recurring procedures worth packaging as skills; read-only unless --apply files SKILLCAND beads", usage: "skill-mine [--since 21d] [--source cass|mail|git]... [--project PATH]... [--skills-dir DIR]... [--mail-archive DIR] [--sink FILE] [--max-new N] [--wall-budget-s S] [--apply] [--json] | skill-mine status [--json]", flags: [
+	{ name: "skill-mine", description: "Mine agent history (cass sessions, the Agent Mail archive, Git history month cursors per repository, and owner-typed session messages) for recurring procedures worth packaging as skills; read-only unless --apply files SKILLCAND beads", usage: "skill-mine [--since 21d] [--source cass|mail|git|owner]... [--project PATH]... [--skills-dir DIR]... [--mail-archive DIR] [--sessions-root DIR] [--sink FILE] [--max-new N] [--wall-budget-s S] [--apply] [--json] | skill-mine status [--json] | skill-mine coverage --backlog PATH [--json]", flags: [
 		{ name: "--since", value: "21d", description: "Lookback window: Nd days or an ISO date (default 21d); Git mines the trailing twelve calendar months overlapping it" },
 		{ name: "--project", value: "PATH", repeatable: true, description: "Restrict mining to these workspaces/project slugs (Git resolves them to repositories); repeat for more" },
 		{ name: "--skills-dir", value: "DIR", repeatable: true, description: "Installed-skills root to dedupe against; repeat for more (default: $OMP_KIT_SKILLS_DIRS, else ~/.agents/skills and ~/.omp/agent/skills)" },
@@ -631,10 +631,20 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--max-new", value: "N", description: "Cap on SKILLCAND beads filed with --apply (default 3, max 1 per project per run)" },
 		{ name: "--apply", description: "File at most --max-new SKILLCAND beads in the owning projects; asks for confirmation first" },
 		{ name: "--yes", description: "Confirm the apply in noninteractive mode; valid only with --apply" },
-		{ name: "--source", value: "cass|mail|git", repeatable: true, description: "Mine only these sources (default all three; comma-separated or repeat), values are case-sensitive; Git keeps a reserved share of the wall budget" },
+		{ name: "--source", value: "cass|mail|git|owner", repeatable: true, description: "Mine only these sources (default cass, mail, git; owner reads the OMP session journals; comma-separated or repeat), values are case-sensitive; Git keeps a reserved share of the wall budget" },
+		{ name: "--sessions-root", value: "DIR", description: "OMP session journals root for the owner source (default <home>/.omp/profiles/claude/agent/sessions)" },
 		{ name: "--wall-budget-s", value: "S", description: "Wall budget in seconds for the whole pass (default 600); each enabled source gets a reserved share and Git keeps at least 40%; stops early with coverage reported" },
 	], subcommands: [
 		{ name: "status", description: "Show the last skill-mine run: per-source status, per-repository Git month coverage, candidate totals, beads filed", usage: "skill-mine status [--json]", flags: [], example: "omp-kit skill-mine status --json", runnable: false },
+		{ name: "coverage", description: "Prove each durable rule older than the grace window is anchored in the skill file a seat loads, with stated-to-landed latency from git", usage: "skill-mine coverage --backlog PATH [--grace-hours N] [--now ISO] [--json]", flags: [
+			{ name: "--backlog", value: "PATH", description: "Rule backlog JSONL to check (rule_id, stated_at, durable, owning_skill, skill_path, anchor)" },
+			{ name: "--grace-hours", value: "N", description: "Grace window in hours for a stated rule to land (default 24)" },
+			{ name: "--now", value: "ISO", description: "Override now as an ISO-8601 date for grace math" },
+		], example: "omp-kit skill-mine coverage --backlog ~/.local/state/omp-kit/chief/rule-backlog.jsonl --json", runnable: false, dataSchema: {
+			type: "object", required: ["rules", "totals", "overdue", "exit_code"], properties: {
+				rules: { type: "array" }, totals: { type: "object" }, overdue: { type: "array" }, exit_code: { type: "number" },
+			},
+		} },
 	], example: "omp-kit skill-mine --since 21d --json", mutation: true, runnable: false, dataSchema: {
 		type: "object", required: ["overall"], properties: {
 			overall: { enum: ["OK", "UNVERIFIED", "NOT_RUN"] }, candidates: { type: "array" }, rejects: { type: "array" },
@@ -676,7 +686,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--project", value: "PATH", repeatable: true, description: "Project root to check; repeat for a fleet; defaults to the current directory" },
 		], example: "omp-kit mission anchor --project ~/Developer/omp-kit --json", runnable: false, dataSchema: missionData },
 	], example: "omp-kit mission validate --json", runnable: false },
-	{ name: "project", description: "Register an omp-kit project, start named seats (receipted, undoable) and report their wake health, park, drop or replace the director goal", usage: "project add REPO --session NAME [--workers N] [--profile P] [--model M] [--mission S:N] [--goal TEXT] [--orientation TEXT] [--plan|--apply] [--undo RECEIPT] [--yes] | project status SESSION [--json] | project goal SESSION --set TEXT|--from-file FILE|--pause|--drop [--plan|--apply] [--json]", flags: [], subcommands: [
+	{ name: "project", description: "Register an omp-kit project, start named seats (receipted, undoable) and report their wake health, park, drop or replace the director goal", usage: "project add REPO --session NAME [--workers N] [--profile P] [--model M] [--mission S:N] [--goal TEXT] [--orientation TEXT] [--plan|--apply] [--undo RECEIPT] [--yes] | project status SESSION|--all [--json] | project goal SESSION --set TEXT|--from-file FILE|--pause|--drop [--plan|--apply] [--json]", flags: [], subcommands: [
 		{ name: "add", description: "Mint seats, write the repo opt-in, roster and admission routes, start seats, deliver the first goal with proof", usage: "project add REPO --session NAME [--workers N] [--profile P] [--model M] [--mission S:N] [--goal TEXT] [--orientation TEXT] [--plan|--apply] [--undo RECEIPT] [--yes]", argument: "REPO", flags: [...planApply,
 			{ name: "--session", value: "NAME", description: "Fleet session name for the project (lowercase, digits and dashes)" },
 			{ name: "--workers", value: "N", description: "Worker seats beside the director (0-16, default 1)" },

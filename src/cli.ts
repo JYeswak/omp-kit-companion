@@ -116,6 +116,7 @@ import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLes
 import { buildFleetLessonsReport, FleetRepoSnapshot, readFleetRepoSnapshot, runFleetLessonsOnce } from "./fleet-lessons.ts";
 import { renderMine, runMine } from "./mine.ts";
 import { readSkillMineStatus, renderSkillMineText, runSkillMine } from "./skill-mine.ts";
+import { CoverageInputError, renderCoverageText, runCoverage, COVERAGE_DEFAULT_GRACE_HOURS } from "./skill-mine-coverage.ts";
 import { runMilestone } from "./milestone.ts";
 import { ccSpool, type CcSpool } from "./cc-spool.ts";
 import { custodyCheckCommand } from "./custody.ts";
@@ -5439,24 +5440,25 @@ registerCommandHandler("skill-mine", async request => {
 		maxNew = nonNegativeInt(request.flags.get("--max-new"), "--max-new");
 		wallBudgetS = nonNegativeInt(request.flags.get("--wall-budget-s"), "--wall-budget-s");
 		const sourceRaw = request.flags.get("--source");
-		if (sourceRaw === true) throw new Error("--source needs a value: repeat --source cass|mail|git");
+		if (sourceRaw === true) throw new Error("--source needs a value: repeat --source cass|mail|git|owner");
 		sources = typeof sourceRaw === "string"
 			? sourceRaw.split("\n").flatMap(line => line.split(",")).map(part => part.trim()).filter(Boolean)
 			: undefined;
 		if (sources !== undefined) {
 			for (const name of sources) {
-				if (name !== "cass" && name !== "mail" && name !== "git") {
-					throw new Error(`--source must be one of cass, mail, git, got ${JSON.stringify(name)}`);
+				if (name !== "cass" && name !== "mail" && name !== "git" && name !== "owner") {
+					throw new Error(`--source must be one of cass, mail, git, owner, got ${JSON.stringify(name)}`);
 				}
 			}
-			if (sources.length === 0) throw new Error("--source must be one of cass, mail, git, got no values");
+			if (sources.length === 0) throw new Error("--source must be one of cass, mail, git, owner, got no values");
 		}
 	} catch (error) {
 		return refusal("INVALID_FLAG", error instanceof Error ? error.message : String(error),
-			"Pass --max-new N and --wall-budget-s S with N, S >= 0, and repeat --source cass|mail|git; no mining was performed.");
+			"Pass --max-new N and --wall-budget-s S with N, S >= 0, and repeat --source cass|mail|git|owner; no mining was performed.");
 	}
 
 	const since = request.flags.get("--since");
+	const sessionsRoot = request.flags.get("--sessions-root");
 	let report;
 	try {
 		report = await runSkillMine({
@@ -5464,6 +5466,7 @@ registerCommandHandler("skill-mine", async request => {
 			...(repeated(request.flags.get("--project")) ? { projects: repeated(request.flags.get("--project")) } : {}),
 			...(repeated(request.flags.get("--skills-dir")) ? { skillsDirs: repeated(request.flags.get("--skills-dir")) } : {}),
 			...(typeof request.flags.get("--mail-archive") === "string" ? { mailArchive: request.flags.get("--mail-archive") as string } : {}),
+			...(typeof sessionsRoot === "string" ? { sessionsRoot } : {}),
 			...(typeof request.flags.get("--sink") === "string" ? { sink: request.flags.get("--sink") as string } : {}),
 			...(maxNew !== undefined ? { maxNew } : {}),
 			...(wallBudgetS !== undefined ? { wallBudgetS } : {}),
@@ -5474,7 +5477,7 @@ registerCommandHandler("skill-mine", async request => {
 		});
 	} catch (error) {
 		return refusal("INVALID_FLAG", error instanceof Error ? error.message : String(error),
-			"Pass --since Nd or an ISO date and repeat --source cass|mail|git; no mining was performed.");
+			"Pass --since Nd or an ISO date and repeat --source cass|mail|git|owner; no mining was performed.");
 	}
 	return {
 		code: report.overall === "OK" ? 0 : 1,
@@ -5490,6 +5493,54 @@ registerCommandHandler("skill-mine status", () => {
 		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset; nothing was read.");
 	const status = readSkillMineStatus(stateRoot);
 	return { code: 0, data: { overall: status.configured ? "OK" : "UNVERIFIED", status }, verification: "PERFORMED" };
+});
+
+registerCommandHandler("skill-mine coverage", async request => {
+	const backlog = request.flags.get("--backlog");
+	if (typeof backlog !== "string" || backlog.length === 0) {
+		return refusal("INVALID_FLAG", "skill-mine coverage needs --backlog PATH",
+			"Pass the rule-backlog JSONL path; nothing was checked.");
+	}
+	let graceHours = COVERAGE_DEFAULT_GRACE_HOURS;
+	const graceRaw = request.flags.get("--grace-hours");
+	if (typeof graceRaw === "string") {
+		const parsed = Number(graceRaw);
+		if (!Number.isFinite(parsed) || parsed < 0) {
+			return refusal("INVALID_FLAG", `skill-mine coverage needs --grace-hours >= 0, got ${JSON.stringify(graceRaw)}`,
+				"Pass a non-negative grace window in hours; nothing was checked.");
+		}
+		graceHours = parsed;
+	} else if (graceRaw === true) {
+		return refusal("INVALID_FLAG", "skill-mine coverage needs --grace-hours N",
+			"Pass a non-negative grace window in hours; nothing was checked.");
+	}
+	let nowMs: number | undefined;
+	const nowRaw = request.flags.get("--now");
+	if (typeof nowRaw === "string") {
+		const parsed = Date.parse(nowRaw);
+		if (Number.isNaN(parsed)) {
+			return refusal("INVALID_FLAG", `skill-mine coverage needs --now as an ISO-8601 date, got ${JSON.stringify(nowRaw)}`,
+				"Pass an ISO-8601 date or omit --now; nothing was checked.");
+		}
+		nowMs = parsed;
+	} else if (nowRaw === true) {
+		return refusal("INVALID_FLAG", "skill-mine coverage needs --now ISO",
+			"Pass an ISO-8601 date or omit --now; nothing was checked.");
+	}
+	let report;
+	try {
+		report = await runCoverage({ backlog, graceHours, ...(nowMs !== undefined ? { nowMs } : {}) });
+	} catch (error) {
+		if (error instanceof CoverageInputError) {
+			return refusal("INVALID_BACKLOG", error.message, "Fix the backlog path and contents; nothing was checked.");
+		}
+		throw error;
+	}
+	return {
+		code: report.exit_code,
+		data: { ...report, ...(!request.json && !request.robot ? { text: renderCoverageText(report) } : {}) },
+		verification: "PERFORMED",
+	};
 });
 
 async function dispatch(request: ParsedCommand, version: string): Promise<CliResult> {

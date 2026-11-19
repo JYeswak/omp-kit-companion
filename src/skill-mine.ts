@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import { createHash, randomBytes } from "node:crypto";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { run } from "./kitlib/run.ts";
+import { defaultOwnerSessionsRoot, loadOwnerCursor, ownerCursorPath, saveOwnerCursor, scanOwnerSessions, type OwnerScanRow } from "./skill-mine-owner.ts";
 import { captureMineReplay } from "./mine-replay.ts";
 import { scrubText } from "../extensions/secret-output-guard.ts";
 // Read-only by default. Every external read is bounded (session caps, file
@@ -40,9 +41,13 @@ export const INFRA_HEAD_RE = /^(omp-kit|br|am|ovnfs|cass|python3|cat|sed|rg)\b|^
 export const SKILL_MINE_WALL_BUDGET_S = 600;
 /** Trailing calendar months of Git history considered per repository (oldest first). */
 export const SKILL_MINE_GIT_MONTHS = 12;
-/** Selectable mining sources: cass sessions, Agent Mail threads, Git history. */
-export const SKILL_MINE_SOURCES = ["cass", "mail", "git"] as const;
+/** Selectable mining sources: cass sessions, Agent Mail threads, Git history, and owner-typed session messages. */
+export const SKILL_MINE_SOURCES = ["cass", "mail", "git", "owner"] as const;
 export type SkillMineSourceName = (typeof SKILL_MINE_SOURCES)[number];
+/** Per-source wall-budget shares. `owner` is present only when the owner
+ * source is enabled, so the three-source shape existing callers assert is
+ * unchanged when it is not. */
+export interface SkillMineSourceBudgetShares { cass: number; mail: number; git: number; owner?: number }
 /** Reserved share of the wall budget for the Git source when enabled (SKILLMINEFAIR1):
  * cass and mail stop at their own cumulative deadlines so a long cass pass can
  * never consume the Git share; time a source does not use flows to the next. */
@@ -162,14 +167,15 @@ export interface SkillMineGitState {
 }
 
 export interface SkillMineEvidence {
-	source: "cass" | "mail" | "git";
+	source: "cass" | "mail" | "git" | "owner";
 	ref: string;
 	quote: string;
 }
 
 export interface SkillMineCandidate {
 	workflow: string;
-	/** Evidence packet for judgement (`git-recurrence`) or a fileable procedure; git packets never auto-file. */
+	/** Evidence packet for judgement (`git-recurrence`) or raw owner words
+	 * (`owner-message`, one row per owner-typed message); neither auto-files. */
 	kind?: string;
 	summary: string;
 	projects: string[];
@@ -214,11 +220,11 @@ export interface SkillMineCoverage {
 	projects: Record<string, number>;
 	git: SkillMineGitCoverage;
 	/** Per-source wall time spent and share given, in milliseconds (SKILLMINEFAIR1). */
-	budgets: Record<SkillMineSourceName, SkillMineSourceBudget>;
+	budgets: { cass: SkillMineSourceBudget; mail: SkillMineSourceBudget; git: SkillMineSourceBudget; owner?: SkillMineSourceBudget };
 }
 
 /** Zero per-source budgets for a run that mined nothing yet. */
-export function emptySkillMineBudgets(): Record<SkillMineSourceName, SkillMineSourceBudget> {
+export function emptySkillMineBudgets(): { cass: SkillMineSourceBudget; mail: SkillMineSourceBudget; git: SkillMineSourceBudget; owner?: SkillMineSourceBudget } {
 	const zero = (): SkillMineSourceBudget => ({ elapsed_ms: 0, budget_ms: 0 });
 	return { cass: zero(), mail: zero(), git: zero() };
 }
@@ -236,8 +242,7 @@ export function emptySkillMineGitCoverage(): SkillMineGitCoverage {
 
 export interface SkillMineReport {
 	overall: "OK" | "UNVERIFIED";
-	sources: { cass: SkillMineSourceReport; mail: SkillMineSourceReport; git: SkillMineSourceReport };
-	coverage: SkillMineCoverage;
+	sources: { cass: SkillMineSourceReport; mail: SkillMineSourceReport; git: SkillMineSourceReport; owner: SkillMineSourceReport };
 	pack: string;
 	candidates: SkillMineCandidate[];
 	rejects: SkillMineReject[];
@@ -251,8 +256,7 @@ export interface SkillMineReport {
 export interface SkillMineStatusReport {
 	configured: boolean;
 	last_run: string | null;
-	sources: { cass: SkillMineSourceReport; mail: SkillMineSourceReport; git: SkillMineSourceReport } | null;
-	candidates_total: number;
+	sources: { cass: SkillMineSourceReport; mail: SkillMineSourceReport; git: SkillMineSourceReport; owner?: SkillMineSourceReport } | null;
 	projects_with_candidates: number;
 	beads_filed: string[];
 	git: {
@@ -271,12 +275,13 @@ export interface SkillMineOptions {
 	projects?: string[];
 	skillsDirs?: string[];
 	mailArchive?: string;
+	/** OMP session journals root for the owner source (default <home>/.omp/profiles/claude/agent/sessions). */
+	sessionsRoot?: string;
 	sink?: string;
 	maxNew?: number;
 	wallBudgetS?: number;
-	/** Sources to mine; default is all three. Repeatable --source on the CLI. */
+	/** Sources to mine; default is cass, mail, git (owner is opt-in via --source owner). Repeatable --source on the CLI. */
 	sources?: string[];
-	/** Test-only seam: lower the pick caps for SKILLMINE3 fixtures without touching the module constants. */
 	sessionCap?: number;
 	perProjectCap?: number;
 	/** Test-only seam: cap Git months mined per repository per run (SKILLMINEGIT1-cursor). */
@@ -294,30 +299,33 @@ export interface SkillMineOptions {
 }
 
 /**
- * Enabled sources in canonical cass, mail, git order. Unknown names throw
+ * Enabled sources in canonical cass, mail, git, owner order. Unknown names throw
  * naming every valid value, so the CLI can refuse with the same list
- * (SKILLMINEFAIR1).
+ * (SKILLMINEFAIR1). The default stays cass, mail, git: the owner journal
+ * source is opt-in via --source owner.
  */
 export function normalizeSkillMineSources(raw: string[] | undefined): SkillMineSourceName[] {
 	if (raw === undefined) return ["cass", "mail", "git"];
 	const seen = new Set<SkillMineSourceName>();
 	for (const name of raw) {
-		if (name !== "cass" && name !== "mail" && name !== "git") {
-			throw new Error(`skill-mine: --source must be one of cass, mail, git, got ${JSON.stringify(name)}`);
+		if (name !== "cass" && name !== "mail" && name !== "git" && name !== "owner") {
+			throw new Error(`skill-mine: --source must be one of cass, mail, git, owner, got ${JSON.stringify(name)}`);
 		}
 		seen.add(name);
 	}
-	if (seen.size === 0) throw new Error("skill-mine: --source must be one of cass, mail, git, got no values");
-	return (["cass", "mail", "git"] as const).filter(name => seen.has(name));
+	if (seen.size === 0) throw new Error("skill-mine: --source must be one of cass, mail, git, owner, got no values");
+	return (["cass", "mail", "git", "owner"] as const).filter(name => seen.has(name));
 }
 
 /**
  * Reserved wall-budget shares per enabled source, in milliseconds. Git keeps
  * at least SKILL_MINE_GIT_BUDGET_SHARE of the total; the remainder splits
- * evenly across the other enabled sources.
+ * evenly across the other enabled sources (the owner source shares the
+ * remainder when enabled). The `owner` key is present only when enabled, so
+ * the three-source shape existing callers assert is unchanged otherwise.
  */
-export function skillMineBudgetShares(enabled: SkillMineSourceName[], totalMs: number): Record<SkillMineSourceName, number> {
-	const shares: Record<SkillMineSourceName, number> = { cass: 0, mail: 0, git: 0 };
+export function skillMineBudgetShares(enabled: SkillMineSourceName[], totalMs: number): SkillMineSourceBudgetShares {
+	const shares: SkillMineSourceBudgetShares = { cass: 0, mail: 0, git: 0 };
 	if (enabled.length === 0) return shares;
 	if (enabled.length === 1) {
 		shares[enabled[0]!] = totalMs;
@@ -2012,6 +2020,12 @@ export async function fileBeads(candidates: SkillMineCandidate[], options: Skill
 			unfiled.push({ candidate: candidate.workflow, reason: "evidence packet for judgement; never auto-filed" });
 			continue;
 		}
+		// Owner messages are raw material for the judging pass, never auto-filed:
+		// one bead per typed message would spam the tracker with unjudged noise.
+		if (candidate.kind === "owner-message") {
+			unfiled.push({ candidate: candidate.workflow, reason: "owner message needs judging; never auto-filed" });
+			continue;
+		}
 		const project = owningProject(candidate);
 		if (project === null) {
 			unfiled.push({ candidate: candidate.workflow, reason: "no evidence project with a .beads dir; filed nothing" });
@@ -2049,6 +2063,55 @@ function lastRunPath(stateDir: string): string {
 	return join(stateDir, "skill-mine", "last-run.json");
 }
 
+/** One candidate row per owner-typed message. Owner words are raw material
+ * for the judging pass, not ranked procedures: they bypass clustering and
+ * skill-overlap dedupe (every typed message emits its row) and never
+ * auto-file as beads (fileBeads leaves them unfiled with a reason). */
+function ownerCandidate(row: OwnerScanRow, nowISO: string): SkillMineCandidate {
+	const head = row.text.includes("\n") ? row.text.slice(0, row.text.indexOf("\n")) : row.text;
+	return {
+		workflow: `owner-message ${row.msg_id.slice(0, 12)}`,
+		kind: "owner-message",
+		summary: `Owner-typed message from ${row.seat_or_project_slug} (${row.session_path}:${row.line}); judge for a durable rule.`,
+		projects: [row.seat_or_project_slug],
+		occurrences: 1,
+		why_skill: "Direct owner words; the judging pass decides whether they become a skill.",
+		evidence: [{ source: "owner", ref: `${row.session_path}:${row.line}`, quote: redactedQuote(head) }],
+		nearest_existing_skill: null,
+		fingerprint: `owner:${row.msg_id}`,
+		score: 0,
+		first_seen: typeof row.at === "string" ? row.at : nowISO,
+	};
+}
+
+async function mineOwner(options: SkillMineOptions, sinceMs: number, deadlineMs: number): Promise<{ status: SkillMineSourceReport; candidates: SkillMineCandidate[] }> {
+	const root = options.sessionsRoot ?? defaultOwnerSessionsRoot(options.home);
+	let isDir = false;
+	try {
+		isDir = statSync(root).isDirectory();
+	} catch {
+		isDir = false;
+	}
+	if (!isDir) {
+		return { status: { status: "UNAVAILABLE", reason: `owner sessions root not found at ${root}; pass --sessions-root DIR` }, candidates: [] };
+	}
+	const cursorPath = ownerCursorPath(options.stateDir);
+	const cursor = loadOwnerCursor(cursorPath);
+	const scanned = scanOwnerSessions(root, sinceMs, null, cursor, { deadlineMs });
+	saveOwnerCursor(cursorPath, scanned.cursor);
+	const nowISO = new Date(options.now ?? Date.now()).toISOString();
+	const candidates = scanned.rows.map(row => ownerCandidate(row, nowISO));
+	const wallSuffix = scanned.stoppedEarly ? "; wall budget reached" : "";
+	return {
+		status: {
+			status: "OK",
+			reason: `scanned ${scanned.files} file(s), ${scanned.rows.length} new owner message(s)${wallSuffix}`,
+			threads: scanned.files, files: scanned.files,
+		},
+		candidates,
+	};
+}
+
 export async function runSkillMine(options: SkillMineOptions): Promise<SkillMineReport> {
 	const started = Date.now();
 	const now = options.now ?? started;
@@ -2064,6 +2127,7 @@ export async function runSkillMine(options: SkillMineOptions): Promise<SkillMine
 	let cursor = started;
 	const cassDeadline = cursor + shares.cass; cursor += shares.cass;
 	const mailDeadline = cursor + shares.mail; cursor += shares.mail;
+	const ownerDeadline = cursor + (shares.owner ?? 0); cursor += (shares.owner ?? 0);
 	const gitDeadline = cursor + shares.git;
 	const skippedCoverage = (): SkillMineCoverage => ({
 		sessions_in_window: 0, sessions_seen: 0, sessions_mined: 0, skipped_oversize: 0,
@@ -2099,6 +2163,16 @@ export async function runSkillMine(options: SkillMineOptions): Promise<SkillMine
 	} else {
 		mail = { status: skipped("mail"), observations: [] };
 	}
+	let owner: { status: SkillMineSourceReport; candidates: SkillMineCandidate[] };
+	let ownerElapsed = 0;
+	if (enabled.includes("owner")) {
+		const sourceStart = Date.now();
+		owner = await mineOwner(options, sinceMs, ownerDeadline);
+		ownerElapsed = Date.now() - sourceStart;
+		owner.status = { ...owner.status, elapsed_ms: ownerElapsed, budget_ms: shares.owner ?? 0 };
+	} else {
+		owner = { status: skipped("owner"), candidates: [] };
+	}
 	const { skills, count: skillCount } = readSkillsIndex(options.skillsDirs ?? defaultSkillsDirs(options.home));
 	const ledger = loadLedger(options.stateDir);
 	const firstSeen = new Map<string, string>(Object.entries(ledger).map(([fp, row]) => [fp, row.first_seen]));
@@ -2117,6 +2191,11 @@ export async function runSkillMine(options: SkillMineOptions): Promise<SkillMine
 	const { candidates: ranked } = rankClusters(clusters, firstSeen, nowISO);
 	const { kept, rejects } = dedupeCandidates([...ranked, ...git.candidates], skills);
 	const fresh = kept.filter(candidate => ledger[candidate.fingerprint] === undefined);
+	// Owner rows bypass ranking and skill-overlap dedupe (one row per typed
+	// message) but share the ledger, so a cursor reset still emits nothing new.
+	for (const candidate of owner.candidates) {
+		if (ledger[candidate.fingerprint] === undefined) fresh.push(candidate);
+	}
 	for (const candidate of fresh) ledger[candidate.fingerprint] = { first_seen: candidate.first_seen };
 	const sink = sinkPath(options);
 	appendSink(sink, fresh);
@@ -2135,17 +2214,19 @@ export async function runSkillMine(options: SkillMineOptions): Promise<SkillMine
 	// The pack is the judging agent's daily read: it carries the current top clusters (kept, ranked), so a cluster
 	// recurring every day stays visible; the sink and --apply stay limited to never-seen fingerprints.
 	const pack = writeSkillMinePack(options.stateDir, nowISO.slice(0, 10), kept);
-	const budgets: Record<SkillMineSourceName, SkillMineSourceBudget> = {
+	const budgets: { cass: SkillMineSourceBudget; mail: SkillMineSourceBudget; git: SkillMineSourceBudget; owner?: SkillMineSourceBudget } = {
 		cass: { elapsed_ms: cassElapsed, budget_ms: shares.cass },
 		mail: { elapsed_ms: mailElapsed, budget_ms: shares.mail },
 		git: { elapsed_ms: gitElapsed, budget_ms: shares.git },
+		...(enabled.includes("owner") ? { owner: { elapsed_ms: ownerElapsed, budget_ms: shares.owner ?? 0 } } : {}),
 	};
 	const report: SkillMineReport = {
-		overall: cass.status.status === "OK" || mail.status.status === "OK" || git.status.status === "OK" ? "OK" : "UNVERIFIED",
+		overall: cass.status.status === "OK" || mail.status.status === "OK" || git.status.status === "OK" || owner.status.status === "OK" ? "OK" : "UNVERIFIED",
 		sources: {
 			cass: cass.status.status === "OK" ? { ...cass.status, reason: `${cass.status.reason}; skills indexed: ${skillCount}` } : cass.status,
 			mail: mail.status,
 			git: git.status,
+			owner: owner.status,
 		},
 		candidates: fresh, rejects,
 		projects_with_candidates: projects.size,
@@ -2204,8 +2285,9 @@ export function renderSkillMineText(report: SkillMineReport): string {
 		`cass: ${report.sources.cass.status} (${report.sources.cass.reason})`,
 		`mail: ${report.sources.mail.status} (${report.sources.mail.reason})`,
 		`git: ${report.sources.git.status} (${report.sources.git.reason})`,
+		`owner: ${report.sources.owner.status} (${report.sources.owner.reason})`,
 		`coverage: ${report.coverage.sessions_mined}/${report.coverage.sessions_in_window} mined, ${report.coverage.skipped_oversize} oversize, stopped_early=${report.coverage.stopped_early}, truncated=${report.coverage.list_truncated}`,
-		`budgets: cass ${report.coverage.budgets.cass.elapsed_ms}/${report.coverage.budgets.cass.budget_ms} ms, mail ${report.coverage.budgets.mail.elapsed_ms}/${report.coverage.budgets.mail.budget_ms} ms, git ${report.coverage.budgets.git.elapsed_ms}/${report.coverage.budgets.git.budget_ms} ms`,
+		`budgets: cass ${report.coverage.budgets.cass.elapsed_ms}/${report.coverage.budgets.cass.budget_ms} ms, mail ${report.coverage.budgets.mail.elapsed_ms}/${report.coverage.budgets.mail.budget_ms} ms, git ${report.coverage.budgets.git.elapsed_ms}/${report.coverage.budgets.git.budget_ms} ms${report.coverage.budgets.owner ? `, owner ${report.coverage.budgets.owner.elapsed_ms}/${report.coverage.budgets.owner.budget_ms} ms` : ""}`,
 		`candidates: ${report.candidates.length}; rejects: ${report.rejects.length}; projects: ${report.projects_with_candidates}; beads filed: ${report.beads_filed.length}`,
 
 	];
