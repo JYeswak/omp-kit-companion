@@ -5,7 +5,7 @@ import { delimiter, dirname, join } from "node:path";
 import { countCaseRows } from "../../src/test-runner.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { previewKitRelease, stageKitRelease, validateReleaseManifest } from "../../src/kit-release.ts";
-import type { ReleaseAsset } from "../../src/kit-release.ts";
+import type { KitReleasePreview, ReleaseAsset, StagedKitRelease } from "../../src/kit-release.ts";
 import { judgeKitPostcheck } from "../../src/kit-update.ts";
 import type { FullTestReport } from "../../src/full-test-runner.ts";
 import { packageSourceRevision, packageSecretOutputGuard, checkPackagedExtensionLoads, checkPackagedScriptDependencies } from "../../scripts/package-release.ts";
@@ -29,10 +29,10 @@ test("native release refuses a drifted or duplicate policy import before staging
 			.toThrow(`PACKAGE_IMPORT_MISMATCH: extensions/secret-output-guard.ts: expected exactly one ${original}`);
 	}
 });
-test("native release derives the rule manifest from rules, covers it in archive integrity, and refuses corrupted bytes", async () => {
-	expect(asset.filename).toBe(`omp-kit-v1.2.3-${key}.tar.gz`);
-	expect([...bytes.subarray(0, 2)]).toEqual([0x1f, 0x8b]);
-	expect(asset.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+
+type PackageArchiveStage = { plan: KitReleasePreview; staged: StagedKitRelease };
+
+async function stagePackageArchive(): Promise<PackageArchiveStage> {
 	const plan = await previewKitRelease({ currentVersion: "1.2.2", platform, sourceTag: "v1.2.3", fetchIndex: async () => index });
 	expect(plan.exitCode).toBe(0);
 	const staged = await stageKitRelease({ archive: bytes, plan, stagingParent: output, probeBinaryInfo: async (binary) => {
@@ -41,6 +41,15 @@ test("native release derives the rule manifest from rules, covers it in archive 
 		const info = JSON.parse(child.stdout.toString()).data;
 		return { version: info.version, source_tag: info.release.source_tag, platform: info.platform };
 	} });
+	return { plan, staged };
+}
+
+let stagedArchive: Promise<PackageArchiveStage> | undefined;
+test("native release derives the rule manifest from rules, covers it in archive integrity, and refuses corrupted bytes", async () => {
+	expect(asset.filename).toBe(`omp-kit-v1.2.3-${key}.tar.gz`);
+	expect([...bytes.subarray(0, 2)]).toEqual([0x1f, 0x8b]);
+	expect(asset.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+	const { plan, staged } = await (stagedArchive ??= stagePackageArchive());
 	expect(staged.files).toContain("skills/jeff-planning-enhanced/SKILL.md");
 	expect(readFileSync(join(staged.root, "skills", "jeff-planning-enhanced", "SKILL.md")))
 		.toEqual(readFileSync(join(output, "archived-source", "skills", "jeff-planning-enhanced", "SKILL.md")));
@@ -72,16 +81,6 @@ test("native release derives the rule manifest from rules, covers it in archive 
 		expect(readFileSync(join(staged.root, "scripts", asset)))
 			.toEqual(readFileSync(join(output, "archived-source", "src", asset)));
 	}
-	expect(checkPackagedExtensionLoads(staged.root)).toEqual([]);
-	const policyPath = join(staged.root, "scripts", "secret-output-policy.v1.json");
-	const policyBytes = readFileSync(policyPath);
-	rmSync(policyPath);
-	try {
-		expect(checkPackagedExtensionLoads(staged.root).some(failure => failure.file === "extensions/secret-output-guard.ts")).toBe(true);
-	} finally {
-		writeFileSync(policyPath, policyBytes);
-	}
-	expect(checkPackagedExtensionLoads(staged.root)).toEqual([]);
 	const replayPolicy = await runBounded(["python3", "-c",
 		"from gate_event_replay import ScrubPolicy, CredentialScreen; ScrubPolicy(); CredentialScreen()"],
 		{ cwd: staged.root, env: { ...process.env, PYTHONPATH: join(staged.root, "scripts"), PYTHONDONTWRITEBYTECODE: "1" }, deadline_s: 10 });
@@ -123,6 +122,35 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(sdkSeed.rc, sdkSeedError).toBe(2);
 	expect(sdkSeed.timed_out || sdkSeed.killed).toBe(false);
 	expect(sdkSeedError).toContain("usage: seed-sdk-source.ts");
+	const dirty = Buffer.from(bytes);
+	dirty[dirty.length - 1030] ^= 1;
+	await expect(stageKitRelease({ archive: dirty, plan, stagingParent: output, probeBinaryInfo: async () => { throw new Error("must not execute unverified archive"); } })).rejects.toThrow("ARCHIVE_DIGEST_MISMATCH");
+	expect(readdirSync(output).filter(name => name.startsWith("kit-stage."))).toHaveLength(1);
+	expect(lstatSync(staged.executable).isFile()).toBe(true);
+	expect(existsSync(join(staged.root, "reports"))).toBe(false);
+});
+
+test("native release rejects a packaged guard with missing policy", async () => {
+	const { staged } = await (stagedArchive ??= stagePackageArchive());
+	const policyPath = join(staged.root, "scripts", "secret-output-policy.v1.json");
+	const policyBytes = readFileSync(policyPath);
+	rmSync(policyPath);
+	try {
+		expect(checkPackagedExtensionLoads(staged.root)).toEqual([
+			{ file: "extensions/secret-output-guard.ts", error: expect.stringContaining("secret-output-policy.v1.json") },
+		]);
+	} finally {
+		writeFileSync(policyPath, policyBytes);
+	}
+});
+
+test("native release loads every staged extension", async () => {
+	const { staged } = await (stagedArchive ??= stagePackageArchive());
+	expect(checkPackagedExtensionLoads(staged.root)).toEqual([]);
+});
+
+test("native release lists packaged full-suite verdicts with invalid integrity", async () => {
+	const { staged } = await (stagedArchive ??= stagePackageArchive());
 	const verdictRepo = join(output, "verdict-reader-repo");
 	mkdirSync(verdictRepo);
 	sourceGit(verdictRepo, ["init", "-q"]);
@@ -165,12 +193,6 @@ test("native release derives the rule manifest from rules, covers it in archive 
 		judge: { role: "main", checks_sha256: checks, runtime }, verdict: "FAIL", integrity: "INVALID" }]);
 	expect(listedData.data?.text).toContain(`runtime=${runtime}`);
 	expect(listedData.data?.text).toContain("verdict=FAIL integrity=INVALID");
-	const dirty = Buffer.from(bytes);
-	dirty[dirty.length - 1030] ^= 1;
-	await expect(stageKitRelease({ archive: dirty, plan, stagingParent: output, probeBinaryInfo: async () => { throw new Error("must not execute unverified archive"); } })).rejects.toThrow("ARCHIVE_DIGEST_MISMATCH");
-	expect(readdirSync(output).filter(name => name.startsWith("kit-stage."))).toHaveLength(1);
-	expect(lstatSync(staged.executable).isFile()).toBe(true);
-	expect(existsSync(join(staged.root, "reports"))).toBe(false);
 });
 
 test("UPGRADENOTES1 (ompkit-1ra0d.209): the packaged release tree contains CHANGELOG.md", async () => {
