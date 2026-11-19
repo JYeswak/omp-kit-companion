@@ -157,6 +157,12 @@ if [ -n "$(git -C "$TARGET" ls-files -- "$HOOKS")" ]; then
 # AUTH_HOOKS: the hooks root the authority checks inspect. A plain variable keeps
 # the python heredoc ownership unambiguous for the staged-pysafe gate.
 AUTH_HOOKS="${KITHOOKS:-$HOOKS}"
+PUSH_VLEVEL=hooks.d/pre-push/41-omp-kit-pushed-vlevel
+OUTER_LEGACY_VLEVEL="$HOOKS/hooks.d/commit-msg/41-omp-kit-commit-msg-vlevel"
+TRACKED_PUSH_VLEVEL=0
+if [ "$TRACKED_HOOKS" = 1 ] && [ -x "$HOOKS/$PUSH_VLEVEL" ] && is_tracked "$HOOKS/$PUSH_VLEVEL"; then
+	TRACKED_PUSH_VLEVEL=1
+fi
 
 # The import gate requires a trusted host Node/TypeScript parser at runtime.
 # Admit that dependency before installing anything; never install project
@@ -477,6 +483,20 @@ chain_dir() {
 	fi
 }
 
+# The managed mirror does not satisfy the paired-close check of a pre-push
+# member that still executes from the tracked root. Check both roots with the
+# same pin as real pushes, without executing repository-owned push scripts.
+check_vlevel_pairs() {
+	if [ ! -x "$AUTH_HOOKS/$PUSH_VLEVEL" ]; then
+		printf 'install-commit-msg-bead: inactive verification-level member: %s\n' "$AUTH_HOOKS/$PUSH_VLEVEL" >&2
+		return 1
+	fi
+	sh "$KITROOT/scripts/pre-push-verification-level.sh" --check-pair "$AUTH_HOOKS" || return 1
+	if [ "$TRACKED_PUSH_VLEVEL" = 1 ]; then
+		sh "$KITROOT/scripts/pre-push-verification-level.sh" --check-pair "$HOOKS"
+	fi
+}
+
 # Only byte-identical kit copies are retired; an owner-adapted member must be
 # reviewed by its owner rather than silently removed. Numeric prefixes varied
 # between install sites, so match the managed basename, not its ordering slot.
@@ -590,6 +610,12 @@ EOF
 		if [ "$TRACKED_HOOKS" = 1 ] && is_tracked "$retired"; then
 			printf 'left tracked retired kit copy for the owner migration: %s\n' "$retired"
 			MIGRATION_TRACKED="$MIGRATION_TRACKED $retired"
+			continue
+		fi
+		if [ "$TRACKED_PUSH_VLEVEL" = 1 ] && [ "$retired" = "$OUTER_LEGACY_VLEVEL" ]; then
+			# This approved legacy copy is still needed by the tracked member.
+			# It retires on the next refresh after the owner removes that member.
+			printf 'left legacy commit-msg partner for tracked pre-push: %s\n' "$retired"
 			continue
 		fi
 		backup "$retired"
@@ -1009,8 +1035,10 @@ if [ "$MODE" = "check" ]; then
 		[ -n "$retired" ] || continue
 		if [ "$TRACKED_HOOKS" = 1 ] && is_tracked "$retired"; then
 			printf 'install-commit-msg-bead: TRACKED retired kit copy: %s; owner migration required (git rm, commit, rerun %s)\n' "$retired" "$0" >&2
-		else
+		elif [ "$TRACKED_PUSH_VLEVEL" != 1 ] || [ "$retired" != "$OUTER_LEGACY_VLEVEL" ]; then
 			printf 'install-commit-msg-bead: RETIRED installed member: %s; rerun %s\n' "$retired" "$0" >&2
+		else
+			continue
 		fi
 		stale=1
 	done <<EOF
@@ -1071,6 +1099,7 @@ EOF
 			stale=1
 		fi
 	done
+	if ! check_vlevel_pairs; then stale=1; fi
 	if [ "$PUSHED_BEADS" = 1 ] && ! pushed_beads_wrapper | cmp -s - "$(chain_dir pre-push)/40-omp-kit-pushed-beads"; then
 		printf 'install-commit-msg-bead: MISSING or STALE pushed-beads member: %s; rerun %s\n' "$(chain_dir pre-push)/40-omp-kit-pushed-beads" "$0" >&2
 		stale=1
@@ -1201,7 +1230,14 @@ install_managed_dispatchers() {
 # ones. Tracked files are never touched (the owner migration covers them).
 sweep_untracked_shadow_copies() {
 	[ "$TRACKED_HOOKS" = 1 ] || return 0
+	keep_outer_folded=0
+	if [ "$TRACKED_PUSH_VLEVEL" = 1 ] && [ -x "$HOOKS/hooks.d/commit-msg/55-omp-kit-commit-gate" ]; then
+		keep_outer_folded=1
+	fi
 	while IFS=' ' read -r _file_group file_chain file_dest _file_source _file_mode; do
+		# Preserve the outer aggregator and its helper closure together while
+		# a tracked pre-push member can still depend on that close.
+		if [ "$keep_outer_folded" = 1 ] && [ "$file_chain" = commit-msg ]; then continue; fi
 		shadow="$HOOKS/hooks.d/$file_chain/$file_dest"
 		if [ -e "$shadow" ] && ! is_tracked "$shadow"; then
 			backup "$shadow"
@@ -1577,6 +1613,9 @@ fi
 # still behaves); when its bytes are the retired stamp pin (HOOKDEDUP1), retire it now so a fresh
 # install passes its own --check. Member 41 enforces the same rule with the same text.
 retire_hook_members
+if ! PAIR_OUT=$(check_vlevel_pairs 2>&1); then
+	rollback "verification-level postcheck failed in $TARGET: $PAIR_OUT"
+fi
 write_exclude_block || rollback "cannot list the installer-owned hook members in $TARGET's info/exclude"
 print_tracked_migration
 # shellcheck disable=SC2086

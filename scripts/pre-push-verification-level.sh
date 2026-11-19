@@ -501,6 +501,9 @@ while [ $# -gt 0 ]; do
 		--tip) TIP=${2:-}; shift 2 ;;
 		--pre-push) MODE=prepush; shift ;;
 		--check) MODE=check; shift ;;
+		--check-pair)
+			[ -n "${2:-}" ] || { printf 'pre-push-verification-level: --check-pair needs a hooks root\n' >&2; exit 2; }
+			MODE=pair PAIR_ROOT=$2; shift 2 ;;
 		--selftest) MODE=selftest; shift ;;
 		--) shift; break ;;
 		-*) printf 'pre-push-verification-level: unknown argument %s\n' "$1" >&2; exit 2 ;;
@@ -518,6 +521,7 @@ case "$MODE" in
 		pre_push "$REMOTE" "$REPO"
 		;;
 	check) do_check "${1:-${REPO:-.}}" ;;
+	pair) paired_fresh "$PAIR_ROOT/$CM_MEMBER" ;;
 	selftest) do_selftest ;;
 	*)
 		# No mode flags: behave as the installed pre-push member (git calls
