@@ -1,1 +1,0 @@
-- `omp-kit rch lease --json` now identifies workers blocked by critical or unproven pressure and unhealthy workers when it cannot admit a build. The existing capacity refusal code, worker checks, and cleanup policy are unchanged.

@@ -4,6 +4,19 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.135] - 2026-11-19
+
+### Changed
+
+- `omp-kit rch lease` now reports the compiler exit from a completed native remote build even when its local lease could not be bound. An unbound result still does not authorize cancellation, recovery, or garbage collection.
+- `omp-kit rch lease --json` now identifies workers blocked by critical or unproven pressure and unhealthy workers when it cannot admit a build. The existing capacity refusal code, worker checks, and cleanup policy are unchanged.
+- `omp-kit preflight close` offers a reviewer report only when the native tracker requires one. `preflight commit` runs selftests from the staged tree, so unstaged fixes cannot hide failures.
+
+### Fixed
+
+- Preserve an active tracked pre-push hook’s commit-message partner during a managed hook refresh, and roll back if either hook chain is missing its required pair.
+- When a stale reviewed Git history plan blocks hook installation, report the current and reviewed tips in the rollback message. The history guard still refuses the install.
+
 ## [0.2.134] - 2026-11-18
 
 ### Fixed
