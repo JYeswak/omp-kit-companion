@@ -391,16 +391,9 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight fixtures keep inherited tracker wri
 
 	try {
 		delete process.env.BEADS_DB;
-		await brun(["init", "--db", join(parent, ".beads", "beads.db")], parent, { BEADS_DB: join(parent, ".beads", "beads.db") }, brBin);
-		// `br init` leaves lock artifacts behind; clear test-owned locks so the unpinned
-		// init below proves that it creates them instead of inheriting setup state.
-		for (const name of readdirSync(beadsDir)) {
-			if (name === ".write.lock" || name.startsWith(".br-db-write-") || name.startsWith(".br-db-openers-")) {
-				rmSync(join(beadsDir, name));
-			}
-		}
+		await brun(["init", "--db", join(parent, ".beads", "beads.db"), "--actor", FIXTURE_AGENT], parent, { BEADS_DB: join(parent, ".beads", "beads.db") }, brBin);
+		// Track writes to the owned ancestor during the pinned operation.
 		const before = beadsSnapshot(beadsDir);
-		expect(before.some(entry => entry.startsWith(".write.lock\t") || entry.startsWith(".br-db-write-") || entry.startsWith(".br-db-openers-"))).toBe(false);
 
 		process.env.BEADS_DB = parentDb;
 		const childRoot = join(parent, "children");
@@ -409,23 +402,24 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight fixtures keep inherited tracker wri
 		expect(statSync(join(fixture.repo, ".beads", "beads.db")).isFile()).toBe(true);
 		expect(beadsSnapshot(beadsDir)).toEqual(before);
 
-		delete process.env.BEADS_DB;
-		const negative = join(parent, "unpinned");
-		mkdirSync(negative);
+		// An unpinned init can be a no-op on an already initialized database.
+		// Make an actual unpinned write with the same inherited parent selector
+		// and read it back from both databases, independent of lock-file layout.
+		const backend = nativeBr();
+		const title = "unpinned preflight tracker write [test]";
 		const negativeEnv = { ...process.env };
-		delete negativeEnv.BEADS_DB;
-		if (harness?.brBinDir) negativeEnv.PATH = `${harness.brBinDir}:${negativeEnv.PATH ?? ""}`;
-		const negativeResult = await run(["sh", join(kitRoot, "tests/fixtures/br-init/unpinned.sh")], {
-			deadline_s: 60,
-			cwd: negative,
-			env: negativeEnv,
-		});
-		if (negativeResult.rc !== 0) {
-			throw new Error(`unpinned fixture failed: rc=${negativeResult.rc} stdout=${new TextDecoder().decode(negativeResult.stdout)} stderr=${new TextDecoder().decode(negativeResult.stderr)}`);
-		}
-		const afterNegative = beadsSnapshot(beadsDir);
-		expect(afterNegative).not.toEqual(before);
-		expect(afterNegative.some(entry => entry.startsWith(".write.lock\t") || entry.startsWith(".br-db-write-"))).toBe(true);
+		delete negativeEnv.BEADS_DIR;
+		negativeEnv.BEADS_DB = parentDb;
+		const created = JSON.parse(await brun(["create", title, "--actor", FIXTURE_AGENT, "--json"],
+			fixture.repo, negativeEnv, backend));
+		expect(created.id).toBeString();
+		const childDb = join(fixture.repo, ".beads", "beads.db");
+		const parentRow = JSON.parse(await brun(["show", created.id, "--db", parentDb, "--json"], parent, negativeEnv, backend));
+		expect(parentRow).toEqual([expect.objectContaining({ id: created.id, title })]);
+		const childList = JSON.parse(await brun(["list", "--db", join(fixture.repo, ".beads", "beads.db"), "--limit", "0", "--json"],
+			fixture.repo, { ...negativeEnv, BEADS_DB: join(fixture.repo, ".beads", "beads.db") }, backend));
+		const childRows: { id: string }[] = Array.isArray(childList) ? childList : childList.issues;
+		expect(childRows.map((row: { id: string }) => row.id).sort()).toEqual([fixture.eligible, fixture.gated].sort());
 	} finally {
 		if (savedDb === undefined) delete process.env.BEADS_DB;
 		else process.env.BEADS_DB = savedDb;
