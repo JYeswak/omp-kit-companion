@@ -39,6 +39,7 @@ async function stagePackageArchive(): Promise<PackageArchiveStage> {
 		const child = Bun.spawnSync([binary, "--info", "--json"], { cwd: output, env: { ...process.env, HOME: output, PATH: stubFirstPath, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" }, stdout: "pipe", stderr: "pipe" });
 		expect(child.exitCode, child.stdout.toString() + child.stderr.toString()).toBe(0);
 		const info = JSON.parse(child.stdout.toString()).data;
+		expect(info.release.source_tag).toBe("v1.2.3");
 		return { version: info.version, source_tag: info.release.source_tag, platform: info.platform };
 	} });
 	return { plan, staged };
@@ -81,10 +82,6 @@ test("native release derives the rule manifest from rules, covers it in archive 
 		expect(readFileSync(join(staged.root, "scripts", asset)))
 			.toEqual(readFileSync(join(output, "archived-source", "src", asset)));
 	}
-	const replayPolicy = await runBounded(["python3", "-c",
-		"from gate_event_replay import ScrubPolicy, CredentialScreen; ScrubPolicy(); CredentialScreen()"],
-		{ cwd: staged.root, env: { ...process.env, PYTHONPATH: join(staged.root, "scripts"), PYTHONDONTWRITEBYTECODE: "1" }, deadline_s: 10 });
-	expect(replayPolicy.rc, Buffer.from(replayPolicy.stderr).toString()).toBe(0);
 	for (const essential of ["bin/omp-kit", "scripts/runtime-adapter.sh", "scripts/e2e-live.sh", "scripts/ladder.sh",
 		"scripts/limit-process-tree.sh", "scripts/external-live.mjs", "checkers/check-readiness.sh", "checkers/check-claim-discipline.sh",
 		"tests/live/mock-model.mjs", "MANIFEST.tsv", "cases/cases.tsv", "LICENSE"])
@@ -104,9 +101,24 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(shippedFleetGuard).not.toContain("../src/fleet-guard/");
 	expect(shippedFleetGuard).toContain("export");
 	expect(staged.files).not.toContain("scripts/role-check.ts");
-	const compiled = Bun.spawnSync([staged.executable, "--info", "--json"], { cwd: output, env: { ...process.env, HOME: output, PATH: stubFirstPath, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" }, stdout: "pipe", stderr: "pipe" });
-	expect(compiled.exitCode).toBe(0);
-	expect(JSON.parse(compiled.stdout.toString()).data.release.source_tag).toBe("v1.2.3");
+	const dirty = Buffer.from(bytes);
+	dirty[dirty.length - 1030] ^= 1;
+	await expect(stageKitRelease({ archive: dirty, plan, stagingParent: output, probeBinaryInfo: async () => { throw new Error("must not execute unverified archive"); } })).rejects.toThrow("ARCHIVE_DIGEST_MISMATCH");
+	expect(readdirSync(output).filter(name => name.startsWith("kit-stage."))).toHaveLength(1);
+	expect(lstatSync(staged.executable).isFile()).toBe(true);
+	expect(existsSync(join(staged.root, "reports"))).toBe(false);
+});
+
+test("native release loads the packaged Python replay policy", async () => {
+	const { staged } = await (stagedArchive ??= stagePackageArchive());
+	const replayPolicy = await runBounded(["python3", "-c",
+		"from gate_event_replay import ScrubPolicy, CredentialScreen; ScrubPolicy(); CredentialScreen()"],
+		{ cwd: staged.root, env: { ...process.env, PYTHONPATH: join(staged.root, "scripts"), PYTHONDONTWRITEBYTECODE: "1" }, deadline_s: 10 });
+	expect(replayPolicy.rc, Buffer.from(replayPolicy.stderr).toString()).toBe(0);
+});
+
+test("native release ships and runs the declared SDK judging files", async () => {
+	const { staged } = await (stagedArchive ??= stagePackageArchive());
 	const judging = await runBounded(["python3", "-m", "suite-metrics", "judging-files"], { env: { ...process.env, PYTHONPATH: join(repo, "scripts") }, deadline_s: 10 });
 	expect(judging.rc).toBe(0);
 	const judgingFiles = Buffer.from(judging.stdout).toString().trim().split("\n");
@@ -122,12 +134,6 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(sdkSeed.rc, sdkSeedError).toBe(2);
 	expect(sdkSeed.timed_out || sdkSeed.killed).toBe(false);
 	expect(sdkSeedError).toContain("usage: seed-sdk-source.ts");
-	const dirty = Buffer.from(bytes);
-	dirty[dirty.length - 1030] ^= 1;
-	await expect(stageKitRelease({ archive: dirty, plan, stagingParent: output, probeBinaryInfo: async () => { throw new Error("must not execute unverified archive"); } })).rejects.toThrow("ARCHIVE_DIGEST_MISMATCH");
-	expect(readdirSync(output).filter(name => name.startsWith("kit-stage."))).toHaveLength(1);
-	expect(lstatSync(staged.executable).isFile()).toBe(true);
-	expect(existsSync(join(staged.root, "reports"))).toBe(false);
 });
 
 test("native release rejects a packaged guard with missing policy", async () => {
