@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { existsSync, mkdirSync, readlinkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 import kitUpgradeNotice, {
 	compareSemver,
 	installedRelease,
@@ -219,6 +222,56 @@ test("live: a behind seat gets exactly one notice per release, idle nextTurn, bu
 	expect(sent.length).toBe(1);
 	expect(f.writes.length).toBe(1);
 });
+
+for (const outcome of ["reconciled", "compensated", "compensated during observation"] as const) {
+	test(`NOTICEPOSTCHECK1: a pending candidate never consumes a notice (${outcome})`, async () => {
+		const temp = ownedTmp("notice-postcheck");
+		try {
+			const home = temp.path;
+			const prefix = join(home, ".local", "opt", "omp-kit");
+			const state = join(home, ".local", "state", "omp-kit");
+			const stable = join(prefix, "bin", "omp-kit");
+			const pending = join(state, "kit-update.pending.json");
+			const marker = join(state, `upgrade-notice-${sessionKey("seat-1")}.json`);
+			mkdirSync(join(prefix, "bin"), { recursive: true });
+			mkdirSync(state, { recursive: true });
+			for (const version of ["0.2.57", "0.2.58"]) {
+				const bin = join(prefix, "releases", version, "bin");
+				mkdirSync(bin, { recursive: true });
+				writeFileSync(join(bin, "omp-kit"), "fixture");
+			}
+			writeFileSync(pending, JSON.stringify({ state: "PENDING", scope: "kit", kitVersion: "0.2.57" }));
+			symlinkSync(INSTALLED_58, stable);
+			const complete = () => {
+				if (outcome !== "reconciled") {
+					symlinkSync(INSTALLED_57, `${stable}.next`);
+					renameSync(`${stable}.next`, stable);
+				}
+				unlinkSync(pending);
+			};
+			const { api, sent, handlers } = fakePi(IDLE);
+			await kitUpgradeNotice(api, {
+				selfPath: LOADED, home, isTTY: true,
+				...(outcome === "compensated during observation" ? { readlink: (path: string) => {
+					const target = readlinkSync(path);
+					if (existsSync(pending)) complete();
+					return target;
+				} } : {}),
+			});
+			handlers["session_start"]!(null, IDLE);
+			expect(sent).toEqual([]);
+			expect(existsSync(marker)).toBe(false);
+
+			if (outcome !== "compensated during observation") complete();
+			handlers["tool_execution_end"]!(null, IDLE);
+			handlers["tool_execution_end"]!(null, IDLE);
+			expect(sent).toHaveLength(outcome === "reconciled" ? 1 : 0);
+			expect(existsSync(marker)).toBe(outcome === "reconciled");
+		} finally {
+			temp.cleanup();
+		}
+	});
+}
 
 test("planted (d): busy delivery goes aside, idle goes nextTurn", async () => {
 	const f = files();

@@ -17,16 +17,17 @@
  *
  * Loaded release: this file ships inside releases/<v>/extensions/, so the module's own path names the
  * loaded release. A checkout path (no /releases/<X.Y.Z>/) reads null and never notices. Installed release:
- * the ~/.local/opt/omp-kit/bin/omp-kit symlink target (../releases/<v>/bin/omp-kit), the same link the
- * kit-update job relinks on every install. Sent markers persist per seat under ~/.local/state/omp-kit/
- * so a restarted seat never repeats a release; memory dedupes within the session. Any failure is fail-open
+ * the ~/.local/opt/omp-kit/bin/omp-kit symlink target (../releases/<v>/bin/omp-kit) once no update receipt
+ * is pending. A staged activation uses the same link before postcheck and may be rolled back.
+ * Sent markers persist per seat under ~/.local/state/omp-kit/ so a restarted seat never repeats a
+ * release; memory dedupes within the session. Any failure is fail-open
  * (a notice that cannot be proven is skipped, warned once): blocking the seat on version I/O would be worse
  * than a missed notice, and the sentinel's own start-time comparison still queues the seat.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export const UPGRADE_NOTICE = "UPGRADE_NOTICE";
 
@@ -244,9 +245,11 @@ export default async function kitUpgradeNotice(pi: UpgradeNoticeApi, deps: Upgra
 			const loaded = loadedRelease(deps.selfPath ?? import.meta.url);
 			if (loaded === null) return;
 			const home = deps.home ?? homedir();
+			const link = join(home, ".local", "opt", "omp-kit", "bin", "omp-kit");
+			const readlink = deps.readlink ?? readlinkSync;
 			let target: string;
 			try {
-				target = (deps.readlink ?? readlinkSync)(join(home, ".local", "opt", "omp-kit", "bin", "omp-kit"));
+				target = readlink(link);
 			} catch {
 				return; // no kit symlink: nothing installed to compare, never notice
 			}
@@ -267,6 +270,16 @@ export default async function kitUpgradeNotice(pi: UpgradeNoticeApi, deps: Upgra
 			// today's exact notice.
 			const changelogPath = join(home, ".local", "opt", "omp-kit", "releases", gap.installed, "CHANGELOG.md");
 			const notes: ChangelogNotes = { path: changelogPath, text: (deps.readFile ?? defaultReadFile)(changelogPath) };
+			const stateHome = join(home, ".local", "state");
+			const xdg = deps.home === undefined ? process.env.XDG_STATE_HOME ?? stateHome : stateHome;
+			if (!isAbsolute(xdg) || resolve(xdg) !== xdg) return;
+			// A scheduled or manual update writes its receipt before switching the link and
+			// clears it only after reconciliation or restoration. Re-read the link after the
+			// receipt check: a compensating update may have finished since the first read.
+			const pending = "kit-update.pending.json";
+			if (lstatSync(join(stateHome, "omp-kit", pending), { throwIfNoEntry: false }) !== undefined ||
+				(xdg !== stateHome && lstatSync(join(xdg, "omp-kit", pending), { throwIfNoEntry: false }) !== undefined) ||
+				readlink(link) !== target) return;
 			pi.sendMessage(
 				{
 					customType: "kit-upgrade-notice",
