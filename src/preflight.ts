@@ -11,11 +11,12 @@
  * claim | in-review | close: the tracker's own predicates for the transition, read from `br show --json`; bound to
  * the bead's updated_at.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { envelope, parseFindingLines, unjudged } from "./kitlib/findings.ts";
 import type { Envelope, Finding, PreflightAct } from "./kitlib/findings.ts";
 import { run } from "./kitlib/run.ts";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { validatePriorArtComment } from "./grader-next.ts";
 import { checkPublishedCommits as checkPublishedCommitShas } from "../extensions/kit-published-commit.ts";
 import type { PublicationGit, PublishedCommitCheck } from "../extensions/kit-published-commit.ts";
@@ -83,34 +84,65 @@ async function judge(member: string, args: string[], cwd: string, env: Record<st
 	return [{ gate: name, code: "MEMBER_REFUSED", detail: line || `exit ${r.rc} with no message`, remedy: "read the member's output; convert it to FINDING lines to get every defect at once", fix: null, blocking: true }];
 }
 
-/** Every staged script that answers `--selftest` is run; a failing one is a finding naming it (the missing gate). */
-async function stagedSelftests(repo: string, staged: string[], env: Record<string, string>): Promise<Finding[]> {
-	const out: Finding[] = [];
-	for (const path of staged) {
-		if (!/\.(py|sh)$/.test(path)) continue;
-		const full = join(repo, path);
-		let body: string;
-		try { body = readFileSync(full, "utf8"); } catch { continue; }
-		if (!body.includes("--selftest")) continue;
-		const argv = [...scriptCommand(full, path.endsWith(".py") ? "python3" : "sh"), "--selftest"];
-		const r = await run(argv, { deadline_s: SELFTEST_DEADLINE_S, cwd: repo, env, max_output_bytes: 1024 * 1024 });
-		if (r.rc === 0) continue;
-		const tail = (text(r.stderr) + text(r.stdout)).trim().split("\n").filter(Boolean).slice(-1)[0] ?? "";
-		out.push({ gate: "staged-selftest", code: r.timed_out ? "SELFTEST_TIMEOUT" : "SELFTEST_FAILED", detail: `${path}: ${tail || `exit ${r.rc}`}`,
-			remedy: `run ${argv.join(" ")} and fix it before committing`, fix: argv, blocking: true });
+/** Judge selftests in the pinned staged tree, not in the live worktree. */
+async function stagedSelftests(repo: string, tree: string, staged: string[], env: Record<string, string>): Promise<Finding[]> {
+	const scripts = staged.filter(path => path.endsWith(".py") || path.endsWith(".sh"));
+	if (scripts.length === 0) return [];
+	const scratch = ownedTmp("preflight-staged-selftest");
+	try {
+		const root = join(scratch.path, "src");
+		mkdirSync(root);
+		// Keep the export index outside the projected tree. Loading the pinned
+		// object never writes to the user's real index or borrows working files.
+		const indexEnv = { ...process.env, GIT_INDEX_FILE: join(scratch.path, "index") } as Record<string, string>;
+		for (const args of [["read-tree", tree], ["checkout-index", "--all", `--prefix=${root}/`]]) {
+			const projected = await run(["git", ...args], { cwd: repo, env: indexEnv, deadline_s: 60, max_output_bytes: 1024 * 1024 });
+			if (projected.rc !== 0 || projected.killed || projected.truncated) {
+				return [unjudged("staged-selftest", projected.rc, `cannot export staged tree: ${text(projected.stderr).trim() || args[0]}`)];
+			}
+		}
+		const childEnv: Record<string, string> = { ...env, GIT_CEILING_DIRECTORIES: scratch.path };
+		for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"] as const) delete childEnv[key];
+		const out: Finding[] = [];
+		for (const path of scripts) {
+			const full = join(root, path);
+			if (!lstatSync(full).isFile() || !readFileSync(full, "utf8").includes("--selftest")) continue;
+			const argv = [...scriptCommand(full, path.endsWith(".py") ? "python3" : "sh"), "--selftest"];
+			const r = await run(argv, { deadline_s: SELFTEST_DEADLINE_S, cwd: root, env: childEnv, max_output_bytes: 1024 * 1024 });
+			if (r.rc === 0) continue;
+			const tail = (text(r.stderr) + text(r.stdout)).trim().split("\n").filter(Boolean).at(-1) ?? "";
+			out.push({ gate: "staged-selftest", code: r.timed_out ? "SELFTEST_TIMEOUT" : "SELFTEST_FAILED", detail: `${path}: ${tail || `exit ${r.rc}`}`,
+				remedy: "fix the failing selftest, stage its corrected bytes, and rerun preflight commit", fix: null, blocking: true });
+		}
+		return out;
+	} catch (error) {
+		return [unjudged("staged-selftest", null, error instanceof Error ? error.message : String(error))];
+	} finally {
+		scratch.cleanup();
 	}
-	return out;
 }
 
 export async function preflightCommit(repo: string, options: { message?: string; env?: Record<string, string> } = {}): Promise<Envelope> {
 	const env = { ...process.env, ...(options.env ?? {}) } as Record<string, string>;
+	const base = await git(repo, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+	if (base.rc !== 0 && base.rc !== 1) {
+		return envelope("commit", null, "unknown", [unjudged("git", base.rc, base.err || "could not resolve the commit baseline")]);
+	}
 	const tree = await git(repo, ["write-tree"]);
 	if (tree.rc !== 0) return envelope("commit", null, "unknown", [unjudged("git", tree.rc, tree.err || "write-tree failed")]);
 	const snapshot = `tree:${tree.out}`;
 	const hooks = await git(repo, ["rev-parse", "--git-path", "hooks"]);
 	const hooksDir = resolve(repo, hooks.out);
-	const stagedOut = await git(repo, ["diff", "--cached", "--name-only", "--diff-filter=ACMR"]);
-	const staged = stagedOut.out ? stagedOut.out.split("\n") : [];
+	// The scope and the projected script must come from the same index
+	// snapshot; a second --cached read can silently select a newer index.
+	const stagedArgv = base.rc === 1
+		? ["ls-tree", "-r", "--full-tree", "--name-only", "-z", tree.out]
+		: ["--no-optional-locks", "diff", "--name-only", "--diff-filter=ACMR", "-z", base.out, tree.out, "--"];
+	const stagedOut = await run(["git", ...stagedArgv], { cwd: repo, deadline_s: 60, max_output_bytes: 4 * 1024 * 1024 });
+	if (stagedOut.rc !== 0 || stagedOut.killed || stagedOut.truncated) {
+		return envelope("commit", null, snapshot, [unjudged("git", stagedOut.rc, text(stagedOut.stderr).trim() || "could not enumerate the pinned staged tree")]);
+	}
+	const staged = text(stagedOut.stdout).split("\0").filter(Boolean);
 	const findings: Finding[] = [];
 	if (staged.length === 0) findings.push({ gate: "preflight", code: "NOTHING_STAGED", detail: "the index has no staged change", remedy: "stage the paths you hold, then preflight again", fix: null, blocking: true });
 	for (const member of members(hooksDir, "pre-commit")) findings.push(...await judge(member, [], repo, env));
@@ -124,7 +156,7 @@ export async function preflightCommit(repo: string, options: { message?: string;
 	} else {
 		for (const member of members(hooksDir, "commit-msg")) findings.push(...await judge(member, [message], repo, env));
 	}
-	findings.push(...await stagedSelftests(repo, staged, env));
+	findings.push(...await stagedSelftests(repo, tree.out, staged, env));
 	return envelope("commit", null, snapshot, findings);
 }
 
@@ -178,13 +210,36 @@ async function readBead(repo: string, id: string, env: Record<string, string>, r
 		updated_at: String(b.updated_at ?? ""), acceptance, labels: Array.isArray(b.labels) ? b.labels.map(String) : [], reworkFeedback };
 }
 
+/** A preview distinguishes a missing, already-satisfied, or unreadable native gate. */
+async function reviewerGateForClose(read: TrackerRead, id: string): Promise<"needed" | "not-needed" | "unknown"> {
+	try {
+		const result = await read(["gate", "list", id, "--json"]);
+		if (!result || typeof result !== "object" || !("issue_id" in result) || result.issue_id !== id
+			|| !("current_status" in result) || result.current_status !== "in_review"
+			|| !("gated_transitions" in result) || !Array.isArray(result.gated_transitions)) return "unknown";
+		for (const edge of result.gated_transitions) {
+			if (!edge || typeof edge !== "object" || typeof edge.from !== "string" || typeof edge.to !== "string" || !Array.isArray(edge.gates)) return "unknown";
+			if (edge.from !== "in_review" || edge.to !== "closed") continue;
+			for (const gate of edge.gates) {
+				if (!gate || typeof gate !== "object" || typeof gate.gate !== "string") return "unknown";
+				if (gate.gate !== "min_reviewers") continue;
+				return gate.satisfied === true ? "not-needed" : gate.satisfied === false ? "needed" : "unknown";
+			}
+		}
+		return "not-needed";
+	} catch {
+		return "unknown";
+	}
+}
+
 const PHASE_TAG = /\[(build|landed|live)\]/;
 
 /** The tracker transition predicates, every one judged, none applied. */
 export async function preflightBead(act: Exclude<PreflightAct, "commit" | "publish" | "scratch-release">, repo: string, id: string, options: { actor?: string; env?: Record<string, string>; read?: TrackerRead } = {}): Promise<Envelope> {
 	const env = { ...process.env, ...(options.env ?? {}) } as Record<string, string>;
 	const claim = act === "claim";
-	const read = options.read ?? ((args: string[]) => readTracker(repo, env, args, claim));
+	const read = options.read ?? ((args: string[]) => readTracker(repo, env,
+		act === "close" ? [...args, "--no-auto-import", "--no-auto-flush"] : args, claim));
 	const bead = await readBead(repo, id, env, read, claim);
 	if ("gate" in bead) return envelope(act, id, "unknown", [bead]);
 	const snapshot = `bead:${bead.updated_at || "no-updated-at"}`;
@@ -246,10 +301,19 @@ export async function preflightBead(act: Exclude<PreflightAct, "commit" | "publi
 		if (actor && bead.assignee && bead.assignee === actor) push("SELF_CLOSE", `${id} is assigned to ${actor}`, "a non-author closes; spawn a background verifier and hand the verdict to a peer");
 		const unticked = bead.acceptance.filter(a => !a.checked);
 		if (unticked.length) push("AC_UNTICKED", `${unticked.length} box(es) unticked: ${unticked.map(a => a.index).join(",")}`, "replay each, then tick with --check-acceptance", ["br", "update", id, "--check-acceptance", unticked.map(a => a.index).join(",")]);
-		push("REVIEWER_GATE", "min_reviewers gate needs a pass report", "report the gate under your identity, then close", ["br", "gate", "report", id, "--gate", "min_reviewers", "--provider", `reviewer:${actor ?? "<you>"}`, "--status", "pass", "--to", "closed"]);
+		const reviewerGate = bead.status === "in_review" ? await reviewerGateForClose(read, id) : "unknown";
+		if (reviewerGate === "needed") {
+			const independent = actor !== null && actor !== bead.assignee;
+			push("REVIEWER_GATE", "native workflow requires an outstanding min_reviewers report",
+				"an independent reviewer reports passing evidence under their own identity",
+				independent ? ["br", "gate", "report", id, "--gate", "min_reviewers", "--provider", `reviewer:${actor}`, "--status", "pass", "--to", "closed", "--actor", actor] : null);
+		} else if (reviewerGate === "unknown") {
+			push("REVIEWER_GATE", bead.status !== "in_review" ? "reviewer gate must be checked after reaching in_review" : "native reviewer gate could not be verified",
+				"confirm the configured transition with br gate list before reporting; no report command is established");
+		}
 		push("TRANSITION_COMMENT", "close requires --reason with evidence and --transition-comment", "cite the commands you re-ran and their results, commit shas, verifier family", ["br", "close", id, "--reason", "<command -> result; commit sha>", "--transition-comment", "<same>"]);
 	}
-	// The last two for in-review/close are informational requirements of the act (always present), not defects.
+	// Transition-comment and reviewer guidance describe the act, not blocking findings.
 	for (const x of f) if (x.code === "TRANSITION_COMMENT" || x.code === "REVIEWER_GATE") x.blocking = false;
 	return envelope(act, id, snapshot, f);
 }

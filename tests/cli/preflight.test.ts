@@ -628,6 +628,112 @@ test("every preflight verb is registered at module load (GATEDIAG1 [b] as publis
 	expect(names.filter((n: string) => n.startsWith("preflight") || n === "verify")).toEqual([]);
 });
 
+test.skipIf(!hasBr)("GATEDIAGREPLAY1 real CLI preserves tracker and gives only an applicable reviewer remedy", async () => {
+	const repo = join(base, "gatediag-native");
+	mkdirSync(repo);
+	const br = nativeBr();
+	const db = join(repo, ".beads", "beads.db");
+	const env = { ...process.env, PATH: `${join(br, "..")}:${process.env.PATH ?? ""}`, BEADS_DB: db, BEADS_DIR: join(repo, ".beads"), AGENT_NAME: "" };
+	const cli = new URL("../../src/cli.ts", import.meta.url).pathname;
+	const native = (args: string[]) => brun(["--db", db, ...args, "--actor", FIXTURE_AGENT], repo, env, br);
+	const preview = async (args: string[]) => {
+		const result = await run([process.execPath, cli, ...args, "--json"], { cwd: repo, deadline_s: fixtureDeadlineS(60), env });
+		const out = new TextDecoder().decode(result.stdout);
+		return { rc: result.rc, doc: JSON.parse(out) };
+	};
+	await native(["init", "--prefix", "gd"]);
+	const policy = join(repo, ".beads", "policy.yaml");
+	const workflow = `workflow:
+  strict: true
+  statuses: [open, in_progress, in_review, rework, closed]
+  transitions:
+    initial: [open]
+    open: [in_progress]
+    in_progress: [in_review]
+    in_review: [closed, rework]
+    rework: [in_progress]
+    closed: [open]
+`;
+	writeFileSync(policy, workflow + `  gates:
+    "in_review -> closed":
+      require_all:
+        - min_reviewers: 1
+`);
+	const id = (await native(["create", "GATEDIAGREPLAY1 original close fixture", "--assignee", FIXTURE_AGENT,
+		"--acceptance-criteria", "- [ ] [a] [build] fixture \`true\` -> rc 0", "--silent"])).trim();
+	for (const status of ["in_progress", "in_review", "rework"]) await native(["update", id, "--status", status, "--transition-comment", `fixture ${status}`]);
+	const before = await native(["show", id, "--json", "--no-auto-import", "--no-auto-flush"]);
+	const close = await preview(["preflight", "close", id, "--actor", FIXTURE_AGENT]);
+	expect(close.rc).toBe(1);
+	expect(close.doc.data.findings.map((f: { code: string }) => f.code)).toEqual([
+		"NOT_IN_REVIEW", "SELF_CLOSE", "AC_UNTICKED", "REVIEWER_GATE", "TRANSITION_COMMENT",
+	]);
+	expect(close.doc.data.findings[3].fix).toBeNull();
+	expect(await native(["show", id, "--json", "--no-auto-import", "--no-auto-flush"])).toBe(before);
+
+	for (const status of ["in_progress", "in_review"]) await native(["update", id, "--status", status, "--transition-comment", `fixture ${status}`]);
+	const configured = await preview(["preflight", "close", id, "--actor", "IndependentReviewer"]);
+	const report = configured.doc.data.findings.find((f: { code: string }) => f.code === "REVIEWER_GATE");
+	expect(report?.fix?.slice(0, 4)).toEqual(["br", "gate", "report", id]);
+	await sh([br, "--db", db, ...report.fix.slice(1)], repo, env);
+	const satisfied = await preview(["preflight", "close", id, "--actor", "IndependentReviewer"]);
+	expect(satisfied.doc.data.findings.some((f: { code: string }) => f.code === "REVIEWER_GATE")).toBe(false);
+	writeFileSync(policy, workflow);
+	const unconfigured = await preview(["preflight", "close", id, "--actor", "IndependentReviewer"]);
+	expect(unconfigured.doc.data.findings.some((f: { code: string }) => f.code === "REVIEWER_GATE")).toBe(false);
+
+	await sh(["git", "init", "-q"], repo);
+	const message = join(repo, "commit-message");
+	const selftest = join(repo, "probe.sh");
+	writeFileSync(message, "fixture [test]\n");
+	writeFileSync(selftest, "#!/bin/sh\n# --selftest\nexit 0\n");
+	await sh(["git", "add", "probe.sh"], repo);
+	const clean = await preview(["preflight", "commit", "--message", message]);
+	expect(clean.rc).toBe(0);
+	expect(clean.doc.data.findings).toEqual([]);
+	writeFileSync(selftest, "#!/bin/sh\n# --selftest\nprintf 'planted staged defect\\n'\nexit 1\n");
+	await sh(["git", "add", "probe.sh"], repo);
+	// The selftest must run against the staged bytes, not the now-green worktree.
+	writeFileSync(selftest, "#!/bin/sh\n# --selftest\nexit 0\n");
+	const planted = await preview(["preflight", "commit", "--message", message]);
+	expect(planted.rc).toBe(1);
+	expect(planted.doc.data.findings.map((f: { code: string }) => f.code)).toEqual(["SELFTEST_FAILED"]);
+}, fixtureDeadlineS(60) * 1000);
+
+test("GATEDIAGREPLAY1 a concurrent index edit cannot hide the pinned tree's red staged selftest", async () => {
+	const repo = await repoWithChain("pinned-paths");
+	const realGit = Bun.which("git")!;
+	const bin = join(repo, "owned-bin");
+	mkdirSync(bin);
+	const shim = join(bin, "git");
+	writeFileSync(shim, `#!/bin/sh
+case "$*" in
+  *" write-tree")
+    "$FIXTURE_REAL_GIT" "$@" || exit $?
+    "$FIXTURE_REAL_GIT" -C "$FIXTURE_REPO" update-index --force-remove -- pinned.sh
+    ;;
+  *) exec "$FIXTURE_REAL_GIT" "$@" ;;
+esac
+`, { mode: 0o755 });
+	const message = join(repo, "message");
+	writeFileSync(message, "preflight snapshot [test]\n");
+	writeFileSync(join(repo, "pinned.sh"), "#!/bin/sh\n# --selftest\nprintf 'red in pinned tree\\n'\nexit 1\n");
+	await sh(["git", "add", "pinned.sh"], repo);
+	const pinned = (await sh(["git", "write-tree"], repo)).trim();
+	const result = await run([process.execPath, new URL("../../src/cli.ts", import.meta.url).pathname,
+		"preflight", "commit", "--message", message, "--json"], { cwd: repo, deadline_s: fixtureDeadlineS(60), env: {
+		...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, FIXTURE_REAL_GIT: realGit, FIXTURE_REPO: repo,
+	} });
+	const output = new TextDecoder().decode(result.stdout);
+	expect(result.rc, output + new TextDecoder().decode(result.stderr)).toBe(1);
+	const doc = JSON.parse(output).data;
+	expect(doc.snapshot).toBe(`tree:${pinned}`);
+	expect(await sh([realGit, "diff", "--cached", "--name-only"], repo)).toBe("");
+	const findings = doc.findings as { code: string; detail: string }[];
+	expect(findings.map(f => f.code).sort()).toEqual(["BEAD_TRAILER", "FRAGMENT", "SELFTEST_FAILED"]);
+	expect(findings.find(f => f.code === "SELFTEST_FAILED")?.detail).toContain("red in pinned tree");
+}, fixtureDeadlineS(45) * 1000);
+
 
 test("RETIREGUARD1 flat claims ignore train configuration, retain actual custody and human gates", async () => {
 	const env = { OMP_KIT_FLEET_WATCH_CONFIG: join(base, "unreadable-cut.json") };
