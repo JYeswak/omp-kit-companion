@@ -1138,29 +1138,35 @@ fi
 # for two live suites and signal one worker explicitly. Inspect the other suite's
 # actual scratch before releasing either suite; aggregate judge failure is not proof.
 pool_trap_cases() {
+	pooltrap_judge_seconds=75
 	mkrepo_begin pooltrap
 	# shellcheck disable=SC2016 # literal fixture, evaluated only inside the archive
-	pooltrap_body='python3 - "$0" <<'"'"'PY'"'"'
+	pooltrap_body='python3 - "$0" "$1" "$2" <<'"'"'PY'"'"'
 import json, os, sys, time
 from pathlib import Path
 role = Path(sys.argv[1]).stem
 root = Path.cwd()
+# Delay the second real suite beyond the old 20s observer bound in the focused regression.
+if int(sys.argv[2]):
+    time.sleep(int(sys.argv[2]))
 ready = root / (role + ".pending")
 ready.write_text(json.dumps({
     "pid": os.getpid(), "parent": os.getppid(), "scratch": os.environ["TMPDIR"]}))
 ready.replace(root / (role + ".ready"))
-deadline = time.monotonic() + 60
+deadline = time.monotonic() + int(sys.argv[3])
 while not (root / (role + ".release")).exists():
     if time.monotonic() >= deadline:
         raise SystemExit("POOLTRAP1 fixture release deadline")
     time.sleep(0.02)
 PY'
-	addfile tests/cli/a.test.sh "$pooltrap_body"
-	addfile tests/cli/b.test.sh "$pooltrap_body"
+	addfile tests/cli/a.test.sh "set -- 0 $pooltrap_judge_seconds
+$pooltrap_body"
+	addfile tests/cli/b.test.sh "set -- ${1:-0} $pooltrap_judge_seconds
+$pooltrap_body"
 	mkrepo_commit
 	# Freeze the complete judging closure, not only the script: identity and helpers
 	# must describe the same source snapshot even while another seat edits the runner.
-	if python3 - "$KITROOT_DIR" "$VERDICT" "$repo" "$TMP/pooltrap-judge" "${POOLTRAP_PLANT:-0}" <<'PY'
+	if python3 - "$KITROOT_DIR" "$VERDICT" "$repo" "$TMP/pooltrap-judge" "${POOLTRAP_PLANT:-0}" "$pooltrap_judge_seconds" <<'PY'
 import importlib.util
 import json
 import os
@@ -1196,8 +1202,10 @@ if sys.argv[5] == "1":
     runner.write_text(source)
     print("POOLTRAP1 planted kitlib_tmp inside owned runner copy", flush=True)
 
+judge_seconds = int(sys.argv[6])
+term_seconds = 10
 environment = dict(os.environ, FULL_SUITE_JOBS="2", OMP_KIT_OMP_SRC_FETCH="0",
-                   KITROOT=str(root), FULL_SUITE_TIMEOUT_SECS="75")
+                   KITROOT=str(root), FULL_SUITE_TIMEOUT_SECS=str(judge_seconds))
 results = []
 errors = []
 
@@ -1205,12 +1213,11 @@ def execute():
     try:
         results.append(run(["sh", str(runner), "--repo", str(archive), "--commit", "HEAD",
                             "--archive-dir", str(archive), "--cache-dir", str(archive) + ".cache"],
-                           cwd=str(root), env=environment, deadline_s=90))
+                           cwd=str(root), env=environment, deadline_s=judge_seconds + 15))
     except BaseException as error:
         errors.append(error)
 
-def await_condition(description, predicate, seconds=20):
-    deadline = time.monotonic() + seconds
+def await_condition(description, predicate, deadline):
     while time.monotonic() < deadline:
         value = predicate()
         if value:
@@ -1225,11 +1232,15 @@ def process_field(pid, field):
     return result.stdout.decode().strip() if result.rc == 0 else ""
 
 execution = threading.Thread(target=execute)
+# Both readiness and termination must fit inside the original judge budget.
+# Leave room for the TERM observation and final fixture release.
+judge_deadline = time.monotonic() + judge_seconds
 execution.start()
 observation_complete = False
 try:
     await_condition("both live suites", lambda: all(
-        (archive / (name + ".ready")).is_file() for name in ("a.test", "b.test")))
+        (archive / (name + ".ready")).is_file() for name in ("a.test", "b.test")),
+        judge_deadline - term_seconds - 5)
     first, second = [json.loads((archive / (name + ".ready")).read_text())
                      for name in ("a.test", "b.test")]
     # The shell fixture execs a Python child: its parent is the suite shell,
@@ -1255,7 +1266,8 @@ try:
             return "sibling-removed"
         state = process_field(victim_worker, "stat")
         return "worker-exited" if not state or state.startswith("Z") else ""
-    observed = await_condition("worker TERM delivery", signal_observed, seconds=10)
+    observed = await_condition("worker TERM delivery", signal_observed,
+                               min(judge_deadline, time.monotonic() + term_seconds))
     survived = sibling_scratch.is_dir()
     print("POOLTRAP1 observed=" + observed + " sibling_before=present sibling_after=" +
           ("present" if survived else "REMOVED") + " sibling_worker=" + str(sibling_worker) +
@@ -1265,7 +1277,7 @@ try:
 finally:
     for name in ("a.test", "b.test"):
         (archive / (name + ".release")).touch()
-    execution.join(timeout=95)
+    execution.join(timeout=judge_seconds + 20)
     assert not execution.is_alive(), "bounded judge invocation did not finish"
     if errors:
         raise errors[0]
@@ -1450,10 +1462,13 @@ case "${1-}" in
 		[ "$fail" -eq 0 ]
 		exit $?
 		;;
-	--pooltrap-only|--pooltrap-planted)
+	--pooltrap-only|--pooltrap-planted|--pooltrap-slow-ready)
 		POOLTRAP_PLANT=0
 		[ "$1" != --pooltrap-planted ] || POOLTRAP_PLANT=1
-		pool_trap_cases
+		case $1 in
+			--pooltrap-slow-ready) pool_trap_cases 21 ;;
+			*) pool_trap_cases ;;
+		esac
 		echo "full-suite-verdict-incomplete: pass=$pass fail=$fail"
 		[ "$fail" -eq 0 ]
 		exit $?
