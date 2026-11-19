@@ -104,6 +104,19 @@ function jsonResult(result: NativeRchResult): unknown {
 	try { return JSON.parse(result.stdout); } catch { return null; }
 }
 
+/** Only the selected native child's machine stdout can attest completion. The
+ * remote command's stdout/stderr are both diagnostic streams in this mode. */
+function completedRemoteExit(result: NativeRchResult, worker: string): number | null {
+	if (result.state !== "exited" || result.exit === null || result.stdout === "") return null;
+	let envelope: Record<string, unknown> | null;
+	try { envelope = object(JSON.parse(result.stdout)); } catch { return null; }
+	if (envelope?.api_version !== "1.0" || envelope.location !== "remote" ||
+		envelope.outcome !== "completed" || envelope.worker_id !== worker ||
+		typeof envelope.command !== "string" || envelope.command === "" ||
+		!nonnegativeInteger(envelope.remote_exit_code) || envelope.remote_exit_code !== result.exit) return null;
+	return envelope.remote_exit_code;
+}
+
 /** Kit admission policy on the native memory-pressure number (observed ~5-6 on idle healthy
 workers 2026-10-19; native units/threshold undocumented, read as percent-used: contabo-4 died at
 100% memory in the ompkit-774u.6.1 incident). A worker at or above this refuses new builds.
@@ -309,11 +322,13 @@ export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): 
 		result.worker = worker.id;
 		result.wrapperId = null; result.nativeExit = null; result.compilerExit = null; result.executionObserved = null;
 		result.compilerState = "not-submitted"; result.cleanup = "not-run"; result.after = null; result.nextAgentReady = null;
+		let nativeCompletedExit: number | null = null;
 		try {
-			const child = executor.build(["exec", "--worker", worker.id, ...options, "--", ...input.command], input.signal);
+			const child = executor.build(["exec", "--json", "--worker", worker.id, ...options, "--", ...input.command], input.signal);
 			result.wrapperId = await bindOwnedWrapper(executor, child, worker.id, input.signal);
 			const compiled = await child.result;
 			result.nativeExit = compiled.exit; result.compilerState = compiled.state;
+			nativeCompletedExit = completedRemoteExit(compiled, worker.id);
 		} finally {
 			// Recover only our bound native identity, never a PID lookup after exit or an unrelated journal row.
 			let returned = result.wrapperId ? await returnedLease(executor, result.wrapperId, worker.id) : null;
@@ -326,8 +341,11 @@ export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): 
 				const recovered = await executor.capture(["jobs", "recover", result.wrapperId, "--json"], GC_TIMEOUT_MS);
 				if (recovered.state === "exited" && recovered.exit === 0) returned = await returnedLease(executor, result.wrapperId, worker.id);
 			}
-			result.compilerExit = returned?.compilerExit ?? null;
-			result.executionObserved = returned?.executionObserved ?? null;
+			// Outcome and cleanup are separate authorities: terminal machine output
+			// proves this child executed, not that its lease can be recovered or GC'd.
+			const unboundExecution = result.wrapperId === null && nativeCompletedExit !== null;
+			result.compilerExit = returned?.compilerExit ?? (unboundExecution ? nativeCompletedExit : null);
+			result.executionObserved = returned?.executionObserved ?? (unboundExecution ? true : null);
 			// Do not reclaim against an unbound or still-active remote lease.
 			if (returned?.retired === true) {
 				const reclaimed = await executor.capture(["gc", "--workers", worker.id, "--worker-timeout", "900", "--apply", "--json"], GC_TIMEOUT_MS);
@@ -339,7 +357,7 @@ export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): 
 		// Exit 137 is 128+SIGKILL: the Linux OOM killer's signature on a remote rustc (native RCH-E302
 		// remediation names the OOM killer first). The journal records exit codes, not signals, so a
 		// deliberate SIGKILL is indistinguishable here; the worker name is always attached.
-		const oomKilled = result.compilerState !== "cancelled" && !input.signal?.aborted && result.compilerExit === 137;
+		const oomKilled = result.wrapperId !== null && result.compilerState !== "cancelled" && !input.signal?.aborted && result.compilerExit === 137;
 		if (result.compilerState === "cancelled" || input.signal?.aborted) { result.overall = "CANCELLED"; result.reason = "native_execution_cancelled"; break; }
 		if (oomKilled && attempt === 0) { oomExcluded.add(worker.id); oomWorker = worker.id; continue; }
 		if (oomKilled) { result.overall = "BUILD_FAILED"; result.reason = `oom_killed_on_${worker.id}_exit_137_remote_sigkill`; }
@@ -358,7 +376,7 @@ export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): 
 /** Spawn only the selected native executable, preserving its bytes and argv. Build output goes to stderr so JSON stdout stays parseable. */
 export function nativeRchExecutor(executable: string, cwd: string, env: NodeJS.ProcessEnv = process.env): RchExecutor {
 	const childEnv = Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined));
-	function launch(args: readonly string[], capture: boolean, timeoutMs: number, signal?: AbortSignal): OwnedRchBuild {
+	function launch(args: readonly string[], build: boolean, timeoutMs: number, signal?: AbortSignal): OwnedRchBuild {
 		let handle: SpawnHandle | undefined;
 		let state: NativeRchResult["state"] = "exited", bytes = 0, settled = false, timer: NodeJS.Timeout | undefined;
 		const output: string[] = [];
@@ -369,10 +387,15 @@ export function nativeRchExecutor(executable: string, cwd: string, env: NodeJS.P
 		};
 		const arm = () => { clearTimeout(timer); timer = setTimeout(() => stop("timeout"), timeoutMs); };
 		const executor = bunCapExec({ captureOutput: false, onOutput: (stream, text) => {
-			if (!capture) { arm(); process.stderr.write(text); return; }
-			if (stream !== "stdout" || state === "output-limit") return;
+			if (build) {
+				arm();
+				if (stream === "stderr") { process.stderr.write(text); return; }
+			}
+			if (stream !== "stdout" || bytes > MAX_METADATA_BYTES) return;
 			bytes += Buffer.byteLength(text);
-			if (bytes > MAX_METADATA_BYTES) stop("output-limit"); else output.push(text);
+			if (bytes <= MAX_METADATA_BYTES) output.push(text);
+			else if (build) output.length = 0; // Lose unbounded metadata, not the running build or its log.
+			else stop("output-limit");
 		} });
 		try {
 			handle = executor.spawn([executable, ...NATIVE_SAFETY, ...args], { cwd, env: childEnv });
@@ -383,7 +406,7 @@ export function nativeRchExecutor(executable: string, cwd: string, env: NodeJS.P
 		signal?.addEventListener("abort", aborted, { once: true });
 		const result = handle.wait().then(({ code }) => {
 			settled = true; clearTimeout(timer); signal?.removeEventListener("abort", aborted);
-			return { exit: code, state, stdout: capture && bytes <= MAX_METADATA_BYTES ? output.join("") : "" };
+			return { exit: code, state, stdout: bytes <= MAX_METADATA_BYTES ? output.join("") : "" };
 		});
 		arm();
 		if (signal?.aborted) aborted();
@@ -391,7 +414,7 @@ export function nativeRchExecutor(executable: string, cwd: string, env: NodeJS.P
 		return { pid: handle.pid, alive: () => handle?.alive?.() === true, result };
 	}
 	return {
-		capture: (args, timeoutMs, signal) => launch(args, true, timeoutMs, signal).result,
-		build: (args, signal) => launch(args, false, BUILD_IDLE_TIMEOUT_MS, signal),
+		capture: (args, timeoutMs, signal) => launch(args, false, timeoutMs, signal).result,
+		build: (args, signal) => launch(args, true, BUILD_IDLE_TIMEOUT_MS, signal),
 	};
 }

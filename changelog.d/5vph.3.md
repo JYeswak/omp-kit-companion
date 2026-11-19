@@ -1,0 +1,1 @@
+- `omp-kit rch lease` now reports the compiler exit from a completed native remote build even when its local lease could not be bound. An unbound result still does not authorize cancellation, recovery, or garbage collection.

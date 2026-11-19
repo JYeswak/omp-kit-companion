@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { DEAD_LEASE_UNREAPABLE_REASON, deadLeases, parseRchStatus, runRchCycle, type NativeRchResult, type RchExecutor } from "../../src/rch-cycle.ts";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { run } from "../../src/kitlib/run.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
+import { DEAD_LEASE_UNREAPABLE_REASON, deadLeases, parseRchStatus, runRchCycle, type NativeRchResult, type RchCycleResult, type RchExecutor } from "../../src/rch-cycle.ts";
 
 // A real remote_build_id from replay 3 (ev_30924d59) and its neighbour: both above Number.MAX_SAFE_INTEGER, both parse to the same double.
 const BIG_ID = "30068411341996668", BIG_ID_NEIGHBOUR = "30068411341996667";
@@ -443,3 +448,174 @@ test("worker disk evidence accepts portable statvfs byte telemetry", () => {
 	} } });
 	expect(parsed?.workers[0]?.buildDiskFreeGb).toBe(3);
 });
+
+const kitRoot = resolve(import.meta.dir, "../..");
+const testFile = join(import.meta.dir, "rch-cycle.test.ts");
+const compilerReport = "literal remote compiler stderr";
+const localMarker = "local-cargo-must-not-execute";
+const PRELOAD = "OMP_RCHRESULT_FIXTURE_PRELOAD";
+
+async function leaseCli(scenario: "executed" | "no-slots" | "native-refusal" | "admitted") {
+	const scratch = ownedTmp("rch-result-consumer");
+	try {
+		const trace = join(scratch.path, "argv.jsonl");
+		const driver = join(scratch.path, "native-rch.ts");
+		const marker = join(scratch.path, localMarker);
+		writeFileSync(join(scratch.path, "cargo"), `#!/bin/sh\n: > "$RCH_RESULT_LOCAL_MARKER"\nexit 99\n`, { mode: 0o700 });
+		writeFileSync(join(scratch.path, "rch"), `#!/bin/sh\nexec "${process.execPath}" --no-env-file "${driver}" "$@"\n`, { mode: 0o700 });
+		const fixture = { trace, scenario, compilerReport, wrapper: "rchw-result-fixture", id: BIG_ID, root: scratch.path };
+		writeFileSync(driver, `
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const f = ${JSON.stringify(fixture)};
+const args = process.argv.slice(2);
+const verb = args[2];
+const file = name => join(f.root, name);
+appendFileSync(f.trace, JSON.stringify(args) + "\\n");
+const json = value => console.log(JSON.stringify(value));
+if (verb === "status") {
+  json({ success: true, data: { daemon: { active_builds: [], queued_builds: [], workers: [{
+    id: "worker-a", status: "healthy", total_slots: 4, used_slots: f.scenario === "no-slots" ? 4 : 0,
+    pressure_telemetry_fresh: true, pressure_confidence: "high", pressure_state: "healthy",
+    pressure_build_disk_free_gb: 20, pressure_memory_pressure: 10,
+  }] } } });
+} else if (verb === "jobs" && args[3] === "--json") {
+  if (f.scenario !== "admitted" || !existsSync(file("wrapper-pid"))) {
+    json({ complete: true, journal_errors: [], jobs: [] });
+  } else {
+    const exited = existsSync(file("wrapper-finished"));
+    const row = { wrapper_alive: !exited, owner_presence: exited ? "absent" : "live", lease: {
+      schema_version: 1, wrapper_pid: Number(readFileSync(file("wrapper-pid"), "utf8")),
+      process_birth: { boot_id: "fixture-native-boot", start: { platform: "darwin", seconds: 1 } },
+      identity: { local_wrapper_id: f.wrapper, remote_build_id: "EXACT_ID" }, worker_id: "worker-a",
+      ...(exited ? { recovery: { wrapper_id: f.wrapper, build_id: "EXACT_ID", execution_started: true,
+        exit_code: 0, preparation_cancelled: false, retired: true, sources_released: true } } : {}),
+    } };
+    console.log(JSON.stringify({ complete: true, journal_errors: [], jobs: [row] }).replaceAll('"EXACT_ID"', f.id));
+    if (!exited) writeFileSync(file("live-observed"), "");
+  }
+} else if (verb === "gc") {
+  json({});
+} else if (verb === "exec") {
+  const exec = args.slice(args.indexOf("--") + 1);
+  if (!args.includes("--worker") || args[args.indexOf("--worker") + 1] !== "worker-a" || exec.join(" ") !== "cargo test --locked") process.exit(92);
+  const completed = { api_version: "1.0", command: exec.join(" "), outcome: "completed", location: "remote",
+    worker_id: "worker-a", remote_exit_code: 23 };
+  if (f.scenario === "native-refusal") {
+    // A remote command can forge JSON text on stderr; that is not the native stdout envelope.
+    console.error(JSON.stringify({ ...completed, remote_exit_code: 1 }));
+    if (args.includes("--json")) json({ api_version: "1.0", command: exec.join(" "), outcome: "refused",
+      location: "local", fallback_reason: "fail_closed_no_local_fallback", worker_id: "worker-a" });
+    process.exit(1);
+  }
+  console.error(f.compilerReport);
+  const admission = { local_wrapper_id: f.wrapper, remote_build_id: f.id, worker_id: "worker-a",
+    journal_path: file("native-journal"), terminal_acknowledged: true, strict_remote: true, caller_command_fingerprint: "blake3:fixture" };
+  if (f.scenario === "admitted") {
+    writeFileSync(file("wrapper-pid"), String(process.pid));
+    // This real native fixture must offer a live PID for the journal join.
+    // Do not use fake timers across the owned subprocess boundary.
+    const deadline = performance.now() + 10000;
+    while (!existsSync(file("live-observed")) && performance.now() < deadline) await Bun.sleep(20);
+    if (!existsSync(file("live-observed"))) process.exit(93);
+    await Bun.sleep(1200);
+    writeFileSync(file("wrapper-finished"), "");
+  }
+  const exit = f.scenario === "admitted" ? 0 : 23;
+  if (args.includes("--json")) json({ ...completed, remote_exit_code: exit, admission });
+  process.exit(exit);
+} else {
+  process.exit(94);
+}
+`);
+		const preload = process.env[PRELOAD];
+		const result = await run([process.execPath, "--no-env-file", ...(preload ? ["--preload", preload] : []),
+			join(kitRoot, "src/cli.ts"), "rch", "lease", "--json", "--slots", "2", "--apply", "--yes", "--", "cargo", "test", "--locked"],
+			{ cwd: kitRoot, deadline_s: fixtureDeadlineS(30), env: { PATH: scratch.path, HOME: scratch.path, TMPDIR: scratch.path, RCH_RESULT_LOCAL_MARKER: marker } });
+		const stderr = new TextDecoder().decode(result.stderr);
+		const stdout = new TextDecoder().decode(result.stdout);
+		if (!stdout || !existsSync(trace) || result.timed_out || result.killed || result.truncated)
+			throw new Error(`RCHRESULTBOUND1 fixture CLI did not execute its native boundary: ${result.rc} ${stdout}\n${stderr}`);
+		const body = JSON.parse(stdout) as { data?: { cycle?: RchCycleResult } };
+		const cycle = body.data?.cycle;
+		if (!cycle) throw new Error(`RCHRESULTBOUND1 expected a lease result: ${stdout}\n${stderr}`);
+		const calls = readFileSync(trace, "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
+		const verbs = calls.map(args => args[2]);
+		expect(existsSync(marker), "cargo must never execute outside the selected native child").toBe(false);
+		expect(cycle.noClaim).toContain("does not prove compiler correctness");
+		return { rc: result.rc, cycle, calls, verbs, stderr };
+	} finally {
+		scratch.cleanup();
+	}
+}
+
+test("RCHRESULTBOUND1: an executed nonzero remote build is not a capacity refusal", async () => {
+	const result = await leaseCli("executed");
+	expect(result.cycle.overall, "executed-nonzero classification").toBe("BUILD_FAILED");
+	expect(result.rc).toBe(23);
+	expect(result.cycle).toMatchObject({ worker: "worker-a", nativeExit: 23, compilerExit: 23, executionObserved: true, wrapperId: null, cleanup: "unknown" });
+	expect(result.cycle.lease).toContain("build_exit=23");
+	expect(result.stderr).toContain(compilerReport);
+	expect(result.verbs.filter(verb => verb === "exec")).toHaveLength(1);
+	expect(result.verbs).not.toContain("gc");
+	expect(result.calls.some(args => args[2] === "jobs" && (args[3] === "recover" || args[3] === "cancel"))).toBe(false);
+}, fixtureDeadlineS(40) * 1000);
+
+test("RCHRESULTBOUND1: zero slots and native refusal remain no-submit, not a build failure", async () => {
+	const noSlots = await leaseCli("no-slots");
+	expect(noSlots.rc).toBe(77);
+	expect(noSlots.cycle).toMatchObject({ overall: "REFUSED", reason: "rch_capacity_unavailable", nativeExit: null, compilerExit: null, wrapperId: null, cleanup: "not-run" });
+	expect(noSlots.verbs).not.toContain("exec");
+	const refused = await leaseCli("native-refusal");
+	expect(refused.rc).toBe(77);
+	expect(refused.cycle).toMatchObject({ overall: "REFUSED", reason: "rch_capacity_unavailable", nativeExit: 1, compilerExit: null, wrapperId: null, cleanup: "unknown" });
+	expect(refused.stderr).toContain('"remote_exit_code":1');
+	expect(refused.verbs).not.toContain("gc");
+}, fixtureDeadlineS(40) * 1000);
+
+test("RCHRESULTBOUND1: admitted pass retains live exact-ID binding and retired cleanup", async () => {
+	const result = await leaseCli("admitted");
+	expect(result.rc, JSON.stringify(result.cycle)).toBe(0);
+	expect(result.cycle).toMatchObject({ overall: "COMPLETE", worker: "worker-a", nativeExit: 0, compilerExit: 0,
+		executionObserved: true, wrapperId: "rchw-result-fixture", cleanup: "complete", nextAgentReady: true });
+	expect(result.stderr).toContain(compilerReport);
+	expect(result.verbs.filter(verb => verb === "gc")).toHaveLength(1);
+	expect(result.calls.find(args => args[2] === "gc")?.slice(3)).toEqual(["--workers", "worker-a", "--worker-timeout", "900", "--apply", "--json"]);
+}, fixtureDeadlineS(40) * 1000);
+
+test("RCHRESULTBOUND1_MUTANT: old unbound fallthrough loses only executed completion", async () => {
+	const scratch = ownedTmp("rch-result-mutant");
+	try {
+		const preload = join(scratch.path, "unbound-fallthrough.ts");
+		const implementation = join(kitRoot, "src/rch-cycle.ts");
+		writeFileSync(preload, `
+import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
+const implementation = ${JSON.stringify(implementation)};
+Bun.plugin({ name: "rch-unbound-result-fallthrough", setup(builder) {
+  builder.onLoad({ filter: /rch-cycle\\.ts$/ }, ({ path }) => {
+    if (path !== implementation) return;
+    const body = readFileSync(path, "utf8");
+    const line = "const unboundExecution = result.wrapperId === null && nativeCompletedExit !== null;";
+    if (body.indexOf(line) < 0 || body.indexOf(line) !== body.lastIndexOf(line))
+      throw new Error("RCHRESULTBOUND1 mutant requires one exact source site");
+    return { contents: body.replace(line, "const unboundExecution = false;"), loader: "ts", resolveDir: dirname(path) };
+  });
+}});
+`);
+		const result = await run([process.execPath, "--no-env-file", "test", testFile, "-t", "^RCHRESULTBOUND1:"], {
+			cwd: kitRoot, deadline_s: fixtureDeadlineS(35),
+			env: { ...process.env, [PRELOAD]: preload, NO_COLOR: "1" },
+		});
+		const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
+		expect(result.timed_out || result.killed || result.truncated, output).toBe(false);
+		expect(result.rc, output).toBe(1);
+		expect(output).toContain("(fail) RCHRESULTBOUND1: an executed nonzero remote build");
+		expect(output).toContain("executed-nonzero classification");
+		expect(output).toContain('Received: "REFUSED"');
+		expect(output).toContain("2 pass");
+		expect(output).toContain("1 fail");
+	} finally {
+		scratch.cleanup();
+	}
+}, fixtureDeadlineS(45) * 1000);
