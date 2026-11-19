@@ -73,6 +73,8 @@ export interface DeadLeaseScope {
 	excludeWrapperIds?: readonly string[];
 	staleMs?: number;
 }
+type AdmissionBlockReason = "worker_unhealthy" | "pressure_critical" | "pressure_unproven";
+
 export interface RchCycleResult {
 	overall: "PLAN" | "REFUSED" | "COMPLETE" | "BUILD_FAILED" | "CANCELLED" | "UNREADY";
 	reason: string;
@@ -85,6 +87,8 @@ export interface RchCycleResult {
 	cleanup: "not-run" | "complete" | "failed" | "unknown";
 	nextAgentReady: boolean | null;
 	before: RchStatus | null;
+	/** Native health/pressure blockers at the final capacity refusal, if observed. */
+	admissionBlocks?: { worker: string; reason: AdmissionBlockReason }[];
 	after: RchStatus | null;
 	wrapperId: string | null;
 	/** Dead-owner leases on the selected worker; null when the native journal could not be read or no worker was in scope. */
@@ -143,8 +147,12 @@ export function parseRchStatus(value: unknown): RchStatus | null {
 	}
 	return { workers, active: daemon.active_builds.length, queued: daemon.queued_builds.length };
 }
-function trusted(worker: RchWorker): boolean {
-	return worker.status === "healthy" && worker.fresh && worker.confidence === "high" && (worker.pressure === "healthy" || worker.pressure === "warning");
+/** One predicate drives worker selection, GC scope, and refusal evidence. */
+function trustBlock(worker: RchWorker): AdmissionBlockReason | null {
+	if (worker.status !== "healthy") return "worker_unhealthy";
+	if (!worker.fresh || worker.confidence !== "high") return "pressure_unproven";
+	if (worker.pressure !== "healthy" && worker.pressure !== "warning") return worker.pressure === "critical" ? "pressure_critical" : "pressure_unproven";
+	return null;
 }
 /** Slot count alone admitted two heavy builds onto one worker and both died (ompkit-774u.6.1).
 A worker is admissible only with known, non-exhausted build disk and known memory pressure below
@@ -155,7 +163,7 @@ function choose(status: RchStatus, input: RchCycleInput, exclude?: ReadonlySet<s
 	for (const worker of status.workers) {
 		if (input.worker && worker.id !== input.worker) continue;
 		if (exclude?.has(worker.id)) continue;
-		if (!trusted(worker) || worker.free < input.requiredSlots || worker.buildDiskFreeGb === null || !(worker.buildDiskFreeGb > 0)) continue;
+		if (trustBlock(worker) !== null || worker.free < input.requiredSlots || worker.buildDiskFreeGb === null || !(worker.buildDiskFreeGb > 0)) continue;
 		if (worker.memoryPressure === null || worker.memoryPressure >= MEMORY_PRESSURE_REFUSE) continue;
 		if (worker.memoryPressure < bestPressure) { best = worker; bestPressure = worker.memoryPressure; }
 	}
@@ -293,9 +301,9 @@ export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): 
 			return finish();
 		}
 		let worker = choose(snapshot, input, oomExcluded);
-		const status = snapshot;
+		let admissionStatus = snapshot;
 		// Dead-owner leases hold pool slots; look on the admissible worker, or the trusted worker whose slots they may be holding.
-		const scope = worker ?? snapshot.workers.find(row => (!input.worker || row.id === input.worker) && trusted(row));
+		const scope = worker ?? snapshot.workers.find(row => (!input.worker || row.id === input.worker) && trustBlock(row) === null);
 		if (!input.apply) {
 			if (scope) result.deadLeases = await reportDeadLeases(executor, scope.id, input.signal);
 			result.overall = "PLAN"; result.reason = worker ? "admissible_snapshot_not_a_reservation" : "rch_capacity_unavailable";
@@ -305,18 +313,26 @@ export async function runRchCycle(input: RchCycleInput, executor: RchExecutor): 
 		if (scope) result.deadLeases = await reportDeadLeases(executor, scope.id, input.signal);
 		if (!worker || worker.pressure === "warning") {
 			// Native policy decides eligibility. A zero-byte reclaim is not restored capacity.
-			const candidate = worker ?? status.workers.find(row => (!input.worker || row.id === input.worker) && trusted(row));
+			const candidate = worker ?? scope;
 			if (candidate) {
 				const reclaimed = await executor.capture(["gc", "--workers", candidate.id, "--worker-timeout", "900", "--apply", "--json"], GC_TIMEOUT_MS, input.signal);
 				if (reclaimed.state !== "exited" || reclaimed.exit !== 0) { result.reason = "rch_pre_gc_failed"; return finish(); }
 				const fresh = parseRchStatus(jsonResult(await executor.capture(["status", "--json"], CONTROL_TIMEOUT_MS, input.signal)));
 				if (!fresh) { result.reason = "rch_status_unavailable"; return finish(); }
+				admissionStatus = fresh;
 				worker = choose(fresh, input, oomExcluded);
 			}
 		}
 		if (!worker) {
 			if (oomWorker) { result.overall = "BUILD_FAILED"; result.reason = `oom_killed_on_${oomWorker}_exit_137_no_retry_worker`; }
-			else result.reason = "rch_capacity_unavailable";
+			else {
+				result.reason = "rch_capacity_unavailable";
+				for (const row of admissionStatus.workers) {
+					if (input.worker && row.id !== input.worker) continue;
+					const reason = trustBlock(row);
+					if (reason !== null) (result.admissionBlocks ??= []).push({ worker: row.id, reason });
+				}
+			}
 			return finish();
 		}
 		result.worker = worker.id;

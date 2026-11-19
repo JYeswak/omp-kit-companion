@@ -455,7 +455,29 @@ const compilerReport = "literal remote compiler stderr";
 const localMarker = "local-cargo-must-not-execute";
 const PRELOAD = "OMP_RCHRESULT_FIXTURE_PRELOAD";
 
-async function leaseCli(scenario: "executed" | "no-slots" | "native-refusal" | "admitted") {
+interface NativeWorkerStatusFixture {
+	id: string;
+	status: "healthy" | "degraded" | "unreachable";
+	total_slots: number;
+	used_slots: number;
+	pressure_telemetry_fresh: boolean;
+	pressure_confidence: string;
+	pressure_state?: string;
+	pressure_disk_free_ratio?: number;
+	pressure_build_disk_free_gb: number;
+	pressure_memory_pressure: number;
+}
+
+const healthyNativeWorker: NativeWorkerStatusFixture = {
+	id: "worker-a", status: "healthy", total_slots: 4, used_slots: 0,
+	pressure_telemetry_fresh: true, pressure_confidence: "high", pressure_state: "healthy",
+	pressure_build_disk_free_gb: 20, pressure_memory_pressure: 10,
+};
+
+async function leaseCli(
+	scenario: "executed" | "no-slots" | "native-refusal" | "admitted",
+	workers: NativeWorkerStatusFixture[] = [{ ...healthyNativeWorker, used_slots: scenario === "no-slots" ? 4 : 0 }],
+) {
 	const scratch = ownedTmp("rch-result-consumer");
 	try {
 		const trace = join(scratch.path, "argv.jsonl");
@@ -463,7 +485,7 @@ async function leaseCli(scenario: "executed" | "no-slots" | "native-refusal" | "
 		const marker = join(scratch.path, localMarker);
 		writeFileSync(join(scratch.path, "cargo"), `#!/bin/sh\n: > "$RCH_RESULT_LOCAL_MARKER"\nexit 99\n`, { mode: 0o700 });
 		writeFileSync(join(scratch.path, "rch"), `#!/bin/sh\nexec "${process.execPath}" --no-env-file "${driver}" "$@"\n`, { mode: 0o700 });
-		const fixture = { trace, scenario, compilerReport, wrapper: "rchw-result-fixture", id: BIG_ID, root: scratch.path };
+		const fixture = { trace, scenario, workers, compilerReport, wrapper: "rchw-result-fixture", id: BIG_ID, root: scratch.path };
 		writeFileSync(driver, `
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -474,11 +496,7 @@ const file = name => join(f.root, name);
 appendFileSync(f.trace, JSON.stringify(args) + "\\n");
 const json = value => console.log(JSON.stringify(value));
 if (verb === "status") {
-  json({ success: true, data: { daemon: { active_builds: [], queued_builds: [], workers: [{
-    id: "worker-a", status: "healthy", total_slots: 4, used_slots: f.scenario === "no-slots" ? 4 : 0,
-    pressure_telemetry_fresh: true, pressure_confidence: "high", pressure_state: "healthy",
-    pressure_build_disk_free_gb: 20, pressure_memory_pressure: 10,
-  }] } } });
+  json({ success: true, data: { daemon: { active_builds: [], queued_builds: [], workers: f.workers } } });
 } else if (verb === "jobs" && args[3] === "--json") {
   if (f.scenario !== "admitted" || !existsSync(file("wrapper-pid"))) {
     json({ complete: true, journal_errors: [], jobs: [] });
@@ -487,7 +505,7 @@ if (verb === "status") {
     const row = { wrapper_alive: !exited, owner_presence: exited ? "absent" : "live", lease: {
       schema_version: 1, wrapper_pid: Number(readFileSync(file("wrapper-pid"), "utf8")),
       process_birth: { boot_id: "fixture-native-boot", start: { platform: "darwin", seconds: 1 } },
-      identity: { local_wrapper_id: f.wrapper, remote_build_id: "EXACT_ID" }, worker_id: "worker-a",
+      identity: { local_wrapper_id: f.wrapper, remote_build_id: "EXACT_ID" }, worker_id: readFileSync(file("wrapper-worker"), "utf8"),
       ...(exited ? { recovery: { wrapper_id: f.wrapper, build_id: "EXACT_ID", execution_started: true,
         exit_code: 0, preparation_cancelled: false, retired: true, sources_released: true } } : {}),
     } };
@@ -498,20 +516,22 @@ if (verb === "status") {
   json({});
 } else if (verb === "exec") {
   const exec = args.slice(args.indexOf("--") + 1);
-  if (!args.includes("--worker") || args[args.indexOf("--worker") + 1] !== "worker-a" || exec.join(" ") !== "cargo test --locked") process.exit(92);
+  const worker = args[args.indexOf("--worker") + 1];
+  if (!args.includes("--worker") || !f.workers.some(row => row.id === worker) || exec.join(" ") !== "cargo test --locked") process.exit(92);
   const completed = { api_version: "1.0", command: exec.join(" "), outcome: "completed", location: "remote",
-    worker_id: "worker-a", remote_exit_code: 23 };
+    worker_id: worker, remote_exit_code: 23 };
   if (f.scenario === "native-refusal") {
     // A remote command can forge JSON text on stderr; that is not the native stdout envelope.
     console.error(JSON.stringify({ ...completed, remote_exit_code: 1 }));
     if (args.includes("--json")) json({ api_version: "1.0", command: exec.join(" "), outcome: "refused",
-      location: "local", fallback_reason: "fail_closed_no_local_fallback", worker_id: "worker-a" });
+      location: "local", fallback_reason: "fail_closed_no_local_fallback" });
     process.exit(1);
   }
   console.error(f.compilerReport);
-  const admission = { local_wrapper_id: f.wrapper, remote_build_id: f.id, worker_id: "worker-a",
+  const admission = { local_wrapper_id: f.wrapper, remote_build_id: f.id, worker_id: worker,
     journal_path: file("native-journal"), terminal_acknowledged: true, strict_remote: true, caller_command_fingerprint: "blake3:fixture" };
   if (f.scenario === "admitted") {
+    writeFileSync(file("wrapper-worker"), worker);
     writeFileSync(file("wrapper-pid"), String(process.pid));
     // This real native fixture must offer a live PID for the journal join.
     // Do not use fake timers across the owned subprocess boundary.
@@ -583,39 +603,109 @@ test("RCHRESULTBOUND1: admitted pass retains live exact-ID binding and retired c
 	expect(result.calls.find(args => args[2] === "gc")?.slice(3)).toEqual(["--workers", "worker-a", "--worker-timeout", "900", "--apply", "--json"]);
 }, fixtureDeadlineS(40) * 1000);
 
-test("RCHRESULTBOUND1_MUTANT: old unbound fallthrough loses only executed completion", async () => {
+/** Replay the exact consumer cases with one module changed in the child process only. */
+async function runRchMutant(filter: string, line: string, replacement: string): Promise<string> {
 	const scratch = ownedTmp("rch-result-mutant");
 	try {
-		const preload = join(scratch.path, "unbound-fallthrough.ts");
+		const preload = join(scratch.path, "rch-cycle-variant.ts");
 		const implementation = join(kitRoot, "src/rch-cycle.ts");
 		writeFileSync(preload, `
 import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 const implementation = ${JSON.stringify(implementation)};
-Bun.plugin({ name: "rch-unbound-result-fallthrough", setup(builder) {
+Bun.plugin({ name: "rch-cycle-source-variant", setup(builder) {
   builder.onLoad({ filter: /rch-cycle\\.ts$/ }, ({ path }) => {
     if (path !== implementation) return;
     const body = readFileSync(path, "utf8");
-    const line = "const unboundExecution = result.wrapperId === null && nativeCompletedExit !== null;";
+    const line = ${JSON.stringify(line)};
     if (body.indexOf(line) < 0 || body.indexOf(line) !== body.lastIndexOf(line))
-      throw new Error("RCHRESULTBOUND1 mutant requires one exact source site");
-    return { contents: body.replace(line, "const unboundExecution = false;"), loader: "ts", resolveDir: dirname(path) };
+      throw new Error("RCH cycle mutant requires one exact source site");
+    return { contents: body.replace(line, ${JSON.stringify(replacement)}), loader: "ts", resolveDir: dirname(path) };
   });
 }});
 `);
-		const result = await run([process.execPath, "--no-env-file", "test", testFile, "-t", "^RCHRESULTBOUND1:"], {
+		const result = await run([process.execPath, "--no-env-file", "test", testFile, "-t", filter], {
 			cwd: kitRoot, deadline_s: fixtureDeadlineS(35),
 			env: { ...process.env, [PRELOAD]: preload, NO_COLOR: "1" },
 		});
 		const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
 		expect(result.timed_out || result.killed || result.truncated, output).toBe(false);
 		expect(result.rc, output).toBe(1);
-		expect(output).toContain("(fail) RCHRESULTBOUND1: an executed nonzero remote build");
-		expect(output).toContain("executed-nonzero classification");
-		expect(output).toContain('Received: "REFUSED"');
-		expect(output).toContain("2 pass");
-		expect(output).toContain("1 fail");
+		return output;
 	} finally {
 		scratch.cleanup();
 	}
+}
+
+test("RCHRESULTBOUND1_MUTANT: old unbound fallthrough loses only executed completion", async () => {
+	const output = await runRchMutant("^RCHRESULTBOUND1:",
+		"const unboundExecution = result.wrapperId === null && nativeCompletedExit !== null;",
+		"const unboundExecution = false;");
+	expect(output).toContain("(fail) RCHRESULTBOUND1: an executed nonzero remote build");
+	expect(output).toContain("executed-nonzero classification");
+	expect(output).toContain('Received: "REFUSED"');
+	expect(output).toContain("2 pass");
+	expect(output).toContain("1 fail");
 }, fixtureDeadlineS(45) * 1000);
+
+const pressureWorker = { ...healthyNativeWorker, pressure_build_disk_free_gb: 4, pressure_disk_free_ratio: 0.04 };
+const slowerHealthy = { ...healthyNativeWorker, id: "worker-b", pressure_memory_pressure: 20 };
+const degradedWorker = { ...healthyNativeWorker, status: "degraded" } as const;
+const unreachableWorker = { ...healthyNativeWorker, status: "unreachable" } as const;
+
+for (const [name, workers, expected] of [
+	["critical at exactly 4% free", [{ ...pressureWorker, pressure_state: "critical" }], ["pressure_critical"]],
+	["missing pressure", [{ ...healthyNativeWorker, pressure_state: undefined }], ["pressure_unproven"]],
+	["unknown pressure", [{ ...healthyNativeWorker, pressure_state: "telemetry_gap" }], ["pressure_unproven"]],
+	["only unhealthy", [degradedWorker, { ...unreachableWorker, id: "worker-c" }], ["worker_unhealthy", "worker_unhealthy"]],
+] satisfies [string, NativeWorkerStatusFixture[], string[]][]) {
+	test(`RCHADMISSIONFAILCLOSED1: ${name} refuses before submission`, async () => {
+		const result = await leaseCli("admitted", workers);
+		const submitted = result.calls.filter(args => args[2] === "exec").map(args => args[args.indexOf("--worker") + 1]);
+		expect(submitted, `${name}: no native exec`).toEqual([]);
+		expect(result.rc).toBe(77);
+		expect(result.cycle).toMatchObject({ overall: "REFUSED", reason: "rch_capacity_unavailable", worker: null,
+			compilerState: "not-submitted", nativeExit: null, compilerExit: null, cleanup: "not-run" });
+		expect(result.verbs).not.toContain("gc");
+		expect(result.cycle).toMatchObject({
+			admissionBlocks: workers.map((worker, index) => ({ worker: worker.id, reason: expected[index] })),
+		});
+		if (name === "critical at exactly 4% free") {
+			expect(result.cycle.before?.workers[0]).toMatchObject({ status: "healthy", pressure: "critical", buildDiskFreeGb: 4, free: 4, memoryPressure: 10 });
+		}
+	}, fixtureDeadlineS(40) * 1000);
+}
+
+for (const worker of [degradedWorker, unreachableWorker]) {
+	test(`RCHADMISSIONFAILCLOSED1: ${worker.status} plus healthy submits only to healthy`, async () => {
+		const result = await leaseCli("admitted", [worker, slowerHealthy]);
+		const submitted = result.calls.filter(args => args[2] === "exec").map(args => args[args.indexOf("--worker") + 1]);
+		expect(submitted, `${worker.status}: healthy worker only`).toEqual(["worker-b"]);
+		expect(result.rc).toBe(0);
+		expect(result.cycle).toMatchObject({ overall: "COMPLETE", worker: "worker-b", compilerExit: 0, cleanup: "complete", nextAgentReady: true });
+		expect(result.calls.filter(args => args[2] === "gc").map(args => args[4])).toEqual(["worker-b"]);
+	}, fixtureDeadlineS(40) * 1000);
+}
+
+test("RCHADMISSIONFAILCLOSED1_MUTANT: isolated omissions admit exactly the wrong workers", async () => {
+	const filter = "^RCHADMISSIONFAILCLOSED1:";
+	const outputPressure = await runRchMutant(filter,
+		'if (worker.pressure !== "healthy" && worker.pressure !== "warning") return worker.pressure === "critical" ? "pressure_critical" : "pressure_unproven";',
+		"");
+	for (const name of ["critical at exactly 4% free", "missing pressure", "unknown pressure"]) {
+		expect(outputPressure).toContain(`error: ${name}: no native exec`);
+		expect(outputPressure).toContain(`(fail) RCHADMISSIONFAILCLOSED1: ${name} refuses before submission`);
+	}
+	expect(outputPressure).toContain("3 pass");
+	expect(outputPressure).toContain("3 fail");
+
+	const outputHealth = await runRchMutant(filter, 'if (worker.status !== "healthy") return "worker_unhealthy";', "");
+	expect(outputHealth).toContain("error: only unhealthy: no native exec");
+	expect(outputHealth).toContain("(fail) RCHADMISSIONFAILCLOSED1: only unhealthy refuses before submission");
+	for (const name of ["degraded", "unreachable"]) {
+		expect(outputHealth).toContain(`error: ${name}: healthy worker only`);
+		expect(outputHealth).toContain(`(fail) RCHADMISSIONFAILCLOSED1: ${name} plus healthy submits only to healthy`);
+	}
+	expect(outputHealth).toContain("3 pass");
+	expect(outputHealth).toContain("3 fail");
+}, fixtureDeadlineS(85) * 1000);
