@@ -286,17 +286,22 @@ function dayStart(now: number): number { return Date.parse(`${new Date(now).toIS
 function pageFor(directory: string, at: number): string {
 	return join(directory, pageName(new Date(at).toISOString().slice(0, 10)));
 }
-function addPage(controlState: Control, page: string, day: string): void {
+function addPage(controlState: Control, page: string, day: string, before: Stats | null): void {
 	const info = privateFile(page);
 	if (!info) throw new Error("PAGE_MISSING_AFTER_APPEND");
+	// Check the live path across the append, not the device number from a previous boot.
+	if (before && (before.dev !== info.dev || before.ino !== info.ino)) throw new Error("PAGE_REPLACED");
 	const known = controlState.pages.findIndex(item => item.day === day);
 	if (known >= 0) {
-		if (controlState.pages[known]!.dev !== info.dev || controlState.pages[known]!.ino !== info.ino) throw new Error("PAGE_REPLACED");
 		controlState.pages[known] = { day, dev: info.dev, ino: info.ino, size: info.size };
 		return;
 	}
 	controlState.pages.push({ day, dev: info.dev, ino: info.ino, size: info.size });
 	controlState.pages.sort((a, b) => a.day.localeCompare(b.day));
+}
+function matchesRegisteredPage(page: Control["pages"][number] | undefined, info: Stats): boolean {
+	// Device numbers can change across boots. Keep the persisted field for schema compatibility.
+	return page !== undefined && page.ino === info.ino && page.size === info.size;
 }
 function expirePages(directory: string, state: Control, now: number): void {
 	const minimum = dayStart(now) - VERIFY_LEDGER_RETENTION_DAYS * DAY_MS;
@@ -306,7 +311,7 @@ function expirePages(directory: string, state: Control, now: number): void {
 		if (day >= minimum) continue;
 		const path = join(directory, pageName(page.day)), info = privateFile(path);
 		if (!info) throw new Error("PAGE_MISSING_BEFORE_RETENTION");
-		if (info.dev !== page.dev || info.ino !== page.ino) throw new Error("PAGE_REPLACED");
+		if (!matchesRegisteredPage(page, info)) throw new Error("PAGE_REPLACED");
 		unlinkSync(path);
 		state.pages = state.pages.filter(candidate => candidate.day !== page.day);
 		if (Date.parse(state.coverage_floor) < minimum) state.coverage_floor = floor;
@@ -355,7 +360,7 @@ function readJournal(root: string | null, now: number): JournalRead {
 			const before = privateFile(path);
 			if (!before) { problems.push("PAGE_MISSING"); continue; }
 			const registered = metadata?.pages.find(value => value.day === page.name.slice(0, 10));
-			if (!registered || registered.dev !== before.dev || registered.ino !== before.ino || registered.size !== before.size) {
+			if (!matchesRegisteredPage(registered, before)) {
 				problems.push("PAGE_UNREGISTERED_REPLACED_OR_TRUNCATED");
 			}
 			if (before.size >= VERIFY_LEDGER_MAX_DAY_BYTES - VERIFY_LEDGER_MAX_EVENT_BYTES) problems.push("PAGE_CAPACITY");
@@ -397,7 +402,7 @@ async function withControl<T>(root: string, now: number, action: (directory: str
 async function appendEvent(directory: string, root: string, state: Control, event: VerifyEvent, now: number): Promise<void> {
 	const day = new Date(now).toISOString().slice(0, 10), page = pageFor(directory, now);
 	const info = privateFile(page), registered = state.pages.find(value => value.day === day);
-	if (info && (!registered || registered.dev !== info.dev || registered.ino !== info.ino || registered.size !== info.size)) {
+	if (info && !matchesRegisteredPage(registered, info)) {
 		throw new Error("PAGE_REPLACED_OR_TRUNCATED");
 	}
 	if (!info && state.pages.length >= VERIFY_LEDGER_MAX_FILES) throw new Error("PAGE_LIMIT");
@@ -405,7 +410,7 @@ async function appendEvent(directory: string, root: string, state: Control, even
 	if (eventBytes > VERIFY_LEDGER_MAX_EVENT_BYTES) throw new Error("EVENT_LIMIT");
 	if ((info?.size ?? 0) + eventBytes > VERIFY_LEDGER_MAX_DAY_BYTES) throw new Error("DAY_CAPACITY");
 	await appendJsonl(page, () => event, { deadline_s: 1, durable: true, state_dir: root });
-	addPage(state, page, day);
+	addPage(state, page, day, info);
 	state.next_sequence = Math.max(state.next_sequence, event.sequence + 1);
 	writeControl(root, state);
 }

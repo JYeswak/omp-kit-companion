@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import {
@@ -136,6 +137,44 @@ test("FIRSTVERIFY1 malformed and torn journal lines keep readable outcomes UNKNO
 		expect(report.attempts[0]?.outcome).toBe("FAIL");
 		expect(await beginVerifyAttempt(fixture.root, context("retry", new Date(now + 3).toISOString()), now + 3))
 			.toMatchObject({ status: "UNAVAILABLE" });
+	} finally { fixture.cleanup(); }
+});
+
+test("VERIFYDEV1 reads and appends after a reboot changes only the registered device", async () => {
+	const fixture = state(), now = Date.UTC(2026, 10, 18);
+	try {
+		const first = recorded(await beginVerifyAttempt(fixture.root, context("before-reboot", new Date(now).toISOString()), now));
+		expect((await finalizeVerifyAttempt(first, evidence("FAIL", "7"), now + 1)).status).toBe("FINALIZED");
+		const control = join(fixture.root, "verify-ledger-control", "control.json");
+		const { integrity_sha256: _, ...payload } = JSON.parse(readFileSync(control, "utf8"));
+		payload.pages[0].dev += 1;
+		const integrity_sha256 = createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+		writeFileSync(control, `${JSON.stringify({ ...payload, integrity_sha256 })}\n`);
+
+		const after = now + 2;
+		const reopened = inspectVerifyLedger(fixture.root, after);
+		expect(reopened.problems).toEqual([]);
+		expect(reopened.first_attempts[0]).toMatchObject({ id: first.id, outcome: "FAIL", coverage: "KNOWN" });
+		const second = recorded(await beginVerifyAttempt(fixture.root, context("after-reboot", new Date(after).toISOString()), after));
+		expect((await finalizeVerifyAttempt(second, evidence("PASS"), after + 1)).status).toBe("FINALIZED");
+		expect(inspectVerifyLedger(fixture.root, after + 2).counts).toMatchObject({ fail: 1, pass: 1, unknown: 0 });
+	} finally { fixture.cleanup(); }
+});
+
+test("VERIFYDEV1 refuses a different inode even when its page bytes are identical", async () => {
+	const fixture = state(), now = Date.UTC(2026, 10, 18);
+	try {
+		const bead = context("replaced", new Date(now).toISOString());
+		recorded(await beginVerifyAttempt(fixture.root, bead, now));
+		const page = join(fixture.root, "verify-evidence", "2026-11-18.jsonl");
+		const old = join(fixture.root, "original-page");
+		renameSync(page, old);
+		writeFileSync(page, readFileSync(old), { mode: 0o600 });
+		expect(lstatSync(page).ino).not.toBe(lstatSync(old).ino);
+		expect(inspectVerifyLedger(fixture.root, now + 1).problems).toContain("PAGE_UNREGISTERED_REPLACED_OR_TRUNCATED");
+		expect(await beginVerifyAttempt(fixture.root, bead, now + 2)).toEqual({
+			status: "UNAVAILABLE", reason: "HISTORY_UNAVAILABLE:PAGE_UNREGISTERED_REPLACED_OR_TRUNCATED",
+		});
 	} finally { fixture.cleanup(); }
 });
 
