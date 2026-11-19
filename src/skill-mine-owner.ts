@@ -19,7 +19,7 @@
  * push regexploit gate has nothing to judge.
  */
 import { createHash } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 export const OWNER_CURSOR_SCHEMA = 1;
@@ -38,9 +38,12 @@ export const OWNER_MAX_PROFILES = 32;
 /**
  * Default owner session roots: every existing
  * `<home>/.omp/profiles/<profile>/agent/sessions` directory, sorted.
- * Only immediate profile directories are listed; entries that are not
- * directories, or lack an agent sessions dir, are skipped. An explicit
- * `--sessions-root` bypasses this inventory entirely.
+ * Every component is lstated: a symlink at `profiles/<p>`, `agent` or
+ * `sessions` rejects that profile, so the default run can never escape
+ * into an aliased tree. Only immediate profile directories are listed;
+ * entries that are not real directories, or lack a real agent sessions
+ * dir, are skipped. An explicit `--sessions-root` bypasses this inventory
+ * entirely (the operator named that tree).
  */
 export function defaultOwnerSessionsRoots(home: string): string[] {
 	const base = join(home, ".omp", "profiles");
@@ -54,16 +57,22 @@ export function defaultOwnerSessionsRoots(home: string): string[] {
 	for (const name of names) {
 		if (roots.length >= OWNER_MAX_PROFILES) break;
 		if (name === "." || name === "..") continue;
-		const sessions = join(base, name, "agent", "sessions");
-		let isDir = false;
-		try {
-			isDir = statSync(sessions).isDirectory();
-		} catch {
-			isDir = false;
-		}
-		if (isDir) roots.push(sessions);
+		const profile = join(base, name);
+		const agent = join(profile, "agent");
+		const sessions = join(agent, "sessions");
+		if (!isRealDir(profile) || !isRealDir(agent) || !isRealDir(sessions)) continue;
+		roots.push(sessions);
 	}
 	return roots;
+}
+
+/** True when the path itself is a directory, not a symlink to one. */
+function isRealDir(path: string): boolean {
+	try {
+		return lstatSync(path).isDirectory();
+	} catch {
+		return false;
+	}
 }
 
 export function ownerCursorPath(stateDir: string): string {
@@ -376,10 +385,22 @@ export function saveOwnerCursor(path: string, files: Record<string, OwnerCursorF
 	writeFileSync(path, `${JSON.stringify({ schema_version: OWNER_CURSOR_SCHEMA, files }, null, 2)}\n`, { mode: 0o600 });
 }
 
-/** All *.jsonl files under root, sorted for deterministic output. */
-function iterSessionFiles(root: string): string[] {
+/**
+ * All real *.jsonl files under root, sorted for deterministic output.
+ * Physically contained: entries are lstated, so a symlinked dir is never
+ * descended and a symlinked file is never collected — loops terminate by
+ * construction. The wall deadline is checked during enumeration (not only
+ * after), stopping with stoppedEarly so the caller keeps the existing
+ * "wall budget reached" note.
+ */
+function iterSessionFiles(root: string, deadlineMs: number): { files: string[]; stoppedEarly: boolean } {
 	const found: string[] = [];
+	let stoppedEarly = false;
 	const walk = (dir: string): void => {
+		if (Date.now() > deadlineMs) {
+			stoppedEarly = true;
+			return;
+		}
 		let names: string[];
 		try {
 			names = readdirSync(dir).sort();
@@ -387,19 +408,25 @@ function iterSessionFiles(root: string): string[] {
 			return;
 		}
 		for (const name of names) {
+			if (Date.now() > deadlineMs) {
+				stoppedEarly = true;
+				return;
+			}
 			const full = join(dir, name);
-			let stat;
+			let entry;
 			try {
-				stat = statSync(full);
+				entry = lstatSync(full);
 			} catch {
 				continue;
 			}
-			if (stat.isDirectory()) walk(full);
-			else if (stat.isFile() && name.endsWith(".jsonl")) found.push(full);
+			if (entry.isSymbolicLink()) continue;
+			if (entry.isDirectory()) walk(full);
+			else if (entry.isFile() && name.endsWith(".jsonl")) found.push(full);
+			if (stoppedEarly) return;
 		}
 	};
 	walk(root);
-	return found.sort();
+	return { files: found.sort(), stoppedEarly };
 }
 
 interface NewLine {
@@ -436,7 +463,9 @@ export function scanOwnerSessions(
 	const next: Record<string, OwnerCursorFile> = {};
 	let files = 0;
 	let stoppedEarly = false;
-	for (const path of iterSessionFiles(root)) {
+	const listed = iterSessionFiles(root, deadlineMs);
+	if (listed.stoppedEarly) stoppedEarly = true;
+	for (const path of listed.files) {
 		if (Date.now() > deadlineMs) {
 			stoppedEarly = true;
 			break;
@@ -445,10 +474,21 @@ export function scanOwnerSessions(
 		const absolute = resolve(path);
 		const rel = relative(resolve(root), absolute);
 		const slug = rel.split(sep)[0] ?? "";
+		let fd = -1;
+		try {
+			fd = openSync(path, "r");
+		} catch {
+			continue;
+		}
 		let size: number;
 		try {
-			size = statSync(path).size;
+			size = fstatSync(fd).size;
 		} catch {
+			try {
+				closeSync(fd);
+			} catch {
+				/* descriptor already gone */
+			}
 			continue;
 		}
 		const state = cursor[absolute];
@@ -457,12 +497,6 @@ export function scanOwnerSessions(
 		if (!Number.isInteger(offset) || offset < 0 || offset > size) {
 			offset = 0;
 			lineno = 1;
-		}
-		let fd = -1;
-		try {
-			fd = openSync(path, "r");
-		} catch {
-			continue;
 		}
 		try {
 			let buf = Buffer.alloc(0);

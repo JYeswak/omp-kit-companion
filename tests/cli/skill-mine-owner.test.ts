@@ -5,7 +5,7 @@
 // tool result) yield no row; a second run from the saved cursor emits nothing.
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import {
@@ -255,4 +255,57 @@ test("RULESKILL1-owner: default run finds both profiles and replays the shared c
 	const second = await runSkillMine({ ...rest, sources: ["owner"] });
 	expect(second.candidates).toHaveLength(0);
 	expect(sinkLines(f.sink)).toHaveLength(2);
+});
+
+function profileSessionsRoot(home: string, profile: string): string {
+	return join(home, ".omp", "profiles", profile, "agent", "sessions");
+}
+
+test("RULESKILL1-owner: a profile symlink to a sibling tree is not scanned", async () => {
+	const f = makeOwnerFixture("skill-mine-owner-alias");
+	writeProfileJournal(f.home, "claude", "-Developer-cfs", "a.jsonl", [userLine("claude words")]);
+	const foreign = join(f.root, "foreign-tree", "agent", "sessions", "-Developer-cfs");
+	mkdirSync(foreign, { recursive: true });
+	writeFileSync(join(foreign, "f.jsonl"), `${userLine("-fixture-foreign-")}\n`, "utf8");
+	symlinkSync(join(f.root, "foreign-tree"), join(f.home, ".omp", "profiles", "foreign-link"), "dir");
+	expect(defaultOwnerSessionsRoots(f.home)).toEqual([profileSessionsRoot(f.home, "claude")]);
+	const { sessionsRoot: _droppedAlias, ...rest } = f.options;
+	const report = await runSkillMine({ ...rest, sources: ["owner"] });
+	expect(report.sources.owner.status).toBe("OK");
+	expect(report.sources.owner.reason).toContain("scanned 1 file(s)");
+	expect(report.candidates).toHaveLength(1);
+	expect(report.candidates.every(candidate => !candidate.evidence[0]!.ref.includes("foreign"))).toBe(true);
+});
+
+test("RULESKILL1-owner: nested symlinked dir and file are not scanned", () => {
+	const f = makeOwnerFixture("skill-mine-owner-nested");
+	writeProfileJournal(f.home, "claude", "-Developer-cfs", "a.jsonl", [userLine("real words")]);
+	const slugDir = join(profileSessionsRoot(f.home, "claude"), "-Developer-cfs");
+	const elsewhere = join(f.root, "elsewhere");
+	mkdirSync(elsewhere, { recursive: true });
+	writeFileSync(join(elsewhere, "e.jsonl"), `${userLine("nested foreign words")}\n`, "utf8");
+	symlinkSync(elsewhere, join(slugDir, "linked-dir"), "dir");
+	symlinkSync(join(elsewhere, "e.jsonl"), join(slugDir, "linked-file.jsonl"));
+	const { rows } = scanOwnerSessions(profileSessionsRoot(f.home, "claude"), Date.parse("2026-11-17T00:00:00Z"), null, {});
+	expect(rows.map(row => row.text)).toEqual(["real words"]);
+});
+
+test("RULESKILL1-owner: a symlink loop terminates without scanning", () => {
+	const f = makeOwnerFixture("skill-mine-owner-loop");
+	writeProfileJournal(f.home, "claude", "-Developer-cfs", "a.jsonl", [userLine("loop real words")]);
+	const slugDir = join(profileSessionsRoot(f.home, "claude"), "-Developer-cfs");
+	symlinkSync(slugDir, join(slugDir, "loop"), "dir");
+	const { rows } = scanOwnerSessions(profileSessionsRoot(f.home, "claude"), Date.parse("2026-11-17T00:00:00Z"), null, {});
+	expect(rows.map(row => row.text)).toEqual(["loop real words"]);
+});
+
+test("RULESKILL1-owner: an expired wall deadline stops enumeration early", () => {
+	const f = makeOwnerFixture("skill-mine-owner-deadline");
+	const slugDir = join(profileSessionsRoot(f.home, "claude"), "-Developer-cfs");
+	mkdirSync(slugDir, { recursive: true });
+	symlinkSync(slugDir, join(slugDir, "loop"), "dir");
+	const scanned = scanOwnerSessions(profileSessionsRoot(f.home, "claude"), Date.parse("2026-11-17T00:00:00Z"), null, {}, { deadlineMs: Date.now() - 1 });
+	expect(scanned.stoppedEarly).toBe(true);
+	expect(scanned.rows).toEqual([]);
+	expect(scanned.files).toBe(0);
 });

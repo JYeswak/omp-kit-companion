@@ -1,3 +1,4 @@
 - `skill-mine` gains an `owner` source: `--source owner` (with `--sessions-root DIR`) reads the messages you actually typed in OMP session journals, one candidate row per message with its time, seat and source line, resuming from a saved cursor so a second run emits nothing new.
 - New `skill-mine coverage --backlog PATH [--grace-hours N] [--now ISO] [--json]` proves each durable rule older than the grace window is anchored in the skill file a seat loads and reports stated-to-landed latency from git; it exits 1 naming every overdue rule.
 - The `owner` source now reads every OMP profile's session journals by default (`~/.omp/profiles/*/agent/sessions`); `--sessions-root DIR` still scopes it to one tree.
+- The `owner` source stays inside real profile roots: symlinked profiles, nested links and loops are never followed, and the wall deadline stops enumeration early.
