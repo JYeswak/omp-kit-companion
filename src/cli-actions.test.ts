@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { afterAll } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ccActionOutcome, ccActionTarget, registerCommandHandler, runCli, type CommandHandler } from "../src/cli.ts";
@@ -21,6 +21,19 @@ function freshState(): string {
 	const dir = t.path;
 	mkdirSync(join(dir, "spool"), { recursive: true });
 	return dir;
+}
+
+/** Stand-in `am` first on PATH: land's tool gate must pass on hosts without Agent Mail so the consent refusal is what this test judges. Consent refuses before any tool call, so the stub's ran marker must stay absent. */
+function amStub(): { dir: string; ranMarker: string } {
+	const t = ownedTmp("cli-actions-am", { root: scratchRoot });
+	owned.push(t);
+	const dir = join(t.path, "bin");
+	mkdirSync(dir, { recursive: true });
+	const ranMarker = join(dir, "am.ran");
+	const stub = join(dir, "am");
+	writeFileSync(stub, `#!/bin/sh\n: > '${ranMarker}'\nexit 97\n`);
+	chmodSync(stub, 0o755);
+	return { dir, ranMarker };
 }
 
 type CliRun = { exitCode: number; stdout: string; stderr: string };
@@ -231,8 +244,10 @@ test("parse_error_surface", async () => {
 test("target_never_free_text", async () => {
 	const state = freshState();
 	const token = `ghp_${"z".repeat(36)}`;
-	const run = await spawnCli(["land", "--paths", "x", "--message", token, "--apply", "--json"], { STATE: state });
+	const am = amStub();
+	const run = await spawnCli(["land", "--paths", "x", "--message", token, "--apply", "--json"], { STATE: state, PATH: `${am.dir}:${process.env.PATH ?? ""}` });
 	expect(run.exitCode).toBe(2);
+	expect(existsSync(am.ranMarker)).toBe(false);
 	const lines = spoolLines(state);
 	const attempt = (lines.find((line) => line.type === "action.attempt")!.data) as Record<string, unknown>;
 	expect(attempt.target).toBeNull();
