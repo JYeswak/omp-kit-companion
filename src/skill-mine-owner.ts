@@ -19,7 +19,7 @@
  * push regexploit gate has nothing to judge.
  */
 import { createHash } from "node:crypto";
-import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 export const OWNER_CURSOR_SCHEMA = 1;
@@ -30,6 +30,11 @@ export const OWNER_CHUNK_BYTES = 8 << 20;
 export const OWNER_MAX_LINE_BYTES = 64 << 20;
 /** Stored candidate text is truncated to this many code points; the sha covers the full text. */
 export const OWNER_MAX_TEXT_CHARS = 4000;
+/** open(2) flag refusing a trailing symlink (ELOOP), so the journal open
+ * itself is the containment check instead of a separate check-then-open.
+ * Undefined where the platform has no O_NOFOLLOW; the scanner then falls
+ * back to an lstat immediately before opening. */
+export const OWNER_O_NOFOLLOW: number | undefined = constants.O_NOFOLLOW;
 
 /** Cap on profile directories listed for the default roots: a bounded
  * inventory, never a home-tree scan. */
@@ -462,12 +467,15 @@ function truncateCodePoints(text: string, max: number): string {
  * consumes its line number. Cursor keys are absolute paths (the one
  * deliberate difference from the Python, which keys by the joined root
  * path: absolute keys cannot silently reuse offsets for a different tree).
- * Containment is checked at open, not only at enumeration: each file is
- * lstated immediately before opening and refused (skipped, still counted
- * in files) when it is now a symlink or not a regular file. `beforeOpen`
- * is a deterministic test seam for that check: it runs after enumeration
- * for each listed file, before the open-time lstat, so a test can swap a
- * file for a symlink without sleeps.
+ * Containment is atomic at open, not check-then-open: each journal is
+ * opened with O_NOFOLLOW so a trailing symlink fails the open itself
+ * (ELOOP) instead of a separate lstat the file could be swapped under; a
+ * descriptor that is not a regular file is closed and refused (still
+ * counted in files). Where the platform has no O_NOFOLLOW the pre-open
+ * lstat remains as fallback. `beforeOpen` is a deterministic test seam for
+ * that path: it runs after enumeration for each listed file, immediately
+ * before the open, so a test can swap a file for a symlink or directory
+ * without sleeps.
  */
 export function scanOwnerSessions(
 	root: string,
@@ -495,22 +503,24 @@ export function scanOwnerSessions(
 		const rel = relative(resolve(root), absolute);
 		const slug = rel.split(sep)[0] ?? "";
 		options?.beforeOpen?.(path);
-		let opened;
-		try {
-			opened = lstatSync(path);
-		} catch {
-			continue;
+		if (OWNER_O_NOFOLLOW === undefined) {
+			let listed;
+			try {
+				listed = lstatSync(path);
+			} catch {
+				continue;
+			}
+			if (listed.isSymbolicLink() || !listed.isFile()) continue;
 		}
-		if (opened.isSymbolicLink() || !opened.isFile()) continue;
 		let fd = -1;
 		try {
-			fd = openSync(path, "r");
+			fd = OWNER_O_NOFOLLOW === undefined ? openSync(path, "r") : openSync(path, OWNER_O_NOFOLLOW | constants.O_RDONLY);
 		} catch {
 			continue;
 		}
-		let size: number;
+		let openedStat;
 		try {
-			size = fstatSync(fd).size;
+			openedStat = fstatSync(fd);
 		} catch {
 			try {
 				closeSync(fd);
@@ -519,6 +529,15 @@ export function scanOwnerSessions(
 			}
 			continue;
 		}
+		if (!openedStat.isFile()) {
+			try {
+				closeSync(fd);
+			} catch {
+				/* descriptor already gone */
+			}
+			continue;
+		}
+		const size = openedStat.size;
 		const state = cursor[absolute];
 		let offset = state?.offset ?? 0;
 		let lineno = state?.next_line ?? 1;

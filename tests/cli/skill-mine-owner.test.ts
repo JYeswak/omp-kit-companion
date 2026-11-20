@@ -356,3 +356,26 @@ test("RULESKILL1-owner: a journal swapped for a symlink before open is refused",
 	expect(scanned.files).toBe(1);
 	expect(scanned.rows).toEqual([]);
 });
+
+test("RULESKILL1-owner: a journal swapped for a directory before open is refused by the fstat check", () => {
+	const f = makeOwnerFixture("skill-mine-owner-dirswap");
+	const sess = writeProfileJournal(f.home, "claude", "-Developer-cfs", "a.jsonl", [userLine("dirswap words")]);
+	const scanned = scanOwnerSessions(profileSessionsRoot(f.home, "claude"), Date.parse("2026-11-17T00:00:00Z"), null, {}, {
+		beforeOpen: path => {
+			if (path === sess) {
+				unlinkSync(sess);
+				mkdirSync(sess);
+			}
+		},
+	});
+	expect(scanned.files).toBe(1);
+	expect(scanned.rows).toEqual([]);
+});
+
+test("RULESKILL1-owner: journal opens carry O_NOFOLLOW so the open itself refuses a trailing symlink", async () => {
+	// Dynamic import: a static import of OWNER_O_NOFOLLOW would fail module
+	// linking on the pre-change tree (no such export) and take down the whole
+	// file on the red run; the namespace lookup keeps the failure to this test.
+	const mod = await import("../../src/skill-mine-owner.ts");
+	expect(typeof mod.OWNER_O_NOFOLLOW).toBe("number");
+});
