@@ -355,6 +355,12 @@ def drive(repo: str, argv: list) -> int:
                                                                   else "COMMIT_FAILED")
     if done.timed_out:
         result = "TIMED_OUT"
+    if result not in ("COMMITTED", "PREPARED_OK"):
+        # Hosted macOS reports PREPARE_REFUSED here with an empty stderr (scheduled CI 44495914239, 44710249264):
+        # say what ran, so a refusal for the wrong reason is never read as the expected one.
+        gitv = kitlib_run.run(["git", "--version"], deadline_s=10)
+        sys.stderr.write("DRIVE_DIAG result=%s rc=%r timed_out=%r acks=%r stdout=%r stderr=%r git=%r python=%r\n" % (
+            result, done.rc, done.timed_out, acks, done.stdout[:300], done.stderr[:300], gitv.stdout.decode("utf-8", "replace").strip(), sys.version.split()[0]))
     print(result)
     return 0 if result in ("COMMITTED", "PREPARED_OK") else 1
 

@@ -482,7 +482,7 @@ test("installed candidate fast proof and planted rule drift fail the full check 
 	expect(report.snapshots.release).toEqual({ unchanged: true, complete: true });
 	expect(report.snapshots.home.unchanged).toBe(true);
 	expect(report.snapshots.home.complete).toBe(true);
-});
+}, fixtureDeadlineS(120) * 1_000);
 
 test("oversized operator files bound the watched snapshot only where the kit could write", async () => {
 	// Two drifted candidates: one holds only the unwatched oversized file, the other holds it
