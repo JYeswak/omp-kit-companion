@@ -38,15 +38,18 @@ export const OWNER_MAX_PROFILES = 32;
 /**
  * Default owner session roots: every existing
  * `<home>/.omp/profiles/<profile>/agent/sessions` directory, sorted.
- * Every component is lstated: a symlink at `profiles/<p>`, `agent` or
- * `sessions` rejects that profile, so the default run can never escape
- * into an aliased tree. Only immediate profile directories are listed;
- * entries that are not real directories, or lack a real agent sessions
- * dir, are skipped. An explicit `--sessions-root` bypasses this inventory
- * entirely (the operator named that tree).
+ * Both parents are lstated first: a symlink or non-directory at
+ * `<home>/.omp` or `<home>/.omp/profiles` rejects the whole inventory, so
+ * the default run can never traverse an aliased tree. Per profile, a
+ * symlink at `profiles/<p>`, `agent` or `sessions` rejects that profile.
+ * Only immediate profile directories are listed. An explicit
+ * `--sessions-root` bypasses this inventory entirely (the operator named
+ * that tree).
  */
 export function defaultOwnerSessionsRoots(home: string): string[] {
-	const base = join(home, ".omp", "profiles");
+	const omp = join(home, ".omp");
+	const base = join(omp, "profiles");
+	if (!isRealDir(omp) || !isRealDir(base)) return [];
 	let names: string[];
 	try {
 		names = readdirSync(base).sort();
@@ -389,17 +392,28 @@ export function saveOwnerCursor(path: string, files: Record<string, OwnerCursorF
  * All real *.jsonl files under root, sorted for deterministic output.
  * Physically contained: entries are lstated, so a symlinked dir is never
  * descended and a symlinked file is never collected — loops terminate by
- * construction. The wall deadline is checked during enumeration (not only
- * after), stopping with stoppedEarly so the caller keeps the existing
- * "wall budget reached" note.
+ * construction. Every descended directory is lstated again at descent, so
+ * a swap after enumeration is refused too (the operator-named root itself
+ * is trusted as given). The wall deadline is checked during enumeration
+ * (not only after), stopping with stoppedEarly so the caller keeps the
+ * existing "wall budget reached" note.
  */
 function iterSessionFiles(root: string, deadlineMs: number): { files: string[]; stoppedEarly: boolean } {
 	const found: string[] = [];
 	let stoppedEarly = false;
-	const walk = (dir: string): void => {
+	const walk = (dir: string, isRoot: boolean): void => {
 		if (Date.now() > deadlineMs) {
 			stoppedEarly = true;
 			return;
+		}
+		if (!isRoot) {
+			let here;
+			try {
+				here = lstatSync(dir);
+			} catch {
+				return;
+			}
+			if (here.isSymbolicLink() || !here.isDirectory()) return;
 		}
 		let names: string[];
 		try {
@@ -420,12 +434,12 @@ function iterSessionFiles(root: string, deadlineMs: number): { files: string[]; 
 				continue;
 			}
 			if (entry.isSymbolicLink()) continue;
-			if (entry.isDirectory()) walk(full);
+			if (entry.isDirectory()) walk(full, false);
 			else if (entry.isFile() && name.endsWith(".jsonl")) found.push(full);
 			if (stoppedEarly) return;
 		}
 	};
-	walk(root);
+	walk(root, true);
 	return { files: found.sort(), stoppedEarly };
 }
 
@@ -448,13 +462,19 @@ function truncateCodePoints(text: string, max: number): string {
  * consumes its line number. Cursor keys are absolute paths (the one
  * deliberate difference from the Python, which keys by the joined root
  * path: absolute keys cannot silently reuse offsets for a different tree).
+ * Containment is checked at open, not only at enumeration: each file is
+ * lstated immediately before opening and refused (skipped, still counted
+ * in files) when it is now a symlink or not a regular file. `beforeOpen`
+ * is a deterministic test seam for that check: it runs after enumeration
+ * for each listed file, before the open-time lstat, so a test can swap a
+ * file for a symlink without sleeps.
  */
 export function scanOwnerSessions(
 	root: string,
 	sinceMs: number | null,
 	untilMs: number | null,
 	cursor: Record<string, OwnerCursorFile>,
-	options?: { chunkBytes?: number; maxLineBytes?: number; deadlineMs?: number },
+	options?: { chunkBytes?: number; maxLineBytes?: number; deadlineMs?: number; beforeOpen?: (path: string) => void },
 ): { rows: OwnerScanRow[]; cursor: Record<string, OwnerCursorFile>; files: number; stoppedEarly: boolean } {
 	const chunkBytes = options?.chunkBytes ?? OWNER_CHUNK_BYTES;
 	const maxLineBytes = options?.maxLineBytes ?? OWNER_MAX_LINE_BYTES;
@@ -474,6 +494,14 @@ export function scanOwnerSessions(
 		const absolute = resolve(path);
 		const rel = relative(resolve(root), absolute);
 		const slug = rel.split(sep)[0] ?? "";
+		options?.beforeOpen?.(path);
+		let opened;
+		try {
+			opened = lstatSync(path);
+		} catch {
+			continue;
+		}
+		if (opened.isSymbolicLink() || !opened.isFile()) continue;
 		let fd = -1;
 		try {
 			fd = openSync(path, "r");

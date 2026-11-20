@@ -5,7 +5,7 @@
 // tool result) yield no row; a second run from the saved cursor emits nothing.
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import {
@@ -308,4 +308,51 @@ test("RULESKILL1-owner: an expired wall deadline stops enumeration early", () =>
 	expect(scanned.stoppedEarly).toBe(true);
 	expect(scanned.rows).toEqual([]);
 	expect(scanned.files).toBe(0);
+});
+
+test("RULESKILL1-owner: a symlinked HOME/.omp mines nothing and reports UNAVAILABLE naming .omp", async () => {
+	const f = makeOwnerFixture("skill-mine-owner-omp-alias");
+	mkdirSync(f.home, { recursive: true });
+	const sibling = join(f.root, "sibling-home");
+	writeProfileJournal(sibling, "claude", "-Developer-cfs", "a.jsonl", [userLine("sibling words")]);
+	symlinkSync(join(sibling, ".omp"), join(f.home, ".omp"), "dir");
+	expect(defaultOwnerSessionsRoots(f.home)).toEqual([]);
+	const { sessionsRoot: _droppedOmp, ...rest } = f.options;
+	const report = await runSkillMine({ ...rest, sources: ["owner"] });
+	expect(report.sources.owner.status).toBe("UNAVAILABLE");
+	expect(report.sources.owner.reason).toContain(".omp");
+	expect(report.candidates).toHaveLength(0);
+});
+
+test("RULESKILL1-owner: a symlinked HOME/.omp/profiles mines nothing and reports UNAVAILABLE naming profiles", async () => {
+	const f = makeOwnerFixture("skill-mine-owner-profiles-alias");
+	mkdirSync(join(f.home, ".omp"), { recursive: true });
+	const sibling = join(f.root, "sibling-home");
+	writeProfileJournal(sibling, "codex", "-Developer-cfs", "b.jsonl", [userLine("sibling codex words")]);
+	symlinkSync(join(sibling, ".omp", "profiles"), join(f.home, ".omp", "profiles"), "dir");
+	expect(defaultOwnerSessionsRoots(f.home)).toEqual([]);
+	const { sessionsRoot: _droppedProfiles, ...rest } = f.options;
+	const report = await runSkillMine({ ...rest, sources: ["owner"] });
+	expect(report.sources.owner.status).toBe("UNAVAILABLE");
+	expect(report.sources.owner.reason).toContain("profiles");
+	expect(report.candidates).toHaveLength(0);
+});
+
+test("RULESKILL1-owner: a journal swapped for a symlink before open is refused", () => {
+	const f = makeOwnerFixture("skill-mine-owner-swap");
+	const sess = writeProfileJournal(f.home, "claude", "-Developer-cfs", "a.jsonl", [userLine("swapped words")]);
+	const elsewhere = join(f.root, "swap-elsewhere");
+	mkdirSync(elsewhere, { recursive: true });
+	const foreign = join(elsewhere, "e.jsonl");
+	writeFileSync(foreign, `${userLine("foreign words")}\n`, "utf8");
+	const scanned = scanOwnerSessions(profileSessionsRoot(f.home, "claude"), Date.parse("2026-11-17T00:00:00Z"), null, {}, {
+		beforeOpen: path => {
+			if (path === sess) {
+				unlinkSync(sess);
+				symlinkSync(foreign, sess);
+			}
+		},
+	});
+	expect(scanned.files).toBe(1);
+	expect(scanned.rows).toEqual([]);
 });
