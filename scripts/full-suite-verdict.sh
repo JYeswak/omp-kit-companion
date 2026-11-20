@@ -10,8 +10,8 @@
 #     [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT]
 #
 # The complete declared repo suite runs against the exact-commit archive: every bun test under
-# tests/cli and tests/fleet-guard, every shell suite tests/cli/*.test.sh, and every python suite
-# tests/cli + tests/scripts (*_test.py, *.test.py). Only a complete measured run can be PASS.
+# tests/cli, tests/fleet-guard, extensions and src, every shell suite tests/cli/*.test.sh, and every python suite
+# tests/cli + tests/scripts + tests/kit-gate (*_test.py, *.test.py). Only a complete measured run can be PASS.
 # Main-role failures in at most three files get one local rerun under the same suite lease (RELFLAKE1).
 # Rows of scripts/gate-ci-only.tsv stay excluded from base-role local checks.
 # Main-role qualification runs every declared file, including those rows.
@@ -355,12 +355,20 @@ fi
 if [ -d "$ARCHIVE_DIR/tests/fleet-guard" ]; then
 	bun_files="$bun_files $(cd "$ARCHIVE_DIR" && find tests/fleet-guard -name '*.test.ts' -not -path '*/var/agent-tmp/*' | sort)"
 fi
+# CATALOG1: no CI group runs extensions/ or src/ Bun tests or the tests/kit-gate Python suite, so before this the
+# verdict never judged them; the declared catalog (full-suite-verdict-store.py declared_suite_files) names the same
+# roots and the record is refused when the two differ.
+for bun_root in extensions src; do
+	if [ -d "$ARCHIVE_DIR/$bun_root" ]; then
+		bun_files="$bun_files $(cd "$ARCHIVE_DIR" && find "$bun_root" -name '*.test.ts' -not -path '*/var/agent-tmp/*' | sort)"
+	fi
+done
 shell_suites=""
 if [ -d "$ARCHIVE_DIR/tests/cli" ]; then
 	shell_suites=$(cd "$ARCHIVE_DIR" && find tests/cli -maxdepth 1 -name '*.test.sh' | sort)
 fi
 py_suites=""
-for pydir in tests/cli tests/scripts; do
+for pydir in tests/cli tests/scripts tests/kit-gate; do
 	if [ -d "$ARCHIVE_DIR/$pydir" ]; then
 		found=$(cd "$ARCHIVE_DIR" && find "$pydir" -maxdepth 1 \( -name '*_test.py' -o -name '*.test.py' \) | sort)
 		py_suites="$py_suites $found"

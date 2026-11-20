@@ -196,9 +196,11 @@ output includes elapsed time, exit status, base-run count and machine load. The 
 separate from the test entrypoint; it never substitutes for the contract suite. These tiny
 fixture policies measure transport/adapter overhead, not production fresh-gate duration.
 
-The complete declared suite is every bun test under `tests/cli` and `tests/fleet-guard`, every
-shell suite `tests/cli/*.test.sh`, and every python suite under `tests/cli` and `tests/scripts`
-(`*_test.py`, `*.test.py`), run against the exact-commit archive. Rows of
+The complete declared suite is every bun test under `tests/cli`, `tests/fleet-guard`, `extensions` and `src`,
+every shell suite `tests/cli/*.test.sh`, and every python suite under `tests/cli`, `tests/scripts` and
+`tests/kit-gate` (`*_test.py`, `*.test.py`), run against the exact-commit archive. (`extensions` and `src`
+held 54 bun test files, and `tests/kit-gate` one python suite, that no CI group runs; before CATALOG1 the
+verdict never judged them.) Rows of
 `scripts/gate-ci-only.tsv` defer those files only in base-role local checks. The one main-role
 qualification runs every declared file, including the manifest rows, from a Git-initialized
 exact-commit export. Its main-role PASS is the release qualification; no second CI-only

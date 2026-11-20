@@ -400,7 +400,10 @@ def excluded_paths(root: Path) -> set[str]:
 
 def declared_suite_files(root: Path, role: str = "base") -> set[str]:
     declared: set[str] = set()
-    for directory in ("tests/cli", "tests/fleet-guard"):
+    # CATALOG1: extensions/ and src/ hold 54 Bun test files and tests/kit-gate one Python suite that no CI group
+    # runs (core is tests/cli and tests/fleet-guard; stock-extensions runs ./extensions on a stock PATH), so the
+    # release verdict never judged them and a 0.2.137 regression in src/cli-actions.test.ts passed it.
+    for directory in ("tests/cli", "tests/fleet-guard", "extensions", "src"):
         base = root / directory
         if base.is_dir():
             declared.update(path.relative_to(root).as_posix() for path in base.rglob("*.test.ts")
@@ -408,7 +411,7 @@ def declared_suite_files(root: Path, role: str = "base") -> set[str]:
     base = root / "tests/cli"
     if base.is_dir():
         declared.update(path.relative_to(root).as_posix() for path in base.glob("*.test.sh") if path.is_file())
-    for directory in ("tests/cli", "tests/scripts"):
+    for directory in ("tests/cli", "tests/scripts", "tests/kit-gate"):
         base = root / directory
         if base.is_dir():
             declared.update(path.relative_to(root).as_posix() for path in base.iterdir()
@@ -423,11 +426,11 @@ def declared_suite_files_from_git(repo: Path, commit: str, role: str = "base") -
     except UnicodeDecodeError as error:
         raise ValueError("suite paths are not UTF-8") from error
     declared = {path for path in paths
-                if path.startswith(("tests/cli/", "tests/fleet-guard/"))
+                if path.startswith(("tests/cli/", "tests/fleet-guard/", "extensions/", "src/"))
                 and path.endswith(".test.ts") and "var/agent-tmp/" not in path}
     declared.update(path for path in paths if path.startswith("tests/cli/") and "/" not in path[len("tests/cli/"):]
                     and path.endswith(".test.sh"))
-    for directory in ("tests/cli/", "tests/scripts/"):
+    for directory in ("tests/cli/", "tests/scripts/", "tests/kit-gate/"):
         declared.update(path for path in paths if path.startswith(directory) and "/" not in path[len(directory):]
                         and (path.endswith("_test.py") or path.endswith(".test.py")))
     if role != "main" and "scripts/gate-ci-only.tsv" in paths:
