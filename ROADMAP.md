@@ -178,6 +178,8 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Dynamic tracker-close IDs retain raw command substitutions and backticks; unresolved mutations refuse while literal controls retain admission. Eligible non-author native verification on exact source `d316b3e6d5` closed all three original acceptance boxes. Release and loaded-behavior evidence remain separate from that source close | ompkit-l2e1t (SELFCLOSEVAR1; independently accepted source) |
 | Release operators can prepare next-version paths and the exact commit message for a caller-owned selective commit without the runner committing or pushing it. Pending bookkeeping and actual install state stay distinct; published-marker retries retain their existing path. Independent native replay closed both original checks on `601356c4e3`; final-main qualification, release and installed behavior remain pending | ompkit-upgradeloop-qum98.11 (CALLERCOMMIT1; independently accepted source) |
 
+- Export dependency replay (`ompkit-1ra0d.154`): provision npm package-directory targets from their committed locks, use Corepack for declared Yarn versions, bind the explicit replay actor and preserve target tracker state on environment-only failures. Source qualification is in progress; independent acceptance, next-cut publication and the original live-readback obligation remain unverified.
+
 ## Rolling releases (reviewed 2026-10-17)
 
 Requested by the maintainer: group the actual backlog into releases that improve the running system. Version numbers are allocated by the train, not assigned to phases. A wave may ship several small releases; completing an entire epic is never a release gate.

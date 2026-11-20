@@ -514,6 +514,12 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit schema` | `schema` | Envelope, command data, exit codes and grammar | `omp-kit schema --json` |
 | `omp-kit robot-docs` | `robot-docs guide` | Automation guidance from the live grammar | `omp-kit robot-docs guide` |
 
+`verify` provisions the exact export's locked dependencies, including literal npm
+`--prefix`/`-C` targets. A declared Yarn `packageManager` uses Corepack; make it
+available on the verifier's runtime PATH (Node 25 and later do not bundle it).
+Replays carry the explicit verifier actor. Environment-only failures leave the
+target tracker unchanged; actual assertion failures still become `REWORK`.
+
 ### Subcommands
 
 | Subcommand | What it does | Example |
@@ -545,47 +551,47 @@ Use repeatable `--done` for explicit reports.
 
 | Scope | What it reports | Example |
 |---|---|---|
-| `--scope kit` | Rules, manifest and packaged planning skill (missing = drift; unscoped checks existing `~/.agents/skills/jeff-planning-enhanced` only) | `omp-kit doctor --scope kit` |
-| `--scope omp` | OMP launcher identity and its source package | `omp-kit doctor --scope omp` |
-| `--scope rules` | Installed, effective, project, and retired rules against the manifest | `omp-kit doctor --scope rules` |
-| `--scope policy` | Per-profile TTSR keys through native `omp config get` | `omp-kit doctor --scope policy` |
-| `--scope settings` | Per-key TTSR status for the selected profiles | `omp-kit doctor --scope settings` |
-| `--scope extensions` | Extension listing and imports that would fail to load | `omp-kit doctor --scope extensions` |
-| `--scope router` | Router skill tooling presence | `omp-kit doctor --scope router` |
-| `--scope profile` | On-disk settings, with the limits of what they prove | `omp-kit doctor --scope profile` |
+| `--scope kit` | Rules, manifest and packaged planning skill (missing = drift; unscoped checks existing `~/.agents/skills/jeff-planning-enhanced` only) | |
+| `--scope omp` | OMP launcher identity and its source package | |
+| `--scope rules` | Installed, effective, project, and retired rules against the manifest | |
+| `--scope policy` | Per-profile TTSR keys through native `omp config get` | |
+| `--scope settings` | Per-key TTSR status for the selected profiles | |
+| `--scope extensions` | Extension listing and imports that would fail to load | |
+| `--scope router` | Router skill tooling presence | |
+| `--scope profile` | On-disk settings, with the limits of what they prove | |
 | `--scope lsp` | Config layers; `--deep --yes` waits for initialized TypeScript diagnostics (private fixture) | `omp-kit doctor --scope lsp --file src/cli.ts` |
 | `--scope project-loading` | Startup inputs a project would load | `omp-kit doctor --scope project-loading --project PATH` |
 | `--scope work` / `--scope model` | Git; weekly model rates/tokens, UNKNOWN (source-only; no live/causal proof) | `omp-kit doctor --scope work` |
-| `--scope sessions` | Running OMP sessions: `CURRENT`, `STALE`, or `UNVERIFIED` against the install | `omp-kit doctor --scope sessions` |
-| `--scope load` | Load average and memory pressure: `OK` or `CONTENDED` | `omp-kit doctor --scope load` |
+| `--scope sessions` | Running OMP sessions: `CURRENT`, `STALE`, or `UNVERIFIED` against the install | |
+| `--scope load` | Load average and memory pressure: `OK` or `CONTENDED` | |
 | `--scope memory` | Memory configuration readiness for a profile | `omp-kit doctor --scope memory --profile NAME` |
 | `--scope mcp` | MCP readiness for a named profile or `--profile default`; `--sources` lists servers in other harness configs | `omp-kit doctor --scope mcp --profile NAME` |
 | `--scope context` | Context inventory for a profile and project | `omp-kit doctor --scope context --profile NAME` |
-| `--scope browsers` | Browser processes and leftover automation clones | `omp-kit doctor --scope browsers` |
-| `--scope services` | launchd jobs: running, idle, failing, path mismatch; `--services FILE` checks a required-jobs list | `omp-kit doctor --scope services` |
-| `--scope regex-tools` | Regex engineering tools on PATH | `omp-kit doctor --scope regex-tools` |
+| `--scope browsers` | Browser processes and leftover automation clones | |
+| `--scope services` | launchd jobs: running, idle, failing, path mismatch; `--services FILE` checks a required-jobs list | |
+| `--scope regex-tools` | Regex engineering tools on PATH | |
 | `--scope test-scope` | Runner scratch exclusions; `OMP_KIT_FLEET_WATCH_CONFIG` selects input | `omp-kit doctor --scope test-scope --json` |
-| `--scope gates` | Python `br` admission on owned fixtures; no live writes | `omp-kit doctor --scope gates` |
-| `--scope dicklesworthstone` | Installed agent tools (`ntm`, `am`, `caam`, ...) behind their latest release | `omp-kit doctor --scope dicklesworthstone` |
+| `--scope gates` | Python `br` admission on owned fixtures; no live writes | |
+| `--scope dicklesworthstone` | Installed agent tools (`ntm`, `am`, `caam`, ...) behind their latest release | |
 | `--scope beads` | Acceptance criteria kept in their dedicated field | `omp-kit doctor --scope beads --project PATH` |
 | `--scope reservations` | Exclusive Agent Mail holds past the age limit | `omp-kit doctor --scope reservations --project PATH` |
 | `--scope identity` | Pane identities that are missing, shared, or stale | `omp-kit doctor --scope identity --project PATH` |
 | `--scope flywheel` | Fleet practice grades from git and the tracker (`BEADS_DB`) | `omp-kit doctor --scope flywheel --project PATH` |
-| `--scope fleet` | Live panes and Agent Mail: `DIRECTOR_DOING_WORK`, `COMMUNICATION_PURGATORY`, frozen turns, stale steering | `omp-kit doctor --scope fleet` |
-| `--scope ownership` | Records with no live or tracked owner | `omp-kit doctor --scope ownership` |
+| `--scope fleet` | Live panes and Agent Mail: `DIRECTOR_DOING_WORK`, `COMMUNICATION_PURGATORY`, frozen turns, stale steering | |
+| `--scope ownership` | Records with no live or tracked owner | |
 | `--scope derived` | Literal facts in config files that a probe should replace | `omp-kit doctor --scope derived --project PATH` |
 | `--scope layout` | Deviations from the standard repo layout | `omp-kit doctor --scope layout --project PATH` |
 | `--scope public-files` | Missing standard public files | `omp-kit doctor --scope public-files --project PATH` |
-| `--scope github` | Read-only GitHub capability probes | `omp-kit doctor --scope github` |
+| `--scope github` | Read-only GitHub capability probes | |
 | `--scope secrets` | Files holding an Infisical value, by file and vault name; `--staged` for the pre-commit hook | `omp-kit doctor --scope secrets --staged` |
 | `--scope stale-worktree` | Worktree paths that remove lines landed in HEAD, with the blamed commit and bead | `omp-kit doctor --scope stale-worktree --project PATH` |
-| `--scope plugin_release` | Linked vs latest published plugin version, per profile | `omp-kit doctor --scope plugin_release` |
-| `--scope mission` | Repos building through rch and whether their gate calls the kit lease | `omp-kit doctor --scope mission` |
-| `--scope hooks` | Stale hook members per fleet repo | `omp-kit doctor --scope hooks` |
+| `--scope plugin_release` | Linked vs latest published plugin version, per profile | |
+| `--scope mission` | Repos building through rch and whether their gate calls the kit lease | |
+| `--scope hooks` | Stale hook members per fleet repo | |
 | `--scope push-latency` | Repo median/max pre-push span and five slowest members from gate-events/current + `.1` (32 MiB/file); excludes transport and untimed rows; incomplete input is `PARTIAL` | `omp-kit doctor --scope push-latency --json` |
-| `--scope rch` | Worker gc roots and health | `omp-kit doctor --scope rch` |
+| `--scope rch` | Worker gc roots and health | |
 | `--scope land` | Land guard identity: pane identity and reservations qualified against the publication parent | `omp-kit doctor --scope land --project PATH` |
-| `--scope activation` | ON, OFF-WITH-REASON, or OFF-NO-REASON for rule packs, extensions, profile links, kit services, and hook members; OFF-NO-REASON exits nonzero | `omp-kit doctor --scope activation` |
+| `--scope activation` | ON, OFF-WITH-REASON, or OFF-NO-REASON for rule packs, extensions, profile links, kit services, and hook members; OFF-NO-REASON exits nonzero | |
 | `--scope release` | Exact origin/main cut readiness; no suites or signing | `omp-kit doctor --scope release --project PATH` |
 `doctor` also takes rules-calibration flags (`--corpus-report`, `--labels`,
 `--seed`, `--sample-size`, `--noisy-lower-bound`) for reading an F2 corpus

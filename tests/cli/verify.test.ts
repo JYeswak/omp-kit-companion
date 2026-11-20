@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, jest, test } from "bun:test";
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
-import { expectedOf, LIVE_READBACK_LABEL, parseBoxes, verifyBead } from "../../src/verify.ts";
+import { expectedOf, LIVE_READBACK_LABEL, liveReadback, parseBoxes, verifyBead } from "../../src/verify.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { resolveRealBr } from "../../src/kitlib/readonly-br.ts";
@@ -751,7 +751,8 @@ test("VERIFYENV1: missing linked OMP identity preserves review state and accepta
 	const after = await row(t, id);
 	expect(after.status).toBe(before.status);
 	expect(after.acceptance_criteria).toBe(before.acceptance_criteria);
-	expect(after.labels).toContain("needs-director");
+	expect(after.labels).toEqual(before.labels);
+	expect(res.acts).toEqual([]);
 	// A broken ambient override alone cannot turn an unrelated product failure into an environment refusal.
 	const broken = await shapedBead(t, "actual assertion failure", "- [ ] [a] [build] `bun -e 'import { strict as assert } from \"node:assert\"; assert.equal(2 + 2, 5)'` -> prints PASS");
 	const failed = await verifyBead({
@@ -972,3 +973,36 @@ test("VERIFYHANDOFFSTATE1: active work is refused before replay; author handoff 
 	expect(after.acceptance_criteria).toBe(acceptance.replace("- [ ]", "- [x]"));
 }, fixtureDeadlineS(90) * 1_000);
 
+
+for (const ambient of ["", "WrongVerifier"]) {
+	test(`VERIFYDEPS1 explicit live actor reaches the nested native self-close guard with ambient ${JSON.stringify(ambient)}`, async () => {
+		const { dir, sha } = await repo(`live-actor-${ambient || "unset"}`);
+		const t = await sharedTracker(base, "replay-t");
+		const nested = await shapedBead(t, "nested author-owned bead", "- [ ] [a] [build] `sh scripts/t.sh` -> 0 fail");
+		const assigned = await brun(["update", nested, "--assignee", "Peer", "--actor", FIXTURE_AGENT], t.dir, trackerEnv(t));
+		expect(assigned.rc, assigned.out).toBe(0);
+		const probe = join(dir, "scripts", "actor-probe.ts");
+		writeFileSync(probe, `
+import { strict as assert } from "node:assert";
+import { run } from ${JSON.stringify(join(import.meta.dir, "..", "..", "src", "kitlib", "run.ts"))};
+const result = await run(${JSON.stringify(["bun", cliPath, "verify", nested, "--export", sha, "--project", dir, "--dry-run", "--json"])}, {
+	cwd: ${JSON.stringify(dir)}, env: process.env as Record<string, string>, deadline_s: 30,
+});
+const body = JSON.parse(new TextDecoder().decode(result.stdout));
+assert.equal(body.data.overall, "NON_AUTHOR_REQUIRED", JSON.stringify(body));
+`);
+		const live = await shapedBead(t, "live nested verifier", "- [ ] [a] [live] `bun scripts/actor-probe.ts` -> rc 0");
+		const opened = await brun(["update", live, "--uncheck-acceptance", "1", "--assignee", "Author", "--actor", FIXTURE_AGENT], t.dir, trackerEnv(t));
+		expect(opened.rc, opened.out).toBe(0);
+		const before = await row(t, live);
+		const nestedBefore = await row(t, nested);
+		const result = await liveReadback({
+			bead: live, repo: dir, actor: "Peer", lesson: "bind the explicit actor only to its read-only replay",
+			env: { ...trackerEnv(t), AGENT_NAME: ambient }, dryRun: true,
+		});
+		expect(result.ok, result.log).toBe(true);
+		expect(result.replays.map(replay => [replay.pass, replay.rc])).toEqual([[true, 0]]);
+		expect(await row(t, live)).toEqual(before);
+		expect(await row(t, nested)).toEqual(nestedBefore);
+	}, fixtureDeadlineS(90) * 1000);
+}

@@ -42,6 +42,7 @@ import { observeAuthorClaim, observeWorkingModel } from "./model-ledger.ts";
 import { beginVerifyAttempt, finalizeVerifyAttempt, resolveVerifyStateRoot } from "./verify-ledger.ts";
 import type { VerifyAttemptFinish, VerifyAttemptOutcome, VerifyAttemptRef, VerifyFinalEvidence } from "./verify-ledger.ts";
 import { resolveOmpIdentity } from "./paths.ts";
+import { executedShellCommands } from "./fleet-guard/git.ts";
 
 const text = (b: Uint8Array) => new TextDecoder().decode(b);
 const CMD = /`([^`]+)`/;
@@ -459,27 +460,60 @@ function lockKind(dir: string): LockKind | null {
 	if (existsSync(join(dir, "bun.lock"))) return { file: "bun.lock", argv: ["bun", "install", "--frozen-lockfile"] };
 	if (existsSync(join(dir, "package-lock.json"))) return { file: "package-lock.json", argv: ["npm", "ci", "--prefer-offline", "--no-audit", "--no-fund"] };
 	if (existsSync(join(dir, "pnpm-lock.yaml"))) return { file: "pnpm-lock.yaml", argv: ["pnpm", "install", "--frozen-lockfile", "--prefer-offline"] };
-	if (existsSync(join(dir, "yarn.lock"))) return existsSync(join(dir, ".yarnrc.yml"))
-		? { file: "yarn.lock", argv: ["yarn", "install", "--immutable"] }
-		: { file: "yarn.lock", argv: ["yarn", "install", "--frozen-lockfile", "--prefer-offline"] };
+	if (existsSync(join(dir, "yarn.lock"))) {
+		let managed = false;
+		let modern = existsSync(join(dir, ".yarnrc.yml"));
+		try {
+			const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { packageManager?: unknown };
+			const declared = manifest.packageManager;
+			if (typeof declared === "string" && declared.startsWith("yarn@")) {
+				managed = true;
+				modern ||= Number.parseInt(declared.slice(5), 10) >= 2;
+			}
+		} catch { /* The package manager reports a missing or invalid manifest. */ }
+		const argv = managed ? ["corepack", "yarn", "install"] : ["yarn", "install"];
+		if (modern) argv.push("--immutable");
+		else argv.push("--frozen-lockfile", "--prefer-offline");
+		return { file: "yarn.lock", argv };
+	}
 	if (existsSync(join(dir, "deno.lock"))) return { file: "deno.lock", argv: ["deno", "install", "--frozen"] };
 	return null;
 }
 /** A box that invokes the deno toolchain (as opposed to a node box that merely runs near deno files). */
 const DENO = /\bdeno\b/;
-/** A box's cwd: the export dir advanced through leading `cd <dir> &&` segments (quotes stripped). */
-function boxCwd(command: string, exportDir: string): string {
+/** Resolve leading shell cwd changes and npm's literal package-directory option. */
+function boxCwd(command: string, exportDir: string): string | null {
 	let cwd = exportDir;
 	let rest = command;
 	for (let i = 0; i < 50 && rest !== ""; i++) {
 		const m = /^\s*cd\s+("[^"]+"|'[^']+'|\S+)\s*&&\s*/.exec(rest);
-		if (m === null) return cwd;
+		if (m === null) break;
 		let target = m[1]!;
 		if ((target.startsWith('"') && target.endsWith('"')) || (target.startsWith("'") && target.endsWith("'"))) target = target.slice(1, -1);
 		if (target !== "") cwd = isAbsolute(target) ? target : resolve(cwd, target);
 		rest = rest.slice(m[0].length);
 	}
-	return cwd;
+	if (!rest.includes("--prefix") && !rest.includes("-C")) return cwd;
+	const inspection = executedShellCommands(rest);
+	if ("refusal" in inspection) return null;
+	const argv = inspection.commands[0]?.argv;
+	if (!argv || argv[0]?.expanded || basename(argv[0]?.text ?? "") !== "npm") return cwd;
+	let target = cwd;
+	for (let i = 1; i < argv.length; i++) {
+		const option = argv[i]!;
+		if (option.text === "--") break;
+		let value: string;
+		if (option.text === "--prefix" || option.text === "-C") {
+			const operand = argv[++i];
+			if (!operand || operand.expanded) return null;
+			value = operand.text;
+		} else if (option.text.startsWith("--prefix=")) {
+			if (option.expanded) return null;
+			value = option.text.slice(9);
+		} else continue;
+		target = resolve(cwd, value);
+	}
+	return target;
 }
 type ProvisionOutcome = { ok: true } | { ok: false; detail: string };
 /** Env keys that must never reach a dependency install. Installs run install scripts, so caller
@@ -548,7 +582,10 @@ async function installLockedDeps(lockDir: string, lock: LockKind, env: Record<st
 	// Frozen installs fail closed on a stale lock (npm "ci can only", pnpm ERR_PNPM_OUTDATED_LOCKFILE,
 	// bun/yarn frozen mismatches, deno "lockfile is out of date"): the project must commit an
 	// up-to-date lockfile, not resolve past it.
-	if (/lockfile|frozen|outdated|out-of-date|up-to-date|needs update|npm ci can only/i.test(out)) {
+	if (
+		/lockfile|frozen|outdated|out-of-date|up-to-date|needs update|npm ci can only/i.test(out) ||
+		out.includes("can only install packages when your package.json")
+	) {
 		return { ok: false, detail: `DEPENDENCIES_NOT_LOCKED: ${lock.file} in ${lockDir} is missing or out of date (install rc ${result.rc}); commit an up-to-date lockfile, never resolve outside it` };
 	}
 	return { ok: false, detail: `environment prerequisite unmet: dependency install failed in ${lockDir} (rc ${result.rc}): ${out.slice(-500).replace(/\n/g, " | ")}` };
@@ -597,8 +634,10 @@ export function declaresDependencies(path: string): boolean {
 export async function ensureBoxDeps(command: string, exportDir: string, env: Record<string, string>, log: string[], cache: Map<string, ProvisionOutcome>): Promise<ProvisionOutcome | null> {
 	if (!JS_RUNTIME.test(command)) return null;
 	const cwd = boxCwd(command, exportDir);
+	if (cwd === null) return { ok: false, detail: "environment prerequisite unmet: the dependency command directory is not literal and inspectable" };
 	const rel = relative(exportDir, cwd);
-	if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+	if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel))
+		return { ok: false, detail: `environment prerequisite unmet: dependency directory ${cwd} is outside the exact export` };
 	let dir = cwd;
 	let hasPackageJson = false;
 	let hasDenoConfig = false;
@@ -882,7 +921,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	// VERIFYSCRATCH1 export root: var/agent-tmp is gitignored, so the export has none; kitlib scratch under the
 	// repo root needs it, as the gates provide it (fresh-gate.sh, full-suite-verdict.sh).
 	const exportTmp = join(exportDir, "var", "agent-tmp");
-	const replayEnv = { ...replayBase, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, KITLIB_TMP_ROOT: exportTmp, ...(wantsOwned ? { OWNED_TRACKER_DB: ownedDb } : {}), PATH: `${replayBin}${delimiter}${replayBase.PATH}` };
+	const replayEnv = { ...replayBase, AGENT_NAME: input.actor, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, KITLIB_TMP_ROOT: exportTmp, ...(wantsOwned ? { OWNED_TRACKER_DB: ownedDb } : {}), PATH: `${replayBin}${delimiter}${replayBase.PATH}` };
 	if (wantsOwned) log.push(`owned fixture ${ownedDb} (per-run read-only replay)`);
 	mkdirSync(exportDir, { recursive: true });
 	const archive = await run(["sh", "-c", `git -C ${JSON.stringify(input.repo)} archive ${JSON.stringify(input.exportSha)} | tar -x -C ${JSON.stringify(exportDir)}`], { deadline_s: 300, env });
@@ -921,7 +960,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		if (deps !== null && !deps.ok) {
 			environmentFailures.push(`${tag(box)} ${deps.detail}`);
 			replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: null, pass: null, detail: `${deps.detail}; not executed`, execution: skippedExecution(true) });
-			log.push(`${tag(box)} ${deps.detail}; not executed; needs-director`);
+			log.push(`${tag(box)} ${deps.detail}; not executed`);
 			continue;
 		}
 		const cached = commandResults.get(named);
@@ -1011,13 +1050,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		// A missing or out-of-date lockfile is its own named refusal, never a silent pass or a
 		// generic environment failure: the project must commit an up-to-date lockfile.
 		const code = environmentFailures.some(f => f.includes("DEPENDENCIES_NOT_LOCKED")) ? "DEPENDENCIES_NOT_LOCKED" : "ENVIRONMENT";
-		const comment = `${code} ${input.bead}: ${environmentFailures.join("; ")}\n${log.join("\n")}`;
-		acts.push(["br", "update", input.bead, "--add-label", "needs-director", "--actor", input.actor]);
-		acts.push(["br", "comments", "add", input.bead, "--actor", input.actor, "-m", comment]);
-		if (!input.dryRun) {
-			const done = await executeActs(acts, input.repo, env);
-			if (done.failure !== null) log.push(done.failure);
-		}
+		// A verifier prerequisite is not a project defect; leave its tracker untouched.
 		return await finishAttempt({ ok: false, code, bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts });
 	}
 	const ran = replays.filter(r => r.pass === true);
@@ -1382,7 +1415,7 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 	const scratch = ownedTmp("verify-live", { bead: input.bead, ...(harnessRoot === undefined ? {} : { root: harnessRoot }) });
 	const realBr = resolveRealBr(env.PATH);
 	if (!realBr.ok) return refuse("NOT_IN_REVIEW", `UNJUDGED: ${realBr.reason}`);
-	const replayEnv = { ...env, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, PATH: `${installReadonlyBr(scratch.path, realBr.path)}:${env.PATH ?? "/usr/bin:/bin"}` };
+	const replayEnv = { ...env, AGENT_NAME: input.actor, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, PATH: `${installReadonlyBr(scratch.path, realBr.path)}:${env.PATH ?? "/usr/bin:/bin"}` };
 	const replays: BoxReplay[] = [];
 	for (const box of toRun) {
 		const command = commandOf(box.body)!;

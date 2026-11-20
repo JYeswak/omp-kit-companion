@@ -1,0 +1,1 @@
+- `verify` provisions npm `--prefix`/`-C` package locks, uses Corepack for declared Yarn versions, and passes the explicit actor into export and live replays. Environment-only failures no longer mutate the target tracker; genuine assertion failures still produce `REWORK`.
