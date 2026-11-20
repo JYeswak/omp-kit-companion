@@ -4,6 +4,22 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.138] - 2026-11-20
+
+### Added
+
+- `omp-kit land --exact-parent SHA --apply --yes` publishes one reviewed commit whose sole parent is fresh `origin/main` while the canonical local main keeps unpushed commits that must stay held. The commit is pushed from a private ovnfs checkout whose own main is that commit, so every push, trailer, bead and secret-scan check judges exactly the pushed commit and never the held ones; custody on its paths, the registered check and the full-suite verdict still apply. Afterwards local main merges origin's commit and the held commits stay where they were. A commit whose parent is not the current origin tip is refused before anything is created.
+
+### Changed
+
+- Honor each hook member's owner-execute mode bit, including on NFS checkouts whose executable-access response incorrectly permits mode-600 files. Reuse the existing timing process for the mode check, keep enabled members running, and refresh older generated runners during installation.
+- Clear a pending wake from a proven older Tern foreground only after keeping its recovery copy and recording the settlement, then deliver the new wake. Current or unverified pending wakes still block new sends.
+
+### Fixed
+
+- `omp-kit land --apply` and the other tool-gated applies now refuse `CONSENT_REQUIRED` (exit 2) when `--yes` is absent, before a missing native tool is reported, so the consent refusal no longer depends on which tools a host has. The `--yes` and preview paths keep their exit-3 tool refusals.
+- `omp-kit doctor --scope lsp --deep` keeps the explanation of a classified outcome when the readiness gate also failed: a server that exits during initialize is reported as having exited, with the readiness failure added as detail instead of replacing it. Native certification of the compiled immediate-exit case no longer refuses every platform.
+
 ## [0.2.137] - 2026-11-20
 
 ### Added

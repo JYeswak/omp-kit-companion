@@ -1,3 +1,0 @@
-### Added
-
-- `omp-kit land --exact-parent SHA --apply --yes` publishes one reviewed commit whose sole parent is fresh `origin/main` while the canonical local main keeps unpushed commits that must stay held. The commit is pushed from a private ovnfs checkout whose own main is that commit, so every push, trailer, bead and secret-scan check judges exactly the pushed commit and never the held ones; custody on its paths, the registered check and the full-suite verdict still apply. Afterwards local main merges origin's commit and the held commits stay where they were. A commit whose parent is not the current origin tip is refused before anything is created.
