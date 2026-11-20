@@ -2211,11 +2211,39 @@ function findAdoptableStrandedTip(repo: string, paths: string[]): StrandedTip | 
 
 // LANDSIBLING1 (ompkit-1ra0d.218.2): publish one reviewed commit whose sole parent is fresh origin/main while the
 // canonical local main keeps unpushed commits that must stay held. The commit is pushed from a private ovnfs
-// checkout whose own main is that commit, so the on-main pre-push member admits it unrelaxed and every push,
-// trailer, bead and secret-scan member judges exactly origin..commit, never the held commits. Custody, actual
-// parent, registered check and full-suite gates are the ones the other land modes run. Afterwards the canonical
-// main takes origin's commit by an ordinary converge, which merges it and leaves every held commit where it was.
+// checkout whose own main is that commit, so the on-main pre-push member admits it unrelaxed. A real ovnfs
+// checkout carries no hooks directory, so no pre-push member runs there; the repository's own gate is run on the
+// candidate first, in the canonical repository (exactParentCandidateGate). Custody and actual-parent gates are the
+// ones the other land modes run. Afterwards the canonical main takes origin's commit by an ordinary converge,
+// which merges it and leaves every held commit where it was.
 const EXACT_PARENT_EXCLUSIVE = ["--paths", "--patch", "--base", "--message", "--review", "--bead", "--checkout", "--keep-checkout"] as const;
+
+const LAND_EXACT_GATE_DEADLINE_ENV = "OMP_KIT_LAND_EXACT_GATE_DEADLINE_S";
+
+/**
+ * A repository that ships scripts/fresh-gate.sh gets that gate run on the exact candidate (it judges the commit's
+ * own archive) before anything is created or pushed, and publishes only on its `FRESH-GATE: GREEN commit=<sha>`
+ * line with exit 0. Deadline: OMP_KIT_LAND_EXACT_GATE_DEADLINE_S (integer, clamped to 1..7200) or 2400 s, the
+ * publication push deadline's bound for the same gate. A repository without the script is unchanged.
+ */
+async function exactParentCandidateGate(repo: string, candidate: string): Promise<CliResult | null> {
+	if (!existsSync(join(repo, "scripts", "fresh-gate.sh"))) return null;
+	const raw = process.env[LAND_EXACT_GATE_DEADLINE_ENV];
+	const parsed = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+	const deadlineS = Number.isSafeInteger(parsed) ? Math.min(7200, Math.max(1, parsed)) : 2400;
+	let run: RunResult;
+	try {
+		run = await kitlibRun(["sh", "scripts/fresh-gate.sh", "--commit", candidate], { cwd: repo, env: gitEnvironment(), deadline_s: deadlineS, max_output_bytes: 8 * 1024 * 1024 });
+	} catch (error) {
+		return refused("LAND_PUBLICATION_REFUSED", `The exact candidate ${candidate} could not be gated: ${error instanceof Error ? error.message : String(error)}`, "Repair scripts/fresh-gate.sh or the host and retry; nothing was created or published.");
+	}
+	const decoder = new TextDecoder();
+	const lines = `${decoder.decode(run.stdout)}\n${decoder.decode(run.stderr)}`.split("\n");
+	const green = run.rc === 0 && !run.timed_out && !run.killed && !run.truncated && lines.some((line) => line.startsWith(`FRESH-GATE: GREEN commit=${candidate}`));
+	if (green) return null;
+	const verdict = [...lines].reverse().find((line) => line.startsWith("FRESH-GATE:")) ?? (run.timed_out ? `timed out after ${deadlineS} s` : `exit ${String(run.rc)} without a FRESH-GATE line`);
+	return refused("LAND_PUBLICATION_REFUSED", `The exact candidate ${candidate} did not pass scripts/fresh-gate.sh: ${previewText(verdict, 300)}`, "Fix the failing check in the commit (scripts/fresh-gate.sh --commit SHA shows it) and rebuild the reviewed commit; nothing was created or published.");
+}
 
 async function landExactParentCommand(repo: string, request: ParsedCommand): Promise<CliResult> {
 	const value = request.flags.get("--exact-parent");
@@ -2258,6 +2286,8 @@ async function landExactParentCommand(repo: string, request: ParsedCommand): Pro
 		if (entry === null) return refused("LAND_CANDIDATE_UNREADABLE", `The commit tree could not be read for ${path}`, "Repair the repository and retry; nothing was created or published.");
 		qualifiedBlobs[path] = entry;
 	}
+	const gateRefusal = await exactParentCandidateGate(repo, candidate);
+	if (gateRefusal !== null) return gateRefusal;
 	const name = `exact-parent-${candidate.slice(0, 12)}`;
 	const ovnfs = (args: string[]) => kitlibRun(["ovnfs", ...args], { cwd: repo, env: gitEnvironment(), deadline_s: 120, max_output_bytes: 64 * 1024 });
 	let checkout: string;

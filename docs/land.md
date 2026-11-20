@@ -123,15 +123,25 @@ shared-main pre-push member admits a push only when the pushed commit is on
 the pushing repository's own `main`, so land does not relax it: it opens a
 private ovnfs checkout at the commit (`ovnfs new --name exact-parent-<sha12>
 --rev SHA`), sets that checkout's own `main` to the commit and publishes from
-it. Every pre-push member then judges exactly `origin..SHA`; a planted secret
-in a held commit is not in that range.
+it. A real ovnfs checkout carries no `hooks` directory, so no pre-push member
+runs there (the first release of this verb assumed it did and published
+ungated; 2026-11-20). Land therefore runs the repository's own gate itself,
+before anything is created: where `scripts/fresh-gate.sh` exists it is run on
+the exact candidate in the canonical repository (`sh scripts/fresh-gate.sh
+--commit SHA`) and the commit publishes only on its `FRESH-GATE: GREEN
+commit=SHA` line with exit 0; anything else is `LAND_PUBLICATION_REFUSED`
+with the gate's own last line, before the private checkout exists. The
+deadline is `OMP_KIT_LAND_EXACT_GATE_DEADLINE_S` (integer, 1 to 7200,
+default 2400). The gate's GREEN row also lands in the canonical ledger, which
+is what the `br` handoff check reads. A repository without the script is
+unchanged.
 
 Gates kept: the commit must name a sole parent equal to the freshly fetched
 origin tip (`LAND_EXACT_PARENT_NOT_TIP` otherwise, before anything is
 created), the caller must hold current exclusive reservations on every path
-the commit changes, and the actual-parent qualification, the registered
-`.omp/push-check` and the full-suite verdict run on the exact candidate as in
-every other land mode. `--message`, `--paths`, `--patch`, `--base`, `--review`,
+the commit changes, and the actual-parent qualification and the registered
+`.omp/push-check` run on the exact candidate as in every other land mode.
+`--message`, `--paths`, `--patch`, `--base`, `--review`,
 `--bead`, `--checkout` and `--keep-checkout` are refused: the commit's own
 message and bytes publish unchanged. The commit must exist in this repository
 (`git fetch CHECKOUT SHA` brings its objects).

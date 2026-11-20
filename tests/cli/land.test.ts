@@ -1042,10 +1042,18 @@ function installOnMainAndRangeScan(work: string): void {
 
 type ExactParentSetup = { work: string; fakeBin: string; bare: string; base: string; reviewed: string; held: string[]; calls: string; copyRoot: string; env: Record<string, string>; hold: unknown[] };
 
+/** The companion's scripts/fresh-gate.sh stand-in: logs its arguments when asked, then runs `body` ($2 is the candidate). */
+function writeExactParentGate(work: string, body: string, log: string | null = null): void {
+	mkdirSync(join(work, "scripts"), { recursive: true });
+	const record = log === null ? "" : `printf '%s\\n' "$*" >> ${JSON.stringify(log)}\n`;
+	writeFileSync(join(work, "scripts", "fresh-gate.sh"), `#!/bin/sh\n${record}${body}\n`);
+}
+
 /** Local main holds two unpushed commits; the reviewed commit is built directly on the origin tip on a side branch. */
 function exactParentSetup(secretIn: "reviewed" | "held" | null = null): ExactParentSetup {
 	const { work, fakeBin } = fixture();
 	installOnMainAndRangeScan(work);
+	writeExactParentGate(work, `printf 'FRESH-GATE: GREEN commit=%s\\n' "$2"`);
 	writeExactParentOvnfs(fakeBin);
 	const bare = git(work, ["remote", "get-url", "origin"]).trim();
 	const base = remoteHead(work);
@@ -1147,6 +1155,50 @@ test("LANDSIBLING1 exact-parent refuses flags that would change the published co
 	const unknown = exactParentRun(setup, "0".repeat(40));
 	expect(responseCode(unknown.body)).toBe("LAND_EXACT_PARENT_UNKNOWN");
 	expect(remoteHead(setup.work)).toBe(setup.base);
+	expect(readFileSync(setup.calls, "utf8")).toBe("");
+});
+
+test("LANDSIBLING1 exact-parent runs scripts/fresh-gate.sh on the exact candidate first: RED refuses and creates nothing, GREEN publishes", () => {
+	const setup = exactParentSetup();
+	const gateLog = join(scratch, `exact-parent-gate-${globalThis.fixtureNumber++}.log`);
+	const writeGate = (body: string) => writeExactParentGate(setup.work, body, gateLog);
+	// Planted negative: the repository's gate is RED for the candidate (exit 1), so nothing is created or published.
+	writeGate(`printf 'FRESH-GATE: RED: affected tests did not pass (exit 1); the push is refused\\n'\nexit 1`);
+	const red = exactParentRun(setup, setup.reviewed);
+	expect(red.status, JSON.stringify(red.body)).not.toBe(0);
+	expect(responseCode(red.body)).toBe("LAND_PUBLICATION_REFUSED");
+	expect(JSON.stringify(red.body)).toContain("did not pass scripts/fresh-gate.sh: FRESH-GATE: RED: affected tests did not pass");
+	expect((red.body.data as { overall: string }).overall).toBe("REFUSED");
+	expect(remoteHead(setup.work)).toBe(setup.base);
+	expectUnpublished(setup, setup.reviewed);
+	expect(readFileSync(setup.calls, "utf8")).toBe("");
+	expect(git(setup.work, ["rev-parse", "main"]).trim()).toBe(setup.held[1]!);
+	// A GREEN line for another commit, or GREEN text with a non-zero exit, is not a pass either.
+	writeGate(`printf 'FRESH-GATE: GREEN commit=%s\\n' "${"0".repeat(40)}"`);
+	expect(responseCode(exactParentRun(setup, setup.reviewed).body)).toBe("LAND_PUBLICATION_REFUSED");
+	writeGate(`printf 'FRESH-GATE: GREEN commit=%s\\n' "$2"\nexit 1`);
+	expect(responseCode(exactParentRun(setup, setup.reviewed).body)).toBe("LAND_PUBLICATION_REFUSED");
+	expect(remoteHead(setup.work)).toBe(setup.base);
+	// Control: the gate reads GREEN for exactly the candidate, so land publishes it.
+	writeGate(`printf 'FRESH-GATE: GREEN commit=%s\\n' "$2"`);
+	const green = exactParentRun(setup, setup.reviewed);
+	expect(green.status, JSON.stringify(green.body)).toBe(0);
+	expect((green.body.data as { overall: string }).overall).toBe("PUSHED");
+	expect(remoteHead(setup.work)).toBe(setup.reviewed);
+	// The gate ran on the exact sha (arguments: --commit SHA) every time.
+	for (const line of readFileSync(gateLog, "utf8").trim().split("\n")) expect(line).toBe(`--commit ${setup.reviewed}`);
+});
+
+test("LANDSIBLING1 exact-parent refuses a candidate whose gate outlives its deadline before creating the checkout or pushing", () => {
+	const setup = exactParentSetup();
+	// The stand-in gate sleeps far past the 2 s deadline; the push never starts because the gate never answered GREEN.
+	writeExactParentGate(setup.work, `sleep 60\nprintf 'FRESH-GATE: GREEN commit=%s\\n' "$2"`);
+	const hung = command(setup.work, ["--exact-parent", setup.reviewed, "--apply", "--yes"], setup.hold, { amDir: setup.fakeBin, gitEnv: { ...setup.env, OMP_KIT_LAND_EXACT_GATE_DEADLINE_S: "2" } });
+	expect(hung.status, JSON.stringify(hung.body)).not.toBe(0);
+	expect(responseCode(hung.body)).toBe("LAND_PUBLICATION_REFUSED");
+	expect(JSON.stringify(hung.body)).toContain("timed out after 2 s");
+	expect(remoteHead(setup.work)).toBe(setup.base);
+	expectUnpublished(setup, setup.reviewed);
 	expect(readFileSync(setup.calls, "utf8")).toBe("");
 });
 
