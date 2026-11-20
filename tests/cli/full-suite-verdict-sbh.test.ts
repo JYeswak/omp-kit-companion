@@ -44,6 +44,7 @@ test("full-suite sibling inherits statfs while auto/sbh still refuses", async ()
 	// (and the files it imports) that its suite runs as "$KITROOT/src/cli.ts heavy".
 	cpSync(join(repoRoot, "src"), join(fixture, "src"), { recursive: true });
 	cpSync(join(repoRoot, "extensions"), join(fixture, "extensions"), { recursive: true }); // src/cli.ts imports extensions/
+	cpSync(join(repoRoot, "skills", "frontend-foundations", "scripts"), join(fixture, "skills", "frontend-foundations", "scripts"), { recursive: true }); // src/cli.ts imports the frontend checker scripts.
 	mkdirSync(join(fixture, "config"));
 	copyFileSync(join(repoRoot, "config", "heavy-labels.json"), join(fixture, "config", "heavy-labels.json"));
 	mkdirSync(join(fixture, "installer"));
@@ -99,7 +100,7 @@ rm -rf "$case_tmp"
 	chmodSync(suite, 0o755);
 	await git(fixture, "add", "--", "tests/cli/savefirst-sibling-pressure.test.sh", "scripts/kitlib-tmp.sh",
 		"scripts/readme-check.ts",
-		"scripts/tern-script-routes.json", "src", "extensions", "config", "installer");
+		"scripts/tern-script-routes.json", "src", "extensions", "skills", "config", "installer");
 	await git(fixture, "commit", "-q", "-m", "[test] SAVEFIRST1 sibling fixture");
 
 	const candidate = await git(fixture, "rev-parse", "HEAD");
