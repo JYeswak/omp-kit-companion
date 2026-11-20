@@ -84,6 +84,7 @@ import { ccStateDir } from "./service.ts";
 import { retainOmpSessions } from "./session-retain.ts";
 import { retainStateLedgers, type LedgerRetentionReport } from "./ledger-retain.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
+import { defaultBudgetLedgerPath, releaseBudgetEntry, SCRATCH_EXPORT_DIRECTORY, SCRATCH_REAPER_ENTRY_BUDGET, SCRATCH_REAPER_HEADROOM_MS, updateScratchUsers } from "./scratch.ts";
 import { applyCheckoutReap, CHECKOUT_IDLE_DAYS_DEFAULT, checkoutArchiveRoot, diffCheckoutEmpty, listIdleEmptyCheckouts, planCheckoutReap, sizeCheckoutBytes } from "./checkout-reap.ts";
 import type { ScratchReleaseOptions } from "./scratch.ts";
 import { appendLog } from "./scratch.ts";
