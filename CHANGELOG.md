@@ -4,6 +4,17 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.136] - 2026-11-20
+
+### Changed
+
+- Compare release directories by identity and stable contents instead of filesystem allocation size. Incomplete or unstable snapshots remain unverifiable, and changes to files, directory entries, permissions, or timestamps still fail the release check.
+
+### Fixed
+
+- Wait for the kit update to finish before telling seats to restart. A candidate that rolls back no longer sends or consumes an upgrade notice.
+- Keep verifier history readable and writable after reboot changes filesystem device numbers. Pages with a different inode or size are still rejected.
+
 ## [0.2.135] - 2026-11-19
 
 ### Changed
