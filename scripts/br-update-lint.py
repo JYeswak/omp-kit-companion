@@ -669,6 +669,18 @@ def _handoff_remedy(repo: str, target: str) -> str:
     return "no declared gate exists in this repository"
 
 
+def _handoff_published(repo: str, commit: str) -> bool:
+    """in_review means a non-author can verify it now, so the DONE source must already be on origin/main.
+
+    A repository without an `origin` remote has nothing to publish to and is unchanged. Only the local
+    remote-tracking ref is read, never the network; a push from another checkout leaves it stale until
+    `git fetch origin main`, which the refusal names."""
+    rc, _, _ = run(["git", "-C", repo, "remote", "get-url", "origin"], repo, 10)
+    if rc != 0:
+        return True
+    return run(["git", "-C", repo, "merge-base", "--is-ancestor", commit, "refs/remotes/origin/main"], repo, 10)[0] == 0
+
+
 def _handoff_claim(repo: str, subject: str, request: list[str]) -> int:
     repo = os.path.realpath(repo)
     commit = ""
@@ -679,7 +691,13 @@ def _handoff_claim(repo: str, subject: str, request: list[str]) -> int:
     if commit and (_storegate_green(repo, commit)
                    if repo == os.path.realpath(Path.home() / ".claude")
                    else _fresh_green(repo, commit) or _push_check_green(repo, commit)):
-        return 0
+        if _handoff_published(repo, commit):
+            return 0
+        print("br-shim: HANDOFF_UNGATED the DONE source "
+              f"{repo}@{commit} is not on origin/main; publish it (omp-kit land, or "
+              "omp-kit land --exact-parent SHA), run git fetch origin main if it is already pushed, and name "
+              "the published sha in the DONE line", file=sys.stderr)
+        return 4
     target = commit or subject or "<sha>"
     remedy = _handoff_remedy(repo, target)
     print("br-shim: HANDOFF_UNGATED requires a complete GREEN observation for the exact DONE source "

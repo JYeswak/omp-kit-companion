@@ -876,6 +876,38 @@ test("HANDOFFPUSHCHECK1 without .omp/push-check the refusal names committing the
 	} finally { g.scratch.cleanup(); }
 }, fixtureDeadlineS(180) * 1_000);
 
+test("HANDOFFPUBLISHED1 with an origin, a GREEN DONE source that is only local is refused; once on origin/main it is admitted; a repo without origin is unchanged", async () => {
+	const g = await handoffRepo(true);
+	try {
+		// Planted negative: a GREEN, fresh-gated commit that exists only locally while the repository has an origin.
+		const commitLocal = async (message: string) => {
+			await g.checked(["git", "-C", g.code, "commit", "--allow-empty", "-qm", message, "-m", "Agent: HandoffAuthor"]);
+			const sha = await g.checked(["git", "-C", g.code, "rev-parse", "HEAD"]);
+			g.ledger(0, sha);
+			return { sha, done: `DONE ${g.code}@${sha}: exact native source observation` };
+		};
+		const local = await commitLocal("local only source");
+		const refused = await g.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", local.done]);
+		const err = decoder.decode(refused.stderr);
+		expect(refused.rc, err).toBe(4);
+		expect(err).toContain("HANDOFF_UNGATED");
+		expect(err).toContain("is not on origin/main");
+		expect(err).toContain("git fetch origin main");
+		expect(await g.status()).toBe("in_progress");
+		// The same DONE after the push: origin/main now contains the commit.
+		await g.checked(["git", "-C", g.code, "push", "-q", "origin", "main"]);
+		const published = await g.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", local.done]);
+		expect(published.rc, decoder.decode(published.stderr)).toBe(0);
+		expect(await g.status()).toBe("in_review");
+		// Control: a repository with no origin remote has nothing to publish to, so the GREEN observation alone admits.
+		await g.checked(["git", "-C", g.code, "remote", "remove", "origin"]);
+		const bare = await commitLocal("source without origin");
+		const admitted = await g.shim(["update", "hh-other", "--status", "in_review", "--transition-comment", bare.done]);
+		expect(admitted.rc, decoder.decode(admitted.stderr)).toBe(0);
+		expect(await g.status("hh-other")).toBe("in_review");
+	} finally { g.scratch.cleanup(); }
+}, fixtureDeadlineS(180) * 1_000);
+
 test("HANDOFFDONELINE1 an in_review update with no DONE line names the missing --transition-comment, not only a gate run", async () => {
 	const g = await handoffRepo(true);
 	try {
