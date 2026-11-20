@@ -749,19 +749,26 @@ export const LSOF_TIMEOUT_MS = 15000;
  * One system-wide open-file snapshot per plan/apply (`lsof -nP -Fn`, ~2 s at
  * load 34): per-dir `lsof +D` tree walks take 30 s+ on cache-dense dirs and
  * time out, failing closed forever. Null when the snapshot itself fails or
- * times out (callers fail closed). Absolute `n<path>` lines only.
+ * times out (callers fail closed). Absolute `n<path>` lines only. `onFailure`
+ * receives why a null happened (exit status plus the first 160 bytes of lsof's
+ * own words), so a run that fails closed can say what lsof said (LSOFWHY1).
  */
-export function takeLsofSnapshot(run: ScratchRunner, timeoutMs = LSOF_TIMEOUT_MS): Set<string> | null {
+export function takeLsofSnapshot(run: ScratchRunner, timeoutMs = LSOF_TIMEOUT_MS, onFailure?: (why: string) => void): Set<string> | null {
+	const failed = (why: string): null => {
+		onFailure?.(why);
+		return null;
+	};
 	let out: ScratchRunResult;
 	try {
 		out = timeoutMs > 0 ? run(["lsof", "-nP", "-Fn"], { timeoutMs }) : run(["lsof", "-nP", "-Fn"], {});
-	} catch {
-		return null;
+	} catch (error) {
+		return failed(`threw: ${(error instanceof Error ? error.message : String(error)).slice(0, 160)}`);
 	}
-	if ((out.code !== 0 && out.code !== 1) || out.stderr !== "") return null;
+	if ((out.code !== 0 && out.code !== 1) || out.stderr !== "")
+		return failed(`rc=${String(out.code)} stderr=${JSON.stringify(out.stderr.slice(0, 160))}`);
 	const text = out.stdout;
-	if (text.includes("command not found") || /lsof:.*(not found|No such file)/i.test(text)) return null;
-	if (/^lsof:/m.test(text)) return null;
+	if (text.includes("command not found") || /lsof:.*(not found|No such file)/i.test(text) || /^lsof:/m.test(text))
+		return failed(`rc=${String(out.code)} stdout=${JSON.stringify(text.slice(0, 160))}`);
 	const paths = new Set<string>();
 	for (const line of out.stdout.split("\n")) {
 		if (line.startsWith("n/")) paths.add(line.slice(1));
@@ -3926,6 +3933,8 @@ export interface ScratchRunReceipt {
 	/** Every failed entry with its reason (capped at 1000, see failuresTruncated); the counts above stay authoritative. */
 	failures: { dir: string; reason: string; action: string; sizeBytes: number; error?: string }[];
 	failuresTruncated: boolean;
+	/** Why the system-wide lsof snapshot returned null this run (first occurrence: rc and the first 160 bytes of lsof's output), else null. */
+	lsof_snapshot_failure: string | null;
 }
 
 export type ScratchGapClass = "never-released" | "pid-keyed-owner-never-released" | "released-unbinned" | "unowned" | "mismatched-owner";
@@ -4127,7 +4136,11 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	const pastDeadline = (): boolean => deps.deadlineMs !== undefined && Date.now() >= deps.deadlineMs;
 	const refreshMs = deps.snapshotRefreshMs ?? SCRATCH_REAPER_SNAPSHOT_REFRESH_MS;
 	let snapAt = Date.now();
-	let snap = takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+	// LSOFWHY1: the first reason a snapshot returned null this run (rc plus the first 160 bytes of lsof's own words),
+	// so a receipt that failed closed on lsof-evidence-unavailable says what lsof said, not only that it failed.
+	let lsofSnapshotFailure: string | null = null;
+	const noteLsofFailure = (why: string): void => { lsofSnapshotFailure ??= why; };
+	let snap = takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS, noteLsofFailure);
 	const snapDeps: ApplyDeps = { ...deps, lsofSnapshot: snap,
 		bootMs: deps.bootMs ?? systemBootMs(deps.run), checkoutNameCache: deps.checkoutNameCache ?? new Map() };
 	const refreshSnap = (): ApplyDeps => {
@@ -4135,7 +4148,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 		// dir, which cost ~2 s each and blew the 30 min cap on a 6k+ census. A null snapshot still
 		// retries on the cadence, so a recovered lsof is picked up without per-dir spawns.
 		if (Date.now() - snapAt >= refreshMs) {
-			const next = takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+			const next = takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS, noteLsofFailure);
 			if (next !== null || snap === undefined) snap = next;
 			snapAt = Date.now();
 		}
@@ -4277,6 +4290,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 		refused_gb: refusedBytes / 1_000_000_000,
 		failures: failuresTruncated ? failures.slice(0, MAX_RECEIPT_FAILURES) : failures,
 		failuresTruncated,
+		lsof_snapshot_failure: lsofSnapshotFailure,
 		orphan_processes: [...killed, ...orphanDecisions.filter(row => row.proof === undefined).map(row => ({ ...row, ok: false }))],
 	};
 	appendLog(home, { event: "run-receipt", dir: "", at: finishedAt, ...receipt });

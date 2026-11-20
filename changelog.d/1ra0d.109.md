@@ -1,3 +1,4 @@
 ### Fixed
 - `scripts/full-suite-verdict.sh` resolves `--commit` once to its full object name (an abbreviation, `HEAD` or a branch all work), so every consumer of the commit, including a main-role shard's `git fetch --depth 1 <sha>`, sees the full name. An abbreviated sha broke that fetch on 2026-11-20.
 - The suite lease's `SUITE_LEASE_OWNER_UNREADABLE` refusal now says why (the caller's shell reported a virtual `$$`, as the omp bash tool's `sh` and `bash` do) and names the remedy: start the verdict through `/bin/sh` or from a real process.
+- The scratch reaper's run receipt (and its reap-log `run-receipt` line) now carries `lsof_snapshot_failure`: when the system-wide `lsof` snapshot comes back null, the first reason this run, as the exit status plus the first 160 bytes of lsof's own output (null when lsof worked). A run that failed closed on `lsof-evidence-unavailable` no longer hides what lsof said.

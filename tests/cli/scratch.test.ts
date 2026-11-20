@@ -444,6 +444,20 @@ test("apply records an owner race as a refused skip without failing the run", ()
   }));
 });
 
+test("LSOFWHY1 the run receipt records why the lsof snapshot was null, and null when lsof worked", () => {
+	const home = useState();
+	const root = agentTmp("scratch-lsofwhy");
+	roots.push(root);
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	const stderr = `lsof: WARNING: can't stat() ${"y".repeat(300)}`;
+	const failing = applyScratch(home, { ...depsFor({ run: (args: readonly string[]) => (args[0] === "lsof" ? { code: 0, stdout: "", stderr } : clearRun()) }), home });
+	expect(failing.receipt?.lsof_snapshot_failure).toBe(`rc=0 stderr=${JSON.stringify(stderr.slice(0, 160))}`);
+	const logged = readFileSync(reapLogPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
+	expect(logged).toContainEqual(expect.objectContaining({ event: "run-receipt", lsof_snapshot_failure: `rc=0 stderr=${JSON.stringify(stderr.slice(0, 160))}` }));
+	// Control: a working lsof leaves the field null.
+	expect(applyScratch(home, { ...depsFor({ run: clearRun }), home }).receipt?.lsof_snapshot_failure).toBeNull();
+});
+
 test("apply quarantines idle unowned dirs and deletes expired quarantine after rechecks", () => {
   const home = useState();
   const root = agentTmp("scratch");
@@ -1286,6 +1300,27 @@ test("lsof snapshot: held file deep in a tree is HELD, empty is clear, failure i
 	expect(snapshotClear(failed, "/deep/tree")).toBeNull();
 	const diag = takeLsofSnapshot(() => ({ code: 0, stdout: "", stderr: "lsof: no such file" }));
 	expect(snapshotClear(diag, "/deep/tree")).toBeNull();
+});
+
+test("LSOFWHY1 takeLsofSnapshot says why it returned null: rc plus the first 160 bytes of lsof's words; success and an empty snapshot say nothing", () => {
+	const reasons: string[] = [];
+	const note = (why: string) => reasons.push(why);
+	const long = `lsof: WARNING: can't stat() ${"x".repeat(300)}`;
+	expect(takeLsofSnapshot(() => ({ code: 0, stdout: "", stderr: long }), 15000, note)).toBeNull();
+	expect(takeLsofSnapshot(() => ({ code: 2, stdout: "", stderr: "" }), 15000, note)).toBeNull();
+	expect(takeLsofSnapshot(() => ({ code: 0, stdout: "lsof: no such file\n", stderr: "" }), 15000, note)).toBeNull();
+	expect(takeLsofSnapshot(() => { throw new Error("spawn lsof ENOENT"); }, 15000, note)).toBeNull();
+	expect(reasons).toEqual([
+		`rc=0 stderr=${JSON.stringify(long.slice(0, 160))}`,
+		`rc=2 stderr=""`,
+		`rc=0 stdout=${JSON.stringify("lsof: no such file\n")}`,
+		"threw: spawn lsof ENOENT",
+	]);
+	expect(reasons[0]!.length).toBeLessThan(200);
+	// A snapshot that worked, empty or not, reports nothing.
+	expect(takeLsofSnapshot(() => ({ code: 1, stdout: "", stderr: "" }), 15000, note)).toEqual(new Set<string>());
+	expect(takeLsofSnapshot(() => ({ code: 0, stdout: "p1\nn/a\n", stderr: "" }), 15000, note)).toEqual(new Set(["/a"]));
+	expect(reasons).toHaveLength(4);
 });
 
 test("lsof snapshot prefix match does not confuse sibling names", () => {
