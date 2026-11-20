@@ -116,7 +116,7 @@ function judgeFiles(policy: FilePolicy, observed: Record<string, unknown>[], cha
 		return {
 			path: name, elapsed_s: elapsed, cpu_s: cpu, equivalent_wall_s: equivalent, cap_s: ceiling,
 			qualified, ncpu, workers: workerCount, default_workers: defaultWorkers, load_1m: row.load_1m, load_1m_end: row.load_1m_end,
-			status: cpuOver || wallOver ? "FILE_OVER_BUDGET" : qualified ? "OK" : "NOT_CALIBRATED",
+			status: wallOver || (cpuOver && qualified) ? "FILE_OVER_BUDGET" : cpuOver ? "UNQUALIFIED" : qualified ? "OK" : "NOT_CALIBRATED",
 			clock: cpuOver ? "cpu-equivalent" : wallOver ? "qualified-wall" : undefined,
 			reference_evidence: reference?.evidence,
 		};
@@ -231,6 +231,7 @@ try {
 		remedy: "Split this file, preserving assertions, like private-index-land-2/-3 and kit-update-*; do not raise the budget or reference.",
 	}));
 	const uncalibrated = judgments.filter(row => row.status === "NOT_CALIBRATED");
+	const unqualified = judgments.filter(row => row.status === "UNQUALIFIED");
 	if (annotateRecords && enforcement) {
 		const byPath = new Map(judgments.map(row => [row.path, row]));
 		for (const row of observed) {
@@ -261,8 +262,8 @@ try {
 	const makespanLowerBound = Math.max(total / workers, longest.elapsed_ms / 1000);
 	const aggregateOverBudget = derive && makespanLowerBound > cycle;
 	const result = { status: violations.length ? "OVER_BUDGET" : aggregateOverBudget ? "AGGREGATE_OVER_BUDGET" : "OK", mode: enforcement ? "enforce" : "derive", timings_dir: timingSource, W_s: total, p_max_s: longest.elapsed_ms / 1000, p_max_path: longest.path, m: workers, worker_count_source: seen.has("--workers") ? "declared" : "default_not_measured", makespan_lower_bound_s: makespanLowerBound, makespan_bound_note: "Necessary lower bound only; not a scheduling or p95 guarantee", push_p95_s: push, full_cycle_s: cycle, per_file_cap_s: cap, per_file_cap_status: heuristic.status, per_file_cap_mode: heuristic.mode, queueing, violations };
-	const fileResult = { cap_s: fileBudget?.cap, mode: "enforce", clock: "qualified-wall+cpu-equivalent", envelope: fileBudget?.envelope, judgments, violations: fileViolations, not_calibrated: uncalibrated };
-	const output = { ...result, ...(fileBudget ? { file_budget: fileResult } : {}), status: fileViolations.length ? "FILE_OVER_BUDGET" : uncalibrated.length ? "NOT_CALIBRATED" : result.status };
+	const fileResult = { cap_s: fileBudget?.cap, mode: "enforce", clock: "qualified-wall+cpu-equivalent", envelope: fileBudget?.envelope, judgments, violations: fileViolations, not_calibrated: uncalibrated, unqualified };
+	const output = { ...result, ...(fileBudget ? { file_budget: fileResult } : {}), status: fileViolations.length ? "FILE_OVER_BUDGET" : unqualified.length ? "UNQUALIFIED" : uncalibrated.length ? "NOT_CALIBRATED" : result.status };
 	if (machine) console.log(JSON.stringify(output));
 	else {
 		console.log(`W=${total}s p_max=${result.p_max_s}s path=${longest.path} m=${workers} (${result.worker_count_source})`);
@@ -273,9 +274,14 @@ try {
 		for (const violation of fileViolations) console.error(`${violation.code} ${violation.path}: ${violation.clock}=${violation.clock === "cpu-equivalent" ? violation.equivalent_wall_s : violation.elapsed_s}s > ${violation.cap_s}s. ${violation.remedy}`);
 	}
 	for (const row of uncalibrated) console.error(`NOT_CALIBRATED busy machine or non-default worker widths: ${row.path} wall=${row.elapsed_s}s load1=${row.load_1m}/${row.load_1m_end} ncpu=${row.ncpu} workers=${row.workers} default_workers=${row.default_workers}; no budget PASS credit; other gates may continue`);
+	// UNQUALIFIED (the chief's ruling, AM91999): a CPU-equivalent overage measured outside the qualification envelope is
+	// neither RED nor PASS. The same unchanged file read 34.6 cpu-s at load 35 against a 24.6 cpu-s ceiling it meets at 20-22
+	// solo; load inflates CPU time. It exits 76 so nothing lands on it, and names the window that decides it.
+	for (const row of unqualified) console.error(`UNQUALIFIED ${row.path}: cpu-equivalent=${row.equivalent_wall_s}s > ${row.cap_s}s on a run outside the qualification envelope (load1=${row.load_1m}/${row.load_1m_end} ncpu=${row.ncpu} workers=${row.workers} default_workers=${row.default_workers}); neither RED nor PASS: retry when load1 < ${(fileBudget?.envelope?.maxLoad ?? 0) * Number(row.ncpu ?? 0)} or on a remote worker`);
 	// The per-file cap is an initial heuristic, not derived from measured distributions: it reports
 	// and never refuses until SUITEBUDGET1 (ompkit-kup44.1) derives it (J-2026-10-31-01).
 	if (aggregateOverBudget || fileViolations.length) process.exitCode = 1;
+	else if (unqualified.length) process.exitCode = 76;
 	else if (uncalibrated.length) process.exitCode = 75;
 } catch (error) {
 	const message = error instanceof Error ? error.message : String(error);

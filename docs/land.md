@@ -132,9 +132,15 @@ the exact candidate in the canonical repository (`sh scripts/fresh-gate.sh
 commit=SHA` line with exit 0; anything else is `LAND_PUBLICATION_REFUSED`
 with the gate's own last line, before the private checkout exists. The
 deadline is `OMP_KIT_LAND_EXACT_GATE_DEADLINE_S` (integer, 1 to 7200,
-default 2400). The gate's GREEN row also lands in the canonical ledger, which
-is what the `br` handoff check reads. A repository without the script is
-unchanged.
+default 2400). A gate that ends `FRESH-GATE: UNQUALIFIED` (exit 76: a changed
+file's CPU time is over its ceiling on a run whose load put it outside the
+qualification envelope, so it is neither RED nor GREEN) is the one verdict a
+quieter machine decides, so land passes the gate `FRESH_GATE_QUIET_WAIT_S`
+(the deadline less 600 s; 0 turns it off) and the gate waits for 1-minute load
+below half the cores and reruns itself; still unqualified at the end is a
+refusal like any non-GREEN. The gate's GREEN row also lands in the canonical
+ledger, which is what the `br` handoff check reads. A repository without the
+script is unchanged.
 
 Gates kept: the commit must name a sole parent equal to the freshly fetched
 origin tip (`LAND_EXACT_PARENT_NOT_TIP` otherwise, before anything is

@@ -1202,6 +1202,24 @@ test("LANDSIBLING1 exact-parent refuses a candidate whose gate outlives its dead
 	expect(readFileSync(setup.calls, "utf8")).toBe("");
 });
 
+test("LANDSIBLING1 exact-parent gives the gate its quiet-window budget and refuses an UNQUALIFIED verdict like any non-GREEN", () => {
+	const setup = exactParentSetup();
+	const waitFile = join(scratch, `exact-parent-quiet-${globalThis.fixtureNumber++}.txt`);
+	// The stand-in gate reports the budget it was given and ends UNQUALIFIED (exit 76): neither RED nor GREEN, so land refuses.
+	writeExactParentGate(setup.work, `printf '%s' "\${FRESH_GATE_QUIET_WAIT_S:-unset}" >'${waitFile}'\nprintf 'FRESH-GATE: UNQUALIFIED: still outside the qualification envelope\\n' >&2\nexit 76`);
+	const held = exactParentRun(setup, setup.reviewed);
+	expect(held.status, JSON.stringify(held.body)).not.toBe(0);
+	expect(responseCode(held.body)).toBe("LAND_PUBLICATION_REFUSED");
+	expect(JSON.stringify(held.body)).toContain("FRESH-GATE: UNQUALIFIED");
+	expect(readFileSync(waitFile, "utf8")).toBe("1800"); // the 2400 s default deadline less 600 s for the runs themselves
+	expect(remoteHead(setup.work)).toBe(setup.base);
+	expectUnpublished(setup, setup.reviewed);
+	// A deadline too short to leave room for a rerun turns the wait off instead of going negative.
+	const short = command(setup.work, ["--exact-parent", setup.reviewed, "--apply", "--yes"], setup.hold, { amDir: setup.fakeBin, gitEnv: { ...setup.env, OMP_KIT_LAND_EXACT_GATE_DEADLINE_S: "300" } });
+	expect(responseCode(short.body)).toBe("LAND_PUBLICATION_REFUSED");
+	expect(readFileSync(waitFile, "utf8")).toBe("0");
+});
+
 test("LANDSIBLING1 pushed-range secret scan refuses a planted secret in the published commit and publishes nothing", () => {
 	const setup = exactParentSetup("reviewed");
 	const run = exactParentRun(setup, setup.reviewed);

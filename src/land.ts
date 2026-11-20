@@ -2233,7 +2233,9 @@ async function exactParentCandidateGate(repo: string, candidate: string): Promis
 	const deadlineS = Number.isSafeInteger(parsed) ? Math.min(7200, Math.max(1, parsed)) : 2400;
 	let run: RunResult;
 	try {
-		run = await kitlibRun(["sh", "scripts/fresh-gate.sh", "--commit", candidate], { cwd: repo, env: gitEnvironment(), deadline_s: deadlineS, max_output_bytes: 8 * 1024 * 1024 });
+		// UNQUALIFIED (load put a file-budget measurement outside its envelope) is the one verdict a quieter machine decides:
+		// the gate waits for a window and reruns itself inside this deadline, keeping 600 s for the runs themselves.
+		run = await kitlibRun(["sh", "scripts/fresh-gate.sh", "--commit", candidate], { cwd: repo, env: { ...gitEnvironment(), FRESH_GATE_QUIET_WAIT_S: String(Math.max(0, deadlineS - 600)) }, deadline_s: deadlineS, max_output_bytes: 8 * 1024 * 1024 });
 	} catch (error) {
 		return refused("LAND_PUBLICATION_REFUSED", `The exact candidate ${candidate} could not be gated: ${error instanceof Error ? error.message : String(error)}`, "Repair scripts/fresh-gate.sh or the host and retry; nothing was created or published.");
 	}

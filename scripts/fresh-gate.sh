@@ -15,6 +15,32 @@ if [ "${GIT_DIR+x}" = x ]; then echo "FRESH-GATE: REFUSED caller GIT_DIR is set"
 if [ "${GIT_WORK_TREE+x}" = x ]; then echo "FRESH-GATE: REFUSED caller GIT_WORK_TREE is set" >&2; exit 1; fi
 if [ "${BEADS_DB+x}" = x ]; then echo "FRESH-GATE: REFUSED caller BEADS_DB is set" >&2; exit 1; fi
 
+# QUIETRETRY1: a gate that ends UNQUALIFIED (exit 76: a changed file's CPU-equivalent time is over its ceiling on a run
+# whose load put it outside the qualification envelope, so it is neither RED nor GREEN) is the one verdict a quieter
+# machine decides. With FRESH_GATE_QUIET_WAIT_S=N (seconds, default off) the gate waits for 1-minute load below half the
+# cores and reruns itself, until a qualified verdict or N seconds; a rerun that is still unqualified at the end exits 76.
+# FRESH_GATE_QUIET_POLL_S (default 30) is the load poll interval; FRESH_GATE_QUIET_MAX_LOAD overrides the ceiling (tests).
+# Every other exit code passes through untouched.
+case "${1:-}" in --selftest|--test-workers|--check-env) ;; *)
+	if [ "${FRESH_GATE_QUIET_INNER:-}" != 1 ] && [ "${FRESH_GATE_QUIET_WAIT_S:-0}" -gt 0 ] 2>/dev/null; then
+		quiet_started=$(date +%s)
+		while :; do
+			quiet_rc=0
+			FRESH_GATE_QUIET_INNER=1 /bin/sh "$0" "$@" || quiet_rc=$?
+			[ "$quiet_rc" -eq 76 ] || exit "$quiet_rc"
+			while :; do
+				if [ $(($(date +%s) - quiet_started)) -ge "$FRESH_GATE_QUIET_WAIT_S" ]; then
+					echo "FRESH-GATE: UNQUALIFIED: still outside the qualification envelope after ${FRESH_GATE_QUIET_WAIT_S} s; no quiet window came" >&2
+					exit 76
+				fi
+				if python3 -c 'import os,sys; sys.exit(0 if os.getloadavg()[0] < float(os.environ.get("FRESH_GATE_QUIET_MAX_LOAD") or (os.cpu_count() or 1) * 0.5) else 1)'; then break; fi
+				sleep "${FRESH_GATE_QUIET_POLL_S:-30}"
+			done
+			echo "FRESH-GATE: load is below half the cores; rerunning the UNQUALIFIED gate" >&2
+		done
+	fi ;;
+esac
+
 SCRIPT_DIR=$(CDPATH='' cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 # shellcheck source=scripts/fixed-env.sh
 . "$SCRIPT_DIR/fixed-env.sh"
@@ -84,7 +110,7 @@ row = {"stage": os.environ["PHASE"], "wall_ms": finish - start,
 with open(os.environ["OUT"], "a") as handle:
     handle.write(json.dumps(row) + "\n")
 PYEOF
-	if [ "$step_rc" -eq 0 ]; then echo "GREEN $label"; else echo "RED $label producer_rc=$step_rc" >&2; fi
+	if [ "$step_rc" -eq 0 ]; then echo "GREEN $label"; elif [ "$step_rc" -eq 76 ]; then echo "UNQUALIFIED $label producer_rc=$step_rc" >&2; else echo "RED $label producer_rc=$step_rc" >&2; fi
 	return "$step_rc"
 }
 
@@ -518,7 +544,11 @@ for path in sys.argv[1:]:
             if math.isfinite(loadavg) and loadavg >= 0 and type(workers) is int and workers > 0:
                 print("FRESH-GATE: RED: " + payload, file=sys.stderr)
 PYEOF
-		echo "FRESH-GATE: RED: affected tests did not pass (exit $tests_rc); the push is refused" >&2
+		if [ "$tests_rc" -eq 76 ]; then
+			echo "FRESH-GATE: UNQUALIFIED: a changed file's CPU-equivalent time is over its ceiling on a run outside the qualification envelope (load too high); neither RED nor GREEN, nothing lands on it; retry when load1 is below half the cores or on a remote worker (FRESH_GATE_QUIET_WAIT_S=N retries automatically)" >&2
+		else
+			echo "FRESH-GATE: RED: affected tests did not pass (exit $tests_rc); the push is refused" >&2
+		fi
 		return "$tests_rc"
 	fi
 	# Same-tree reuse carries the actual measured records as well as the selected

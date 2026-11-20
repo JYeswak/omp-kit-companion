@@ -288,19 +288,36 @@ test("FILEBUDGET1 v2 same file outside the envelope is NOT_CALIBRATED, never a w
 	expect((await measured(root, "new.test.ts", 1000, "new.test.ts", { load_1m: 48 })).rc).toBe(75);
 });
 
-test("FILEBUDGET1 v2 frozen CPU-equivalent overage refuses at every load, without normalizing wall", async () => {
+test("FILEBUDGET1 v2 CPU-equivalent overage is RED inside the envelope and UNQUALIFIED outside it, never PASS", async () => {
 	const root = fixture();
 	const policyPath = join(root, ".github/test-budget.json");
 	const policy = JSON.parse(await Bun.file(policyPath).text());
 	policy.changed_file_budget.references["same.test.ts"] = reference();
 	writeFileSync(policyPath, JSON.stringify(policy));
-	for (const load of [4, 48]) {
-		const result = await measured(root, "same.test.ts", 1000, "same.test.ts", { cpu_user_ms: 46000, cpu_system_ms: 0, load_1m: load, load_1m_end: load });
-		expect(result.rc).toBe(1);
-		expect(JSON.parse(result.stdout).file_budget.violations[0]).toMatchObject({ clock: "cpu-equivalent", equivalent_wall_s: 92, cap_s: 90 });
+	// Inside the envelope (load 5 of 32 cpus) the overage is a refusal, exactly as strict as before.
+	const red = await measured(root, "same.test.ts", 1000, "same.test.ts", { cpu_user_ms: 46000, cpu_system_ms: 0, load_1m: 5, load_1m_end: 5 });
+	expect(red.rc).toBe(1);
+	expect(JSON.parse(red.stdout).file_budget.violations[0]).toMatchObject({ clock: "cpu-equivalent", equivalent_wall_s: 92, cap_s: 90 });
+	// The same file at load 35 (CPU time inflates under load: 34.6 cpu-s against a ceiling met at 20-22 solo) is UNQUALIFIED:
+	// not RED, not PASS. Nothing lands on it (exit 76) and the stderr names the window that decides it.
+	for (const load of [16.001, 35, 48]) {
+		const held = await measured(root, "same.test.ts", 1000, "same.test.ts", { cpu_user_ms: 46000, cpu_system_ms: 0, load_1m: load, load_1m_end: load });
+		expect(held.rc, held.stdout).toBe(76);
+		const data = JSON.parse(held.stdout);
+		expect(data.status).toBe("UNQUALIFIED");
+		expect(data.file_budget.violations).toEqual([]);
+		expect(data.file_budget.unqualified[0]).toMatchObject({ path: "same.test.ts", status: "UNQUALIFIED", clock: "cpu-equivalent", equivalent_wall_s: 92, cap_s: 90, qualified: false });
+		expect(held.stderr).toContain("neither RED nor PASS");
+		expect(held.stderr).toContain("load1 < 16");
+		expect(held.stdout + held.stderr).not.toContain("Split this file");
 	}
+	// The boundary stays qualified: load 16 of 32 is inside the envelope, so the overage is RED again.
+	expect((await measured(root, "same.test.ts", 1000, "same.test.ts", { cpu_user_ms: 46000, cpu_system_ms: 0, load_1m: 16, load_1m_end: 16 })).rc).toBe(1);
+	// The wall clock never decides an unqualified run: a wall overage with no CPU overage stays NOT_CALIBRATED.
 	const busy = await measured(root, "same.test.ts", 139600, "same.test.ts", { cpu_user_ms: 44000, cpu_system_ms: 0, load_1m: 48 });
 	expect(busy.rc).toBe(75); // Equivalent 88 s does not turn an unqualified wall observation into PASS.
+	// A qualified run within the ceiling passes.
+	expect((await measured(root, "same.test.ts", 1000, "same.test.ts", { cpu_user_ms: 44000, cpu_system_ms: 0, load_1m: 5, load_1m_end: 5 })).rc).toBe(0);
 });
 
 test("FILEBUDGET1 v2 original grandfather references preserve their exact evidence-bound CPU ceilings", async () => {
@@ -310,9 +327,12 @@ test("FILEBUDGET1 v2 original grandfather references preserve their exact eviden
 		const pair = value as { cpu_s: number; wall_s: number };
 		const at = await measured(root, name, pair.wall_s * 1000, name, { cpu_user_ms: pair.cpu_s * 1000, cpu_system_ms: 0 });
 		expect(at.rc, at.stdout).toBe(0);
-		const grown = await measured(root, name, 1000, name, { cpu_user_ms: (pair.cpu_s + 0.001) * 1000, cpu_system_ms: 0, load_1m: 48 });
+		const grown = await measured(root, name, 1000, name, { cpu_user_ms: (pair.cpu_s + 0.001) * 1000, cpu_system_ms: 0 });
 		expect(grown.rc).toBe(1);
 		expect(JSON.parse(grown.stdout).file_budget.violations[0].clock).toBe("cpu-equivalent");
+		// Outside the envelope the same growth is held, not refused: a later qualified run decides it.
+		const held = await measured(root, name, 1000, name, { cpu_user_ms: (pair.cpu_s + 0.001) * 1000, cpu_system_ms: 0, load_1m: 48 });
+		expect(held.rc).toBe(76);
 	}
 });
 
