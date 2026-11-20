@@ -105,26 +105,40 @@ export function ownerModifiedCases(): void {
 
 // RETIRESHIPPED1 (ompkit-1ra0d.243): a repo installed from an older release holds an older
 // kit-shipped copy of a retired member (localbench and zestroku held gap-mention e6e80d85). That
-// copy is the kit's, so the installer retires it; only a hand edit refuses (ownerModifiedCases).
+// copy is the kit's, so it retires; changing even one byte must preserve it and refuse refresh.
 export function shippedOlderCases(): void {
-	for (const [chain, name] of [
-		["commit-msg", "47-omp-kit-gap-mention"],
-		["pre-commit", "52-omp-kit-staged-sources"],
-	]) {
-		test(`RETIRESHIPPED1 retires an older kit-shipped ${chain} member`, async () => {
+	for (const [chain, name, digestPrefix] of [
+		["commit-msg", "47-omp-kit-gap-mention", "e6e80d85"],
+		["pre-commit", "52-omp-kit-staged-sources", "0c981262"],
+	] as const) {
+		test(`RETIRESHIPPED1 retires shipped ${chain} bytes but preserves a one-byte edit`, async () => {
 			const scratch = ownedTmp("retire-shipped");
 			const root = resolve(import.meta.dir, "../..");
 			const exec = (argv: string[]) => runFixtureAsync(argv, { cwd: scratch.path, floor_s: 60 });
 			try {
 				expect((await exec(["git", "init", "-q", "--template="])).rc).toBe(0);
 				expect((await exec(["sh", join(root, "scripts/install-commit-msg-bead.sh"), "--no-pushed-beads", scratch.path])).rc).toBe(0);
-				const retired = join(scratch.path, ".git/hooks/hooks.d", chain!, name!);
-				writeFileSync(retired, readFileSync(join(import.meta.dir, "fixtures/retired-shipped", name!)));
+				const retired = join(scratch.path, ".git/hooks/hooks.d", chain, name);
+				const shipped = readFileSync(join(import.meta.dir, "fixtures/retired-shipped", name));
+				const digest = Bun.CryptoHasher.hash("sha256", shipped, "hex");
+				expect(digest.slice(0, 8)).toBe(digestPrefix);
+				const edit = Buffer.from(shipped);
+				edit[0] = edit[0]! ^ 1;
+				writeFileSync(retired, edit);
 				chmodSync(retired, 0o755);
+				const refused = await exec(["sh", join(root, "scripts/install-commit-msg-bead.sh"), "--no-pushed-beads", scratch.path]);
+				const diagnostic = Buffer.from(refused.stderr).toString();
+				expect(refused.rc, diagnostic).toBe(2);
+				expect(diagnostic).toContain(`REFUSED owner-modified retired member: ${retired}`);
+				expect(readFileSync(retired)).toEqual(edit);
+
+				writeFileSync(retired, shipped);
 				const rerun = await exec(["sh", join(root, "scripts/install-commit-msg-bead.sh"), "--no-pushed-beads", scratch.path]);
 				expect(rerun.rc, Buffer.from(rerun.stderr).toString()).toBe(0);
 				expect(Buffer.from(rerun.stdout).toString()).toContain(`retired kit hook member: ${retired}`);
-				expect(() => readFileSync(retired)).toThrow();
+				expect(() => readFileSync(retired)).toThrow("ENOENT");
+				console.log(JSON.stringify({ scenario: "RETIRESHIPPED1", name, digest, editedOffset: 0,
+					editedExit: refused.rc, shippedExit: rerun.rc, retired: true }));
 			} finally {
 				scratch.cleanup();
 			}
