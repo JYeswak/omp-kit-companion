@@ -504,6 +504,23 @@ const lessonData: DataSchema = { type: "object", required: ["overall", "entry", 
 
 export const COMMANDS: readonly Command[] = [
 	TOOLS_COMMAND,
+	{ name: "frontend", description: "Verify the 30 frontend foundations against the project build", usage: "frontend check [FLAGS]", flags: [],
+		example: "omp-kit frontend check", runnable: false, subcommands: [
+			{ name: "check", description: "Run this project's trusted verifier commands and bind their results to the build and decisions", usage: "frontend check [FLAGS]", flags: [
+				{ name: "--in", value: "PATH", description: "Decisions file, default frontend.foundations.json" },
+				{ name: "--foundations", value: "PATH", description: "Foundation reference, default the installed reference" },
+				{ name: "--evidence", value: "PATH", description: "Read and recheck a prior evidence file" },
+				{ name: "--write-evidence", value: "PATH", description: "Seal evidence at this path outside the build" },
+				{ name: "--approval", value: "PATH", description: "Owner approval file naming the exact build and criteria digests" },
+				{ name: "--require-approval", description: "Refuse unless explicit owner approval matches both digests" },
+				{ name: "--selftest", description: "Run the checker, renderer and planted negatives in owned fixtures" },
+				{ name: "--check", value: "PATH", description: "In selftest only, replay an alternate Node checker" },
+				{ name: "--sealer", value: "PATH", description: "In selftest only, use a separate Node checker to seal fixture inputs" },
+				{ name: "--build-reference", value: "PATH", description: "In selftest only, replay an alternate Node renderer" },
+				{ name: "--approval-decisions-only", description: "In selftest only, replay just the two exact-approval negative controls" },
+			], example: "omp-kit frontend check --require-approval --approval frontend.approval.json", runnable: false,
+				dataSchema: { type: "object", required: ["overall", "text"], properties: { overall: { enum: ["VERIFIED", "SELFTEST_PASS", "REFUSED"] }, text: { type: "string" } } } },
+		] },
 	{ name: "rch", description: "Native remote-build lifecycle; no replacement daemon or cache policy", usage: "rch lease [FLAGS] -- COMMAND [ARG ...]", flags: [], example: "omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2", runnable: false, subcommands: [
 		{ name: "lease", description: "Observe, reclaim under native policy, admit, execute and verify next-agent readiness", usage: "rch lease --slots N [--worker ID] [--project PATH] [--plan | --apply --yes] -- COMMAND [ARG ...]", argument: "COMMAND", flags: [
 			...planApply,

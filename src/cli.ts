@@ -132,6 +132,8 @@ import { beadsMigrateCommand } from "./beads-migrate.ts";
 import { briefContract, briefCandidates, renderBrief } from "./brief.ts";
 import { toolsVerifyCommand } from "./tools-manifest.ts";
 import { TOOL_UPDATE_LOOKUP_CODE, runToolUpdate, toolsUpdateCommand } from "./tool-update.ts";
+import { checkFrontend } from "../skills/frontend-foundations/scripts/check.mjs";
+import { selftestFrontend } from "../skills/frontend-foundations/scripts/check-selftest.mjs";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -143,6 +145,7 @@ export type CommandHandler = (request: ParsedCommand) => CliResult | Promise<Cli
 const handlers = new Map<string, CommandHandler>();
 registerCommandHandler("tools verify", toolsVerifyCommand);
 registerCommandHandler("tools update", toolsUpdateCommand);
+registerCommandHandler("frontend check", frontendCheckCommand);
 
 /** Register a real handler by grammar path (e.g. "apply rules"); absent handlers remain unavailable. */
 export function registerCommandHandler(path: string, handler: CommandHandler): void {
@@ -432,6 +435,48 @@ function kitIdentity() {
 		} catch { /* A missing manifest is not a verified version. */ }
 	}
 	return { version, release: { identity: status, source_tag: sourceTag, root: root ?? null, executable: process.execPath, entrypoint: Bun.main }, data_paths: { state: process.env.XDG_STATE_HOME ?? join(process.env.HOME ?? "", ".local", "state"), data: process.env.XDG_DATA_HOME ?? join(process.env.HOME ?? "", ".local", "share") }, platform: { os: process.platform, arch: process.arch } };
+}
+
+async function frontendCheckCommand({ flags }: ParsedCommand): Promise<CliResult> {
+	const root = kitIdentity().release.root;
+	if (!root) return refusal("RELEASE_ROOT_UNAVAILABLE", "Could not locate frontend foundations.", "Use the installed Kit binary or run the source CLI.");
+	const selftest = flags.has("--selftest");
+	if (!selftest && ["--check", "--sealer", "--build-reference", "--approval-decisions-only"].some(flag => flags.has(flag))) {
+		return refusal("SELFTEST_REQUIRED", "Fixture overrides require --selftest.", "For project verification, use only the project and evidence flags.");
+	}
+	const skill = join(root, "skills", "frontend-foundations");
+	const messages: string[] = [], findings: string[] = [];
+	const options = {
+		cwd: process.cwd(), reference: join(skill, "references", "foundations.md"), run: runBounded,
+		out: (text: string) => { messages.push(text); }, err: (text: string) => { findings.push(text); },
+	};
+	let status: number;
+	if (selftest) {
+		const node = Bun.which("node");
+		if (!node) return refusal("NODE_UNAVAILABLE", "The frontend selftest needs Node for its fixtures.", "Install Node on PATH or run the project checker without --selftest.");
+		const kit = Bun.main.endsWith(".ts") ? [process.execPath, Bun.main] : [process.execPath];
+		const fixtures = ownedTmp("frontend-selftest", { bead: "ompkit-l500m" });
+		try {
+			status = await selftestFrontend(flags, {
+				...options, kit: [...kit, "frontend", "check"], node, fixtures: fixtures.path,
+				renderer: join(skill, "scripts", "build-reference.mjs"),
+			});
+		} catch (error) {
+			options.err(error instanceof Error ? error.message : String(error));
+			status = 1;
+		} finally {
+			fixtures.cleanup();
+		}
+	} else {
+		status = await checkFrontend(flags, options);
+	}
+	const code = status === 0 ? 0 : 1;
+	return {
+		code, verification: "PERFORMED",
+		data: { overall: code ? "REFUSED" : selftest ? "SELFTEST_PASS" : "VERIFIED", text: messages.join("\n") },
+		...(code ? { errors: [{ code: selftest ? "FRONTEND_SELFTEST_FAILED" : "FOUNDATIONS_UNVERIFIED",
+			message: findings.join("\n"), remediation: selftest ? "Inspect the failed fixture." : "Resolve the findings before shipping." }] } : {}),
+	};
 }
 
 function ompIdentity(): Record<string, unknown> {

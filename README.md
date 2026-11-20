@@ -16,7 +16,7 @@
 Current release: v0.2.135
 <!-- kit-release:end -->
 
-A tested rule pack, 15 extensions, five skills, and a guarded CLI for an
+A tested rule pack, 15 extensions, six skills, and a guarded CLI for an
 existing OMP install.
 
 ```sh
@@ -80,7 +80,7 @@ ls rules/*.md | wc -l
 bun scripts/rule-class.ts rules/*.md
 ```
 
-The pack has 26 rules: 12 `reminder`, 13 `tripwire`, and one `router`
+The pack has 27 rules: 13 `reminder`, 13 `tripwire`, and one `router`
 (`rs-unsafe-added-router`, for Rust unsafe-code skills).
 Use `omp-kit doctor --scope rules` to check discovery.
 Tripwires cover unverified completion, unevidenced closes, `--no-verify`,
@@ -182,7 +182,7 @@ Existing profile entries are preserved; use their original receipt to undo them.
 
 ### Skills
 
-`skills/` ships five OMP skills:
+`skills/` ships six OMP skills:
 
 - **omp-kit-native:** fleet situations mapped to the native verb that handles
   them (waiting, verification, publishing, CI state, scratch, sends, doctor,
@@ -196,13 +196,11 @@ Existing profile entries are preserved; use their original receipt to undo them.
   intent; never resume a paused goal. Tern restart does not reload extensions
   inside OMP. The read-only
   `skills/fleet-restart/scripts/fleet_restart.py align --version X.Y.Z` checks profile links.
-- **fleet-round:** the lockstep fleet round protocol and a read-only report
-  validator. `skills/fleet-round/scripts/fleet-round.ts` has `collect`,
-  `snapshot`, `check`, `validate`, `spot-check`, `score` and `barrier`: it
-  recomputes each director's claims from br, git, tmux and Agent Mail identity
-  files, checks the round-0 pass bar, reports UNKNOWN, never PASS, for anything
-  unobservable, and at each barrier reports per project whether its report
-  arrived and was accepted, escalating a repeated blocker.
+- **fleet-round:** `skills/fleet-round/scripts/fleet-round.ts` validates
+  reports against br, git, tmux and Agent Mail. It names unobservable claims
+  as UNKNOWN and escalates repeated project blockers at barriers.
+- **frontend-foundations:** decide 30 foundations first; use `omp-kit frontend`
+  to verify the build before shipping.
 
 ```sh
 OMP_KIT_TERN_LIVE=1 bun test extensions/kit-goal-keepalive.test.ts -t NATIVESESSION1
@@ -462,6 +460,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit checkin` | `checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]` | Record verified own activity or explicit items; refuses unavailable coverage | `omp-kit checkin --done br-123 --next 'Verify the consumer' --bead br-123 --commit --json` |
 | `omp-kit project` | `project add REPO --session NAME [--workers N] [--profile P] [--plan\|--apply] [--undo RECEIPT]`; `project status SESSION\|--all [--json]`; `project goal SESSION --set TEXT\|--from-file FILE\|--pause\|--drop [--apply]` | Exact IDs for every session; UNKNOWN exits nonzero, not fleet health. | `omp-kit project status --all --json` |
 | `omp-kit test` | `test [--full] [--record] [--rules DIR --cases FILE] [--integrations] [--mcp] [--metamorphic] [--mutants] [--repeat N]` | Matcher conformance, external packs, live fixtures, per-profile integration and MCP proofs, mutation and flake checks | `omp-kit test --json` |
+| `omp-kit frontend` | `frontend check [FLAGS]` | Run all project verifiers and seal build-bound evidence | `omp-kit frontend check` |
 | `omp-kit doctor` | `doctor [--scope NAME] [--project PATH] [--profile NAME] [--staged] [--deep --yes]` | Read-only diagnosis of one scope (table below) | `omp-kit doctor --scope lsp --json` |
 | `omp-kit health` | `health` | Strict monitoring status | `omp-kit health --json` |
 | `omp-kit apply` | `apply rules\|policy\|extensions\|plugin\|mcp [--plan\|--apply]` | Plan/apply a kit component with a receipt | `omp-kit apply rules --plan --json` |
