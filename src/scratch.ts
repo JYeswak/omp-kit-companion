@@ -3693,6 +3693,8 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 			sizeBytes: dirSize(dir), detail: `checkout ${checkoutName} owns this root; its opener releases it with ovnfs rm` };
 	}
 	// RELEASELIVE1: a dir a registered user still runs in is never quarantined or reaped, released or not.
+	const user = blockingScratchUser(dir, deps.liveness);
+	if (user !== null) return { dir, action: "LIVE", reason: "user-live", owner: readReleaseRecord(dir, deps.bootMs ?? null)?.owner ?? null, sizeBytes: dirSize(dir) };
 	const released = readReleaseRecord(dir, deps.bootMs ?? null);
 	// A verified owner release (marker bound to the owner text, device and inode) stands whatever the directory's name,
 	// since a respawn rehomes .owner to the successor and keeps the creator's pid in the name.
