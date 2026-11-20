@@ -2,7 +2,7 @@ import { afterAll, afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import { inspectLspReadiness, planLspSetup, resolveOmpDefaults, type LspReadinessReport } from "../../src/lsp-readiness.ts";
-import { buildLspJsonRpcReceipt, classifyLspProbeOutcome, collectReadinessWaits, initialLspStatusChecks, lspReadinessSignals, nextLspReadinessDecision, probeLspReadiness } from "../../src/lsp-probe.ts";
+import { buildLspJsonRpcReceipt, classifyLspProbeOutcome, collectReadinessWaits, initialLspStatusChecks, lspProbeReason, lspReadinessSignals, nextLspReadinessDecision, probeLspReadiness } from "../../src/lsp-probe.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { run } from "../../src/kitlib/run.ts";
 import { cachedOmpPackage } from "../../src/omp-source-cache.ts";
@@ -641,6 +641,25 @@ test("planted: isolated cold-refusal inputs stay distinguishable and missing evi
 	expect(report.status).toBe("MISSING");
 	expect(report.status).not.toBe("PASS");
 	expect(report.elapsed_ms).toBe(0);
+});
+
+test("planted: a classified probe outcome keeps its own reason when the readiness gate also failed", () => {
+	// a860c80cea made the readiness failure replace the reason, so an immediate-exit server reported only
+	// LSP_INITIALIZE_RESPONSE_UNOBSERVED and the compiled native certification refused every hosted job.
+	const unobserved = "LSP_INITIALIZE_RESPONSE_UNOBSERVED: the selected server returned no initialized capabilities.";
+	const exited = lspProbeReason("IMMEDIATE_EXIT", unobserved);
+	expect(exited.toLowerCase()).toContain("exited");
+	expect(exited).toContain(unobserved);
+	expect(lspProbeReason("IMMEDIATE_EXIT", null).toLowerCase()).toContain("exited");
+	expect(lspProbeReason("MISSING", unobserved).toLowerCase()).toContain("missing");
+	expect(lspProbeReason("WRONG_MARKER", unobserved).toLowerCase()).toContain("root marker");
+	expect(lspProbeReason("TIMEOUT", unobserved).toLowerCase()).toContain("timeout");
+	// INCOMPLETE has no sharper explanation than the readiness failure; without one it keeps its generic text.
+	const ceiling = "LSP_READINESS_CEILING_EXCEEDED: no first diagnostic after initialize within 9000ms.";
+	expect(lspProbeReason("INCOMPLETE", ceiling)).toBe(ceiling);
+	expect(lspProbeReason("INCOMPLETE", null)).toContain("incomplete");
+	// A readiness failure never turns a PASS into anything else.
+	expect(lspProbeReason("PASS", unobserved)).toBe(lspProbeReason("PASS", null));
 });
 
 afterAll(() => cleanupAllOwnedTmp());

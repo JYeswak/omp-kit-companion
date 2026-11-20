@@ -105,6 +105,25 @@ async function* lspProbeTurns(
 }
 
 export type LspProbeState = "PASS" | "MISSING" | "IMMEDIATE_EXIT" | "WRONG_MARKER" | "INCOMPLETE" | "TIMEOUT" | "UNVERIFIED";
+
+/**
+ * The reason text for a finished probe. A classified outcome keeps its own explanation and the readiness
+ * failure is appended as detail: a860c80cea let the readiness text replace it, so an immediate-exit server
+ * reported "LSP_INITIALIZE_RESPONSE_UNOBSERVED" with no mention of the exit and every native certification
+ * of the compiled immediate-exit negative was refused. INCOMPLETE has no sharper explanation than the
+ * readiness failure itself.
+ */
+export function lspProbeReason(state: LspProbeState, readinessFailure: string | null): string {
+	const classified = state === "PASS" ? "The OMP LSP tool completed initialize and a fresh diagnostic response, returned a known positive reference, and completed the absent-symbol control in the private fixture."
+		: state === "MISSING" ? "The selected language server executable or runtime is missing."
+			: state === "WRONG_MARKER" ? "OMP did not select the server because its configured root marker was not present."
+				: state === "IMMEDIATE_EXIT" ? "The selected language server exited during OMP-mediated startup or initialization."
+					: state === "TIMEOUT" ? "The OMP-mediated LSP request exceeded its bounded timeout."
+						: "The OMP-mediated LSP route was incomplete; inspect the bounded checks and raw tool results.";
+	if (readinessFailure === null || state === "PASS") return classified;
+	return state === "INCOMPLETE" || state === "UNVERIFIED" ? readinessFailure : `${classified} ${readinessFailure}`;
+}
+
 type ProbeTreeSnapshot = Record<string, [number, number, number, string | null]>;
 
 export interface LspProbeInput {
@@ -783,12 +802,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		const immediateExit = /(?:failed to start|server exited|process exited|exited (?:with )?(?:code|status)|spawn(?:ing)? .*failed)/i.test(combined);
 		const checksPassed = Object.values(checks).every(Boolean) && ompCode === 0 && !timedOut && timeoutObservation === null;
 		state = classifyLspProbeOutcome({ timed_out: timedOut || timeoutObservation !== null, server_missing: serverMissing, wrong_marker: wrongMarker, immediate_exit: immediateExit, checks_passed: checksPassed });
-		reason = readinessFailure ?? (state === "PASS" ? "The OMP LSP tool completed initialize and a fresh diagnostic response, returned a known positive reference, and completed the absent-symbol control in the private fixture."
-			: state === "MISSING" ? "The selected language server executable or runtime is missing."
-				: state === "WRONG_MARKER" ? "OMP did not select the server because its configured root marker was not present."
-					: state === "IMMEDIATE_EXIT" ? "The selected language server exited during OMP-mediated startup or initialization."
-						: state === "TIMEOUT" ? "The OMP-mediated LSP request exceeded its bounded timeout."
-							: "The OMP-mediated LSP route was incomplete; inspect the bounded checks and raw tool results.");
+		reason = lspProbeReason(state, readinessFailure);
 	} catch (error) {
 		reason = `Deep LSP probe failed closed: ${error instanceof Error ? error.message : String(error)}`;
 	} finally {
