@@ -1,0 +1,46 @@
+diff --git a/src/commands.ts b/src/commands.ts
+--- a/src/commands.ts
++++ b/src/commands.ts
+@@ -1,4 +1,5 @@
+ import { PROFILE_RECIPE_KINDS } from "./profile-recipes.ts";
++import { TERN_COMMAND } from "./tern/registry.ts";
+ 
+ export type Flag = {
+ 	readonly aliases?: readonly string[];
+@@ -334,3 +335,4 @@
+ 
+ export const COMMANDS: readonly Command[] = [
++	TERN_COMMAND,
+ 	{ name: "heavy", description: "Run one load-admitted heavy command at nice 10", usage: "heavy [--label LABEL] [--no-wait] -- COMMAND [ARG ...]", argument: "COMMAND", flags: [
+diff --git a/src/cli.ts b/src/cli.ts
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -3390,4 +3390,7 @@
+ registerCommandHandler("update", updateCommand);
++
++import { registerTernHandlers } from "./tern/omp-adapter.ts";
++registerTernHandlers(registerCommandHandler);
+ 
+ async function dispatch(request: ParsedCommand, version: string): Promise<CliResult> {
+ 	const { command, parent, flags } = request;
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -17,7 +17,9 @@
+ A tested rule pack, five guard extensions, four skills, and a guarded CLI for
+-an existing OMP install. Every change
+-the CLI makes is planned first, written with a receipt, and reversible with
+-`omp-kit undo`.
++an existing OMP install. Managed configuration changes are planned first,
++written with a receipt, and reversible with `omp-kit undo`. Native Tern calls
++have a hash-only attempt journal instead: their external effects are not
++generically reversible. See [Tern integration](docs/tern-integration.md) for
++the source-bound command map and verification boundaries.
+ 
+ ```sh
+ # Resolve the newest published release at run time, then dry-run the installer.
+@@ -500,3 +502,4 @@
+ | Command | Usage | What it does | Example |
+ |---|---|---|---|
++| `omp-kit tern` | `tern catalog\|doctor\|ctl\|script\|native\|api\|sdk\|coverage\|surface\|render` | Native Tern control, SDK bindings, source coverage and TSP helpers; explicit consent, no generic undo | `omp-kit tern catalog --json` |
+ | `omp-kit status` | `status` | Kit and OMP presence; changes nothing | `omp-kit status --json` |
