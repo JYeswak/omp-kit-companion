@@ -5605,6 +5605,10 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	const missingTool = path === "send" && flags.has("--ack-pending") ? undefined
 		: TOOL_GATED_COMMANDS[path]?.find((tool) => !toolPresent(tool));
 	if (missingTool) {
+		// Absent consent refuses before any dependency verdict: without --yes nothing mutates either way, so the refusal must not depend on which native tools this host has. The --yes and preview paths keep the tool refusal.
+		if (handler && command.mutation && flags.has("--apply") && !flags.has("--yes")) {
+			return refusal("CONSENT_REQUIRED", `${path} was not confirmed; no mutation was attempted`, `Review the plan, then pass --yes. This host also lacks the native ${missingTool} binary: install it first.`);
+		}
 		const code = TOOL_UNAVAILABLE_CODES[missingTool] ?? "TOOL_UNAVAILABLE";
 		return { code: 3, data: { overall: "UNAVAILABLE" },
 			errors: [{ code, message: `${path} needs the native ${missingTool} binary, which is not on PATH`,

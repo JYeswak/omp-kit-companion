@@ -86,6 +86,20 @@ describe("oq1h.6 tool-gated capabilities", () => {
 		expect(tern.errorsCode).toBe("TERN_UNAVAILABLE");
 	});
 
+	test("stock runner: an unconfirmed --apply refuses CONSENT_REQUIRED (exit 2) before the missing-tool refusal; --yes and preview keep exit 3", () => {
+		const root = workspace();
+		const bin = stockBin();
+		const unconfirmed = robot(["land", "--paths", "x", "--message", "m", "--apply", "--json"], root, bin);
+		expect(unconfirmed.code).toBe(2);
+		expect(unconfirmed.errorsCode).toBe("CONSENT_REQUIRED");
+		const confirmed = robot(["land", "--paths", "x", "--message", "m", "--apply", "--yes", "--json"], root, bin);
+		expect(confirmed.code).toBe(3);
+		expect(confirmed.errorsCode).toBe("AGENT_MAIL_UNAVAILABLE");
+		const preview = robot(["land", "--paths", "x", "--message", "m", "--json"], root, bin);
+		expect(preview.code).toBe(3);
+		expect(preview.errorsCode).toBe("AGENT_MAIL_UNAVAILABLE");
+	});
+
 	test("planted: fake rch restores rch lease; all fakes restore all verbs", () => {
 		const root = workspace();
 		const rchOnly = robot(["capabilities", "--json"], root, fakeBin(["rch"]));
