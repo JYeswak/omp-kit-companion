@@ -1469,7 +1469,7 @@ function landedBaseTimeMs(repo: string, base: string): number | null {
 // it the stranded tip it re-verifies before publishing.
 async function publishQualifiedCandidate(
 	repo: string,
-	input: { candidate: string; base: string; paths: string[]; owner: string; message: string; qualifiedBlobs: Record<string, WorktreeBlob>; checkPreflight: PushCheckPlan; pushDeadlineS?: number; keepCheckout?: boolean; namedCheckout?: string | null; patchFile?: string | null; spawnEnv?: Record<string, string> },
+	input: { candidate: string; base: string; paths: string[]; owner: string; message: string; qualifiedBlobs: Record<string, WorktreeBlob>; checkPreflight: PushCheckPlan; pushDeadlineS?: number; keepCheckout?: boolean; namedCheckout?: string | null; patchFile?: string | null; spawnEnv?: Record<string, string>; pushRepo?: string },
 ): Promise<CliResult> {
 	const { candidate, base, paths, owner, message, qualifiedBlobs, checkPreflight } = input;
 	// Actual-parent/custody qualification (ompkit-rhy9.10): the candidate must
@@ -1513,7 +1513,7 @@ async function publishQualifiedCandidate(
 	try {
 		convergenceStarted = true;
 		const convergence = await convergeRepository({
-			repo, apply: true, push: true, pushDeadlineS: input.pushDeadlineS, lockWaitMs: LAND_CONVERGE_WAIT_MS,
+			repo: input.pushRepo ?? repo, apply: true, push: true, pushDeadlineS: input.pushDeadlineS, lockWaitMs: LAND_CONVERGE_WAIT_MS,
 			beforePush: async (candidateSha, baseSha) => {
 				checkedCandidateSha = candidateSha;
 				checkResult = await runPushCheck(repo, baseSha, candidateSha);
@@ -2209,6 +2209,114 @@ function findAdoptableStrandedTip(repo: string, paths: string[]): StrandedTip | 
 	return { candidate: tip, base: parentList[0], message: message.out };
 }
 
+// LANDSIBLING1 (ompkit-1ra0d.218.2): publish one reviewed commit whose sole parent is fresh origin/main while the
+// canonical local main keeps unpushed commits that must stay held. The commit is pushed from a private ovnfs
+// checkout whose own main is that commit, so the on-main pre-push member admits it unrelaxed and every push,
+// trailer, bead and secret-scan member judges exactly origin..commit, never the held commits. Custody, actual
+// parent, registered check and full-suite gates are the ones the other land modes run. Afterwards the canonical
+// main takes origin's commit by an ordinary converge, which merges it and leaves every held commit where it was.
+const EXACT_PARENT_EXCLUSIVE = ["--paths", "--patch", "--base", "--message", "--review", "--bead", "--checkout", "--keep-checkout"] as const;
+
+async function landExactParentCommand(repo: string, request: ParsedCommand): Promise<CliResult> {
+	const value = request.flags.get("--exact-parent");
+	if (typeof value !== "string" || value.trim().length === 0)
+		return refused("LAND_EXACT_PARENT_REQUIRED", "--exact-parent needs a commit SHA", "Pass the reviewed commit whose sole parent is fresh origin/main; nothing was published.");
+	for (const flag of EXACT_PARENT_EXCLUSIVE)
+		if (request.flags.has(flag)) return refused("LAND_EXACT_PARENT_EXCLUSIVE", `--exact-parent publishes one prebuilt commit and takes no ${flag}`, "Drop the flag: the commit's own message, paths and bytes publish unchanged; nothing was published.");
+	const resolved = git(repo, ["rev-parse", "--verify", `${value.trim()}^{commit}`]);
+	if (resolved.code !== 0 || resolved.interrupted || resolved.out.trim().length === 0)
+		return refused("LAND_EXACT_PARENT_UNKNOWN", `The commit is unknown in this repository: ${value.trim()}`, "Fetch its objects into this repository (git fetch CHECKOUT SHA) or name a commit that exists here; nothing was published.");
+	const candidate = resolved.out.trim();
+	const branch = git(repo, ["symbolic-ref", "--quiet", "HEAD"]);
+	if (branch.code !== 0 || branch.out.trim() !== "refs/heads/main")
+		return refused("LAND_MAIN_REQUIRED", "Land requires the canonical shared main checkout", "Return to shared main without discarding work; nothing was created or published.");
+	const gitDir = git(repo, ["rev-parse", "--absolute-git-dir"]);
+	const commonDir = git(repo, ["rev-parse", "--git-common-dir"]);
+	if (gitDir.code !== 0 || commonDir.code !== 0 || resolve(repo, commonDir.out.trim()) !== resolve(gitDir.out.trim()))
+		return refused("LAND_CANONICAL_REQUIRED", "Land requires the primary shared checkout, not a linked worktree", "Use the canonical shared main checkout; nothing was created or published.");
+	const fetch = git(repo, ["fetch", "origin", "refs/heads/main"]);
+	const tip = fetch.code === 0 && !fetch.interrupted ? git(repo, ["rev-parse", "--verify", "refs/remotes/origin/main"]) : null;
+	if (tip === null || tip.code !== 0 || tip.out.trim().length === 0)
+		return refused("LAND_ORIGIN_UNAVAILABLE", "Fresh origin/main could not be fetched", "Restore origin reachability and retry; nothing was created or published.");
+	const base = tip.out.trim();
+	const parentResult = git(repo, ["show", "-s", "--format=%P", candidate]);
+	if (parentResult.code !== 0 || parentResult.interrupted)
+		return refused("LAND_ACTUAL_PARENT_UNREADABLE", "The commit has no readable actual parent", "Repair the commit and retry; nothing was created or published.");
+	const parents = parentResult.out.trim().split(" ").map((parent) => parent.trim()).filter((parent) => parent.length > 0);
+	if (parents.length !== 1 || parents[0] !== base)
+		return refused("LAND_EXACT_PARENT_NOT_TIP", `The commit ${candidate} is parented on ${parents.length === 1 ? parents[0] : `${parents.length} parents`}, not fresh origin/main ${base}`, "Rebuild the reviewed commit directly on the current origin/main tip and have that exact diff reviewed again; nothing was created or published.");
+	const paths = candidateTouchedPaths(repo, candidate);
+	if (paths === null || paths.length === 0)
+		return refused("LAND_EXACT_PARENT_PATHS_UNREADABLE", "The commit's file list is empty or could not be read", "Name a reviewed commit that changes files; nothing was created or published.");
+	const owner = authorizedOwner(repo, paths);
+	if ("error" in owner) return owner.error;
+	const body = git(repo, ["show", "-s", "--format=%B", candidate]);
+	if (body.code !== 0 || body.interrupted) return refused("LAND_ACTUAL_PARENT_UNREADABLE", "The commit message could not be read", "Repair the commit and retry; nothing was created or published.");
+	const qualifiedBlobs: Record<string, WorktreeBlob> = {};
+	for (const path of paths) {
+		const entry = treeBlob(repo, candidate, path);
+		if (entry === null) return refused("LAND_CANDIDATE_UNREADABLE", `The commit tree could not be read for ${path}`, "Repair the repository and retry; nothing was created or published.");
+		qualifiedBlobs[path] = entry;
+	}
+	const name = `exact-parent-${candidate.slice(0, 12)}`;
+	const ovnfs = (args: string[]) => kitlibRun(["ovnfs", ...args], { cwd: repo, env: gitEnvironment(), deadline_s: 120, max_output_bytes: 64 * 1024 });
+	let checkout: string;
+	try {
+		const created = await ovnfs(["new", "--name", name, "--rev", candidate]);
+		checkout = new TextDecoder().decode(created.stdout).trim();
+		if (created.rc !== 0 || created.timed_out || created.killed || !isAbsolute(checkout) || !existsSync(checkout))
+			return refused("LAND_EXACT_PARENT_CHECKOUT_UNAVAILABLE", `The private checkout ${name} could not be created: ${previewText(new TextDecoder().decode(created.stderr).trim() || `ovnfs exited ${String(created.rc)}`, 300)}`, `Resolve the ovnfs refusal (a stale ${name} is removed with ovnfs rm ${name} after you inspect it); nothing was published.`);
+	} catch (error) {
+		return refused("LAND_EXACT_PARENT_CHECKOUT_UNAVAILABLE", `The private checkout ${name} could not be created: ${error instanceof Error ? error.message : String(error)}`, "Install or repair ovnfs; nothing was published.");
+	}
+	const removeCheckout = async (): Promise<boolean> => {
+		try {
+			const removed = await ovnfs(["rm", name]);
+			return removed.rc === 0 && !removed.timed_out && !removed.killed;
+		} catch { return false; }
+	};
+	const switched = git(checkout, ["switch", "-q", "-C", "main", candidate]);
+	const checkoutMain = switched.code === 0 && !switched.interrupted ? git(checkout, ["rev-parse", "--verify", "refs/heads/main^{commit}"]) : null;
+	if (checkoutMain === null || checkoutMain.code !== 0 || checkoutMain.out.trim() !== candidate) {
+		const removed = await removeCheckout();
+		return refused("LAND_EXACT_PARENT_CHECKOUT_UNAVAILABLE", `The private checkout ${name} could not be set to the commit: ${landGitDetail(switched)}`, `Nothing was published; ${removed ? "the checkout was removed" : `remove it with ovnfs rm ${name}`}.`);
+	}
+	let checkPreflight = preparePushCheck(repo, base);
+	if (checkReplaceable(checkPreflight) && paths.includes(PUSH_CHECK_PATH)) {
+		const checkDiff = git(repo, ["diff", "--quiet", base, candidate, "--", `:(literal)${PUSH_CHECK_PATH}`]);
+		if (checkDiff.code === 1) checkPreflight = { kind: "skip", result: pushCheckResult("SKIP", "hash_changed", checkPreflight.result.sha256) };
+	}
+	let result: CliResult;
+	try {
+		result = await publishQualifiedCandidate(repo, {
+			candidate, base, paths, owner: owner.owner, message: body.out, qualifiedBlobs, checkPreflight,
+			pushDeadlineS: landPushDeadlineSeconds(), keepCheckout: true, namedCheckout: null, patchFile: null, pushRepo: checkout,
+		});
+	} catch (error) {
+		const removed = await removeCheckout();
+		return { code: 77, data: { overall: "UNRUN", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, check: pushCheckResult("UNRUN", "not_run") }, errors: [{ code: "LAND_PUBLICATION_UNVERIFIED", message: `The exact-parent publication could not be verified: ${error instanceof Error ? error.message : String(error)}`, remediation: `Inspect origin/main before retrying; no force-push or fallback was attempted; ${removed ? "the private checkout was removed" : `remove ${name} with ovnfs rm ${name}`}.` }], verification: "UNVERIFIED" };
+	}
+	const data = { ...(result.data as Record<string, unknown> | null) };
+	const published = data.overall === "PUSHED";
+	let reconcile: { state: string | null; applied: boolean; new_head: string | null; reason: string | null } | null = null;
+	if (published) {
+		try {
+			const caught = await convergeRepository({ repo, apply: true, push: false, lockWaitMs: LAND_CONVERGE_WAIT_MS });
+			reconcile = { state: caught.state, applied: caught.applied, new_head: caught.new_head ?? null, reason: caught.reason };
+		} catch (error) {
+			reconcile = { state: null, applied: false, new_head: null, reason: error instanceof Error ? error.message : String(error) };
+		}
+		data.phases = landPhaseEvidence(repo, candidate, true, data.convergence as ConvergeResult | undefined);
+		data.localMain = git(repo, ["rev-parse", "refs/heads/main"]).out.trim();
+	}
+	const removed = await removeCheckout();
+	const caughtUp = reconcile !== null && reconcile.applied && (reconcile.state === "MERGED" || reconcile.state === "FAST_FORWARD");
+	const text = published
+		? `Published ${candidate} on origin/main from the private checkout ${name}${removed ? " (removed)" : ` (remove it with ovnfs rm ${name})`}; ${caughtUp ? `the canonical main now holds it by ${reconcile?.state}, with its held commits untouched` : `the canonical main did not take it (${reconcile?.reason ?? reconcile?.state ?? "unknown"}); run converge --apply on the canonical repository`}.`
+		: `Nothing was published; the private checkout ${name} ${removed ? "was removed" : `is still present: remove it with ovnfs rm ${name}`}.`;
+	return { ...result, data: { ...data, exact_parent: { candidate, base, checkout: name, checkout_removed: removed }, ...(reconcile !== null ? { local_reconcile: reconcile } : {}), text } };
+}
+
 export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 	if (!request.flags.has("--apply")) return refused("LAND_APPLY_REQUIRED", "land is a mutation and requires --apply", "Review the exact owner, paths, base and candidate, then pass --apply --yes.");
 	const root = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
@@ -2219,6 +2327,7 @@ export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 	} catch (error) {
 		return refused("SOURCE_ACT_REFUSED", error instanceof Error ? error.message : String(error), "Land only from the canonical companion source root; no commit or publication was attempted.");
 	}
+	if (request.flags.get("--exact-parent") !== undefined) return landExactParentCommand(repo, request);
 	if (request.flags.get("--patch") !== undefined) return landPatchCommand(repo, request);
 	if (request.flags.get("--review") !== undefined || request.flags.get("--bead") !== undefined) return landReviewAutoCommand(repo, request);
 	const paths = normalizePaths(request.flags.get("--paths"), repo);

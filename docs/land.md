@@ -112,6 +112,39 @@ Use path mode for ordinary shared-main saves. Patch mode supplies the selected-
 hunk construction requested by the UDS committer; it does not establish full
 UDS adoption or replace JEV's separately reviewed index/history publisher.
 
+## Exact-parent mode (LANDSIBLING1)
+
+`omp-kit land --exact-parent SHA --apply --yes` publishes one already-reviewed
+commit whose sole parent is fresh `origin/main` while the canonical local
+`main` holds unpushed commits that must stay held. Path and patch modes refuse
+that state (`LAND_BASE_ADVANCE_REFUSED`) because they build the commit on local
+`main`, and pushing local `main` would send the held commits too. The
+shared-main pre-push member admits a push only when the pushed commit is on
+the pushing repository's own `main`, so land does not relax it: it opens a
+private ovnfs checkout at the commit (`ovnfs new --name exact-parent-<sha12>
+--rev SHA`), sets that checkout's own `main` to the commit and publishes from
+it. Every pre-push member then judges exactly `origin..SHA`; a planted secret
+in a held commit is not in that range.
+
+Gates kept: the commit must name a sole parent equal to the freshly fetched
+origin tip (`LAND_EXACT_PARENT_NOT_TIP` otherwise, before anything is
+created), the caller must hold current exclusive reservations on every path
+the commit changes, and the actual-parent qualification, the registered
+`.omp/push-check` and the full-suite verdict run on the exact candidate as in
+every other land mode. `--message`, `--paths`, `--patch`, `--base`, `--review`,
+`--bead`, `--checkout` and `--keep-checkout` are refused: the commit's own
+message and bytes publish unchanged. The commit must exist in this repository
+(`git fetch CHECKOUT SHA` brings its objects).
+
+After a `PUSHED` result land removes the private checkout and runs an
+ordinary converge in the canonical repository, which merges origin's commit
+into local `main`; the held commits stay where they were and stay unpublished.
+The result reports `exact_parent` (candidate, base, checkout, whether it was
+removed) and `local_reconcile` (converge state, applied, new head, reason).
+A failed reconcile leaves `PUSHED` standing and names the converge command to
+run. Remove the verb if it ever publishes a commit that is not a descendant of
+the remote tip.
+
 ## Review mode (LANDPIPE1)
 
 `omp-kit land --checkout NAME --bead ID --review auto --message MSG --apply --yes`

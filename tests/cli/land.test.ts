@@ -995,3 +995,183 @@ test("LANDFINDINGS1-scratch publication ignores unreleased scratch under another
 		else process.env.XDG_STATE_HOME = savedState;
 	}
 });
+
+/** LANDSIBLING1 (ompkit-1ra0d.218.2): a fake ovnfs that models `new --name N --rev R` as a full copy of the calling
+ * repository (hooks, config and refs included, as the real checkout carries them) detached at R, and `rm N`. */
+function writeExactParentOvnfs(fakeBin: string): void {
+	const script = [
+		"#!/bin/sh",
+		'printf "%s\\n" "$*" >> "$OVNFS_CALL_LOG"',
+		'case "$1" in',
+		"  new)",
+		'    shift; name=""; rev=""',
+		'    while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift 2 ;; --rev) rev="$2"; shift 2 ;; *) shift ;; esac; done',
+		'    dest="$OVNFS_COPY_ROOT/$name"',
+		'    if [ -e "$dest" ]; then printf "checkout %s exists\\n" "$name" >&2; exit 1; fi',
+		'    cp -R "$PWD" "$dest" || exit 1',
+		'    git -C "$dest" checkout -q --detach "$rev" || exit 1',
+		'    printf "%s\\n" "$dest" ;;',
+		"  rm)",
+		'    rm -rf "$OVNFS_COPY_ROOT/$2" ;;',
+		"  *) exit 2 ;;",
+		"esac",
+		"",
+	].join("\n");
+	writeFileSync(join(fakeBin, "ovnfs"), script);
+	chmodSync(join(fakeBin, "ovnfs"), 0o755);
+}
+
+const PLANTED_SECRET = "PLANTED_SECRET_TOKEN";
+
+/** The production on-main member plus a pre-push secret scan of exactly the range git is about to push. */
+function installOnMainAndRangeScan(work: string): void {
+	const hooks = join(work, ".git", "hooks");
+	writeFileSync(join(hooks, "pre-push-on-main"), readFileSync(join(repoRoot, "scripts", "check-pushed-on-main.sh")), { mode: 0o755 });
+	writeFileSync(join(hooks, "pre-push"), [
+		"#!/bin/sh",
+		'input=$(cat)',
+		'printf "%s\\n" "$input" | sh "$(dirname "$0")/pre-push-on-main" || exit $?',
+		'printf "%s\\n" "$input" | while read -r lref lsha rref rsha; do',
+		'  case "$lsha" in *[!0]*) ;; *) continue ;; esac',
+		'  range="$lsha"; case "$rsha" in *[!0]*) range="$rsha..$lsha" ;; esac',
+		`  if git log -p --format= "$range" | grep -q ${PLANTED_SECRET}; then printf 'range-scan: REFUSED planted secret in %s\\n' "$range" >&2; exit 5; fi`,
+		"done",
+		"",
+	].join("\n"), { mode: 0o755 });
+}
+
+type ExactParentSetup = { work: string; fakeBin: string; bare: string; base: string; reviewed: string; held: string[]; calls: string; copyRoot: string; env: Record<string, string>; hold: unknown[] };
+
+/** Local main holds two unpushed commits; the reviewed commit is built directly on the origin tip on a side branch. */
+function exactParentSetup(secretIn: "reviewed" | "held" | null = null): ExactParentSetup {
+	const { work, fakeBin } = fixture();
+	installOnMainAndRangeScan(work);
+	writeExactParentOvnfs(fakeBin);
+	const bare = git(work, ["remote", "get-url", "origin"]).trim();
+	const base = remoteHead(work);
+	const id = globalThis.fixtureNumber++;
+	const copyRoot = join(scratch, `exact-parent-co-${id}`);
+	mkdirSync(copyRoot, { recursive: true });
+	const calls = join(scratch, `exact-parent-calls-${id}.log`);
+	writeFileSync(calls, "");
+	git(work, ["switch", "-q", "-c", "reviewed"]);
+	writeFileSync(join(work, "reviewed.txt"), secretIn === "reviewed" ? `${PLANTED_SECRET}=reviewed\n` : "reviewed bytes\n");
+	git(work, ["add", "--", "reviewed.txt"]);
+	git(work, ["commit", "-m", "feat(land): reviewed exact-parent commit [test]"]);
+	const reviewed = git(work, ["rev-parse", "HEAD"]).trim();
+	git(work, ["switch", "-q", "main"]);
+	const held: string[] = [];
+	for (const n of [1, 2]) {
+		writeFileSync(join(work, `held-${n}.txt`), secretIn === "held" && n === 1 ? `${PLANTED_SECRET}=held\n` : `held ${n}\n`);
+		git(work, ["add", "--", `held-${n}.txt`]);
+		git(work, ["commit", "-m", `held ${n} [test]`]);
+		held.push(git(work, ["rev-parse", "HEAD"]).trim());
+	}
+	return {
+		work, fakeBin, bare, base, reviewed, held, calls, copyRoot,
+		env: { OVNFS_CALL_LOG: calls, OVNFS_COPY_ROOT: copyRoot },
+		hold: [{ agent: "DarkFern", path: "reviewed.txt", exclusive: true, remaining_seconds: 3600 }],
+	};
+}
+
+function exactParentRun(setup: ExactParentSetup, sha: string) {
+	return command(setup.work, ["--exact-parent", sha, "--apply", "--yes"], setup.hold, { amDir: setup.fakeBin, gitEnv: setup.env });
+}
+
+function expectUnpublished(setup: ExactParentSetup, sha: string): void {
+	expect(() => git(setup.bare, ["cat-file", "-e", `${sha}^{commit}`])).toThrow();
+}
+
+test("LANDSIBLING1 exact-parent publishes the reviewed commit while local main keeps two unpushed commits", () => {
+	const setup = exactParentSetup();
+	const mainBefore = git(setup.work, ["rev-parse", "main"]).trim();
+	expect(mainBefore).toBe(setup.held[1]!);
+	const run = exactParentRun(setup, setup.reviewed);
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	expectLandSchema(run.body.data);
+	const data = run.body.data as {
+		overall: string; candidate_sha: string; pushed_sha: string; base: string; paths: string[];
+		exact_parent: { candidate: string; base: string; checkout: string; checkout_removed: boolean };
+		local_reconcile: { state: string; applied: boolean };
+	};
+	expect(data.overall).toBe("PUSHED");
+	expect(data.pushed_sha).toBe(setup.reviewed);
+	expect(data.base).toBe(setup.base);
+	expect(data.paths).toEqual(["reviewed.txt"]);
+	expect(remoteHead(setup.work)).toBe(setup.reviewed);
+	expect(git(setup.bare, ["rev-parse", "refs/heads/main"]).trim()).toBe(setup.reviewed);
+	// The held commits never left this machine and stay on local main, unchanged and unpublished.
+	for (const held of setup.held) {
+		expectUnpublished(setup, held);
+		git(setup.work, ["merge-base", "--is-ancestor", held, "main"]);
+	}
+	// Local main now also holds the published commit, by a merge that leaves the held commits where they were.
+	git(setup.work, ["merge-base", "--is-ancestor", setup.reviewed, "main"]);
+	expect(data.local_reconcile).toMatchObject({ state: "MERGED", applied: true });
+	const unpublished = git(setup.work, ["rev-list", "origin/main..main"]).trim().split("\n");
+	expect(unpublished).toEqual(expect.arrayContaining(setup.held));
+	// The private checkout was created for exactly this commit and removed afterwards.
+	const name = `exact-parent-${setup.reviewed.slice(0, 12)}`;
+	expect(data.exact_parent).toEqual({ candidate: setup.reviewed, base: setup.base, checkout: name, checkout_removed: true });
+	expect(readFileSync(setup.calls, "utf8").trim().split("\n")).toEqual([`new --name ${name} --rev ${setup.reviewed}`, `rm ${name}`]);
+	expect(existsSync(join(setup.copyRoot, name))).toBe(false);
+});
+
+test("LANDSIBLING1 exact-parent refuses a commit whose parent is not the remote tip and creates nothing", () => {
+	const setup = exactParentSetup();
+	// A peer advances origin after the reviewed commit was built, so its parent is no longer the tip.
+	const peer = join(scratch, `exact-parent-peer-${globalThis.fixtureNumber++}`);
+	git(scratch, ["clone", "--no-hardlinks", "--branch", "main", setup.bare, peer]);
+	git(peer, ["config", "user.name", "peer"]);
+	git(peer, ["config", "user.email", "peer@example.invalid"]);
+	writeFileSync(join(peer, "peer-advance.txt"), "peer advance\n");
+	git(peer, ["add", "--", "peer-advance.txt"]);
+	git(peer, ["commit", "-m", "peer advance [test]"]);
+	git(peer, ["push", "origin", "HEAD:refs/heads/main"]);
+	const tip = remoteHead(setup.work);
+	expect(tip).not.toBe(setup.base);
+	const run = exactParentRun(setup, setup.reviewed);
+	expect(run.status, JSON.stringify(run.body)).not.toBe(0);
+	expect(responseCode(run.body)).toBe("LAND_EXACT_PARENT_NOT_TIP");
+	expect((run.body.data as { overall: string }).overall).toBe("REFUSED");
+	expect(remoteHead(setup.work)).toBe(tip);
+	expectUnpublished(setup, setup.reviewed);
+	expect(readFileSync(setup.calls, "utf8")).toBe("");
+	expect(git(setup.work, ["rev-parse", "main"]).trim()).toBe(setup.held[1]!);
+});
+
+test("LANDSIBLING1 exact-parent refuses flags that would change the published commit and an unknown commit", () => {
+	const setup = exactParentSetup();
+	const withMessage = command(setup.work, ["--exact-parent", setup.reviewed, "--message", "feat(land): other [test]", "--apply", "--yes"], setup.hold, { amDir: setup.fakeBin, gitEnv: setup.env });
+	expect(responseCode(withMessage.body)).toBe("LAND_EXACT_PARENT_EXCLUSIVE");
+	const unknown = exactParentRun(setup, "0".repeat(40));
+	expect(responseCode(unknown.body)).toBe("LAND_EXACT_PARENT_UNKNOWN");
+	expect(remoteHead(setup.work)).toBe(setup.base);
+	expect(readFileSync(setup.calls, "utf8")).toBe("");
+});
+
+test("LANDSIBLING1 pushed-range secret scan refuses a planted secret in the published commit and publishes nothing", () => {
+	const setup = exactParentSetup("reviewed");
+	const run = exactParentRun(setup, setup.reviewed);
+	expect(run.status, JSON.stringify(run.body)).not.toBe(0);
+	expect((run.body.data as { overall: string }).overall).not.toBe("PUSHED");
+	expect(remoteHead(setup.work)).toBe(setup.base);
+	expectUnpublished(setup, setup.reviewed);
+	// Refused publication leaves local main exactly as it was and removes the private checkout it made.
+	expect(git(setup.work, ["rev-parse", "main"]).trim()).toBe(setup.held[1]!);
+	const name = `exact-parent-${setup.reviewed.slice(0, 12)}`;
+	expect(existsSync(join(setup.copyRoot, name))).toBe(false);
+	expect(readFileSync(setup.calls, "utf8").trim().split("\n")).toEqual([`new --name ${name} --rev ${setup.reviewed}`, `rm ${name}`]);
+});
+
+test("LANDSIBLING1 pushed-range secret scan judges exactly the published commit, not a secret held in an unpushed commit", () => {
+	const setup = exactParentSetup("held");
+	// Control: pushing local main itself would carry the held secret and the scan refuses it.
+	expect(() => git(setup.work, ["push", "origin", "main"])).toThrow(/planted secret/);
+	expect(remoteHead(setup.work)).toBe(setup.base);
+	const run = exactParentRun(setup, setup.reviewed);
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	expect(remoteHead(setup.work)).toBe(setup.reviewed);
+	expectUnpublished(setup, setup.held[0]!);
+	git(setup.work, ["merge-base", "--is-ancestor", setup.held[0]!, "main"]);
+});

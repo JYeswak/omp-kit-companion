@@ -460,6 +460,8 @@ const landData: DataSchema = { type: "object", required: ["overall", "check"], p
 	checkoutsKept: { type: "array", items: { type: "object", required: ["name", "unappliedPaths"], properties: { name: { type: "string" }, unappliedPaths: { type: "array", items: { type: "string" } } } } },
 	checkoutsMatching: { type: "array", items: { type: "string" } },
 	checkout_text: { type: "string" }, text: { type: "string" },
+	exact_parent: { type: "object", required: ["candidate", "base", "checkout", "checkout_removed"], properties: { candidate: { type: "string" }, base: { type: "string" }, checkout: { type: "string" }, checkout_removed: { type: "boolean" } } },
+	local_reconcile: { type: "object", required: ["state", "applied", "new_head", "reason"], properties: { state: { type: ["string", "null"] }, applied: { type: "boolean" }, new_head: { type: ["string", "null"] }, reason: { type: ["string", "null"] } } },
 }, allOf: [{
 	if: { properties: { overall: { const: "PUSHED" } } },
 	then: { required: ["commit", "candidate_sha", "pushed_sha", "owner", "paths", "base", "convergence"], properties: { commit: { type: "string" }, pushed_sha: { type: "string" } } },
@@ -573,7 +575,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--ours", value: "PATH", repeatable: true, description: "Explicit owner decision to keep the integrated local path" },
 		{ name: "--theirs", value: "PATH", repeatable: true, description: "Explicit owner decision to take the origin path" },
 	], example: "omp-kit converge --repo . --json", runnable: false, mutation: true, dataSchema: convergeData },
-	{ name: "land", description: "Commit exactly reserved paths to shared main and publish through owner-resolved convergence", usage: "land --paths PATH... --message MSG --apply --yes [--checkout NAME] [--keep-checkout] | land --patch FILE [--base SHA] --message MSG --apply --yes [--checkout NAME] [--keep-checkout] | land --checkout NAME --bead ID --review auto --message MSG --apply --yes", flags: [
+	{ name: "land", description: "Commit exactly reserved paths to shared main and publish through owner-resolved convergence", usage: "land --paths PATH... --message MSG --apply --yes [--checkout NAME] [--keep-checkout] | land --patch FILE [--base SHA] --message MSG --apply --yes [--checkout NAME] [--keep-checkout] | land --checkout NAME --bead ID --review auto --message MSG --apply --yes | land --exact-parent SHA --apply --yes", flags: [
 		{ name: "--paths", value: "PATH", repeatable: true, description: "Exact repository-relative file path; repeat for each reserved file (path mode; refused with --patch)" },
 		{ name: "--patch", value: "FILE", description: "Caller-produced unified diff whose selected hunks are reconstructed onto fresh origin/main (patch mode; refused with --paths)" },
 		{ name: "--base", value: "SHA", description: "Base commit the patch was produced from; must apply cleanly there and is recorded as an Authored-On trailer (patch mode only)" },
@@ -584,6 +586,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--bead", value: "ID", description: "Bead under review (review mode; refused without --checkout and --review auto)" },
 		{ name: "--review", value: "MODE", description: "Review mode: auto runs the bead acceptance, one independent-session review (in your seat; verify stays the non-author gate), then reserve and land in one act (refused with --paths/--patch/--base)" },
 		{ name: "--keep-checkout", description: "Keep all ovnfs checkouts instead of removing fully-landed matches after publishing" },
+		{ name: "--exact-parent", value: "SHA", description: "Publish one reviewed commit whose sole parent is fresh origin/main from a private ovnfs checkout while local main keeps its unpushed commits; then merge origin into local main (exact-parent mode; refused with every other mode flag)" },
 	], example: "omp-kit land --paths src/a.ts --message 'fix: x [pending]' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
 	{ name: "push-check", description: "Run the repo's committed .omp/push-check against a commit and record the verdict the author handoff reads", usage: "push-check --commit SHA [--repo PATH]", flags: [
 		{ name: "--commit", value: "SHA", description: "Commit whose tree the HEAD push-check runs against" },
