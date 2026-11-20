@@ -20,7 +20,7 @@ const release = Bun.YAML.parse(readFileSync(join(root, ".github/workflows/releas
 const planner = ci.jobs["resolve-omp-versions"].steps.find(step => step.id === "suites");
 const output = join(tmp, "suites.out");
 const planned = Bun.spawnSync(["bash", "-eu", "-c", planner.run], {
-  env: { ...process.env, SHARDED: "false", GITHUB_OUTPUT: output },
+  env: { ...process.env, SHARDED: "false", SHARD_UBUNTU: "false", GITHUB_OUTPUT: output },
   stdout: "pipe", stderr: "pipe",
 });
 assert.equal(planned.exitCode, 0, Buffer.from(planned.stderr).toString());
@@ -50,13 +50,21 @@ function matrixRows(job, context) {
     assert.ok(Array.isArray(values), `unsupported matrix axis: ${key}`);
     rows = rows.flatMap(row => values.map(value => ({ ...row, [key]: value })));
   }
-  for (const excluded of matrix.exclude ?? [])
+  // exclude and include may be expressions over the planner's outputs; GitHub's order is axes, exclude, include.
+  const excludes = typeof matrix.exclude === "string" ? evaluate(matrix.exclude, context) : matrix.exclude ?? [];
+  const includes = typeof matrix.include === "string" ? evaluate(matrix.include, context) : matrix.include ?? [];
+  assert.ok(Array.isArray(excludes) && Array.isArray(includes), `unsupported exclude/include in matrix`);
+  for (const excluded of excludes)
     rows = rows.filter(row => !Object.entries(excluded).every(([key, value]) => row[key] === value));
-  // These workflows use standalone include rows, not partial matrix augmentation.
-  if (matrix.include) {
-    assert.equal(Object.keys(matrix).filter(key => key !== "include").length, 0,
-      "mixed include matrices need explicit expansion support");
-    rows = matrix.include;
+  const axes = Object.keys(matrix).filter(key => key !== "include" && key !== "exclude");
+  if (axes.length === 0) return includes;
+  // An include row augments every original combination it does not contradict on an original axis, and
+  // only when no original axis value would be overwritten; a row that contradicts all of them is a new leg.
+  const original = rows;
+  for (const extra of includes) {
+    const fits = original.filter(row => axes.every(axis => !(axis in extra) || row[axis] === extra[axis]));
+    if (fits.length > 0) for (const row of fits) Object.assign(row, extra);
+    else rows = [...rows, { ...extra }];
   }
   return rows;
 }
@@ -164,6 +172,49 @@ check("serial jobs do not inflate the concurrent ceiling", () => {
   const serial = { jobs: { first: { "runs-on": "macos-15", strategy: { matrix: { leg: [1, 2, 3] } } },
     second: { "runs-on": "macos-15", needs: "first", strategy: { matrix: { leg: [1, 2, 3] } } } } };
   assert.equal(ceiling(serial, release, qualification).total, 3);
+});
+// CORESHARD1: the unsharded Ubuntu core leg outgrew its 40 min cap (every scheduled run 2026-11-08..11-20 was
+// cancelled there), so scheduled and certification runs shard Ubuntu core only. Run the real planner for that
+// event and expand the real matrix: macOS keeps its single core leg and gains no shard leg.
+function plannedOutputs(env) {
+  const out = join(tmp, `suites-${Object.values(env).join("-")}.out`);
+  const run = Bun.spawnSync(["bash", "-eu", "-c", planner.run], {
+    env: { ...process.env, SHARDED: "false", SHARD_UBUNTU: "false", ...env, GITHUB_OUTPUT: out }, stdout: "pipe", stderr: "pipe" });
+  assert.equal(run.exitCode, 0, Buffer.from(run.stderr).toString());
+  return Object.fromEntries(readFileSync(out, "utf8").trim().split("\n").map(line => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+}
+function suiteLegs(planned, event, inputs = { version: "", reuse_fast_ci: false }) {
+  const needs = new Proxy({}, { get: () => ({ result: "success", outputs: planned }) });
+  const context = { inputs, needs, github: { event_name: event, event: { repository: { private: false } } },
+    fromJSON: JSON.parse, always: () => true, cancelled: () => false, failure: () => false };
+  const legs = {};
+  for (const row of matrixRows(ci.jobs["cli-contracts-suites"], context)) (legs[row.os] ??= []).push(row.suite);
+  for (const os of Object.keys(legs)) legs[os].sort();
+  return legs;
+}
+check("scheduled runs shard Ubuntu core only and leave macOS demand unchanged", () => {
+  const unchanged = suiteLegs(outputs, "schedule");
+  const planned = plannedOutputs({ SHARD_UBUNTU: "true" });
+  assert.equal(planned.core_shards, "4");
+  const legs = suiteLegs(planned, "schedule");
+  assert.deepEqual(legs["ubuntu-24.04"], ["core-1", "core-2", "core-3", "core-4", "kit-update", "package-release"]);
+  assert.deepEqual(legs["macos-15"], ["core", "kit-update", "package-release"]);
+  assert.deepEqual(legs["macos-15"], unchanged["macos-15"]);
+  console.log(`SCHEDULED_LEGS ubuntu=${legs["ubuntu-24.04"].length} macos=${legs["macos-15"].length}`);
+});
+check("push keeps its four Ubuntu shards and the unsharded planner keeps one core leg per OS", () => {
+  const push = suiteLegs(plannedOutputs({ SHARDED: "true" }), "push");
+  assert.deepEqual(push, { "ubuntu-24.04": ["core-1", "core-2", "core-3", "core-4", "kit-update", "package-release"] });
+  assert.deepEqual(suiteLegs(outputs, "schedule"), {
+    "ubuntu-24.04": ["core", "kit-update", "package-release"], "macos-15": ["core", "kit-update", "package-release"] });
+});
+check("planted: dropping the Ubuntu core exclusion or sharding macOS is rejected", () => {
+  const planned = plannedOutputs({ SHARD_UBUNTU: "true" });
+  const noExclude = suiteLegs({ ...planned, suite_excludes: "[]" }, "schedule");
+  assert.ok(noExclude["ubuntu-24.04"].includes("core") && noExclude["ubuntu-24.04"].includes("core-1"),
+    "an unexcluded Ubuntu core leg must remain visible next to its shards");
+  const macShards = suiteLegs({ ...planned, suite_includes: JSON.stringify([1, 2, 3, 4].map(n => ({ os: "macos-15", suite: `core-${n}` }))) }, "schedule");
+  assert.ok(macShards["macos-15"].length > 3, "macOS shard legs must raise the macOS leg count");
 });
 check("signing and local-attest do not overlap qualification", () => {
   assert.ok(ceiling(ci, release, { ...qualification, signing: true }).total <= 5);

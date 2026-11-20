@@ -60,6 +60,8 @@ jobs:
       matrix: ${{ steps.resolve.outputs.matrix }}
       suites: ${{ steps.suites.outputs.suites }}
       core_shards: ${{ steps.suites.outputs.core_shards }}
+      suite_excludes: ${{ steps.suites.outputs.suite_excludes }}
+      suite_includes: ${{ steps.suites.outputs.suite_includes }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -91,24 +93,37 @@ jobs:
             printf 'certified=%s\n' "$certified"
             printf 'matrix=%s\n' "$matrix"
           } >> "$GITHUB_OUTPUT"
-      - name: Plan cli-contracts suite legs (core is sharded on push and pull_request only)
+      - name: Plan cli-contracts suite legs (core is sharded on push and pull_request, and on Ubuntu for scheduled and certification runs)
         id: suites
         shell: bash
         env:
-          # Push and PR run Ubuntu only, where four core shards cut the 12.0 min p50 critical path. Schedule and
-          # workflow_call keep one core leg per OS: sharding there would multiply macOS jobs against the
-          # five-slot macOS pool (tests/cli/ci-concurrency.test.sh).
+          # Push and PR run Ubuntu only, where four core shards cut the 12.0 min p50 critical path. Release
+          # qualification (inputs.version) keeps one core leg per OS: sharding there would multiply macOS jobs
+          # against the five-slot macOS pool (tests/cli/ci-concurrency.test.sh).
           SHARDED: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && !inputs.reuse_fast_ci }}
+          # The unsharded Ubuntu core leg outgrew its 40 min cap: all eight scheduled runs 2026-11-08..11-20
+          # (the first at 42466843421) ended with that job cancelled at 40 min. Scheduled and OMP-certification
+          # runs therefore shard Ubuntu core only; macOS keeps its single core leg.
+          SHARD_UBUNTU: ${{ github.event_name != 'push' && github.event_name != 'pull_request' && inputs.version == '' && !inputs.reuse_fast_ci }}
         run: |
           set -euo pipefail
           shards=1
+          excludes='[]'
+          includes='[]'
           if [[ "$SHARDED" == "true" ]]; then shards=4; fi
           suites="$(jq -cn --argjson n "$shards" '(if $n > 1 then [range(1; $n + 1) | "core-\(.)"] else ["core"] end) + ["package-release", "kit-update"]')"
+          if [[ "${SHARD_UBUNTU:-false}" == "true" ]]; then
+            shards=4
+            excludes='[{"os":"ubuntu-24.04","suite":"core"}]'
+            includes="$(jq -cn --argjson n "$shards" '[range(1; $n + 1) | {os: "ubuntu-24.04", suite: "core-\(.)"}]')"
+          fi
           {
             printf 'core_shards=%s\n' "$shards"
             printf 'suites=%s\n' "$suites"
+            printf 'suite_excludes=%s\n' "$excludes"
+            printf 'suite_includes=%s\n' "$includes"
           } >> "$GITHUB_OUTPUT"
-          echo "cli-contracts suite legs: $suites"
+          echo "cli-contracts suite legs: $suites excluding $excludes including $includes"
   stock-extensions:
     if: github.event.repository.private == false
     runs-on: ubuntu-24.04
@@ -194,6 +209,8 @@ jobs:
       matrix:
         os: ${{ inputs.reuse_fast_ci && fromJSON('["macos-15"]') || ((github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]')) }}
         suite: ${{ fromJSON(needs.resolve-omp-versions.outputs.suites) }}
+        exclude: ${{ fromJSON(needs.resolve-omp-versions.outputs.suite_excludes) }}
+        include: ${{ fromJSON(needs.resolve-omp-versions.outputs.suite_includes) }}
     runs-on: ${{ matrix.os }}
     # Every event runs the same groups: CLI/fleet core, package release, and kit update.
     # Native br extension contracts run in the tool-equipped core fleet suite; portable extension
