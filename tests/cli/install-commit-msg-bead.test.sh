@@ -94,6 +94,7 @@ git -C "$H" update-ref refs/heads/main "$L2" "$X"
 mv "$TMP/witness.moved" "$RTX/ref-txn-witness.py"
 # The paired admitted control: the reviewed transform through the installed chain.
 out=$(fx drive "$H" "$PLAN" 2> "$TMP/o-witness-p")
+[ "$out" = COMMITTED ] || cat "$TMP/o-witness-p" >&2
 ok "$out" "COMMITTED" "witness-reviewed-transform-committed"
 ok "$(git -C "$H" rev-parse refs/heads/main)" "$NEW" "witness-reviewed-transform-main"
 grep -q "ADMITTED reviewed history transform plan=$SHA ref=refs/heads/main old=$L2 new=$NEW mapped=3" "$TMP/o-witness-p"

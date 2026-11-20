@@ -1,0 +1,1 @@
+- Honor each hook member's owner-execute mode bit, including on NFS checkouts whose executable-access response incorrectly permits mode-600 files. Reuse the existing timing process for the mode check, keep enabled members running, and refresh older generated runners during installation.

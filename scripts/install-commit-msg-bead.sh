@@ -721,7 +721,7 @@ case "$kind" in
 		;;
 esac
 rc=0
-# GATEEVENTS1 runner v7: per-member wall start and monotonic elapsed accompany verdicts;
+# GATEEVENTS1 runner v8: per-member wall start and monotonic elapsed accompany verdicts;
 # each verdict is one gate-events row (act = commit/publish, gate = member name); FINDING lines (kitlib-findings.sh
 # grammar) from every member are collected into ONE envelope printed once at the end, and the chain exits
 # non-zero once iff any member found something. A legacy member that exits non-zero without FINDING lines
@@ -744,11 +744,14 @@ run_member() {
 for hook in "$here/hooks.d/$kind"/[0-9][0-9]-*; do
 	[ -e "$hook" ] || continue
 	[ -x "$hook" ] || continue
+	# NFS ACCESS can ignore mode bits; disabled members still need to stay disabled.
+	# Reuse the clock process for stat, before allocating per-member scratch.
+	# Python <3.10 on macOS makes monotonic() process-relative; use the shared kernel clock.
+	member_clock=$(python3 -c 'import os,stat,sys,time; print(time.time(), time.clock_gettime(time.CLOCK_MONOTONIC)) if os.stat(sys.argv[1]).st_mode & stat.S_IXUSR else None' "$hook") || exit "$?"
+	[ -n "$member_clock" ] || continue
 	member=$(basename -- "$hook")
 	member_rc=0
 	errf=$(mktemp "${TMPDIR:-/tmp}/hook-stderr.XXXXXX") || exit 1
-	# Python <3.10 on macOS makes monotonic() process-relative; use the shared kernel clock.
-	member_clock=$(python3 -c 'import time; print(time.time(), time.clock_gettime(time.CLOCK_MONOTONIC))')
 	member_started_epoch=${member_clock% *}
 	member_started_mono=${member_clock#* }
 	if [ -n "$input" ]; then out=$(run_member "$@" < "$input" 2> "$errf") || member_rc=$?; else out=$(run_member "$@" 2> "$errf") || member_rc=$?; fi
