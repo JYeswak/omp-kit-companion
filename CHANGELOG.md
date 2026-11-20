@@ -4,6 +4,26 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.137] - 2026-11-20
+
+### Added
+
+- New `frontend-foundations` skill: decide all 30 front-end foundations first, build from the defaults, and verify before shipping. Includes the foundations reference, initializer, optional overlay, preview renderer and native UI reminder.
+- `omp-kit frontend check` runs every foundation verifier through Kit's bounded process runner (argv, no shell) and records the real exit and output digest; hand-written exits and saved-output snippets are refused.
+- Results bind to the exact build and decisions via build/criteria digests; sealed evidence is refused when either digest no longer matches, and `--require-approval` refuses owner approvals naming other digests.
+- Items needing a human judge report `NEEDS_JUDGE`, never PASS; `init.mjs` pre-marks owner-accept and UNVERIFIED-pipeline rows as judge notes.
+- Docs resolve installed script paths relative to the skill directory, and the reference preview renders a stock look with no overlay present; overlays stay optional.
+
+### Changed
+
+- `skill-mine` gains an `owner` source: `--source owner` (with `--sessions-root DIR`) reads the messages you actually typed in OMP session journals, one candidate row per message with its time, seat and source line, resuming from a saved cursor so a second run emits nothing new.
+- New `skill-mine coverage --backlog PATH [--grace-hours N] [--now ISO] [--json]` proves each durable rule older than the grace window is anchored in the skill file a seat loads and reports stated-to-landed latency from git; it exits 1 naming every overdue rule.
+- The `owner` source now reads every OMP profile's session journals by default (`~/.omp/profiles/*/agent/sessions`); `--sessions-root DIR` still scopes it to one tree.
+- The `owner` source stays inside real profile roots: symlinked profiles, nested links and loops are never followed, and the wall deadline stops enumeration early.
+- The `owner` default run is contained end to end: a symlinked `~/.omp` or `~/.omp/profiles` yields no roots, descended directories are re-checked at descent, and a journal swapped for a symlink before open is refused; `--sessions-root DIR` behavior is unchanged.
+- The `owner` scan opens each journal with `O_NOFOLLOW` so the open itself refuses a trailing symlink instead of a separate check-then-open; a descriptor that is not a regular file is closed and refused.
+- Owner journals open nonblocking so a file replaced by a FIFO cannot hang the scan; non-regular descriptors are closed without recording messages or a cursor.
+
 ## [0.2.136] - 2026-11-20
 
 ### Changed
