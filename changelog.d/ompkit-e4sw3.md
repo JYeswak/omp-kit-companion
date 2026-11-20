@@ -1,0 +1,1 @@
+- Clear a pending wake from a proven older Tern foreground only after keeping its recovery copy and recording the settlement, then deliver the new wake. Current or unverified pending wakes still block new sends.

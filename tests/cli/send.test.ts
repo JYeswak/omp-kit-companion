@@ -1027,27 +1027,6 @@ test("WAKEFAILCLEAR1 planted: a runtime ok:false keeps the pending record and th
 	expect(carlyRuns(fake)).toBe(1);
 });
 
-test("GOALSENDLAND1-stale: a pending attempt from a previous runtime incarnation refuses at once with path and ack command", async () => {
-	const dir = ternDropDir();
-	const marker = "kit-send-0123456789ae";
-	const pendingPath = seedPending(dir, settledJournal, marker, `old\n[${marker}]`);
-	const record = JSON.parse(readFileSync(pendingPath, "utf8"));
-	writeFileSync(pendingPath, JSON.stringify({ ...record, foregroundStarted: "Mon Nov 10 22:13:00 2025" }) + "\n");
-	const fake = ternFake();
-	const bound = { ...ternRuntimeBinding, foregroundStarted: "Tue Nov 11 05:59:00 2026" };
-	const r = await deliverTern(fake, "new", { dropDir: dir, untilDeliveredMs: 60_000,
-		wait: async () => { throw new Error("stale pending must not wait out the bound"); },
-		observe: idleOf(fake, { runtimeBinding: bound }),
-		identify: async () => ({ ...ternIdentified, runtimeBinding: bound }) });
-	expect(r.status).toBe("REFUSED");
-	expect(r.code).toBe("STALE_PENDING_INCARNATION");
-	expect(r.sends).toBe(0);
-	expect(r.detail).toContain(pendingPath);
-	expect(r.detail).toContain("omp-kit send --ack-pending");
-	expect(fake.runs.length).toBe(0);
-	expect(existsSync(pendingPath)).toBe(true);
-});
-
 test("GOALSENDLAND1-stale: a replaced-unproven record refuses at once with path and ack command", async () => {
 	const fx = replacedPending(settledJournal);
 	const r = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io, untilDeliveredMs: 60_000,

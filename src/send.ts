@@ -12,6 +12,7 @@ import { defaultTernIo, discoverTernSeatFromInspection, identifyTernSeat, observ
 	resolveDaemonSocket, sessionViewOfText, SESSION_TAIL_WINDOW_BYTES, ternPaneId } from "./plane-tern.ts";
 import type { SessionJournalView, TernObserveOptions, TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
+import { parsePsStart } from "./scratch.ts";
 
 export const SEND_POLL_MS = 1500;
 export const SEND_DEADLINE_MS = 15000;
@@ -1338,12 +1339,9 @@ export function acknowledgeTernPending(path: string, dropDir: string, now = Date
  * a destructive payload to a pane not proven to run OMP is refused by rule
  * id) -> identify -> observe/identify/configured-pane fence (SENDX1) ->
  * eligibility from the very snapshot observe hashed -> refuse slash
- * controls with no proof contract -> sweep settled pendings (ledger only;
- * a same-session attempt pinned to an older foreground start is a previous
- * incarnation and refuses at once with path and ack command, GOALSENDLAND1-stale)
- * -> suppress while an attempt on this incarnation is unproven (the sweep
- * reconciles a pending whose marker has since landed, WAKEDEADLINE1) ->
- * persist the attempt durably -> lock -> re-read (incarnation pre-filter, not
+ * controls with no proof contract -> lock the pane -> reconcile pending records
+ * (old incarnations can be acknowledged with a recovery copy; still-unproven
+ * current attempts suppress) -> persist the attempt durably -> re-read (incarnation pre-filter, not
  * atomicity) -> ONE native admission turn plus its `carly ok` verdict (GOALSENDLAND1:
  * the lua exit alone never proves the turn ran) -> poll for proof (an admitted steer
  * waits up to the caller's until-delivered bound, capped by the proof deadline
@@ -1534,118 +1532,101 @@ export async function deliverToTernSeat(input: {
 	if (payloadKind.kind === "slash") {
 		return fail("SLASH_UNPROVABLE", "slash control has no journal proof contract (only /goal set BODY does); zero sends");
 	}
-	// Pending records for this seat: a consumed one, or one whose incarnation
-	// is gone, is settled in the ledger (never resent); one still unproven on
-	// THIS incarnation suppresses every new send. The key is the stable
-	// journal session identity, never the mutable content hash, so appends
-	// and BUSY/IDLE flaps cannot release suppression (AM58562-4, B5).
-	const pendingDir = resolve(join(input.dropDir, "..", "tern-pending"));
-	const refuseReplaced = (path: string, rec: TernPendingRecord): TernDeliverResult =>
-		fail("REPLACED_UNPROVEN", `Journal replaced; consumption of ${path} (${rec.marker}) is unproven; no resend. `
-			+ `To acknowledge this loss of proof without sending, run: ${ackPendingCommand(path, input.dropDir)}`);
-	// SENDREPLACED1: the pinned journal counts as gone only when both reads
-	// report a file identity and they differ; a matching identity means the
-	// pinned file still exists, and a missing identity on either side leaves
-	// the loss unproven. Either way the record keeps its hold and stays honoured.
-	// SENDREPLACED1: the shared loss-of-proof settlement the stale-record sweep
-	// (WAKEREPLACED1) and a plain send both use: a pending record whose pinned
-	// journal is gone can never be proven, so ledger the loss first (never a
-	// resend), keep a recovery copy beside the drop folder, and note it so the
-	// new send proceeds with the acknowledgement in its result. Null settles;
-	// otherwise the refusal to return (nothing sent).
-	const settleStaleReplaced = (name: string, rec: TernPendingRecord, origin: string, loss: string): TernDeliverResult | null => {
-		const stalePath = join(pendingDir, name);
-		let dropPath: string;
-		try {
-			dropPath = dropMessage(input.dropDir, input.seat.session, input.seat.pane, rec.marker,
-				`stale replaced-unproven attempt auto-acknowledged (${origin}); consumption can never be proven.\n\n- marker: ${rec.marker}\n- seatKey: ${rec.seatKey}\n- journal session: ${rec.sessionId}\n- textSha256: ${rec.textSha256}\n- createdAt: ${rec.createdAt}\n- pending record: ${stalePath}`);
-		} catch {
-			return fail("PENDING_SETTLEMENT_FAILED", `Could not write a recovery copy for stale replaced-unproven record ${stalePath}; nothing sent.`);
-		}
-		if (!settleTernPending(pendingDir, name, rec, "ACKNOWLEDGED", null)) {
-			return fail("PENDING_SETTLEMENT_FAILED", `Could not settle stale replaced-unproven record ${stalePath}; nothing sent.`);
-		}
-		staleAcks.push(`auto-acknowledged stale replaced-unproven attempt ${rec.marker} (${origin}: ${loss}; recovery copy at ${dropPath})`);
-		return null;
-	};
-	// GOALSENDLAND1-stale: an attempt pinned to an older foreground start belongs to a previous runtime
-	// incarnation (the seat restarted since). It can never suppress a new send, and it is reported at once
-	// with its path and the ack command instead of waiting out any bound. Records without a pinned start
-	// predate this signal and keep the old suppression.
-	const refuseStaleIncarnation = (path: string, rec: TernPendingRecord): TernDeliverResult | null => {
-		const then = typeof rec.foregroundStarted === "string" && rec.foregroundStarted !== "" ? rec.foregroundStarted : null;
-		const current = ob.foregroundStarted;
-		if (then === null || typeof current !== "string" || current === "" || then === current) return null;
-		return fail("STALE_PENDING_INCARNATION", `earlier attempt ${rec.marker} is from a previous runtime incarnation `
-			+ `(seat foreground started ${then} at attempt time, ${current} now); zero sends; pending record at ${path}; `
-			+ `to acknowledge this loss of proof without sending, run: ${ackPendingCommand(path, input.dropDir)}`);
-	};
-	let pendingNames: string[] = [];
+	const releaseLock = await acquirePaneLock(paneLockPath(input.dropDir, input.seat.session, input.seat.pane),
+		Math.max(1, Math.ceil(deadlineMs / pollMs)), pollMs, wait);
+	if (!releaseLock) {
+		const marker = `kit-send-${randomBytes(6).toString("hex")}`;
+		return { status: "NOT_DELIVERED", marker, sends: 0, sessionFile: null, offset: null,
+			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
+			detail: "destination locked by another send within the bound; nothing typed", code: "LOCK_BUSY",
+			...(queued ? { queue_states: ["QUEUED", "EXPIRED"] as const } : {}) };
+	}
 	try {
-		pendingNames = readdirSync(pendingDir);
-	} catch {
-		pendingNames = [];
-	}
-	for (const name of pendingNames) {
-		if (!name.startsWith(`${seatKey}.`) || !name.endsWith(".json")) continue;
-		const rec = readTernPending(join(pendingDir, name));
-		if (rec === null) continue;
-		if (rec.status === "REPLACED_UNPROVEN"
-			&& (rec.sessionId !== journal.sessionId
-				|| (rec.fileIdentity !== null && journalView.identity !== null && journalView.identity !== rec.fileIdentity))) {
-			// WAKEREPLACED1: the seat journals a new session file now, so the replaced journal is gone and
-			// consumption can never be proven. SENDREPLACED1: the same holds when the session is unchanged
-			// but the pinned file is gone (replaced under the seat). Ack the stale record itself (ledgered,
-			// never resent), keep a recovery copy, note it in the result, and proceed with the new send
-			// instead of suppressing it. A record whose journal still exists keeps its hold below.
-			const settled = settleStaleReplaced(name, rec,
-				rec.sessionId !== journal.sessionId ? "WAKEREPLACED1" : "SENDREPLACED1",
-				rec.sessionId !== journal.sessionId
-					? `journal session ${rec.sessionId} gone`
-					: `pinned journal ${rec.fileIdentity} replaced`);
-			if (settled !== null) return settled;
-			continue;
-		}
-		if (rec.status === "REPLACED_UNPROVEN") return refuseReplaced(join(pendingDir, name), rec);
-		if (rec.sessionId !== journal.sessionId) {
-			settleTernPending(pendingDir, name, rec, "INCARNATION_GONE", null);
-			continue;
-		}
-		const stale = refuseStaleIncarnation(join(pendingDir, name), rec);
-		if (stale !== null) return stale;
-		// A key pinned before this view's tail re-reads with its own range on one snapshot.
-		const proofView = rec.prefixStart < journalView.tailStart
-			? readSessionView(input.io, sessionFile, { start: rec.prefixStart, cursor: rec.cursorBytes }) : journalView;
-		const proof = proofView === null ? null : proveTernEntry(proofView, rec);
-		if (proof?.status === "PROVEN") {
-			settleTernPending(pendingDir, name, rec, "CONSUMED_LATER", proof.offset);
-		} else if (input.testOnlyPendingSettlement !== "v0.2.95"
-			&& proof?.status === "UNCERTAIN" && proof.reason === "JOURNAL_REPLACED" && proofView !== null) {
-			const replacement = proveReplacedTernEntry(input.io, sessionFile, proofView, rec);
-			const status = replacement.status === "PROVEN" ? "CONSUMED_LATER" : "REPLACED_UNPROVEN";
-			if (!settleTernPending(pendingDir, name, rec, status, replacement.status === "PROVEN" ? replacement.offset : null)) {
-				return fail("PENDING_SETTLEMENT_FAILED", `Could not settle pending record ${join(pendingDir, name)}; nothing sent.`);
+		// Hold the same pane lock through settlement and dispatch: a stale
+		// reader must never clear another sender's new pending record.
+		const pendingDir = resolve(join(input.dropDir, "..", "tern-pending"));
+		const pendingName = `${seatKey}.${sha256Hex(journal.sessionId).slice(0, 16)}.json`;
+		const pendingPath = join(pendingDir, pendingName);
+		const refuseReplaced = (path: string, rec: TernPendingRecord): TernDeliverResult =>
+			fail("REPLACED_UNPROVEN", `Journal replaced; consumption of ${path} (${rec.marker}) is unproven; no resend. `
+				+ `To acknowledge this loss of proof without sending, run: ${ackPendingCommand(path, input.dropDir)}`);
+		const settleStale = (name: string, rec: TernPendingRecord, origin: string, loss: string): TernDeliverResult | null => {
+			const path = join(pendingDir, name);
+			let dropPath: string;
+			try {
+				dropPath = dropMessage(input.dropDir, input.seat.session, input.seat.pane, rec.marker,
+					`stale replaced-unproven attempt auto-acknowledged (${origin}); consumption is not proven.\n\n- loss: ${loss}\n- marker: ${rec.marker}\n- seatKey: ${rec.seatKey}\n- journal session: ${rec.sessionId}\n- textSha256: ${rec.textSha256}\n- createdAt: ${rec.createdAt}\n- pending record: ${path}`);
+			} catch {
+				return fail("PENDING_SETTLEMENT_FAILED", `Could not write a recovery copy for ${path}; nothing sent.`);
 			}
-			if (status === "REPLACED_UNPROVEN") return refuseReplaced(join(pendingDir, name), rec);
-		}
-	}
-	const pendingName = `${seatKey}.${sha256Hex(journal.sessionId).slice(0, 16)}.json`;
-	const pendingPath = resolve(join(pendingDir, pendingName));
-	const pending = readTernPending(pendingPath);
-	if (pending !== null && pending.sessionId === journal.sessionId) {
-		if (pending.status === "REPLACED_UNPROVEN") {
-			// SENDREPLACED1: the sweep above already settles a replaced-journal record it can list;
-			// when only this exact record remains, settle it the same way and send instead of refusing
-			// forever. A record whose journal still exists keeps its hold.
-			if (pending.fileIdentity === null || journalView.identity === null || journalView.identity === pending.fileIdentity) {
-				return refuseReplaced(pendingPath, pending);
+			if (!settleTernPending(pendingDir, name, rec, "ACKNOWLEDGED", null)) {
+				return fail("PENDING_SETTLEMENT_FAILED", `Could not settle pending record ${path}; nothing sent.`);
 			}
-			const settled = settleStaleReplaced(pendingName, pending, "SENDREPLACED1",
-				`pinned journal ${pending.fileIdentity} replaced`);
-			if (settled !== null) return settled;
-		} else {
-			const staleSamePath = refuseStaleIncarnation(pendingPath, pending);
-			if (staleSamePath !== null) return staleSamePath;
+			staleAcks.push(`auto-acknowledged stale replaced-unproven attempt ${rec.marker} (${origin}: ${loss}; recovery copy at ${dropPath})`);
+			return null;
+		};
+		let pendingNames: string[];
+		try {
+			pendingNames = readdirSync(pendingDir);
+		} catch {
+			pendingNames = [pendingName];
+		}
+		for (const name of pendingNames) {
+			if (!name.startsWith(`${seatKey}.`) || !name.endsWith(".json")) continue;
+			const path = join(pendingDir, name);
+			const rec = readTernPending(path);
+			if (rec === null || rec.seatKey !== seatKey || name !== `${seatKey}.${sha256Hex(rec.sessionId).slice(0, 16)}.json`) continue;
+			if (rec.status === "REPLACED_UNPROVEN"
+				&& (rec.sessionId !== journal.sessionId
+					|| (rec.fileIdentity !== null && journalView.identity !== null && journalView.identity !== rec.fileIdentity))) {
+				const settled = settleStale(name, rec,
+					rec.sessionId !== journal.sessionId ? "WAKEREPLACED1" : "SENDREPLACED1",
+					rec.sessionId !== journal.sessionId
+						? `journal session ${rec.sessionId} gone`
+						: `pinned journal ${rec.fileIdentity} replaced`);
+				if (settled !== null) return settled;
+				continue;
+			}
+			if (rec.sessionId !== journal.sessionId) {
+				settleTernPending(pendingDir, name, rec, "INCARNATION_GONE", null);
+				continue;
+			}
+			// A key pinned before this view's tail re-reads with its own range on one snapshot.
+			const proofView = rec.prefixStart < journalView.tailStart
+				? readSessionView(input.io, sessionFile, { start: rec.prefixStart, cursor: rec.cursorBytes }) : journalView;
+			const proof = proofView === null ? null : proveTernEntry(proofView, rec);
+			const replacement = input.testOnlyPendingSettlement !== "v0.2.95"
+				&& proof?.status === "UNCERTAIN" && proof.reason === "JOURNAL_REPLACED" && proofView !== null
+				? proveReplacedTernEntry(input.io, sessionFile, proofView, rec) : null;
+			const consumed = proof?.status === "PROVEN" ? proof : replacement?.status === "PROVEN" ? replacement : null;
+			if (consumed !== null) {
+				if (!settleTernPending(pendingDir, name, rec, "CONSUMED_LATER", consumed.offset)) {
+					return fail("PENDING_SETTLEMENT_FAILED", `Could not settle pending record ${path}; nothing sent.`);
+				}
+				continue;
+			}
+			// Native ps start times, not arbitrary different strings, authorize
+			// loss-of-proof settlement. An equal or unknown start retains its hold.
+			if (rec.foregroundStarted && rec.foregroundStarted !== ob.foregroundStarted) {
+				const previous = parsePsStart(rec.foregroundStarted);
+				const current = parsePsStart(ob.foregroundStarted);
+				if (previous !== null && current !== null && previous < current) {
+					const settled = settleStale(name, rec, "STALEINC1",
+						`foreground changed from ${rec.foregroundStarted} to ${ob.foregroundStarted}`);
+					if (settled !== null) return settled;
+					continue;
+				}
+			}
+			if (rec.status === "REPLACED_UNPROVEN") return refuseReplaced(path, rec);
+			if (replacement !== null) {
+				if (!settleTernPending(pendingDir, name, rec, "REPLACED_UNPROVEN", null)) {
+					return fail("PENDING_SETTLEMENT_FAILED", `Could not settle pending record ${path}; nothing sent.`);
+				}
+				return refuseReplaced(path, rec);
+			}
+		}
+		const pending = readTernPending(pendingPath);
+		if (pending !== null && pending.sessionId === journal.sessionId) {
 			const ackableAt = pendingAckableAt(pending);
 			const how = ackableAt === null ? "" : Date.now() >= ackableAt
 				? `; if it never landed, acknowledge the loss of proof without resending: ${ackPendingCommand(pendingPath, input.dropDir)}`
@@ -1654,25 +1635,14 @@ export async function deliverToTernSeat(input: {
 				detail: noted(`earlier attempt unproven on this runtime incarnation; new send suppressed${how}`), code: "SUPPRESSED_PENDING",
 				...(queued ? { queue_states: ["QUEUED", "PENDING_CONSUME"] as const } : {}) };
 		}
-	}
-	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
-	const payload = payloadKind.kind === "goal-set" ? input.text.trim() : `${provenance.text}\n[${marker}]`;
-	const key = buildTernProofKey(journalView, journal, { kind: payloadKind.kind, payload, marker,
-		objective: payloadKind.kind === "goal-set" ? payloadKind.objective : "" });
-	const attempt: TernPendingRecord = { ...key, seatKey, sessionSha: observation.sessionSha ?? "",
-		textSha256: sha256Hex(input.text), createdAt: new Date().toISOString(),
-		foregroundStarted: ob.foregroundStarted };
-	if (!persistTernAttempt(pendingPath, attempt)) return fail("PENDING_WRITE_FAILED", "attempt record not persisted; zero sends");
-	const releaseLock = await acquirePaneLock(paneLockPath(input.dropDir, input.seat.session, input.seat.pane),
-		Math.max(1, Math.ceil(deadlineMs / pollMs)), pollMs, wait);
-	if (!releaseLock) {
-		try { rmSync(pendingPath, { force: true }); } catch {}
-		return { status: "NOT_DELIVERED", marker, sends: 0, sessionFile: null, offset: null,
-			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
-			detail: noted(`destination locked by another send within the bound; nothing typed`), code: "LOCK_BUSY",
-			...(queued ? { queue_states: ["QUEUED", "EXPIRED"] as const } : {}) };
-	}
-	try {
+		const marker = `kit-send-${randomBytes(6).toString("hex")}`;
+		const payload = payloadKind.kind === "goal-set" ? input.text.trim() : `${provenance.text}\n[${marker}]`;
+		const key = buildTernProofKey(journalView, journal, { kind: payloadKind.kind, payload, marker,
+			objective: payloadKind.kind === "goal-set" ? payloadKind.objective : "" });
+		const attempt: TernPendingRecord = { ...key, seatKey, sessionSha: observation.sessionSha ?? "",
+			textSha256: sha256Hex(input.text), createdAt: new Date().toISOString(),
+			foregroundStarted: ob.foregroundStarted };
+		if (!persistTernAttempt(pendingPath, attempt)) return fail("PENDING_WRITE_FAILED", "attempt record not persisted; zero sends");
 		// F1: this re-read is a cheap incarnation pre-filter, NOT atomicity;
 		// on the ctl path the admission checks live inside the one native turn.
 		const fresh = steer ? readSessionView(input.io, sessionFile, { start: key.prefixStart, cursor: key.cursorBytes })
