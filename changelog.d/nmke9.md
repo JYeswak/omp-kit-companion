@@ -4,3 +4,4 @@
 - The `owner` source stays inside real profile roots: symlinked profiles, nested links and loops are never followed, and the wall deadline stops enumeration early.
 - The `owner` default run is contained end to end: a symlinked `~/.omp` or `~/.omp/profiles` yields no roots, descended directories are re-checked at descent, and a journal swapped for a symlink before open is refused; `--sessions-root DIR` behavior is unchanged.
 - The `owner` scan opens each journal with `O_NOFOLLOW` so the open itself refuses a trailing symlink instead of a separate check-then-open; a descriptor that is not a regular file is closed and refused.
+- Owner journals open nonblocking so a file replaced by a FIFO cannot hang the scan; non-regular descriptors are closed without recording messages or a cursor.

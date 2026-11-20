@@ -379,3 +379,42 @@ test("RULESKILL1-owner: journal opens carry O_NOFOLLOW so the open itself refuse
 	const mod = await import("../../src/skill-mine-owner.ts");
 	expect(typeof mod.OWNER_O_NOFOLLOW).toBe("number");
 });
+
+test("RULESKILL1-owner: a journal replaced by a FIFO finishes without mining or cursoring the FIFO", () => {
+	// Use the harness TMPDIR: overlay filesystems can reject FIFO opens
+	// with EACCES before the blocking-open regression can be exercised.
+	const root = ownedTmp("skill-mine-owner-fifo").path;
+	const sessions = join(root, "sessions");
+	const proj = join(sessions, "fixture-seat");
+	mkdirSync(proj, { recursive: true });
+	const regular = join(proj, "a.jsonl");
+	const replaced = join(proj, "x.jsonl");
+	const fifo = join(root, "fifo");
+	writeLines(regular, [userLine("regular owner words")]);
+	writeLines(replaced, [userLine("replaced words")]);
+	const made = runFixture(["mkfifo", fifo], { cwd: root });
+	expect(made.rc).toBe(0);
+	// Replace the enumerated journal at the seam: a FIFO already present at
+	// enumeration is excluded, but a file can become one before open.
+	const script = `
+		import { renameSync } from "node:fs";
+		const { scanOwnerSessions } = await import(process.argv[1]);
+		const [root, replaced, fifo] = process.argv.slice(2);
+		const result = scanOwnerSessions(root, null, null, {}, {
+			beforeOpen(path) {
+				if (path === replaced) renameSync(fifo, replaced);
+			},
+		});
+		console.log(JSON.stringify(result));
+	`;
+	const out = runFixture([
+		"node", "--input-type=module", "-e", script, resolve(repo, "src/skill-mine-owner.ts"), sessions, replaced, fifo,
+	], { cwd: root, label: "owner-fifo-open" });
+	expect(out.rc).toBe(0);
+	const scanned = JSON.parse(new TextDecoder().decode(out.stdout));
+	expect(scanned.files).toBe(2);
+	expect(scanned.rows.map((row: { text: string }) => row.text)).toEqual(["regular owner words"]);
+	// Without the fstat isFile guard the nonblocking FIFO read yields no
+	// bytes, but the scanner would still persist an invalid FIFO cursor.
+	expect(Object.keys(scanned.cursor)).toEqual([regular]);
+}, fixtureDeadlineS() * 3 * 1000);

@@ -514,7 +514,9 @@ export function scanOwnerSessions(
 		}
 		let fd = -1;
 		try {
-			fd = OWNER_O_NOFOLLOW === undefined ? openSync(path, "r") : openSync(path, OWNER_O_NOFOLLOW | constants.O_RDONLY);
+			// A journal can become a FIFO after enumeration. Nonblocking open
+			// reaches the descriptor check instead of waiting for a writer.
+			fd = openSync(path, constants.O_RDONLY | (OWNER_O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
 		} catch {
 			continue;
 		}
