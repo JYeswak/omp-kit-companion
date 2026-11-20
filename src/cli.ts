@@ -84,8 +84,9 @@ import { ccStateDir } from "./service.ts";
 import { retainOmpSessions } from "./session-retain.ts";
 import { retainStateLedgers, type LedgerRetentionReport } from "./ledger-retain.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
-import { defaultBudgetLedgerPath, releaseBudgetEntry, SCRATCH_EXPORT_DIRECTORY, SCRATCH_REAPER_ENTRY_BUDGET, SCRATCH_REAPER_HEADROOM_MS, updateScratchUsers } from "./scratch.ts";
+import { applyCheckoutReap, CHECKOUT_IDLE_DAYS_DEFAULT, checkoutArchiveRoot, diffCheckoutEmpty, listIdleEmptyCheckouts, planCheckoutReap, sizeCheckoutBytes } from "./checkout-reap.ts";
 import type { ScratchReleaseOptions } from "./scratch.ts";
+import { appendLog } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
 import { registerTernHandlers } from "./tern/omp-adapter.ts";
 import { runHeavy } from "./heavy.ts";
@@ -2818,6 +2819,28 @@ async function runScratchReaperBody(home: string): Promise<CliResult> {
 				errors: [`ledger-retention: ${error instanceof Error ? error.message : String(error)}`] };
 		}
 	}
+	// Bounded and fail-open: at most 10 checkouts per run, every refusal named, archives verified before rm.
+	const cwd = process.cwd();
+	let checkoutReaped: string[] = [];
+	let checkoutKept: { name: string; reason: string }[] = [];
+	let checkoutArchives: string[] = [];
+	let checkoutFreedBytes = 0;
+	let checkoutEligible = 0;
+	let checkoutFreedBytesDf: number | null = null;
+	try {
+		const checkoutResult = applyCheckoutReap({ idleDays: CHECKOUT_IDLE_DAYS_DEFAULT,
+			list: () => listIdleEmptyCheckouts(cwd, CHECKOUT_IDLE_DAYS_DEFAULT),
+			diff: (name) => diffCheckoutEmpty(name, cwd), sizeBytes: sizeCheckoutBytes,
+			archiveRoot: checkoutArchiveRoot(home), maxReaps: 10, log: (event) => appendLog(home, event) });
+		checkoutReaped = checkoutResult.reaped;
+		checkoutKept = checkoutResult.kept;
+		checkoutArchives = checkoutResult.archives;
+		checkoutFreedBytes = checkoutResult.freedBytes;
+		checkoutEligible = checkoutResult.eligible;
+		checkoutFreedBytesDf = checkoutResult.freedBytesDf;
+	} catch {
+		checkoutKept = [{ name: "<inventory>", reason: "checkout-inventory-unavailable" }];
+	}
 	return { code: failed > 0 ? 1 : 0, data: { overall: failed > 0 ? "FINDINGS" : "OK", job: "scratch-reaper",
 		stats: { roots: result.roots.length, sessions: result.applied.length, browser_orphans: browserResult.killed.length, browser_clones: browserResult.quarantined.length, orphans: result.orphans.length,
 			reaped: result.applied.filter(v => v.action === "REAP").length,
@@ -2825,7 +2848,8 @@ async function runScratchReaperBody(home: string): Promise<CliResult> {
 			applied: result.applied.length, refused,
 			deleted: result.expired.length, failures: failed,
 			reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
-		sessions: result.applied, orphans: result.orphans, killed: result.killed, expired: result.expired, ledgerRetention },
+		sessions: result.applied, orphans: result.orphans, killed: result.killed, expired: result.expired, ledgerRetention,
+		checkouts: { eligible: checkoutEligible, reaped: checkoutReaped, kept: checkoutKept, archives: checkoutArchives, freedBytes: checkoutFreedBytes, freedBytesDf: checkoutFreedBytesDf } },
 		errors: failed > 0 ? [{ code: "SCRATCH_APPLY_FAILED", message: `scratch-reaper had ${failed} failed action(s)${firstFailure(result)}`,
 			remediation: "Inspect the applied verdicts and scratch reap JSONL receipt; refused paths were left in place." }] : [],
 		verification: "UNVERIFIED" };
@@ -4786,6 +4810,49 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
 }
 for (const subcommand of ["plan", "release", "apply", "mine", "new", "gate", "use", "unuse"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
+
+async function checkoutsCommand(request: ParsedCommand): Promise<CliResult> {
+	const sub = request.command.name;
+	let home: string;
+	try {
+		home = serviceHome();
+	} catch {
+		return { code: 3, data: { overall: "UNAVAILABLE" },
+			errors: [{ code: "HOME_UNAVAILABLE", message: "Checkout commands need an absolute HOME",
+				remediation: "Run with an absolute HOME; no checkout was changed." }], verification: "UNVERIFIED" };
+	}
+	const idleFlag = request.flags.get("--idle-days");
+	const idleDays = typeof idleFlag === "string" && idleFlag !== "" ? Number(idleFlag) : CHECKOUT_IDLE_DAYS_DEFAULT;
+	if (!Number.isInteger(idleDays) || idleDays < 1 || idleDays > 90)
+		return refusal("CHECKOUTS_IDLE_INVALID", "--idle-days must be an integer 1..90",
+			"Pass --idle-days 7 (the default); nothing was changed.");
+	const cwd = process.cwd();
+	const list = () => listIdleEmptyCheckouts(cwd, idleDays);
+	const diff = (name: string) => diffCheckoutEmpty(name, cwd);
+	if (sub === "plan") {
+		const plan = planCheckoutReap({ idleDays, list, diff, sizeBytes: sizeCheckoutBytes });
+		return { code: 0, data: { overall: "OK", rows: plan.rows, eligible: plan.eligible.map((row) => row.name),
+			eligibleBytes: plan.eligibleBytes, unmeasuredBytes: plan.unmeasuredBytes, idleDays }, verification: "UNVERIFIED" };
+	}
+	if (sub === "reap") {
+		if (!request.flags.has("--apply") || !request.flags.has("--yes")) {
+			return refusal("CHECKOUTS_REQUIRES_APPLY", "checkouts reap archives and removes checkouts",
+				"Re-run with --apply --yes, or run checkouts plan to preview without changing anything.");
+		}
+		const result = applyCheckoutReap({ idleDays, list, diff, sizeBytes: sizeCheckoutBytes,
+			archiveRoot: checkoutArchiveRoot(home), log: (event) => appendLog(home, event) });
+		const failed = result.kept.filter((row) => row.reason === "rm-failed").length;
+		return { code: failed > 0 ? 1 : 0,
+			data: { overall: result.reaped.length > 0 ? "CHANGED" : "OK", eligible: result.eligible, reaped: result.reaped,
+				kept: result.kept, archives: result.archives, freedBytes: result.freedBytes, freeBytesBefore: result.freeBytesBefore,
+				freeBytesAfter: result.freeBytesAfter, freedBytesDf: result.freedBytesDf, idleDays },
+			errors: failed > 0 ? [{ code: "CHECKOUTS_RM_FAILED", message: `${failed} checkout(s) archived but not removed`,
+				remediation: "Remove them with `ovnfs rm NAME`; nothing else was changed." }] : [],
+			verification: "UNVERIFIED" };
+	}
+	return refusal("UNKNOWN_CHECKOUTS_COMMAND", `Unknown checkouts subcommand: ${sub}`, "Run omp-kit help checkouts for exact grammar.");
+}
+for (const subcommand of ["plan", "reap"]) registerCommandHandler(`checkouts ${subcommand}`, checkoutsCommand);
 
 async function scratchIndexLockCommand(request: ParsedCommand): Promise<CliResult> {
 	const repoFlag = request.flags.get("--repo");

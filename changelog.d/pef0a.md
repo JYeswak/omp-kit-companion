@@ -1,0 +1,2 @@
+### Added
+- New `omp-kit checkouts plan|reap`: fleet-wide ovnfs checkout inventory with idle age, diff state and best-effort bytes, plus rule-based reap. Reap archives the diff and untracked files first (`checkout.patch` via `ovnfs diff -p --binary`, plus manifest, verified by `git apply --check` against the recorded HEAD tree), then removes only idle checkouts with an empty diff; active checkouts are never touched. The scheduled scratch-reaper run covers up to 10 eligible checkouts per run; no new daemon.

@@ -150,10 +150,10 @@ function isAbsentError(message: string): boolean {
   return message.includes("ENOENT") || message.includes("not found") || message.includes("No such file");
 }
 
-export function listOvnfsCheckouts(cwd: string): OvnfsListOk | OvnfsListUnavailable {
+export function listOvnfsCheckouts(cwd: string, extraArgs: readonly string[] = []): OvnfsListOk | OvnfsListUnavailable {
   let run: RunResult;
   try {
-    run = runSync(["ovnfs", "ls", "--json"], { cwd, deadline_s: LS_DEADLINE_S, max_output_bytes: MAX_OUTPUT_BYTES });
+    run = runSync(["ovnfs", "ls", ...extraArgs, "--json"], { cwd, deadline_s: LS_DEADLINE_S, max_output_bytes: MAX_OUTPUT_BYTES });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { unavailable: isAbsentError(message) ? "absent" : "unavailable" };

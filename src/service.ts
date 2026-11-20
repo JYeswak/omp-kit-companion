@@ -107,7 +107,7 @@ export interface ServiceJobDef {
 export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"omp-watch": { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 },
 	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: false,
-		ownedState: home => [{ path: quarantineDir(home) }, { path: reapLogPath(home) }] },
+		ownedState: home => [{ path: quarantineDir(home) }, { path: reapLogPath(home) }, { path: join(kitStateDir(home), "checkout-archive") }] },
 	"scratch-pressure": { name: "scratch-pressure", label: "com.omp-kit.scratch-pressure", kind: "interval", intervalSeconds: 60, runAtLoad: false },
 	"kit-update": { name: "kit-update", label: "com.omp-kit.kit-update", kind: "interval", intervalSeconds: 300, runAtLoad: false },
 	"fleet-lessons": { name: "fleet-lessons", label: "com.omp-kit.fleet-lessons", kind: "interval", intervalSeconds: 21600, runAtLoad: false },

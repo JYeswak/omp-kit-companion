@@ -408,6 +408,20 @@ const scratchData: DataSchema = { type: "object", required: ["overall"], propert
 		by_class: { type: "object" },
 	} },
 } };
+const checkoutData: DataSchema = { type: "object", required: ["overall"], properties: {
+	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE"] },
+	rows: { type: "array", items: { type: "object", required: ["name", "eligible", "reason"], properties: {
+		name: { type: "string" }, path: { type: "string" }, source: { type: "string" }, dirty: { type: "boolean" },
+		touched: { type: ["string", "null"] }, idleHours: { type: ["number", "null"] }, eligible: { type: "boolean" },
+		reason: { type: "string" }, diffEmpty: { type: ["boolean", "null"] }, bytes: { type: ["number", "null"] },
+	} } },
+	eligible: { type: "array", items: { type: "string" } },
+	reaped: { type: "array", items: { type: "string" } },
+	kept: { type: "array", items: { type: "object", required: ["name", "reason"], properties: { name: { type: "string" }, reason: { type: "string" } } } },
+	archives: { type: "array", items: { type: "string" } },
+	eligibleBytes: { type: "number" }, freedBytes: { type: "number" }, idleDays: { type: "number" },
+	freeBytesBefore: { type: ["number", "null"] }, freeBytesAfter: { type: ["number", "null"] }, freedBytesDf: { type: ["number", "null"] },
+} };
 const flushPendingData: DataSchema = { type: "object", required: ["overall", "applied", "panes", "stale_steer", "frozen_turn"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE"] }, applied: { type: "boolean" },
 	panes: { type: "array", items: { type: "object" } }, stale_steer: { type: "array", items: { type: "object" } }, frozen_turn: { type: "array", items: { type: "object" } },
@@ -1155,6 +1169,18 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--db", value: "PATH", description: "Tracker beads.db for filing gap comments (else br auto-discovers or uses BEADS_DB)" },
 		], example: "omp-kit scratch apply --apply --yes --json", runnable: false, mutation: true, dataSchema: scratchData },
 	], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
+	{ name: "checkouts",
+		description: "Inventory ovnfs checkouts fleet-wide and reap them by rule: archive the diff and untracked files first (checkout.patch plus manifest, verified by git apply --check against the recorded HEAD tree), then remove idle checkouts with an empty diff. Active checkouts are never touched; landed or empty checkouts go first. plan is read-only; reap needs --apply --yes.",
+		usage: "checkouts plan|reap [--idle-days N] [--apply --yes]", flags: [], subcommands: [
+			{ name: "plan", description: "Read-only inventory of every checkout with idle age, diff state, best-effort bytes and eligibility; changes nothing", usage: "checkouts plan [--idle-days N]", flags: [
+				{ name: "--idle-days", value: "N", description: "Idle bar in days (default 7): only checkouts untouched this long are eligible" },
+			], example: "omp-kit checkouts plan --json", runnable: false, dataSchema: checkoutData },
+			{ name: "reap", description: "Archive each eligible checkout (verified patch plus manifest) and remove it; re-verifies the diff and idleness at apply time and refuses anything changed, unverifiable or active", usage: "checkouts reap [--idle-days N] --apply --yes", flags: [
+				{ name: "--idle-days", value: "N", description: "Idle bar in days (default 7)" },
+				{ name: "--apply", description: "Request guarded apply" },
+				{ name: "--yes", description: "Confirm the apply in noninteractive mode" },
+			], example: "omp-kit checkouts reap --apply --yes --json", runnable: false, mutation: true, dataSchema: checkoutData },
+	], example: "omp-kit checkouts plan --json", runnable: false, dataSchema: checkoutData },
 	{ name: "fleet", description: "Act on the live tmux fleet", usage: "fleet flush-pending [--apply --yes]", flags: [], subcommands: [
 		{ name: "flush-pending", description: "Find idle omp panes holding a queued band or composer text, and turns showing a band for 5+ min or frozen (spinner over an unchanged screen). Plan by default; --apply only sends Alt+Up then Enter to an idle pane whose queued band sits over an empty composer; everything else, busy and frozen panes included, is reported and never sent keys", usage: "fleet flush-pending [--apply --yes]", flags: planApply, example: "omp-kit fleet flush-pending --json", runnable: false, mutation: true, dataSchema: flushPendingData },
 		{ name: "respawn", description: "Report panes running a stale plugin (omp started before the latest applied relink); with --panes and --apply --yes, respawn named idle panes with --resume, strictly serially. Busy, frozen, dirty, reservation-holding and sessionless panes are reported, never touched", usage: "fleet respawn [--panes SESSION:W.P,...] [--apply --yes]", flags: [...planApply, { name: "--panes", value: "PANES", description: "Comma-separated pane labels to respawn (session:window.pane); required with --apply" }], example: "omp-kit fleet respawn --json", runnable: false, mutation: true, dataSchema: respawnData },

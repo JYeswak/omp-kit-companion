@@ -214,9 +214,7 @@ omp-kit planning score --json
 ```sh
 omp-kit send SESSION PANE "message" --json   # proves delivery; needs a bead id or --no-bead-reason
 omp-kit fleet flush-pending --json           # plan: queued bands, frozen turns
-omp-kit fleet respawn --json                 # plan: stale-plugin panes
 omp-kit scratch plan --json                  # reap report over scratch roots
-omp-kit scratch index-lock --repo DIR --json  # plan: stale index.lock verdict
 omp-kit ci status --json                     # cached CI, never calls GitHub
 omp-kit ci wait --repo OWNER/REPO --sha abc1234 --json # cache events; CI, since now, 3600 s
 omp-kit heavy --label cli-tests -- bun test tests/cli   # load-admitted, nice 10
@@ -503,6 +501,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit imessage` | `imessage poll\|send TEXT\|notify-blocked\|brief` | Poll Joshua's handle into the lead seat (others dropped by hash); reply, push once per key, brief | `omp-kit imessage poll --json` |
 | `omp-kit fleet` | `fleet flush-pending\|respawn [--apply --yes] [--panes SESSION:W.P,...]` | Idle panes with queued input and frozen turns; panes whose omp predates the latest relink (`--apply` respawns named idle panes; busy, frozen, dirty, holding and sessionless panes never touched) | `omp-kit fleet flush-pending --json` |
 | `omp-kit scratch` | `scratch plan\|release DIR\|index-lock --repo DIR [--apply --yes]` | Release, quarantine and delete scratch (idle 72 h to quarantine, 7-day expiry); index-lock reports HELD pid/command and >30 min orphan helpers (`--reap --yes` renames; `--apply` refused) | `omp-kit scratch plan --json` |
+| `omp-kit checkouts` | `checkouts plan\|reap [--idle-days N] [--apply --yes]` | Idle ovnfs checkouts: `reap` archives the diff, then removes | `omp-kit checkouts plan --json` |
 | `omp-kit tern` | `tern catalog\|doctor\|ctl\|script\|native\|api\|sdk\|coverage\|surface\|render` | [Native SDK/control integration](docs/tern-integration.md): context-bound Luau, drift, wire codecs; explicit targets | `omp-kit tern catalog --filter cx.agents` |
 | `omp-kit tern-ref` | `tern-ref build\|query\|validate\|drift [--root DIR]` | Version-pinned local Tern Plugin SDK reference, with blind-label eval and drift re-index | `omp-kit tern-ref query --query 'restyle without rebuild'` |
 | `omp-kit infra` | `infra pin\|check\|promote\|undo\|upgrade-plan\|upgrade-verify` | Pin, test, promote toolchain; gate machine upgrades | `omp-kit infra pin --json` |

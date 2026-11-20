@@ -845,7 +845,15 @@ export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?:
 	removeTree?: (path: string) => void;
 	/** The system temp dirs scanned for runtime and kitlib work dirs; defaults to TMPDIR and /tmp. A test pins its own
 	 * stand-in so plan and apply never read the machine's real temp. */
-	systemTempBases?: readonly string[] }
+	systemTempBases?: readonly string[];
+	/** Names the ovnfs checkout a scratch root lives in, or null outside one. Defaults to a `git -C <top> config
+	 * --get ovnfs.checkout` probe; a test pins its own mapping. One probe per root, cached in checkoutNameCache. */
+	checkoutProbe?: (top: string) => string | null;
+	/** Per-run cache of scratchRootCheckoutName answers, keyed by root. Plan and apply runs carry one map. */
+	checkoutNameCache?: Map<string, string | null>;
+	/** Machine boot time in epoch ms for the release-identity recheck; defaults to a sysctl probe, null fails closed.
+	 * A test pins a time after its fixture release to simulate the reboot that renumbers APFS device ids. */
+	bootMs?: number | null }
 
 function dirSize(dir: string, measure?: { entries: number; newestMtimeMs: number | null }): number {
 	let total = 0;
@@ -1254,6 +1262,124 @@ export function stateRoot(home: string): string {
 
 export function quarantineDir(home: string): string {
 	return join(stateRoot(home), "omp-kit", "scratch-quarantine");
+}
+
+/** A quarantine that sits inside the scratch root it serves, for roots on another device than the state dir
+ * (EXDEV: ovnfs checkouts live on the mount, ~/.local/state on the volume). Same-device renames only; the
+ * reaper's expiry also drains these, and the plan never visits them as session dirs. */
+export const QUARANTINE_LOCAL_DIR = ".quarantine-omp-kit";
+
+/** Every quarantine directory that may hold entries for these roots: the global one plus each root's local one. */
+export function quarantineDirsFor(home: string, roots: readonly string[]): string[] {
+	const dirs = [quarantineDir(home)];
+	for (const root of roots) {
+		const local = join(root, QUARANTINE_LOCAL_DIR);
+		try {
+			if (statSync(local).isDirectory() && !isSymlink(local)) dirs.push(local);
+		} catch { /* absent: nothing quarantined there */ }
+	}
+	return dirs;
+}
+
+export type QuarantineMove = { moved: string; fallback: boolean } | { failed: true; reason: string; error?: unknown };
+
+/**
+ * Move a dir into quarantine without crossing a device boundary. The global quarantine is tried first; on EXDEV
+ * the move falls back to a quarantine inside the dir's own scratch root (same device by construction), with the
+ * same rechecks the caller runs afterwards. Any other failure keeps the old SKIP reasons.
+ */
+export function moveToQuarantine(dir: string, entry: string, home: string, root: string, deps: ApplyDeps): QuarantineMove {
+	const rename = deps.renameDir ?? renameSync;
+	const primary = quarantineDir(home);
+	try {
+		mkdirSync(primary, { recursive: true, mode: 0o700 });
+	} catch (error) {
+		return { failed: true, reason: "quarantine-create-failed", error };
+	}
+	const moved = join(primary, entry);
+	try {
+		rename(dir, moved);
+		return { moved, fallback: false };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code !== "EXDEV") return { failed: true, reason: "atomic-quarantine-failed", error };
+	}
+	const local = join(root, QUARANTINE_LOCAL_DIR);
+	try {
+		mkdirSync(local, { recursive: true, mode: 0o700 });
+	} catch (error) {
+		return { failed: true, reason: "quarantine-create-failed", error };
+	}
+	const fallbackMoved = join(local, entry);
+	try {
+		rename(dir, fallbackMoved);
+		return { moved: fallbackMoved, fallback: true };
+	} catch (error) {
+		return { failed: true, reason: "atomic-quarantine-failed", error };
+	}
+}
+
+/** Anchored probe result: a checkout name from `git config --get ovnfs.checkout`, else null. */
+const CHECKOUT_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/**
+ * The ovnfs checkout a scratch root lives in, or null outside one. A root is `<checkout>/var/agent-tmp`;
+ * the checkout top answers through git config (never guessed from the path). One probe per root per run.
+ */
+export function scratchRootCheckoutName(root: string, deps: Pick<InspectDeps, "run" | "checkoutProbe" | "checkoutNameCache">): string | null {
+	if (basename(root) !== "agent-tmp") return null;
+	const cached = deps.checkoutNameCache?.get(root);
+	if (cached !== undefined) return cached;
+	const top = dirname(dirname(root));
+	let answer: string | null = null;
+	try {
+		if (deps.checkoutProbe !== undefined) {
+			answer = deps.checkoutProbe(top);
+		} else {
+			const probed = deps.run(["git", "-C", top, "config", "--get", "ovnfs.checkout"], { timeoutMs: 5_000 });
+			if (probed.code === 0) {
+				const name = probed.stdout.trim();
+				answer = CHECKOUT_NAME_PATTERN.test(name) ? name : null;
+			}
+		}
+	} catch {
+		answer = null;
+	}
+	const named = answer !== null && CHECKOUT_NAME_PATTERN.test(answer) ? answer : null;
+	deps.checkoutNameCache?.set(root, named);
+	return named;
+}
+
+/**
+ * REBOOTDEVICE1: APFS renumbers st_dev across a reboot (16777232 -> 16777233 on 2026-11-20), so a persisted marker's
+ * device only binds within a boot. Same file = same inode, and same device unless the machine rebooted since the
+ * release. bootMs null fails closed to the old strict check.
+ */
+export function sameReleasedFile(stat: { dev: number; ino: number },
+	marker: { device: string; inode: string }, releasedAt: string, bootMs: number | null): boolean {
+	if (String(stat.ino) !== marker.inode) return false;
+	if (String(stat.dev) === marker.device) return true;
+	if (bootMs === null) return false;
+	const releasedMs = Date.parse(releasedAt);
+	return Number.isFinite(releasedMs) && bootMs > releasedMs;
+}
+
+/** Machine boot time in epoch ms for the release-identity recheck; null when unprovable (fail closed). */
+export function systemBootMs(run: ScratchRunner): number | null {
+	try {
+		if (process.platform === "darwin") {
+			const out = run(["sysctl", "-n", "kern.boottime"], { timeoutMs: 5_000 });
+			if (out.code !== 0) return null;
+			const match = /\bsec\s*=\s*(\d+)/.exec(out.stdout);
+			if (!match) return null;
+			return Number(match[1]) * 1000;
+		}
+		const raw = readFileSync("/proc/stat", "utf8");
+		const match = /^btime (\d+)$/m.exec(raw);
+		if (!match) return null;
+		return Number(match[1]) * 1000;
+	} catch {
+		return null;
+	}
 }
 
 export function reapLogPath(home: string): string {
@@ -2016,6 +2142,9 @@ export interface ApplyDeps extends InspectDeps {
 	cursorStore?: ReaperCursorStore | null;
 	/** REAPTIMEOUT1: snapshot refresh cadence in ms; defaults to SCRATCH_REAPER_SNAPSHOT_REFRESH_MS. */
 	snapshotRefreshMs?: number;
+	/** Rename seam for the quarantine move: the default renameSync throws EXDEV across devices, and the
+	 * caller falls back to a same-root quarantine. A test plants an EXDEV thrower for the global dir. */
+	renameDir?: (src: string, dst: string) => void;
 }
 
 function isBeadClosed(bead: string, deps: ApplyDeps): boolean | null {
@@ -2051,7 +2180,7 @@ export interface ReapEvent { event: string; dir: string; at: string; [key: strin
 
 const MAX_REAP_LOG_BYTES = 1_048_576;
 
-function appendLog(home: string, event: ReapEvent): void {
+export function appendLog(home: string, event: ReapEvent): void {
 	try {
 		const path = reapLogPath(home);
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -2277,7 +2406,7 @@ function parseReleaseMarker(text: string): Omit<ReleaseRecord, "owner" | "ownerT
 		legacyName: seen.legacy_name ?? null, releaseReason: seen.release_reason ?? null, bin, ref: seen.ref ?? null };
 }
 
-function readReleaseRecord(dir: string): ReleaseRecord | null {
+function readReleaseRecord(dir: string, bootMs?: number | null): ReleaseRecord | null {
 	if (isSymlink(dir)) return null;
 	const ownerPath = join(dir, ".owner");
 	const markerPath = join(dir, RELEASE_FILE);
@@ -2296,7 +2425,7 @@ function readReleaseRecord(dir: string): ReleaseRecord | null {
 	}
 	if (!stat.isDirectory() || stat.isSymbolicLink() ||
 		createHash("sha256").update(ownerText).digest("hex") !== marker.ownerHash ||
-		String(stat.dev) !== marker.device || String(stat.ino) !== marker.inode) return null;
+		!sameReleasedFile(stat, marker, marker.releasedAt, bootMs ?? null)) return null;
 	if (!marker.legacyName) {
 		const owner = parseOwnerFile(ownerText);
 		if (!owner) return null;
@@ -2621,6 +2750,9 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 			: { ok: false, changed: false, dir, reason: "directory-unavailable", ownerPid: null };
 	}
 	if (!stat.isDirectory() || stat.isSymbolicLink()) return { ok: false, changed: false, dir, reason: "not-a-directory", ownerPid: null };
+	// REBOOTDEVICE1: the marker's device binds within a boot; resolve the boot once so every identity recheck below
+	// tolerates the APFS renumbering after a reboot. Null fails closed to the strict device check.
+	const bootMs = deps.bootMs ?? systemBootMs(deps.run);
 	const ownerPath = join(dir, ".owner");
 	if (isSymlink(ownerPath)) return { ok: false, changed: false, dir, reason: "owner-file-unreadable", ownerPid: null };
 	const ownerText = readText(ownerPath);
@@ -2673,14 +2805,14 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	}
 	const markerPath = join(dir, RELEASE_FILE);
 	if (existsSync(markerPath)) {
-		const prior = readReleaseRecord(dir);
+		const prior = readReleaseRecord(dir, bootMs);
 		if (prior && prior.ownerText === ownerText) {
 			// SCRATCHRETIRE1 (ompkit-fp72.120.16.37): disposal follows job completion, not the reaper. A dir its owner
 			// released marker-only (without --now) is retired by that owner's later release with --now under the same bin
 			// and reference, through the same rechecks, provided the marker still pins this very inode.
 			if (opts.now === true && opts.bin !== undefined) {
 				const pinned = parseReleaseMarker(prior.markerText);
-				if (!pinned || pinned.device !== String(stat.dev) || pinned.inode !== String(stat.ino))
+				if (!pinned || !sameReleasedFile(stat, pinned, prior.releasedAt, bootMs))
 					return { ok: false, changed: false, dir, reason: "release-marker-inode-mismatch", ownerPid: owner.pid };
 				const at = new Date(deps.now ?? Date.now()).toISOString();
 				// Released (the marker stands) but not retired: the CLI exits SCRATCH_RELEASE_HELD with the reason.
@@ -3067,18 +3199,9 @@ function applyReleasedLocked(dir: string, root: string, verdict: ScratchVerdict,
 	const clearBefore = lsofClearDir(deps, dir);
 	if (clearBefore !== true) return fail(clearBefore === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present");
 	const entry = quarantineEntryFor(basename(dir), new Date(deps.now ?? Date.now()));
-	const qt = quarantineDir(deps.home);
-	try {
-		mkdirSync(qt, { recursive: true, mode: 0o700 });
-	} catch (error) {
-		return fail("quarantine-create-failed", error);
-	}
-	const moved = join(qt, entry);
-	try {
-		renameSync(dir, moved);
-	} catch (error) {
-		return fail("atomic-quarantine-failed", error);
-	}
+	const movedInto = moveToQuarantine(dir, entry, deps.home, root, deps);
+	if ("failed" in movedInto) return fail(movedInto.reason, movedInto.error);
+	const moved = movedInto.moved;
 	const afterMove = readReleaseRecord(moved);
 	const clearAfter = lsofClearDir(deps, moved);
 	if (inodeOf(moved) !== identity || !afterMove || afterMove.markerText !== released.markerText ||
@@ -3091,7 +3214,7 @@ function applyReleasedLocked(dir: string, root: string, verdict: ScratchVerdict,
 		}
 		return fail("final-recheck-refused");
 	}
-	appendLog(deps.home, { event: "quarantine", dir, at, entry, owner: released.owner.pid, reason: "owner-released", sizeBytes: verdict.sizeBytes });
+	appendLog(deps.home, { event: "quarantine", dir, at, entry, owner: released.owner.pid, reason: "owner-released", sizeBytes: verdict.sizeBytes, ...(movedInto.fallback ? { fallback: "same-root" } : {}) });
 	return { ...verdict, dir: moved, action: "QUARANTINE", reason: "owner-released-quarantined" };
 }
 
@@ -3132,21 +3255,13 @@ function applyReapLocked(dir: string, root: string, verdict: ScratchVerdict, dep
 	if (identity === null) return fail("inode-proof-unavailable");
 	if (blockingScratchUser(dir, deps.liveness) !== null) return fail("user-live");
 	const entry = quarantineEntryFor(dir.slice(root.length + 1));
-	const qt = quarantineDir(deps.home);
-	try {
-		mkdirSync(qt, { recursive: true, mode: 0o700 });
-	} catch (error) {
-		return fail("quarantine-create-failed", error);
-	}
-	const moved = join(qt, entry);
-	try {
-		renameSync(dir, moved);
-	} catch (error) {
-		return fail("atomic-quarantine-failed", error);
-	}
+	const movedInto = moveToQuarantine(dir, entry, deps.home, root, deps);
+	if ("failed" in movedInto) return fail(movedInto.reason, movedInto.error);
+	const moved = movedInto.moved;
+	const qtHere = dirname(moved);
 	if (isSymlink(moved)) return { ...verdict, dir: moved, action: "SKIP", reason: "path-replaced-with-non-directory" };
 	if (inodeOf(moved) !== identity) return { ...verdict, dir: moved, action: "SKIP", reason: "inode-changed-before-delete" };
-	const recheck = inspectSession(moved, qt, deps, false, root);
+	const recheck = inspectSession(moved, qtHere, deps, false, root);
 	const recheckText = textVerdict ? readText(join(moved, ".owner")) : null;
 	if (recheck.action !== "REAP" || (textVerdict ? recheckText !== expected : (!recheck.owner || ownerSnapshot(recheck.owner) !== expected))) {
 		try {
@@ -3156,7 +3271,7 @@ function applyReapLocked(dir: string, root: string, verdict: ScratchVerdict, dep
 		}
 		return fail("final-recheck-refused");
 	}
-	const deleting = join(qt, `${entry}.delete-${process.pid}`);
+	const deleting = join(qtHere, `${entry}.delete-${process.pid}`);
 	try {
 		renameSync(moved, deleting);
 	} catch {
@@ -3243,12 +3358,6 @@ function applyUnownedLocked(dir: string, root: string, deps: ApplyDeps, planned?
 		}
 	}
 	const entry = quarantineEntryFor(dir.slice(root.length + 1));
-	const qt = quarantineDir(deps.home);
-	try {
-		mkdirSync(qt, { recursive: true, mode: 0o700 });
-	} catch (error) {
-		return stop("quarantine-create-failed", error);
-	}
 	const identity = inodeOf(dir);
 	if (identity === null) return stop("inode-proof-unavailable");
 	if (blockingScratchUser(dir, deps.liveness) !== null) return stop("user-live", undefined, undefined, { action: "LIVE" });
@@ -3257,12 +3366,9 @@ function applyUnownedLocked(dir: string, root: string, deps: ApplyDeps, planned?
 		clearBefore === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present",
 		undefined, undefined,
 		{ ...(clearBefore === false ? { cause: "open-fd" as const } : { cause: "lsof-unavailable" as const }) });
-	const moved = join(qt, entry);
-	try {
-		renameSync(dir, moved);
-	} catch (error) {
-		return stop("atomic-quarantine-failed", error);
-	}
+	const movedInto = moveToQuarantine(dir, entry, deps.home, root, deps);
+	if ("failed" in movedInto) return stop(movedInto.reason, movedInto.error);
+	const moved = movedInto.moved;
 	const ownerAfter = readText(join(moved, ".owner"));
 	if (inodeOf(moved) !== identity || ownerAfter !== ownerBefore ||
 		(currentOwner !== null && !ownerMatchesScratchRoot(currentOwner, root, moved, deps)) ||
@@ -3275,7 +3381,7 @@ function applyUnownedLocked(dir: string, root: string, deps: ApplyDeps, planned?
 		return stop("final-recheck-refused");
 	}
 	appendLog(deps.home, { event: "quarantine", dir, at, entry, sizeBytes: dirSize(moved),
-		reason: quarantineTerminalReason(planned?.reason, ownerBefore, currentOwner) });
+		reason: quarantineTerminalReason(planned?.reason, ownerBefore, currentOwner), ...(movedInto.fallback ? { fallback: "same-root" } : {}) });
 	return { ...base, dir: moved, action: "QUARANTINE",
 		reason: quarantineTerminalReason(planned?.reason, ownerBefore, currentOwner), sizeBytes: dirSize(moved) };
 }
@@ -3317,16 +3423,6 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 		appendLog(home, { event: "quarantine-ttl-config-invalid", dir: qt, at, error: error instanceof Error ? error.message : String(error) });
 		return done;
 	}
-	let entries: string[];
-	try {
-		entries = readdirSync(qt);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return done;
-		const failed: ScratchVerdict = { dir: qt, action: "SKIP", reason: "quarantine-read-failed", owner: null, sizeBytes: 0 };
-		done.push(failed);
-		appendLog(home, { event: "quarantine-read-failed", dir: qt, at, error: error instanceof Error ? error.message : String(error) });
-		return done;
-	}
 	// QRELEASED1: every expired entry kept or skipped leaves one reap-log line with its reason, so no hold is silent.
 	const record = (verdict: ScratchVerdict): void => {
 		done.push(verdict);
@@ -3334,7 +3430,19 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 			appendLog(home, { event: "quarantine-keep", dir: verdict.dir, at, entry: basename(verdict.dir), action: verdict.action,
 				reason: verdict.reason, cause: verdict.cause ?? null, sizeBytes: verdict.sizeBytes });
 	};
-	for (const entry of entries) {
+	// A cross-device fallback quarantine inside a scratch root drains through the same expiry as the global one.
+	const todo: { qt: string; entry: string }[] = [];
+	for (const qt of quarantineDirsFor(home, resolveScratchRoots(home))) {
+		try {
+			for (const entry of readdirSync(qt)) todo.push({ qt, entry });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+			const failed: ScratchVerdict = { dir: qt, action: "SKIP", reason: "quarantine-read-failed", owner: null, sizeBytes: 0 };
+			done.push(failed);
+			appendLog(home, { event: "quarantine-read-failed", dir: qt, at, error: error instanceof Error ? error.message : String(error) });
+		}
+	}
+	for (const { qt, entry } of todo) {
 		if (entry.startsWith(".")) continue;
 		const quarantinedAt = quarantineTimeOf(entry);
 		if (quarantinedAt === null || now - quarantinedAt < ttlMs) continue;
@@ -3439,6 +3547,10 @@ export function summarizeScratch(sessions: ScratchVerdict[], roots: string[]): S
 		const key = `${verdict.action}:${verdict.reason}`;
 		totals.sizeByVerdict[key] = (totals.sizeByVerdict[key] ?? 0) + verdict.sizeBytes;
 		totals.countByVerdict[key] = (totals.countByVerdict[key] ?? 0) + 1;
+		// A checkout view is a copy-on-write window onto the source's bytes, not owned bytes: counting it per
+		// root double-counts logical bytes as reclaimable (35 GB per checkout root in the 2026-11-20 census).
+		// The pin stays visible under sizeByVerdict/countByVerdict; sizeByRoot counts only reaper-owned bytes.
+		if (verdict.reason === "checkout-owned-scratch") continue;
 		const root = roots.find(candidate => verdict.dir.startsWith(candidate + "/")) ?? dirname(verdict.dir);
 		totals.sizeByRoot[root] = (totals.sizeByRoot[root] ?? 0) + verdict.sizeBytes;
 		if (verdict.reason === "malformed-owner-file" || verdict.reason === "malformed-owner-file-but-active")
@@ -3523,32 +3635,33 @@ export function quarantineBuckets(home: string, now = Date.now(), ttlMs?: number
 			report.ttlValid = false;
 		}
 	}
-	const path = quarantineDir(home);
-	let entries: string[];
-	try {
-		entries = readdirSync(path);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") report.readable = false;
-		return report;
-	}
-	for (const entry of entries) {
-		const quarantinedAt = quarantineTimeOf(entry);
-		if (quarantinedAt === null) continue;
-		const age = Math.max(0, now - quarantinedAt);
-		report.oldestAgeMs = report.oldestAgeMs === null ? age : Math.max(report.oldestAgeMs, age);
-		const itemPath = join(path, entry);
-		let bytes: number;
+	for (const path of quarantineDirsFor(home, resolveScratchRoots(home))) {
+		let entries: string[];
 		try {
-			bytes = isSymlink(itemPath) ? lstatSync(itemPath).size : dirSize(itemPath);
-		} catch {
-			report.readable = false;
+			entries = readdirSync(path);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") report.readable = false;
 			continue;
 		}
-		const bucket = age < ttl ? report.young
-			: entry.includes(".delete-") || failedPaths.has(itemPath) ? report.failed
-				: report.expiredHeld;
-		bucket.entries++;
-		bucket.bytes += bytes;
+		for (const entry of entries) {
+			const quarantinedAt = quarantineTimeOf(entry);
+			if (quarantinedAt === null) continue;
+			const age = Math.max(0, now - quarantinedAt);
+			report.oldestAgeMs = report.oldestAgeMs === null ? age : Math.max(report.oldestAgeMs, age);
+			const itemPath = join(path, entry);
+			let bytes: number;
+			try {
+				bytes = isSymlink(itemPath) ? lstatSync(itemPath).size : dirSize(itemPath);
+			} catch {
+				report.readable = false;
+				continue;
+			}
+			const bucket = age < ttl ? report.young
+				: entry.includes(".delete-") || failedPaths.has(itemPath) ? report.failed
+					: report.expiredHeld;
+			bucket.entries++;
+			bucket.bytes += bytes;
+		}
 	}
 	return report;
 }
@@ -3570,10 +3683,17 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 	} catch {
 		return null;
 	}
+	// CHECKOUTOWN1: scratch under an ovnfs checkout's var/agent-tmp belongs to the checkout lifecycle, never to the
+	// reaper. Deleting through a checkout view only writes a whiteout over the source's bytes (or double-counts an
+	// inherited view), so a checkout-rooted dir is never a cleanup candidate here: the checkout's opener owns it,
+	// and `ovnfs rm` removes everything inside it, ignored files included. The SKIP names the owning checkout.
+	const checkoutName = scratchRootCheckoutName(root, deps);
+	if (checkoutName !== null) {
+		return { dir, action: "SKIP", reason: "checkout-owned-scratch", owner: readOwner(dir).owner,
+			sizeBytes: dirSize(dir), detail: `checkout ${checkoutName} owns this root; its opener releases it with ovnfs rm` };
+	}
 	// RELEASELIVE1: a dir a registered user still runs in is never quarantined or reaped, released or not.
-	const user = blockingScratchUser(dir, deps.liveness);
-	if (user !== null) return { dir, action: "LIVE", reason: "user-live", owner: readReleaseRecord(dir)?.owner ?? null, sizeBytes: dirSize(dir) };
-	const released = readReleaseRecord(dir);
+	const released = readReleaseRecord(dir, deps.bootMs ?? null);
 	// A verified owner release (marker bound to the owner text, device and inode) stands whatever the directory's name,
 	// since a respawn rehomes .owner to the successor and keeps the creator's pid in the name.
 	const releasedNameOk = released !== null && (!released.legacy || basename(dir) === released.legacyName);
@@ -3758,13 +3878,18 @@ export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	const roots = entries.map(entry => entry.root);
 	const systemWorkDirs = resolveSystemWorkDirs(deps);
 	const sessions: ScratchVerdict[] = [];
-	const snapDeps: InspectDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
+	const snapDeps: InspectDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS),
+		bootMs: deps.bootMs ?? systemBootMs(deps.run), checkoutNameCache: deps.checkoutNameCache ?? new Map() };
 	const record = (verdict: ScratchVerdict | null) => {
 		if (verdict === null) return;
 		sessions.push(verdict);
 		deps.onProgress?.(verdict);
 	};
-	const visit = (dir: string, root: string, nameRequired = true) => record(inspectOne(dir, root, snapDeps, nameRequired));
+	const visit = (dir: string, root: string, nameRequired = true) => {
+		// A root-local quarantine holds entries already counted by quarantineBuckets; never visit it as a session dir.
+		if (basename(dir) === QUARANTINE_LOCAL_DIR && dirname(dir) === root) return;
+		record(inspectOne(dir, root, snapDeps, nameRequired));
+	};
 	for (const root of roots) eachSessionDir(root, dir => visit(dir, root), dir => visit(dir, root, false));
 	for (const dir of systemWorkDirs) record(inspectSystemWorkDir(dir, snapDeps));
 	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
@@ -3796,6 +3921,9 @@ export interface ScratchRunReceipt {
 	refused_gb: number;
 	/** Per-incarnation terminal/preserved evidence, alongside the existing byte/count totals. */
 	orphan_processes: ScratchOrphanResult[];
+	/** Every failed entry with its reason (capped at 1000, see failuresTruncated); the counts above stay authoritative. */
+	failures: { dir: string; reason: string; action: string; sizeBytes: number; error?: string }[];
+	failuresTruncated: boolean;
 }
 
 export type ScratchGapClass = "never-released" | "pid-keyed-owner-never-released" | "released-unbinned" | "unowned" | "mismatched-owner";
@@ -3984,8 +4112,8 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	const candidates: { dir: string; root: string; nameRequired: boolean }[] = [];
 	for (const root of roots) {
 		eachSessionDir(root,
-			dir => candidates.push({ dir, root, nameRequired: true }),
-			dir => candidates.push({ dir, root, nameRequired: false }));
+			dir => { if (!(basename(dir) === QUARANTINE_LOCAL_DIR && dirname(dir) === root)) candidates.push({ dir, root, nameRequired: true }); },
+			dir => { if (!(basename(dir) === QUARANTINE_LOCAL_DIR && dirname(dir) === root)) candidates.push({ dir, root, nameRequired: false }); });
 	}
 	for (const dir of systemWorkDirs) candidates.push({ dir, root: dirname(dir), nameRequired: false });
 	candidates.sort((a, b) => (a.dir < b.dir ? -1 : a.dir > b.dir ? 1 : 0));
@@ -3998,7 +4126,8 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	const refreshMs = deps.snapshotRefreshMs ?? SCRATCH_REAPER_SNAPSHOT_REFRESH_MS;
 	let snapAt = Date.now();
 	let snap = takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
-	const snapDeps: ApplyDeps = { ...deps, lsofSnapshot: snap };
+	const snapDeps: ApplyDeps = { ...deps, lsofSnapshot: snap,
+		bootMs: deps.bootMs ?? systemBootMs(deps.run), checkoutNameCache: deps.checkoutNameCache ?? new Map() };
 	const refreshSnap = (): ApplyDeps => {
 		// REAPTIMEOUT1: one snapshot per run, refreshed on a cadence — never one full-system lsof per
 		// dir, which cost ~2 s each and blew the 30 min cap on a 6k+ census. A null snapshot still
@@ -4008,7 +4137,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 			if (next !== null || snap === undefined) snap = next;
 			snapAt = Date.now();
 		}
-		return { ...deps, lsofSnapshot: snap };
+		return { ...snapDeps, lsofSnapshot: snap };
 	};
 	const systemSet = new Set(systemWorkDirs);
 	const planned: { verdict: ScratchVerdict; root: string }[] = [];
@@ -4113,6 +4242,24 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 		}
 	}
 	for (const kill of killed) if (!kill.ok) failedCount++;
+	// RECEIPTFAIL1: every failed entry is enumerable with its reason in the receipt itself, capped with a flag.
+	const failures: { dir: string; reason: string; action: string; sizeBytes: number; error?: string }[] = [];
+	for (const verdict of applied) {
+		if (verdict.action !== "SKIP" || !isApplyFailure(verdict)) continue;
+		failures.push({ dir: verdict.dir, reason: verdict.reason, action: verdict.action, sizeBytes: verdict.sizeBytes,
+			...(verdict.error === undefined ? {} : { error: verdict.error }) });
+	}
+	for (const verdict of expired) {
+		if (verdict.action !== "SKIP" || !isApplyFailure(verdict)) continue;
+		failures.push({ dir: verdict.dir, reason: verdict.reason, action: verdict.action, sizeBytes: verdict.sizeBytes,
+			...(verdict.error === undefined ? {} : { error: verdict.error }) });
+	}
+	for (const kill of killed) {
+		if (kill.ok) continue;
+		failures.push({ dir: `pid ${kill.pid} ${kill.command}`, reason: kill.reason, action: "KILL", sizeBytes: 0 });
+	}
+	const MAX_RECEIPT_FAILURES = 1000;
+	const failuresTruncated = failures.length > MAX_RECEIPT_FAILURES;
 	const finishedAt = new Date(now).toISOString();
 	const receipt: ScratchRunReceipt = {
 		started_at: startedAt,
@@ -4126,6 +4273,8 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 		failed_gb: failedBytes / 1_000_000_000,
 		refused_count: refusedCount,
 		refused_gb: refusedBytes / 1_000_000_000,
+		failures: failuresTruncated ? failures.slice(0, MAX_RECEIPT_FAILURES) : failures,
+		failuresTruncated,
 		orphan_processes: [...killed, ...orphanDecisions.filter(row => row.proof === undefined).map(row => ({ ...row, ok: false }))],
 	};
 	appendLog(home, { event: "run-receipt", dir: "", at: finishedAt, ...receipt });
