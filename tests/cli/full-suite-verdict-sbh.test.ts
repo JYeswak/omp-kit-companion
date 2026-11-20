@@ -42,8 +42,11 @@ test("full-suite sibling inherits statfs while auto/sbh still refuses", async ()
 	copyFileSync(join(repoRoot, "scripts", "readme-check.ts"), join(fixture, "scripts", "readme-check.ts")); // src/release-ready.ts imports it when the real CLI boots.
 	// HERMETIC1 points a suite's KITROOT at the candidate archive, so the candidate carries the CLI
 	// (and the files it imports) that its suite runs as "$KITROOT/src/cli.ts heavy".
-	cpSync(join(repoRoot, "src"), join(fixture, "src"), { recursive: true });
-	cpSync(join(repoRoot, "extensions"), join(fixture, "extensions"), { recursive: true }); // src/cli.ts imports extensions/
+	// The verdict enumerates extensions/ and src/ *.test.ts as suites (CATALOG1), so the fixture copies sources only:
+	// copying the real tests would run ~54 unrelated files inside this one-suite fixture and exceed its 30 s deadline.
+	const sourcesOnly = (path: string) => !path.endsWith(".test.ts");
+	cpSync(join(repoRoot, "src"), join(fixture, "src"), { recursive: true, filter: sourcesOnly });
+	cpSync(join(repoRoot, "extensions"), join(fixture, "extensions"), { recursive: true, filter: sourcesOnly }); // src/cli.ts imports extensions/
 	cpSync(join(repoRoot, "skills", "frontend-foundations", "scripts"), join(fixture, "skills", "frontend-foundations", "scripts"), { recursive: true }); // src/cli.ts imports the frontend checker scripts.
 	mkdirSync(join(fixture, "config"));
 	copyFileSync(join(repoRoot, "config", "heavy-labels.json"), join(fixture, "config", "heavy-labels.json"));
