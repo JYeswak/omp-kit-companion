@@ -26,17 +26,22 @@ ok() { if [ "$1" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf
 repo="$TMP/repo"
 mkdir -p "$repo/scripts" "$repo/tests/cli"
 cp "$KITROOT_DIR/scripts/kitlib-tmp.sh" "$repo/scripts/kitlib-tmp.sh"
-printf '%s\n' "print('REPOABS_STUB_RAN', flush=True)" >"$repo/tests/cli/fixture_test.py"
+cat >"$repo/tests/cli/fixture_test.py" <<STUB
+import glob
+print('REPOABS_STUB_RAN', flush=True)
+for record in glob.glob('$TMP/*.cache/.suite-lease/**/holder.json', recursive=True):
+    print('LEASEHOLDER', open(record).read().replace('\n', ' '), flush=True)
+STUB
 git -C "$repo" init -q
 git -C "$repo" config user.name "VERDICTREPOABS1 test"
 git -C "$repo" config user.email "verdictrepoabs1@example.invalid"
 git -C "$repo" add -A
 git -C "$repo" commit -q -m "[test] VERDICTREPOABS1 fixture"
 
-# run LABEL REPO_ARG: run the verdict from the fixture root with its own cache; rc in $rc, output in $TMP/LABEL.out.
+# run LABEL REPO_ARG [COMMIT]: run the verdict from the fixture root with its own cache; rc in $rc, output in $TMP/LABEL.out.
 run() {
 	rc=0
-	(cd "$repo" && KITROOT=$KITROOT_DIR OMP_KIT_OMP_SRC_FETCH=0 sh "$VERDICT" --repo "$2" --commit HEAD \
+	(cd "$repo" && KITROOT=$KITROOT_DIR OMP_KIT_OMP_SRC_FETCH=0 sh "$VERDICT" --repo "$2" --commit "${3:-HEAD}" \
 		--cache-dir "$TMP/$1.cache") >"$TMP/$1.out" 2>&1 || rc=$?
 }
 
@@ -52,6 +57,17 @@ ok $? "absolute-repo-unchanged: rc=$rc out=$(cat "$TMP/absolute.out")"
 run missing "$TMP/no-such-repo"
 [ "$rc" != 0 ] && grep -Fq -- "--repo $TMP/no-such-repo is not a directory" "$TMP/missing.out"
 ok $? "missing-repo-refused: rc=$rc out=$(cat "$TMP/missing.out")"
+
+# FULLSHA1: an abbreviated or symbolic --commit is resolved once, so every consumer of COMMIT (the suite lease holder
+# record here; a main-role shard's `git fetch --depth 1 <sha>`, which an abbreviation broke on 2026-11-20) sees the
+# full commit. The stub suite file prints the holder record the verdict writes while it runs; it lands in the log.
+full=$(git -C "$repo" rev-parse HEAD)
+run abbrev "$repo" "$(git -C "$repo" rev-parse --short=12 HEAD)"
+[ "$rc" = 0 ] && grep -rhq "LEASEHOLDER .*\"commit\": \"$full\"" "$TMP/abbrev.cache"
+ok $? "abbreviated-commit-forwarded-in-full: rc=$rc out=$(cat "$TMP/abbrev.out")"
+run unresolvable "$repo" "no-such-ref-at-all"
+[ "$rc" != 0 ] && grep -Fq "not a git object" "$TMP/unresolvable.out"
+ok $? "unresolvable-commit-refused: rc=$rc out=$(cat "$TMP/unresolvable.out")"
 
 kitlib_tmp_cleanup "$TMP" 2>/dev/null || :
 printf 'full-suite-verdict-repo-path: %s pass %s fail\n' "$pass" "$fail"

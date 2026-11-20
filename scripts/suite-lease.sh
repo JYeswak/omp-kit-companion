@@ -328,7 +328,9 @@ def acquire(opts):
     owner_pid = kitlib_proc.safe_pid(opts["owner"])
     own = kitlib_proc.incarnation(owner_pid)
     if own is None:
-        refuse("SUITE_LEASE_OWNER_UNREADABLE", "cannot read the start time of run %d" % owner_pid)
+        refuse("SUITE_LEASE_OWNER_UNREADABLE", "cannot read the start time of run %d: that is not a live process, which "
+               "happens when the caller's shell reports a virtual $$ (the omp bash tool's sh and bash do); start the "
+               "verdict through /bin/sh or from a real process, and the lease records its true pid" % owner_pid)
     lease = Lease(opts)
     tree, role, commit, launcher = opts["tree"], opts["role"], opts["commit"], opts["launcher"]
     join = opts.get("join") == "1"

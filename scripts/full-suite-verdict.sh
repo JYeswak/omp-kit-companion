@@ -152,6 +152,10 @@ command -v python3 >/dev/null 2>&1 || { fail "python3 is not on PATH; verdict ev
 
 type=$(git -C "$ROOT" cat-file -t "$COMMIT" 2>/dev/null) || { fail "candidate $COMMIT is not a git object in $ROOT"; exit 1; }
 [ "$type" = "commit" ] || { fail "candidate $COMMIT is a $type, not a commit"; exit 1; }
+# FULLSHA1: an abbreviated or symbolic --commit (HEAD, a branch, a 12-hex prefix) is resolved to its full object name
+# once, here. Every later use hands COMMIT to another process, and a main-role shard's `git fetch --depth 1 <sha>`
+# fails on an abbreviation (2026-11-20), so the verdict records and forwards only the full name.
+COMMIT=$(git -C "$ROOT" rev-parse --verify "$COMMIT^{commit}" 2>/dev/null) || { fail "candidate $COMMIT does not resolve to one commit in $ROOT"; exit 1; }
 tree=$(git -C "$ROOT" rev-parse "$COMMIT^{tree}" 2>/dev/null) || { fail "candidate $COMMIT has no readable tree"; exit 1; }
 case "$tree" in *[!0-9a-f]*|???????????????????????????????????????) fail "candidate tree hash is not hex: $tree"; exit 1 ;; esac
 [ "${#tree}" -ge 40 ] || { fail "candidate tree hash is too short: $tree"; exit 1; }
