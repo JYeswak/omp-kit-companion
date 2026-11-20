@@ -98,6 +98,13 @@ describe("oq1h.6 tool-gated capabilities", () => {
 		const preview = robot(["land", "--paths", "x", "--message", "m", "--json"], root, bin);
 		expect(preview.code).toBe(3);
 		expect(preview.errorsCode).toBe("AGENT_MAIL_UNAVAILABLE");
+		// A second verb on the shared dispatch path: the rule is the dispatcher's, not land's (save declares no --apply and never asks consent).
+		const rchUnconfirmed = robot(["rch", "lease", "--slots", "2", "--apply", "--json", "--", "cargo", "test"], root, bin);
+		expect(rchUnconfirmed.code).toBe(2);
+		expect(rchUnconfirmed.errorsCode).toBe("CONSENT_REQUIRED");
+		const rchConfirmed = robot(["rch", "lease", "--slots", "2", "--apply", "--yes", "--json", "--", "cargo", "test"], root, bin);
+		expect(rchConfirmed.code).toBe(3);
+		expect(rchConfirmed.errorsCode).toBe("RCH_UNAVAILABLE");
 	});
 
 	test("planted: fake rch restores rch lease; all fakes restore all verbs", () => {
