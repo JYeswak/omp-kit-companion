@@ -1,7 +1,11 @@
 ---
 description: "Use the frontend-foundations skill before building or changing web UI"
 condition:
-  - '\b(?:component|stylesheet|landing page|responsive|breakpoint)\b'
+  - '\bcomponent\b'
+  - '\bstylesheet\b'
+  - '\blanding page\b'
+  - '\bresponsive\b'
+  - '\bbreakpoint\b'
   - '</(?:div|section|main|button|form)>'
   - '\b(?:useState|className)\b|@media\b'
 scope:
