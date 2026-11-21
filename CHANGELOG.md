@@ -4,6 +4,21 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.142] - 2026-11-21
+
+### Added
+
+- The `br` shim can remember a successful Agent Mail registration check for a short time (WHOISCACHE1, MAILPOOL1). Every tracker write made one `am agents show` round trip plus one reservation read; while Agent Mail's database pool was starving, the registration read was the call that timed out first and every `br` write was refused (`BR_SHIM_RESERVATION_UNKNOWN`). Set `OMP_KIT_BR_SHIM_WHOIS_TTL_S=N` (1 to 3600 seconds; unset, 0 or anything else is off, the default) and a positive answer for the exact (project, agent) pair is reused for N seconds, kept under `OMP_KIT_BR_SHIM_WHOIS_DIR` (default `$XDG_STATE_HOME/omp-kit/br-shim-whois`). It fails closed on a miss, an expired entry, another agent or an unreadable entry; a refusal is never cached; the reservation conflict read is never cached, so a foreign lease still refuses every write. It lowers load, it does not remove the dependency: with Agent Mail down the reservation read still refuses.
+
+### Changed
+
+- The compaction reminder (`kit-flywheel-guard` COMPACTION_REREAD) now names the recent owner-rules digest when the operator setup has the producer (COMPACTRULES1). After a compaction the reminder already named AGENTS.md and the held beads; when `~/.claude/skills/omp-kit-chief/scripts/chief_tick.py` exists it also prints the runnable `python3 '<path>' rules --days 3` line, "after AGENTS.md and before your next mutation", so a seat re-reads the last 72 hours of owner rules instead of resuming from a summary that does not carry them. The producer is detected, never required: a stock install (no such file, or a discovery error) gets the same reminder as before, and neither path blocks a tool call. The path is single-quoted so a home directory with a quote still yields one runnable word.
+
+### Fixed
+
+- `omp-kit verify` accepts a background task verifier: a task that authored neither the change nor its fixture replays the original acceptance read-only and records its verdict on the bead under its own label (`--verifier-label L --verifier-parent P --verifier-session S`). The parent seat must be a registered, non-author agent and owns the tracker writes; the gate report records `reviewer:<label>`. Label equal to the author, label equal to the parent, a missing session id, and an inherited parent identity with no label each refuse with a named code and record nothing.
+- The scheduled scratch reaper no longer spends its 30 minute cap in the checkout phase (CHECKOUTBUDGET1). The 0.2.141 reaper still ended `TIMEOUT` every run: after the scratch census (about 60 s) it measured every idle, empty ovnfs checkout with `du -sk` (30 s deadline each, and on an NFS-served checkout it always hits the deadline and reports nothing: 18 eligible rows were 540 s) in order to reap at most ten, then archived and removed them with no regard for the cap, and the receipt named `BROWSER_INSPECT` as the interrupted action because the checkout phase sent no progress. Now the reaper job no longer sizes checkouts (reclaimed bytes are the physical df delta it already reports as `freedBytesDf`), `applyCheckoutReap` sizes at most as many rows as it can reap and in reap order, no reap starts when less than 180 s remain before the run deadline (the row is kept with reason `run-deadline` and tried on the next run), and each reap is reported to the keeper as `CHECKOUT_REAP <name>`, so a timeout names the checkout it interrupted.
+
 ## [0.2.141] - 2026-11-21
 
 ### Fixed
