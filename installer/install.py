@@ -855,6 +855,8 @@ GITHUB_API = "https://api.github.com"
 GITHUB_API_ENV = "OMP_KIT_GITHUB_API"
 NETWORK_HINT = ("check the network: the public GitHub API answers anonymously (60 requests an hour per address), so no"
                 " `gh auth login` is needed; export GH_TOKEN only to raise that limit")
+GH_HINT = ("install the GitHub CLI 2.69 or newer from https://cli.github.com (the Ubuntu 24.04 distro package, 2.45, is"
+           " too old); it only verifies the signature offline and need not be logged in")
 
 
 class _SameBaseRedirect(urllib.request.HTTPRedirectHandler):
@@ -964,9 +966,14 @@ def verify_attestation(archive, version):
                  "--predicate-type", "https://slsa.dev/provenance/v1"],
                 deadline_s=60, max_output_bytes=1024 * 1024)
     except (OSError, subprocess.SubprocessError) as exc:
-        refuse("KIT_ATTESTATION_VERIFIER_UNAVAILABLE: " + str(exc))
+        refuse("KIT_ATTESTATION_VERIFIER_UNAVAILABLE: " + str(exc) + " " + GH_HINT)
     if result.rc != 0 or result.truncated:
-        refuse("KIT_ATTESTATION_UNVERIFIED: " + result.stderr.decode(errors="replace").strip()[-1000:])
+        detail = result.stderr.decode(errors="replace").strip()
+        if "unknown command" in detail or "unknown flag" in detail:
+            # A gh without `attestation verify --source-digest` prints its whole usage; that is not a verification verdict.
+            refuse("KIT_ATTESTATION_VERIFIER_UNAVAILABLE: this gh cannot verify attestations ("
+                   + (detail.splitlines() or [""])[0][:160] + "); " + GH_HINT)
+        refuse("KIT_ATTESTATION_UNVERIFIED: " + detail[-1000:])
 
 
 def safe_directory(path):

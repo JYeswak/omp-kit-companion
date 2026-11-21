@@ -44,6 +44,9 @@ mode = os.environ.get("GH_CASE", "valid")
 if os.environ.get("GH_CALL_LOG"):
     with open(os.environ["GH_CALL_LOG"], "a") as log:
         log.write(json.dumps(args) + "\\n")
+if mode == "old-gh" and args[:2] == ["attestation", "verify"]:
+    # A distro gh (Ubuntu 24.04 ships 2.45) has no \`attestation\` command: it prints its whole usage and exits 1.
+    os.write(2, b'unknown command "attestation" for "gh"\\n\\nUsage:  gh <command> <subcommand> [flags]\\n\\nAvailable commands:\\n  alias\\n  api\\n'); sys.exit(1)
 if args[:1] == ["api"]:
     # OUTSIDERAUTH1: the installer fetches the tag and the bundle itself; a call to \`gh api\` (which needs a login) is a regression.
     os.write(2, b"fake gh: the installer must not call gh api"); sys.exit(41)
@@ -182,6 +185,16 @@ test("isolated attestation accepts JSON-lines policy control, rejects invalid/mi
 		for (const [mode, code] of [["verify-failure", "KIT_ATTESTATION_UNVERIFIED"], ["verify-flood", "KIT_ATTESTATION_UNVERIFIED"]]) {
 			expectRefusal(await invoke(f, ["attestation", a.path, version, platform], "isolated", { GH_CASE: mode! }), code!);
 		}
+		// A gh too old to verify attestations is a missing verifier with a remedy, not a verdict on the archive, and its usage dump is cut.
+		const oldGh = await invoke(f, ["attestation", a.path, version, platform], "isolated", { GH_CASE: "old-gh" });
+		expectRefusal(oldGh, "KIT_ATTESTATION_VERIFIER_UNAVAILABLE");
+		const oldText = decoder.decode(oldGh.stderr);
+		expect(oldText).toContain("2.69");
+		expect(oldText).toContain("https://cli.github.com");
+		expect(oldText).not.toContain("Available commands");
+		expect(oldText).not.toContain("KIT_ATTESTATION_UNVERIFIED");
+		const absent = await invoke(f, ["attestation", a.path, version, platform], "isolated", { PATH: "/nonexistent-installer-test-bin" });
+		expect(decoder.decode(absent.stderr)).toContain("https://cli.github.com");
 		writeFileSync(`${a.path}.sigstore.json`, '{"fixture":false}');
 		expectRefusal(await invoke(f, ["attestation", a.path, version, platform]), "KIT_ATTESTATION_UNVERIFIED");
 		writeFileSync(`${a.path}.sigstore.json`, "[]");

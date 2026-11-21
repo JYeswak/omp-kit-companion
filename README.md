@@ -20,8 +20,8 @@ A tested rule pack, 15 extensions, six skills, and a guarded CLI for an
 existing OMP install.
 
 Install the newest release with one command. It needs `curl`, `python3` (3.9 or
-newer) and the GitHub CLI `gh`, installed but not logged in. Everything it
-downloads is verified before anything is installed; see
+newer) and the GitHub CLI `gh` 2.69 or newer, installed but not logged in.
+Everything it downloads is verified before anything is installed; see
 [Installation](#installation).
 
 ```sh
@@ -282,8 +282,8 @@ Moved to [docs/comparison.md](docs/comparison.md).
 ## Installation
 
 Requirements: an existing OMP install with `omp` on PATH (for `status` and
-`test`), plus Python 3.9 or newer, `curl` and the GitHub CLI (`gh`) for the
-installer. `gh` must be installed, not logged in: it only runs
+`test`), plus Python 3.9 or newer, `curl` and the GitHub CLI (`gh` 2.69 or newer;
+the Ubuntu 24.04 distro package is 2.45) for the installer. `gh` must be installed, not logged in: it only runs
 `gh attestation verify` on a bundle the installer has already fetched, and the
 installer reads the release tag and that bundle from the public GitHub API
 anonymously (60 requests an hour; export `GH_TOKEN` only to raise that). Linux
