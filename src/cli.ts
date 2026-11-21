@@ -2794,12 +2794,12 @@ async function runScratchReaperBody(home: string): Promise<CliResult> {
 	const capOverride = Number(process.env.OMP_KIT_RUN_CAP_MS);
 	const cap = Number.isFinite(capOverride) && capOverride > 0 ? capOverride : RUN_TIME_CAPS_MS["scratch-reaper"];
 	const bodyStartedAt = Date.now();
-	process.send?.({ action: "CENSUS", path: home }); // NFSPROBE1: a hang before the first INSPECT now names its phase in the receipt
 	const result = applyScratch(home, {
 		liveness: defaultLiveness(), run: scratchRunner, home, runtimeRepo: kitIdentity().release.root,
 		onInspect: path => { process.send?.({ action: "INSPECT", path }); },
 		entryBudget: SCRATCH_REAPER_ENTRY_BUDGET,
-		probeNetworkMounts: true,
+		// Only the scheduled job (launchd or systemd set OMP_KIT_JOB) can be blocked by a mount; a shell run reads every mount and a probe would spend its cap.
+		probeNetworkMounts: process.env.OMP_KIT_JOB === "scratch-reaper",
 		// NFSPROBE1: a mount is probed by this same binary (a platform binary such as ls is denied a removable volume at once while ours blocks on the open).
 		mountProbe: mount => ({ args: [process.execPath, ...(import.meta.path.startsWith("/$bunfs/") ? [] : [import.meta.path]), "service", "run", "scratch-reaper", "--json"], env: { OMP_KIT_SCRATCH_PROBE: mount } }),
 		deadlineMs: Date.now() + Math.max(60_000, cap - SCRATCH_REAPER_HEADROOM_MS),
