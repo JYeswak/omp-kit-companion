@@ -5238,6 +5238,18 @@ registerCommandHandler("verify", async request => {
 	if (lessonFlag !== undefined && (typeof lessonFlag !== "string" || !lessonFlag.trim()))
 		return refusal("INVALID_FLAG", "--lesson requires non-empty text", "Pass --lesson TEXT or leave an author Lesson: comment before verification.");
 	const lesson = typeof lessonFlag === "string" ? lessonFlag : undefined;
+	// VERIFYBG1 (ompkit-1ra0d.258): a background task verifier rides --verifier-label with its parent
+	// seat and session id; the recorder stays --actor/AGENT_NAME. Any one flag requires all three.
+	const verifierText = (name: string): string | null | undefined => {
+		const value = request.flags.get(name);
+		if (value === undefined) return undefined;
+		if (typeof value !== "string" || !value.trim()) return null;
+		return value.trim();
+	};
+	const vLabel = verifierText("--verifier-label"), vParent = verifierText("--verifier-parent"), vSession = verifierText("--verifier-session");
+	if (vLabel === null || vParent === null || vSession === null)
+		return refusal("INVALID_FLAG", "a background verifier flag needs non-empty text", "Pass --verifier-label L --verifier-parent P --verifier-session S, all three with text.");
+	const verifier = vLabel === undefined && vParent === undefined && vSession === undefined ? undefined : { label: vLabel ?? "", parent: vParent ?? "", session: vSession ?? "" };
 	const repo = verifyProject(request.flags.get("--project"));
 	const dryRun = request.flags.get("--dry-run") === true;
 	if (request.flags.get("--all") === true && request.flags.get("--live-readback") !== true) return refusal("INVALID_FLAG", "--all is only valid with --live-readback", "Use omp-kit verify --live-readback --all.");
@@ -5262,8 +5274,10 @@ registerCommandHandler("verify", async request => {
 	if (!request.argument) return refusal("MISSING_ARGUMENT", "A bead id is required", "Use omp-kit verify BEAD --export SHA.");
 	const exportSha = request.flags.get("--export");
 	if (typeof exportSha !== "string" || !/^[0-9a-f]{7,40}$/.test(exportSha.trim())) return refusal("INVALID_FLAG", "--export requires a commit sha", "Pass --export <sha> of the exact commit to replay.");
-	if (!actor) return refusal("NO_SEAT_IDENTITY", "no --actor and no AGENT_NAME", "Pass --actor NAME or export AGENT_NAME.");
-	const res = await verifyBead({ bead: request.argument, exportSha: exportSha.trim(), repo, actor, family, lesson, dryRun });
+	if (!actor && verifier === undefined) return refusal("NO_SEAT_IDENTITY", "no --actor and no AGENT_NAME", "Pass --actor NAME or export AGENT_NAME.");
+	const recorder = actor ?? verifier?.parent ?? "";
+	if (verifier !== undefined && recorder === "") return refusal("NO_SEAT_IDENTITY", "no --actor, no AGENT_NAME and no verifiable parent seat", "Pass --verifier-label L --verifier-parent P --verifier-session S with a registered parent seat.");
+	const res = await verifyBead({ bead: request.argument, exportSha: exportSha.trim(), repo, actor: recorder, family, lesson, dryRun, ...(verifier === undefined ? {} : { verifier }) });
 	const code = res.code === "CLOSED" || res.code === "DRY_RUN" ? 0 : res.code === "REWORK" ? 1 : 2;
 	return { code, data: { overall: res.code, bead: res.bead, export: res.export, replays: res.replays, acts: res.acts, log: res.log, ...(res.child === undefined ? {} : { child: res.child }), ...(res.rollback === undefined ? {} : { rollback: res.rollback }) }, verification: res.code === "DRY_RUN" || res.replays.length === 0 ? "NOT_RUN" : "PERFORMED" };
 });

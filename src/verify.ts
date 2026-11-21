@@ -149,6 +149,30 @@ async function verifierKnownToTargetMail(repo: string, actor: string, env: Recor
 	mailProbeCache.set(key, probe);
 	return probe;
 }
+/**
+ * VERIFYBG1 (ompkit-1ra0d.258): validate a background verifier identity before any tracker act.
+ * Shape first (needs no tracker read): a present identity names all three of label, parent seat
+ * and session id, and the label differs from the parent. Author comparison needs the bead row and
+ * runs in verifyBead. Every refusal records nothing: no replay and no tracker act ran.
+ */
+export function validateBackgroundVerifierShape(v: { label: string; parent: string; session: string } | undefined): { ok: true } | { ok: false; code: string; detail: string } {
+	if (v === undefined) return { ok: true };
+	const label = v.label.trim(), parent = v.parent.trim(), session = v.session.trim();
+	const anyPresent = label !== "" || parent !== "" || session !== "";
+	if (!anyPresent) return { ok: true };
+	if (label === "") return { ok: false, code: "LABEL_REQUIRED", detail: "a background verifier needs its own label; an inherited parent identity with no label is refused" };
+	if (parent === "") return { ok: false, code: "PARENT_REQUIRED", detail: "a background verifier needs its parent seat; the recorder must be a registered seat" };
+	if (session === "") return { ok: false, code: "SESSION_REQUIRED", detail: "a background verifier needs its session id; rerun with all three of label, parent seat and session id" };
+	if (label === parent) return { ok: false, code: "LABEL_IS_PARENT", detail: `background label ${JSON.stringify(label)} must differ from its parent seat` };
+	return { ok: true };
+}
+
+/** Author half of the background identity check (needs the bead row): label and parent both differ from the author. */
+export function validateBackgroundVerifierAuthor(v: { label: string; parent: string; session: string }, author: string | null): { ok: true } | { ok: false; code: string; detail: string } {
+	if (author !== null && v.label.trim() !== "" && v.label.trim() === author) return { ok: false, code: "LABEL_IS_AUTHOR", detail: `background label ${JSON.stringify(v.label.trim())} must differ from the author ${JSON.stringify(author)}` };
+	if (author !== null && v.parent.trim() !== "" && v.parent.trim() === author) return { ok: false, code: "PARENT_IS_AUTHOR", detail: `parent seat ${JSON.stringify(v.parent.trim())} must differ from the author ${JSON.stringify(author)}` };
+	return { ok: true };
+}
 
 /**
  * One acceptance box; `line` is the trimmed source line, so a lint can name it and tell a new box from an unchanged one.
@@ -671,7 +695,9 @@ export async function ensureBoxDeps(command: string, exportDir: string, env: Rec
 }
 
 /** `laneParent` overrides LANE_PARENT (a tracker without the omp-kit lane, such as a fixture). */
-export interface VerifyInput { bead: string; exportSha: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; laneParent?: string; lesson?: string }
+/** VERIFYBG1 (ompkit-1ra0d.258): a background task that authored neither the change nor its fixture verifies under its own label. `verifier` carries the background identity (label + parent seat + session id); the recorder stays `actor` (a registered seat, never the author). Absent means an ordinary seat verification. */
+export interface BackgroundVerifier { label: string; parent: string; session: string }
+export interface VerifyInput { bead: string; exportSha: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; laneParent?: string; lesson?: string; verifier?: BackgroundVerifier }
 
 function commentLesson(body: string): string | null {
 	for (const raw of body.split("\n")) {
@@ -745,7 +771,16 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const env = { ...process.env, ...(input.env ?? {}) } as Record<string, string>;
 	const verifierAtInvocation = observeWorkingModel(env);
 	const acts: string[][] = [];
-	const log: string[] = [`verify ${input.bead} export ${input.exportSha} actor ${input.actor} ${new Date().toISOString()}`];
+	// VERIFYBG1 (ompkit-1ra0d.258): normalize the background identity first, before any tracker act.
+	const raw = input.verifier;
+	const norm = raw === undefined ? undefined : { label: raw.label.trim(), parent: raw.parent.trim(), session: raw.session.trim() };
+	const bg = norm !== undefined && (norm.label !== "" || norm.parent !== "" || norm.session !== "") ? norm : undefined;
+	const shape = validateBackgroundVerifierShape(bg === undefined ? undefined : { label: bg.label, parent: bg.parent, session: bg.session });
+	const log: string[] = [`verify ${input.bead} export ${input.exportSha} actor ${input.actor}${bg === undefined ? "" : ` verifier ${bg.label} parent ${bg.parent} session ${bg.session}`} ${new Date().toISOString()}`];
+	if (!shape.ok) return { ok: false, code: shape.code, bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`refused: ${shape.detail}; no replay or tracker act ran`).join("\n"), acts };
+	// The recorder is the registered seat that owns the tracker writes; the prover is the
+	// background label that ran the replay. Without a background identity they are the same seat.
+	const prover = bg === undefined ? input.actor : bg.label;
 	const pre = await preflightBead("close", input.repo, input.bead, { actor: input.actor, env });
 	const blocking = pre.findings.filter(f => f.blocking);
 	if (blocking.some(f => f.code === "SELF_CLOSE")) return { ok: false, code: "NON_AUTHOR_REQUIRED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`refused: ${input.actor} is the assignee`).join("\n"), acts };
@@ -774,6 +809,11 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake", "--actor", input.actor]] };
 	}
 	if (row === null) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("UNJUDGED: bead became unreadable").join("\n"), acts };
+	if (bg !== undefined) {
+		const authorCheck = validateBackgroundVerifierAuthor(bg, row.assignee);
+		if (!authorCheck.ok) return { ok: false, code: authorCheck.code, bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`refused: ${authorCheck.detail}; no replay or tracker act ran`).join("\n"), acts };
+		log.push(`background verifier ${bg.label} of parent seat ${bg.parent} session ${bg.session} records under its label; tracker writes stay with ${input.actor}`);
+	}
 	const lesson = await closeLesson(input.lesson, row, input.repo, env);
 	if (lesson === null) return { ok: false, code: "LESSON_MISSING", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment; no replay or tracker act ran").join("\n"), acts };
 	// VERIFYGATE1-identity: the tracker guard refuses a verifier the target project's Agent Mail does not
@@ -807,7 +847,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 			export_commit: exportCommit,
 			bead_created_at: row.createdAt,
 			author: observeAuthorClaim(stateRoot, tracker, input.bead),
-			verifier: { actor: input.actor, attribution: verifierAtInvocation },
+			verifier: { actor: prover, attribution: verifierAtInvocation },
 		};
 		const begun = await beginVerifyAttempt(stateRoot, context);
 		if (begun.status === "UNAVAILABLE") {
@@ -921,7 +961,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	// VERIFYSCRATCH1 export root: var/agent-tmp is gitignored, so the export has none; kitlib scratch under the
 	// repo root needs it, as the gates provide it (fresh-gate.sh, full-suite-verdict.sh).
 	const exportTmp = join(exportDir, "var", "agent-tmp");
-	const replayEnv = { ...replayBase, AGENT_NAME: input.actor, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, KITLIB_TMP_ROOT: exportTmp, ...(wantsOwned ? { OWNED_TRACKER_DB: ownedDb } : {}), PATH: `${replayBin}${delimiter}${replayBase.PATH}` };
+	const replayEnv = { ...replayBase, AGENT_NAME: prover, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, KITLIB_TMP_ROOT: exportTmp, ...(wantsOwned ? { OWNED_TRACKER_DB: ownedDb } : {}), PATH: `${replayBin}${delimiter}${replayBase.PATH}` };
 	if (wantsOwned) log.push(`owned fixture ${ownedDb} (per-run read-only replay)`);
 	mkdirSync(exportDir, { recursive: true });
 	const archive = await run(["sh", "-c", `git -C ${JSON.stringify(input.repo)} archive ${JSON.stringify(input.exportSha)} | tar -x -C ${JSON.stringify(exportDir)}`], { deadline_s: 300, env });
@@ -1119,7 +1159,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		}
 	}
 	const childRef = reuse ?? CHILD;
-	const reason = `verified by ${input.actor} (family: ${family}) on export ${input.exportSha}: ${ran.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}${deferred.length ? `; deferred ${deferredTags} to ${childRef} (LIVEREADBACK, ${home ? `child of ${homeNote || home}` : "parentless"}, related to ${input.bead})` : ""}`;
+	const reason = `verified by ${prover} (family: ${family}) on export ${input.exportSha}: ${ran.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}${deferred.length ? `; deferred ${deferredTags} to ${childRef} (LIVEREADBACK, ${home ? `child of ${homeNote || home}` : "parentless"}, related to ${input.bead})` : ""}`;
 	if (deferred.length > 0) {
 		const moved = new Set(deferred.map(b => b.item));
 		let item = 0;
@@ -1139,8 +1179,8 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	// an unreadable answer keeps the act and the fallback below still lands the close.
 	const gateRequired = await minReviewersRequired(input.repo, input.bead, row.status, env);
 	if (gateRequired === false) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${row.status} -> closed'; skipping gate report`);
-	else acts.push(["br", "gate", "report", input.bead, "--gate", MIN_REVIEWERS_GATE, "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
-	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${input.actor} (family: ${family})\n${lesson}\n${log.join("\n")}`, "--actor", input.actor]);
+	else acts.push(["br", "gate", "report", input.bead, "--gate", MIN_REVIEWERS_GATE, "--provider", `reviewer:${prover}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
+	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${prover} (family: ${family})${bg === undefined ? "" : ` background verifier ${bg.label} of ${bg.parent} session ${bg.session}`}\n${lesson}\n${log.join("\n")}`, "--actor", input.actor]);
 	if (homeNote) log.push(`LIVEREADBACK child placed under ${homeNote}`);
 	const child = deferred.length > 0 ? childRef : undefined;
 	if (input.dryRun) return await finishAttempt({ ok: true, code: "DRY_RUN", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts, child });
