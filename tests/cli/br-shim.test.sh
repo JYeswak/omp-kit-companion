@@ -31,7 +31,8 @@ if [ "$1" = "create" ] && printf '%s\n' "$@" | grep -Fqx -- "--help"; then
 	printf 'Usage: br create [OPTIONS] [TITLE]\n'
 	exit 0
 fi
-printf '%s\n' "$@" > "$BR_SHIM_TEST_ARGV"
+# The first call of a case is the one under test; the REVIEWROUTE1 hook's follow-up `comments add` must not replace it.
+[ -s "$BR_SHIM_TEST_ARGV" ] || printf '%s\n' "$@" > "$BR_SHIM_TEST_ARGV"
 if [ -n "${BR_CREATE_LOG:-}" ]; then
 	printf '<%s>' "$@" >> "$BR_CREATE_LOG"
 	printf '\n' >> "$BR_CREATE_LOG"
