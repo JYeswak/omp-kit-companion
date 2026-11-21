@@ -124,6 +124,7 @@ gate_cli_boot() { echo cli-boot >>"$WORK/calls"; }
 gate_harness() { echo harness-gate >>"$WORK/calls"; }
 gate_notes() { echo notes >>"$WORK/calls"; }
 gate_readme() { echo readme >>"$WORK/calls"; }
+gate_staged() { echo staged >>"$WORK/calls"; }
 gate_focused() { echo focused >>"$WORK/calls"; }
 run_gate
 EOF
@@ -136,7 +137,7 @@ dispatch() {
 		dispatch_rc=$?
 	fi
 }
-all_phases='manifest file-budget-policy cli-compile cli-boot harness-gate notes readme focused'
+all_phases='manifest file-budget-policy cli-compile cli-boot harness-gate notes readme staged focused'
 dispatch 'src/cli.ts'
 same "$dispatch_rc" 0 "code: passing control"
 same "$(paste -sd ' ' "$TMP/dispatch-work/calls")" "$all_phases" "code: ordered phases"
@@ -144,7 +145,7 @@ printf 'broken compiler input\n' >"$TMP/dispatch-work/BROKEN"
 for path in docs/guide.md changelog.d/x-1.md; do
 	dispatch "$path"
 	same "$dispatch_rc" 0 "$path: unrelated broken compiler skipped"
-	same "$(paste -sd ' ' "$TMP/dispatch-work/calls")" 'notes focused' "$path: no broad runtime phases"
+	same "$(paste -sd ' ' "$TMP/dispatch-work/calls")" 'notes staged focused' "$path: no broad runtime phases"
 done
 dispatch 'src/cli.ts'
 same "$dispatch_rc" 7 "code: planted broken read input refuses"
@@ -152,11 +153,11 @@ same "$(paste -sd ' ' "$TMP/dispatch-work/calls")" 'manifest file-budget-policy 
 rm "$TMP/dispatch-work/BROKEN"
 for path in README.md rules/example.md cases/cases.tsv .github/test-budget.json tests/cli/example.test.ts; do
 	case "$path" in
-		README.md) expected='notes readme focused' ;;
-		rules/*) expected='manifest harness-gate notes readme focused' ;;
-		cases/*) expected='harness-gate notes focused' ;;
-		.github/test-budget.json) expected='file-budget-policy notes focused' ;;
-		tests/*) expected='notes focused' ;;
+		README.md) expected='notes readme staged focused' ;;
+		rules/*) expected='manifest harness-gate notes readme staged focused' ;;
+		cases/*) expected='harness-gate notes staged focused' ;;
+		.github/test-budget.json) expected='file-budget-policy notes staged focused' ;;
+		tests/*) expected='notes staged focused' ;;
 	esac
 	dispatch "$path"
 	same "$dispatch_rc" 0 "$path: passing control"

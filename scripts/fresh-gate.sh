@@ -67,7 +67,7 @@ fail() {
 }
 
 require_gate_functions() {
-	for name in gate_manifest gate_cli_compile gate_cli_boot gate_harness gate_notes gate_readme gate_focused select_affected_tests run_affected_tests expand_changed_with_importers; do
+	for name in gate_manifest gate_cli_compile gate_cli_boot gate_harness gate_notes gate_readme gate_staged gate_focused select_affected_tests run_affected_tests expand_changed_with_importers; do
 		command -v "$name" >/dev/null 2>&1 || fail "required gate function is missing: $name"
 	done
 }
@@ -721,6 +721,41 @@ gate_readme() {
 	)
 }
 
+# STAGEDGATE1: the pre-commit members (scripts/check-staged-*.sh: imports, fragments, regexploit, pysafe, tempsafe, kitlib,
+# br-init, wallclock, readme, embed) judge the commit a hook is about to make. A handoff committed in an ovnfs checkout
+# carries no hook, so a `sh -c <variable>` test reached main (6e6440a0eb) and failed both hosted ladder jobs. This
+# phase makes the gate run the same members: a scratch repository holds BASE as HEAD and the candidate's tree as the
+# staged index, so each member sees exactly the staged change a hook would. The scratch repository borrows the pushing
+# checkout's objects (alternates) and release tags, as the README member reads tags. The members come from the
+# candidate's own tree (they judge the candidate by its own rules, like the other phases).
+gate_staged() {
+	(
+		repo=${FRESH_GATE_REPO:-$ROOT}
+		base=$(git -C "$repo" rev-parse --verify "${BASE:-$COMMIT^}^{commit}") || { echo "staged-members: cannot resolve the base of $COMMIT" >&2; exit 1; }
+		commit=$(git -C "$repo" rev-parse --verify "$COMMIT^{commit}") || { echo "staged-members: cannot resolve $COMMIT" >&2; exit 1; }
+		probe="$WORK/staged-probe"
+		mkdir "$probe" || exit 1
+		git -C "$probe" init -q || exit 1
+		git -C "$repo" rev-parse --path-format=absolute --git-path objects >"$probe/.git/objects/info/alternates" || exit 1
+		git -C "$repo" for-each-ref --format='%(objectname) %(refname)' refs/tags >"$probe/.git/packed-refs" || exit 1
+		git -C "$probe" checkout -q --detach "$base" || exit 1
+		git -C "$probe" read-tree -u --reset "$commit" || exit 1
+		failed=
+		for member in "$ARCHIVE_DIR"/scripts/check-staged-*.sh; do
+			[ -f "$member" ] || continue
+			name=$(basename "$member")
+			if out=$(cd "$probe" && sh "$member" 2>&1); then
+				echo "staged-members: $name ok"
+			else
+				echo "staged-members: $name REFUSED"
+				printf '%s\n' "$out"
+				failed="$failed $name"
+			fi
+		done
+		[ -z "$failed" ] || { echo "staged-members: REFUSED:$failed" >&2; exit 1; }
+	)
+}
+
 gate_focused() {
 	expand_changed_with_importers || return $?
 	focus_tests=
@@ -1291,7 +1326,7 @@ run_gate() {
 	started=$(date +%s)
 	gate_rc=0
 	for phase in manifest:gate_manifest file-budget-policy:gate_file_budget_policy cli-compile:gate_cli_compile cli-boot:gate_cli_boot \
-		harness-gate:gate_harness notes:gate_notes readme:gate_readme focused:gate_focused; do
+		harness-gate:gate_harness notes:gate_notes readme:gate_readme staged:gate_staged focused:gate_focused; do
 		if ! phase_needed "${phase%%:*}"; then
 			echo "SKIP ${phase%%:*}: no changed input paths"
 			continue
