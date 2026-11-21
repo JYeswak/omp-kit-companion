@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { run, RunResult } from "../../src/kitlib/run.ts";
+import { run, runSync, RunResult } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { verifyBead } from "../../src/verify.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
@@ -224,13 +224,16 @@ test("LANDPIPE1 handoff trailer: a published GREEN source with no Bead trailer i
 	expect(handed.rc, output(handed)).toBe(0);
 	expect(output(handed)).not.toContain("NOT_PUBLISHED");
 	expect(await f.state("pw-missing")).toBe("in_review");
-	// The acceptance command (`sh tests/missing.sh`) cannot run in the export. Verify reports that command's own exit code
-	// (127), never a review-admission relabel: the Lesson exists, so nothing here is a handoff refusal.
+	// The acceptance command (`sh tests/missing.sh`) cannot run in the export. Verify reports that command's own exit code,
+	// never a review-admission relabel: the Lesson exists, so nothing here is a handoff refusal. A missing script file exits 127
+	// under macOS sh and 2 under dash (Ubuntu CI), so the expectation is what this platform's own sh gives for it.
+	const own = runSync(["sh", "tests/missing.sh"], { cwd: f.repo, deadline_s: fixtureDeadlineS(10) }).rc;
+	expect(own).not.toBe(0);
 	const verdict = await verifyBead({ bead: "pw-missing", exportSha: source, repo: f.repo, actor: REVIEWER, env: { ...f.env, BEADS_DB: join(f.repo, ".beads/beads.db"), AGENT_NAME: REVIEWER }, dryRun: true });
 	expect(verdict.code, String(verdict.log)).not.toBe("LESSON_MISSING");
 	expect(verdict.code).not.toBe("NOT_PUBLISHED");
 	expect(verdict.code).not.toBe("ACCEPTANCE_NOT_REPLAYABLE");
-	expect(verdict.replays.map(replay => replay.rc)).toEqual([127]);
+	expect(verdict.replays.map(replay => replay.rc)).toEqual([own]);
 }, TEST_TIMEOUT_MS);
 
 test("PWDI original sync controls preserve three-behind, fast-forward, dirty and post-push outcomes", async () => {

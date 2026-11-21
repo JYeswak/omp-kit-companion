@@ -126,7 +126,8 @@ else process.exit(9);
 	const shim = (args: string[], actor = BUILDER) => run(["sh", join(ROOT, "scripts/br-shim.sh"), "--db", db, ...args], {
 		cwd: repo, env: { ...env, AGENT_NAME: actor }, deadline_s: fixtureDeadlineS(60), max_output_bytes: 4 << 20,
 	});
-	const reason = `DONE ${repo}@${published}: native fixture qualification`;
+	// LANDPIPE1: the in_review admission requires the bead author's Lesson (verify's LESSON_MISSING predicate), so the handoff carries one.
+	const reason = `DONE ${repo}@${published}: native fixture qualification\nLesson: a handoff names its reviewer`;
 	return { dir, repo, origin, published, env, git, br, state, comments, shim, reason, mailLog };
 }
 
