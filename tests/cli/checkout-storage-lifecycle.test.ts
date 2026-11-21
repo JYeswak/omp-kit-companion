@@ -133,6 +133,31 @@ test("scratch under an ovnfs checkout is checkout-owned, not foreign", () => {
 	expect(existsSync(join(dir, ".owner"))).toBe(true);
 });
 
+// REAPTIMEOUT1: walking checkout-owned scratch (11,458 dirs, 351 GB of logical bytes over NFS in the 2026-11-21 census) cost a
+// 690 s plan and held the scheduled reaper past its 30 min cap before it reaped anything. The SKIP verdict needs no size.
+test("REAPTIMEOUT1: a checkout-owned verdict does not walk the dir: its bytes stay unmeasured", () => {
+	const f = scratchFixture();
+	const coRoot = join(f.base, "checkouts", "co1", "var", "agent-tmp");
+	const dir = join(coRoot, "work.999998");
+	mkdirSync(join(dir, "deep", "er"), { recursive: true, mode: 0o700 });
+	writeFileSync(join(dir, ".owner"), JSON.stringify(f.owner), { mode: 0o600 });
+	writeFileSync(join(dir, "deep", "er", "payload.bin"), Buffer.alloc(1 << 20, 1));
+	const deps = { ...deadDeps(), checkoutProbe: () => "co1", checkoutNameCache: new Map<string, string | null>() };
+	const verdict = inspectOne(dir, coRoot, deps as InspectDeps);
+	expect(verdict?.reason).toBe("checkout-owned-scratch");
+	expect(verdict?.sizeBytes).toBe(0);
+	expect(verdict?.detail).toContain("bytes not measured");
+	// Control: the same bytes under a root that is not a checkout are measured.
+	const plainRoot = join(f.base, "plainproj", "var", "agent-tmp");
+	const plain = join(plainRoot, "work.999997");
+	mkdirSync(join(plain, "deep"), { recursive: true, mode: 0o700 });
+	writeFileSync(join(plain, ".owner"), JSON.stringify(f.owner), { mode: 0o600 });
+	writeFileSync(join(plain, "deep", "payload.bin"), Buffer.alloc(1 << 20, 1));
+	const measured = inspectOne(plain, plainRoot, { ...deps, checkoutProbe: () => null, checkoutNameCache: new Map<string, string | null>() } as InspectDeps);
+	expect(measured?.reason).not.toBe("checkout-owned-scratch");
+	expect(measured?.sizeBytes ?? 0).toBeGreaterThanOrEqual(1 << 20);
+});
+
 test("plan skips the root-local quarantine directory", () => {
 	const f = scratchFixture();
 	const local = join(f.root, QUARANTINE_LOCAL_DIR, "work.999999.q-2020-01-01T00-00-00-000Z");

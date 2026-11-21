@@ -3556,7 +3556,7 @@ export function summarizeScratch(sessions: ScratchVerdict[], roots: string[]): S
 		totals.countByVerdict[key] = (totals.countByVerdict[key] ?? 0) + 1;
 		// A checkout view is a copy-on-write window onto the source's bytes, not owned bytes: counting it per
 		// root double-counts logical bytes as reclaimable (35 GB per checkout root in the 2026-11-20 census).
-		// The pin stays visible under sizeByVerdict/countByVerdict; sizeByRoot counts only reaper-owned bytes.
+		// The pin stays visible as countByVerdict (its bytes are not measured since REAPTIMEOUT1); sizeByRoot counts only reaper-owned bytes.
 		if (verdict.reason === "checkout-owned-scratch") continue;
 		const root = roots.find(candidate => verdict.dir.startsWith(candidate + "/")) ?? dirname(verdict.dir);
 		totals.sizeByRoot[root] = (totals.sizeByRoot[root] ?? 0) + verdict.sizeBytes;
@@ -3696,8 +3696,12 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 	// and `ovnfs rm` removes everything inside it, ignored files included. The SKIP names the owning checkout.
 	const checkoutName = scratchRootCheckoutName(root, deps);
 	if (checkoutName !== null) {
+		// REAPTIMEOUT1: the verdict needs no size. A checkout view is not reaper-owned bytes (summarizeScratch never counts it
+		// per root) and no decision reads this row's bytes, yet walking it was the whole cost of a run: 11,458 such dirs
+		// (351 GB of logical bytes across 20+ NFS-served checkouts) took 690 s to plan and held the scheduled run past its
+		// 30 min cap before any real reap. `omp-kit checkouts plan` reports a checkout's bytes, best effort, on demand.
 		return { dir, action: "SKIP", reason: "checkout-owned-scratch", owner: readOwner(dir).owner,
-			sizeBytes: dirSize(dir), detail: `checkout ${checkoutName} owns this root; its opener releases it with ovnfs rm` };
+			sizeBytes: 0, detail: `checkout ${checkoutName} owns this root; its opener releases it with ovnfs rm (bytes not measured)` };
 	}
 	// RELEASELIVE1: a dir a registered user still runs in is never quarantined or reaped, released or not.
 	const user = blockingScratchUser(dir, deps.liveness);
