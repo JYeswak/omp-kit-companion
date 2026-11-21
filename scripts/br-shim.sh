@@ -480,6 +480,25 @@ if { [ "$gate_sub" = update ] || { [ "$gate_sub" = comments ] && [ "$gate_id" = 
 		*) fail "HANDOFF_UNGATED source admission could not be verified; run in the source checkout: sh scripts/fresh-gate.sh --commit <sha>" ;;
 	esac
 fi
+# REVIEWROUTE1 (ompkit-uikz9): after a bead successfully enters in_review,
+# route a named non-author reviewer of the same project and wake it with the
+# exact verify command. The transition runs first and routing only warns: a
+# router trouble never blocks the handoff, so this adds no new refusal.
+if [ "$gate_sub" = "update" ] && [ "$gate_claim" = 0 ] && [ "$gate_extra_ids" = 0 ] && [ -n "$gate_id" ] && [ "$gate_status" = "in_review" ]; then
+	route_dir="$(dirname -- "$self_path")"
+	if [ -f "$route_dir/review-route.py" ] && command -v python3 >/dev/null 2>&1; then
+		if [ -n "$found" ]; then
+			"$real" "$@"
+		else
+			"$real" "$@" --actor "$AGENT_NAME"
+		fi
+		route_rc=$?
+		if [ "$route_rc" = 0 ]; then
+			(cd -- "$route_dir" && python3 ./review-route.py route --bead "$gate_id" --db "$tracker_db_path" --project "$tracker_project" --actor "$AGENT_NAME" --real-br "$real" --tcomment "$gate_tcomment" --treason "$gate_reason") || echo "br-shim: review-route warn (handoff kept)" >&2
+		fi
+		exit "$route_rc"
+	fi
+fi
 # PARENTBLOCK1 (rz5.134): a blocks edge from a bead onto its own parent-child descendant hides every child of it from
 # br ready. The helper walks the target's parent chain with the real br and refuses only that edge. It runs by a
 # literal script path from the shim's own directory, so the Python it executes is the judged file beside this shim;
