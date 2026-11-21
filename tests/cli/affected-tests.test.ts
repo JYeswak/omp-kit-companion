@@ -477,3 +477,40 @@ test("EXTLOADGATE1 a staged extensions/*.ts or package.json change selects the p
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+// NAMEDSUITE1 (ompkit-1ra0d.218.1): tests/cli/br-shim.test.sh builds the path of scripts/br-shim.sh at run time, so no literal
+// reference selected it when REVIEWROUTE1 changed the script; it failed five cases at the release verdict instead.
+const NAMED: Record<string, string> = {
+	"scripts/shim.sh": "#!/bin/sh\necho shim\n",
+	"tests/cli/shim.test.sh": '#!/bin/sh\nDIR=scripts\nsh "$ROOT/$DIR/sh""im.sh"\n',
+	"scripts/lib.py": "def lib(): pass\n",
+	"tests/cli/lib.test.sh": '#!/bin/sh\nPY=li\npython3 "$ROOT/scripts/${PY}b.py"\n',
+	"tests/cli/orphan.test.sh": "#!/bin/sh\necho orphan\n",
+};
+
+test("NAMEDSUITE1 a suite named after the script it judges is selected when that script changes, whatever path it builds at run time", () => {
+	const dir = tree(NAMED);
+	try {
+		expect(select(dir, ["scripts/shim.sh"]).tests).toEqual(["tests/cli/shim.test.sh"]);
+		expect(select(dir, ["scripts/lib.py"]).tests).toEqual(["tests/cli/lib.test.sh"]);
+		// Controls: a suite with no same-stem source is selected only by itself, and the named edge is one hop only.
+		expect(select(dir, ["tests/cli/orphan.test.sh"]).tests).toEqual(["tests/cli/orphan.test.sh"]);
+		expect(select(dir, ["scripts/shim.sh"]).err).toContain("affected: tests/cli/shim.test.sh <- scripts/shim.sh");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("NAMEDSUITE1 mutant: without the naming edge the same change selects nothing", () => {
+	const dir = tree(NAMED);
+	try {
+		const source = readFileSync(selector, "utf8");
+		const mutated = source.replace("for (const target of suiteNamedTargets(rel, files)) edge(namers, rel, target);", "");
+		expect(mutated).not.toBe(source);
+		const mutant = join(dir, "mutant-selector.ts");
+		writeFileSync(mutant, mutated);
+		expect(select(dir, ["scripts/shim.sh"], mutant).tests).toEqual([]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

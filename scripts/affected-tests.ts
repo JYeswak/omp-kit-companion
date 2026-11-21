@@ -308,6 +308,19 @@ function resolveShOperand(fromRel: string, operand: string): string | null {
 	return base;
 }
 
+// NAMEDSUITE1: a suite is named after what it judges. tests/cli/br-shim.test.sh runs scripts/br-shim.sh but builds that path
+// at run time, so no literal reference shows the edge: a change to the script selected neither the suite nor the REVIEWROUTE1
+// regression it caught (found by the 0.2.140 verdict, not by the push gate or hosted CI). Same-stem sources are named by
+// their suite, one hop like any naming edge.
+function suiteNamedTargets(test: string, files: ReadonlySet<string>): string[] {
+	if (!test.startsWith("tests/cli/")) return [];
+	const file = test.slice("tests/cli/".length);
+	const suffix = TEST_SUFFIX.find((candidate) => file.endsWith(candidate));
+	if (suffix === undefined) return [];
+	const stem = file.slice(0, -suffix.length);
+	return ["scripts", "src", "extensions"].flatMap((dir) => [".sh", ".py", ".ts"].map((ext) => `${dir}/${stem}${ext}`)).filter((candidate) => files.has(candidate));
+}
+
 export function selectAffected(root: string, changed: readonly string[]): Selection {
 	const all = walk(root);
 	const files = new Set(all);
@@ -376,6 +389,7 @@ export function selectAffected(root: string, changed: readonly string[]): Select
 			if (isTestFile(rel) || SCANNED_EXT.some((ext) => target.endsWith(ext))) edge(namers, rel, target);
 		}
 		if (isTestFile(rel)) {
+			for (const target of suiteNamedTargets(rel, files)) edge(namers, rel, target);
 			for (const [base, fixtures] of fixtureByBase) {
 				if (!text.includes(`"${base}"`) && !text.includes(`'${base}'`)) continue;
 				for (const fixture of fixtures) edge(namers, rel, fixture);

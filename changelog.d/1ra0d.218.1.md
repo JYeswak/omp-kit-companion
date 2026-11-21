@@ -1,0 +1,2 @@
+### Fixed
+- `scripts/affected-tests.ts` now names a suite after what it judges (NAMEDSUITE1): `tests/cli/<stem>.test.{ts,sh}` is selected, one hop, when `scripts/<stem>.{sh,py,ts}`, `src/<stem>.ts` or `extensions/<stem>.ts` changes, even when the suite builds that path at run time and no literal reference shows the edge. `tests/cli/br-shim.test.sh` is the case that escaped: a change to `scripts/br-shim.sh` (REVIEWROUTE1) selected 32 suites but not it, the clone gate and hosted CI passed, and the release verdict found five failing cases. It adds selection only, no refusal.
