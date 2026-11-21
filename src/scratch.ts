@@ -4182,6 +4182,17 @@ export function findBlockedNetworkMounts(run: ScratchRunner, timeoutMs: number =
 	return blocked;
 }
 
+/**
+ * TCCPROMPT1: the probe command shared by the reaper and `doctor --scope access`: this same binary opens one path and exits (a platform
+ * binary such as ls is denied a removable volume at once while the kit's binary blocks, and a macOS consent prompt names the binary that
+ * asked, so only the kit's own identity proves what the kit can open). It takes no lock and writes no state; the
+ * `service run scratch-reaper` entry reads OMP_KIT_SCRATCH_PROBE before anything else.
+ */
+export function selfOpenProbe(path: string): { args: string[]; env: Record<string, string> } {
+	const cli = join(import.meta.dir, "cli.ts");
+	return { args: [process.execPath, ...(import.meta.path.startsWith("/$bunfs/") ? [] : [cli]), "service", "run", "scratch-reaper", "--json"], env: { OMP_KIT_SCRATCH_PROBE: path } };
+}
+
 export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult {
 	const blockedMounts = deps.probeNetworkMounts === true ? findBlockedNetworkMounts(deps.run, deps.networkProbeTimeoutMs, deps.mountProbe) : [];
 	blockedMountPrefixes = blockedMounts.map(blocked => blocked.mount);

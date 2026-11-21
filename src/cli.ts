@@ -84,7 +84,7 @@ import { ccStateDir } from "./service.ts";
 import { retainOmpSessions } from "./session-retain.ts";
 import { retainStateLedgers, type LedgerRetentionReport } from "./ledger-retain.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
-import { defaultBudgetLedgerPath, releaseBudgetEntry, SCRATCH_EXPORT_DIRECTORY, SCRATCH_REAPER_ENTRY_BUDGET, SCRATCH_REAPER_HEADROOM_MS, updateScratchUsers } from "./scratch.ts";
+import { defaultBudgetLedgerPath, releaseBudgetEntry, SCRATCH_EXPORT_DIRECTORY, SCRATCH_REAPER_ENTRY_BUDGET, SCRATCH_REAPER_HEADROOM_MS, selfOpenProbe, updateScratchUsers } from "./scratch.ts";
 import { applyCheckoutReap, CHECKOUT_IDLE_DAYS_DEFAULT, checkoutArchiveRoot, diffCheckoutEmpty, listIdleEmptyCheckouts, planCheckoutReap, sizeCheckoutBytes } from "./checkout-reap.ts";
 import type { ScratchReleaseOptions } from "./scratch.ts";
 import { appendLog } from "./scratch.ts";
@@ -2800,8 +2800,8 @@ async function runScratchReaperBody(home: string): Promise<CliResult> {
 		entryBudget: SCRATCH_REAPER_ENTRY_BUDGET,
 		// Only the scheduled job (launchd or systemd set OMP_KIT_JOB) can be blocked by a mount; a shell run reads every mount and a probe would spend its cap.
 		probeNetworkMounts: process.env.OMP_KIT_JOB === "scratch-reaper",
-		// NFSPROBE1: a mount is probed by this same binary (a platform binary such as ls is denied a removable volume at once while ours blocks on the open).
-		mountProbe: mount => ({ args: [process.execPath, ...(import.meta.path.startsWith("/$bunfs/") ? [] : [import.meta.path]), "service", "run", "scratch-reaper", "--json"], env: { OMP_KIT_SCRATCH_PROBE: mount } }),
+		// NFSPROBE1: a mount is probed by this same binary (see selfOpenProbe).
+		mountProbe: selfOpenProbe,
 		deadlineMs: Date.now() + Math.max(60_000, cap - SCRATCH_REAPER_HEADROOM_MS),
 	});
 	process.send?.({ action: "BROWSER_INSPECT", path: home });

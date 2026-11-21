@@ -24,6 +24,8 @@ import { inspectHookInstallers, inspectHooks, liveHookFreshnessIo } from "./hook
 import { analyzeBeadBreadth, loadPlanningScoreConfig } from "./planning-score.ts";
 import type { LoadedPlanningScoreConfig, PlanningBead } from "./planning-score.ts";
 import { inspectTestScope } from "./test-scope.ts";
+import { inspectAccess } from "./access-doctor.ts";
+import { defaultRunner } from "./scratch.ts";
 import { inspectGatePlane } from "./gate-plane.ts";
 
 export type DiagnosticStatus = "OK" | "DEGRADED" | "DRIFT" | "UNVERIFIED" | "FAIL" | "NOT_RUN";
@@ -66,6 +68,7 @@ export const DIAGNOSTIC_SCOPE_COMPONENTS: Readonly<Record<string, readonly strin
 	hooks: ["hooks"],
 	"regex-tools": ["regex-tools"],
 	"test-scope": ["test-scope"],
+	access: ["access"],
 	gates: ["gates"],
 	rch: ["rch", "rch_gc_roots", "rch_workers"],
 	activation: ["activation"],
@@ -2373,6 +2376,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (input.scope === "layout" && input.project) rows.push(...inspectLayoutScope(resolve(input.project), root));
 	if (input.scope === "public-files" && input.project) rows.push(...inspectPublicFilesScope(resolve(input.project), root));
 	if (input.scope === "test-scope") rows.push(inspectTestScope());
+	if (input.scope === "access") rows.push(inspectAccess({ home, run: defaultRunner }));
 	if (input.scope === "gates") rows.push(await inspectGatePlane({ root, home }));
 	if (wants("actions-billing") && input.actionsBilling) rows.push(inspectActionsBilling(input.actionsBilling));
 	const manifest = wants("kit", "manifest", "installed_rules", "effective_rules", "retired_rules", "unknown_rules", "project_rules") ? readManifest(root) : undefined;
