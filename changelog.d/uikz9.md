@@ -1,2 +1,0 @@
-### Added
-- `br-shim.sh` routes a named non-author reviewer after a bead enters `in_review`: the new `scripts/review-route.py` picks a registered same-project seat (never author or implementer, preferring a different model family, least `in_review` load first), records `REVIEWROUTE <seat>: <exact verify command>` on the bead, and wakes the seat by mail. Unresolvable routing records `REVIEWROUTE PENDING` and routes to the observer; the handoff itself is never blocked.
