@@ -238,6 +238,8 @@ test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, ot
 	mkdirSync(join(state, "scratch-users"), { recursive: true });
 	mkdirSync(join(state, "send-drop"), { recursive: true });
 	mkdirSync(join(state, "write-ledger"), { recursive: true });
+	mkdirSync(join(state, "chief", "fleet-guard"), { recursive: true });
+	mkdirSync(join(state, "model-evidence"), { recursive: true });
 	writeFileSync(join(state, "gate-events.jsonl"), "{\"open\":1}\n");
 	writeFileSync(join(state, "mail-wake.jsonl"), "{\"open\":1}\n");
 	writeFileSync(join(state, "scratch-budgets.json"), "{}\n");
@@ -245,6 +247,11 @@ test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, ot
 	writeFileSync(join(state, "scratch-users", "def456.lock"), "1\n");
 	writeFileSync(join(state, "git-lock-rate.0.json.lock"), "1\n");
 	writeFileSync(join(state, "kit-update-job-11111111-2222-3333-4444-555555555555.json"), "{}\n");
+	// UPDPOST1: the chief's tick and fleet-guard state, the model-evidence ledgers and the native-tool attempt counters.
+	writeFileSync(join(state, "chief", "fleet-guard", "state.json"), "{}\n");
+	writeFileSync(join(state, "chief", "tick-watchdog.log"), "tick\n");
+	writeFileSync(join(state, "model-evidence", "current.jsonl"), "{}\n");
+	writeFileSync(join(state, "native-tool-attempts.json"), "{}\n");
 	const before = snapshotWatched(paths);
 	// The fleet's own clock during the isolated run: appends, a new wake file, a new job record, a rate tmp.
 	appendFileSync(join(state, "gate-events.jsonl"), "{\"tick\":2}\n");
@@ -256,9 +263,16 @@ test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, ot
 	writeFileSync(join(state, "send-drop", "cfsios-1-kit-send-ce1bd6d1a31e.md"), "drop\n");
 	writeFileSync(join(state, "write-ledger", "2026-11-10.jsonl"), "{}\n");
 	writeFileSync(join(state, "upgrade-notice-4cfb58040454d8b4.json"), "[]\n");
+	writeFileSync(join(state, "chief", "fleet-guard", "state.json"), "{\"tick\":2}\n");
+	appendFileSync(join(state, "chief", "tick-watchdog.log"), "tick 2\n");
+	writeFileSync(join(state, "chief", "reports-2026-11-21.md"), "new chief file\n");
+	appendFileSync(join(state, "model-evidence", "current.jsonl"), "{\"tick\":2}\n");
+	writeFileSync(join(state, "model-evidence", "2026-11-21.jsonl"), "{}\n");
+	writeFileSync(join(state, "native-tool-attempts.json"), "{\"n\":2}\n");
 	const quiet = compareWatched(before, snapshotWatched(paths), home);
 	expect(quiet, JSON.stringify(quiet)).toMatchObject({ unchanged: true, complete: true, changed_paths: [], incomplete_paths: [] });
 	expect(quiet.live_state_paths).toEqual([
+		"~/.local/state/omp-kit/chief",
 		"~/.local/state/omp-kit/gate-events.jsonl",
 		"~/.local/state/omp-kit/git-lock-rate.0.json.lock",
 		"~/.local/state/omp-kit/git-lock-rate.1.json.tmp.12345",
@@ -266,15 +280,22 @@ test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, ot
 		"~/.local/state/omp-kit/kit-update-job-11111111-2222-3333-4444-555555555555.json",
 		"~/.local/state/omp-kit/kit-update-job-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.json",
 		"~/.local/state/omp-kit/mail-wake.jsonl",
+		"~/.local/state/omp-kit/model-evidence",
+		"~/.local/state/omp-kit/native-tool-attempts.json",
 		"~/.local/state/omp-kit/scratch-budgets.json",
 		"~/.local/state/omp-kit/scratch-users",
 		"~/.local/state/omp-kit/send-drop",
 		"~/.local/state/omp-kit/upgrade-notice-4cfb58040454d8b4.json",
 		"~/.local/state/omp-kit/write-ledger",
 	]);
-	// Planted: a kit receipt the fleet never writes is still reported beside the live state.
+	// Planted: a kit receipt the fleet never writes is still reported beside the live state, and so are look-alike
+	// names that are not the declared namespaces (a different top-level file, not the chief/ or model-evidence/ directory).
 	writeFileSync(join(state, "receipts", "x.json"), "{}\n");
+	writeFileSync(join(state, "chief-notes.json"), "{}\n");
+	writeFileSync(join(state, "model-evidence.json"), "{}\n");
 	expect(compareWatched(before, snapshotWatched(paths), home).changed_paths).toEqual([
+		"~/.local/state/omp-kit/chief-notes.json",
+		"~/.local/state/omp-kit/model-evidence.json",
 		"~/.local/state/omp-kit/receipts/x.json",
 	]);
 }, fixtureDeadlineS() * 1000);

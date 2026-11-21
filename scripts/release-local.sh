@@ -346,7 +346,11 @@ Agent: $agent" >"$message"
 # RELDIAG1 (ompkit-1ra0d.210): 0.2.125 ended PARTIAL the same way, but through the kit's own diagnostics handler:
 # cli.ts persistHandlerDiagnostic writes diagnostics/handler-<hex16>.json (randomBytes(16).toString("hex")) when a
 # handler fails during the isolated test, so those paths join the class. Anything else still refuses.
-RELREMEDY_LIVE_WRITER='^(gate-events\.jsonl(\.1)?|inbox-wake/[A-Za-z0-9._-]+\.json|diagnostics/handler-[0-9a-f]{32}\.json)$'
+# UPDPOST1 (ompkit-3isy): 0.2.138 and 0.2.139 ended PARTIAL on running seats' and chief ticks' own state under the kit state
+# root: chief/** (tick, fleet-guard, watchdog), model-evidence/<name>.jsonl and native-tool-attempts.json. The installed
+# updater's postcheck is the PREVIOUS version's, so the in-product exemption (operator-snapshot.ts) only helps the install
+# after next; this class carries the cut until then. Chief path segments never start with a dot, so no `..` can match.
+RELREMEDY_LIVE_WRITER='^(gate-events\.jsonl(\.1)?|inbox-wake/[A-Za-z0-9._-]+\.json|diagnostics/handler-[0-9a-f]{32}\.json|native-tool-attempts\.json|model-evidence/[A-Za-z0-9][A-Za-z0-9._-]*\.jsonl|chief/([A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*)$'
 # jq prelude: $root is the absolute kit state root, $home expands the updater's ~/ display form.
 # shellcheck disable=SC2016 # jq variables, not shell expansions
 RELREMEDY_JQ='
@@ -368,7 +372,7 @@ install_postcheck_cause() {
 			if ($q | abs) == $root then "\($q): exceeds the postcheck snapshot budget (20000 entries or 512 MiB per root): size, not a race"
 			else "\($q): unreadable mid-read, a live-writer race" end),
 		(($p.changed_operator_paths // [])[] | if writer then "\(.): written by a kit service during the isolated test (live-writer race)"
-			else "\(.): changed outside the kit live-writer class (gate-events.jsonl, inbox-wake/*.json, diagnostics/handler-*.json)" end)'
+			else "\(.): changed outside the kit live-writer class (gate-events.jsonl, inbox-wake/*.json, diagnostics/handler-*.json, chief/**, model-evidence/*.jsonl, native-tool-attempts.json)" end)'
 	install_class_jq -r 2>/dev/null | sed 's/^/release-local: postcheck: /' >&2 || true
 }
 # Keep the verified sources past $WORK cleanup, so the printed apply command stays runnable after exit.

@@ -96,7 +96,11 @@ const reconcileScenarios = ["reconciled-complete", "reconciled-missing-profile",
 // RELDIAG1 (ompkit-1ra0d.210): the exact 0.2.125 shape, whose only changed files are the kit's own
 // diagnostics/handler-*.json files, plus a foreign-path negative outside the kit state dir.
 const diagnosticsScenarios = ["diagnostics-partial", "diagnostics-foreign"] as const;
-for (const scenario of ["updated", "symlinked-work", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused", ...writerScenarios, ...diagnosticsScenarios, ...reconcileScenarios] as const) {
+// UPDPOST1 (ompkit-3isy): the exact 0.2.139 shape, whose only changed files are running seats' and chief ticks' own state
+// (chief/**, model-evidence/*.jsonl, native-tool-attempts.json), a foreign negative (a receipt no seat writes and a look-alike
+// top-level name), and a mutant that restores the previous class and must fall back to the refusal.
+const fleetScenarios = ["fleet-partial", "fleet-foreign", "fleet-mutant"] as const;
+for (const scenario of ["updated", "symlinked-work", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused", ...writerScenarios, ...diagnosticsScenarios, ...fleetScenarios, ...reconcileScenarios] as const) {
 	const writer = (writerScenarios as readonly string[]).includes(scenario);
 	test(`${writer ? "RELREMEDY1 " : ""}release install ${scenario} only stamps installed after real store alignment`, async () => {
 		const work = realpathSync(ownedTmp("release-install", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
@@ -192,6 +196,18 @@ if (args[0] === "update") {
       ["omp-kit update --reconcile cd03799d-67fd --yes"], false);
     process.exit(1);
   }
+  if (scenario.startsWith("fleet-")) {
+    // The exact 0.2.139 PARTIAL: only running seats' and chief ticks' own state changed.
+    const changed = ["~/.local/state/omp-kit/chief/fleet-guard/last.json", "~/.local/state/omp-kit/chief/fleet-guard/state.json", "~/.local/state/omp-kit/chief/tick-watchdog.log",
+      "~/.local/state/omp-kit/model-evidence/2026-11-21.jsonl", "~/.local/state/omp-kit/model-evidence/current.jsonl", "~/.local/state/omp-kit/native-tool-attempts.json",
+      ...(scenario === "fleet-foreign" ? ["~/.local/state/omp-kit/receipts/r1.json", "~/.local/state/omp-kit/chief-notes.json"] : [])];
+    emit({ action: "PARTIAL", receipt_id: "cd03799d-67fd", active_version: "0.0.0", matcher: "PASS", live: "PASS", postcheck: "FAIL",
+      postcheck_detail: { status: "FAIL", changed_operator_paths: changed, failed_stages: [], deferred_stages: [],
+        failures: changed.map(path => "Operator file changed during isolated test: " + path),
+        cause: { cause_code: "Error", cause_message: "KIT_POSTCHECK_FAILED" }, live_state_paths: ["~/.local/state/omp-kit/chrome-jfp"] } },
+      ["omp-kit update --reconcile cd03799d-67fd --yes"], false);
+    process.exit(1);
+  }
   emit({ action: "UPDATED", active_version: "0.0.0" }); process.exit(0);
 }
 if (args[0] === "apply" && args[1] === "plugin") {
@@ -206,10 +222,13 @@ if (args[0] === "apply" && args[1] === "plugin") {
 process.exit(99);
 `);
 		chmodSync(kit, 0o755);
-		// The mutant drops the live-writer class: its writer-only PARTIAL must fall back to the refusal.
+		// The mutants restore an older class: its writer-only PARTIAL must fall back to the refusal. writer-mutant drops the class
+		// entirely; fleet-mutant keeps the class as it stood before UPDPOST1 (a function replacement, as the text holds `$'`).
+		const previousClass = "'^(gate-events\\.jsonl(\\.1)?|inbox-wake/[A-Za-z0-9._-]+\\.json|diagnostics/handler-[0-9a-f]{32}\\.json)$'";
 		const installHelpers = scenario === "writer-mutant"
-			? stagePrelude.replace(/^RELREMEDY_LIVE_WRITER=.*$/m, "RELREMEDY_LIVE_WRITER='^$.'") : stagePrelude;
-		if (scenario === "writer-mutant") expect(installHelpers).not.toBe(stagePrelude);
+			? stagePrelude.replace(/^RELREMEDY_LIVE_WRITER=.*$/m, "RELREMEDY_LIVE_WRITER='^$.'")
+			: scenario === "fleet-mutant" ? stagePrelude.replace(/^RELREMEDY_LIVE_WRITER=.*$/m, () => `RELREMEDY_LIVE_WRITER=${previousClass}`) : stagePrelude;
+		if (scenario === "writer-mutant" || scenario === "fleet-mutant") expect(installHelpers).not.toBe(stagePrelude);
 		const receiptFunction = releaseStage("receipt() {", 'if [ "$DRY_RUN" = 1 ]; then\n\t# shellcheck');
 		const fixture = join(work, "install.sh");
 		writeFileSync(fixture, `${installHelpers}
@@ -229,12 +248,12 @@ receipt installed fixture fixture
 			const result = await runFixtureAsync(["bash", fixture, stageWork, ROOT, home], { cwd: ROOT, env: env as Record<string, string>, floor_s: 30 });
 			const stdout = new TextDecoder().decode(result.stdout);
 			const stderr = new TextDecoder().decode(result.stderr);
-			const successful = scenario === "updated" || scenario === "symlinked-work" || scenario === "browser-partial" || scenario === "writer-partial" || scenario === "diagnostics-partial" || scenario.startsWith("reconciled-");
+			const successful = scenario === "updated" || scenario === "symlinked-work" || scenario === "browser-partial" || scenario === "writer-partial" || scenario === "diagnostics-partial" || scenario === "fleet-partial" || scenario.startsWith("reconciled-");
 			expect(result.rc, stderr).toBe(successful ? 0 : 4);
 			const calls = readFileSync(join(work, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
 			expect(calls[0]).toEqual(["update", "--apply", "--yes", "--version", "0.0.0", "--index", join(work, "public/release-index.json"),
 				"--archive", join(work, "public/omp-kit-v0.0.0-darwin-arm64-none.tar.gz"), "--json"]);
-			expect(calls.filter(args => args.includes("--reconcile")).length).toBe(["browser-partial", "reconcile-refused", "writer-partial", "diagnostics-partial"].includes(scenario) || scenario.startsWith("reconciled-") ? 1 : 0);
+			expect(calls.filter(args => args.includes("--reconcile")).length).toBe(["browser-partial", "reconcile-refused", "writer-partial", "diagnostics-partial", "fleet-partial"].includes(scenario) || scenario.startsWith("reconciled-") ? 1 : 0);
 			if (scenario === "writer-partial") {
 				expect(calls.find(args => args.includes("--reconcile"))).toEqual(["update", "--reconcile", "cd03799d-67fd", "--yes", "--json"]);
 				expect(stdout).toContain("substep install.reconcile-kit-live-writer-state");
@@ -247,7 +266,13 @@ receipt installed fixture fixture
 				expect(stderr).toContain("diagnostics/handler-5735d1e1dc677c5aa334220edd816432.json: written by a kit service during the isolated test (live-writer race)");
 				expect(stderr).toContain("diagnostics/handler-8c2064fd6b9c2bcdabf25f719ce89a18.json: written by a kit service during the isolated test (live-writer race)");
 			}
-			if (scenario === "writer-foreign" || scenario === "writer-mutant" || scenario === "diagnostics-foreign") {
+			if (scenario === "fleet-partial") {
+				expect(calls.find(args => args.includes("--reconcile"))).toEqual(["update", "--reconcile", "cd03799d-67fd", "--yes", "--json"]);
+				expect(stdout).toContain("substep install.reconcile-kit-live-writer-state");
+				for (const path of ["chief/fleet-guard/last.json", "chief/fleet-guard/state.json", "chief/tick-watchdog.log", "model-evidence/2026-11-21.jsonl", "model-evidence/current.jsonl", "native-tool-attempts.json"])
+					expect(stderr).toContain(`${path}: written by a kit service during the isolated test (live-writer race)`);
+			}
+			if (scenario === "writer-foreign" || scenario === "writer-mutant" || scenario === "diagnostics-foreign" || scenario === "fleet-foreign" || scenario === "fleet-mutant") {
 				expect(stderr).toContain("not the known live-browser, kit live-writer or deferred-live PARTIAL");
 				expect(stderr).toContain(`reconcile it with: ${kit} update --reconcile cd03799d-67fd --yes`);
 				const apply = /re-apply with: (\S+) update --apply --yes --version 0\.0\.0 --index (\/\S+) --archive (\/\S+)$/m.exec(stderr);
@@ -255,6 +280,12 @@ receipt installed fixture fixture
 				for (const source of [apply![2]!, apply![3]!]) { expect(existsSync(source)).toBe(true); expect(source.startsWith(join(work, "public"))).toBe(false); }
 				if (scenario === "writer-foreign") expect(stderr).toContain("~/.omp/agent/config.yml: changed outside the kit live-writer class");
 				if (scenario === "diagnostics-foreign") expect(stderr).toContain("~/.config/operator.json: changed outside the kit live-writer class");
+				if (scenario === "fleet-foreign") {
+					expect(stderr).toContain("~/.local/state/omp-kit/receipts/r1.json: changed outside the kit live-writer class");
+					expect(stderr).toContain("~/.local/state/omp-kit/chief-notes.json: changed outside the kit live-writer class");
+					expect(stderr).toContain("chief/fleet-guard/state.json: written by a kit service during the isolated test (live-writer race)");
+				}
+				if (scenario === "fleet-mutant") expect(stderr).toContain("~/.local/state/omp-kit/chief/fleet-guard/state.json: changed outside the kit live-writer class");
 			}
 			if (successful) {
 				expect(stdout).toContain('"installed": true');
@@ -267,7 +298,7 @@ receipt installed fixture fixture
 			} else {
 				expect(stdout).not.toContain('"installed": true');
 				expect(stdout).not.toContain("installed 0.0.0; every profile link aligned");
-				const refusal = scenario === "foreign-write" || scenario === "writer-foreign" || scenario === "writer-mutant" || scenario === "diagnostics-foreign" ? "not the known live-browser, kit live-writer or deferred-live PARTIAL"
+				const refusal = scenario === "foreign-write" || scenario === "writer-foreign" || scenario === "writer-mutant" || scenario === "diagnostics-foreign" || scenario === "fleet-foreign" || scenario === "fleet-mutant" ? "not the known live-browser, kit live-writer or deferred-live PARTIAL"
 					: scenario === "stale-link" ? "installed profile alignment is stale"
 					: scenario === "wrong-version" ? "installed CLI version readback differs"
 					: "live-browser-state reconcile refused";

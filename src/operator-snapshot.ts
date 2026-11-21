@@ -54,14 +54,17 @@ const VOLATILE_CACHE_DIR_NAMES: Record<string, true> = {
  * clock, the installed kit-update job records its own runs, and live seats rewrite their own runtime state on
  * their own clock: goal-state records (extensions/kit-goal-state.ts), the imessage-bridge relay cursors and
  * delivery ledgers (src/imessage-bridge.ts), and the send plane's locks and pending proofs (src/send.ts).
+ * UPDPOST1 (0.2.138 and 0.2.139 installs ended PARTIAL on these): the chief's tick and fleet-guard state (chief/),
+ * the model-evidence ledgers (model-evidence/) and the native-tool attempt counters (native-tool-attempts.json),
+ * all rewritten every few seconds by running seats and chief ticks, never by an install.
  * None are kit install writes, and the post-run concurrent-writer probe cannot catch writes minutes apart,
  * so the snapshot does not judge them. Matched by exact top-level name, literal top-level prefix, whole
  * subdirectory, or anchored file prefix inside one named subdirectory (never a broad pattern).
  * Everything else under the state root stays watched.
  */
-const LIVE_FLEET_TOP_FILES: Record<string, true> = { "gate-events.jsonl": true, "mail-wake.jsonl": true, "scratch-budgets.json": true };
+const LIVE_FLEET_TOP_FILES: Record<string, true> = { "gate-events.jsonl": true, "mail-wake.jsonl": true, "native-tool-attempts.json": true, "scratch-budgets.json": true };
 const LIVE_FLEET_TOP_PREFIXES: readonly string[] = ["kit-update-job-", "git-lock-rate.", "upgrade-notice-"];
-const LIVE_FLEET_SUBDIRS: Record<string, true> = { "goal-state": true, "inbox-wake": true, "scratch-users": true, "send-drop": true, "send-locks": true, "tern-pending": true, "write-ledger": true };
+const LIVE_FLEET_SUBDIRS: Record<string, true> = { "chief": true, "goal-state": true, "inbox-wake": true, "model-evidence": true, "scratch-users": true, "send-drop": true, "send-locks": true, "tern-pending": true, "write-ledger": true };
 /** Anchored file prefixes inside one named subdirectory: the rest of that subdirectory stays watched. */
 const LIVE_FLEET_SUBDIR_PREFIXES: Record<string, readonly string[]> = { "jobs": ["imessage-bridge."] };
 
