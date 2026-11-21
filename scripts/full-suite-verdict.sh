@@ -351,7 +351,7 @@ fi
 # A candidate tree that carries no judging closure at all (a fixture, never a release) has no identity to compare: its
 # identity is unreadable and it is left to the reader's own judge-root check.
 if [ "$JUDGE_ROLE" = main ] && [ -z "$SHARD_OUT" ]; then
-	candidate_checks=$(python3 "$SCRIPT_DIR/suite-metrics.py" identity --root "$ARCHIVE_DIR" --scope full 2>/dev/null) || candidate_checks=
+	candidate_checks=$(PYTHONPATH="$SCRIPT_DIR" python3 -B -m suite-metrics identity --root "$ARCHIVE_DIR" --scope full 2>/dev/null) || candidate_checks=
 	if [ -n "$candidate_checks" ] && [ "$candidate_checks" != "$checks" ]; then
 		cleanup_archive
 		fail "JUDGE_NOT_CANDIDATE: this run's judging scripts ($SCRIPT_DIR) are not byte-identical to the candidate's own (judge $checks, candidate $candidate_checks); launch scripts/full-suite-verdict.sh from a clean checkout of $COMMIT"
