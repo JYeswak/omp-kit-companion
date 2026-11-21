@@ -32,7 +32,12 @@ function fixtureDirs(tag: string): { root: string; home: string; stateRoot: stri
 	writeFileSync(join(root, "package.json"), JSON.stringify({ version: "9.9.9", omp: { extensions: ["extensions/hello.ts"], notLoadedExtensions: {} } }));
 	return { root, home, stateRoot: join(home, ".local", "state", "omp-kit") };
 }
-const okService = () => async (_argv: readonly string[]) => ({ exit: 0, stdout: JSON.stringify({ code: 0, data: {} }), stderr: "" });
+// The real `omp-kit service install <job> --apply --yes --json` output (captured from the 0.2.140 update): the envelope has no
+// top-level `code`; `ok` is the verdict. A stub that prints {code: 0} passed the old check while every real run failed it.
+const serviceEnvelope = (ok: boolean, errors: unknown[] = []) => JSON.stringify({ ok, tool_version: "0.2.140",
+	data: { backup: null, changed: false, detail: "Identical bytes and loaded; no-op.", job: "scratch-reaper", label: "com.omp-kit.scratch-reaper", ok, overall: ok ? "OK" : "FINDINGS" },
+	meta: { schema_version: "1", verification: "UNVERIFIED" }, warnings: [], commands: [], errors });
+const okService = () => async (_argv: readonly string[]) => ({ exit: 0, stdout: serviceEnvelope(true), stderr: "" });
 function hookIo(record: string[]): HookRefreshIo {
 	return {
 		repos: () => [],
@@ -70,7 +75,7 @@ test("opt-outs skip without failure, envelope stays UPDATED with records", async
 	recordOptOut(home, "service:kit-update", "no auto service here");
 	const calls: string[][] = [];
 	const result = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit",
-		exec: async (argv) => { calls.push([...argv]); return { exit: 0, stdout: JSON.stringify({ code: 0, data: {} }), stderr: "" }; } });
+		exec: async (argv) => { calls.push([...argv]); return { exit: 0, stdout: serviceEnvelope(true), stderr: "" }; } });
 	expect(result.ok).toBe(true);
 	expect(result.failed).toEqual([]);
 	expect(result.skipped.map((s) => s.item)).toContain("rules:rules");
@@ -142,8 +147,8 @@ test("planted: a failing service apply reports FINDINGS, never UPDATED", async (
 	const { root, home, stateRoot } = fixtureDirs("servicefail");
 	const result = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit",
 		exec: async (argv) => argv.includes("kit-update")
-			? { exit: 1, stdout: JSON.stringify({ code: 1, errors: [{ code: "BOOTSTRAP_FAILED", message: "synthetic" }] }), stderr: "" }
-			: { exit: 0, stdout: JSON.stringify({ code: 0, data: {} }), stderr: "" } });
+			? { exit: 1, stdout: serviceEnvelope(false, [{ code: "BOOTSTRAP_FAILED", message: "synthetic" }]), stderr: "" }
+			: { exit: 0, stdout: serviceEnvelope(true), stderr: "" } });
 	expect(result.ok).toBe(false);
 	expect(result.failed.map((f) => f.item)).toContain("service:kit-update");
 	const out = updatePostApplyEnvelope(envelopeBase, { ok: true, detail: "linked" }, result, root);
@@ -151,6 +156,24 @@ test("planted: a failing service apply reports FINDINGS, never UPDATED", async (
 	expect(out.data["overall"]).toBe("FINDINGS");
 	const section = out.data["manifest"];
 	expect(section !== null && typeof section === "object" && "status" in section ? section.status : null).toBe("FINDINGS");
+});
+
+test("planted: exit 0 with ok:false, exit 1 with ok:true and unparsable output each read as a failed service; the real envelope reads applied", async () => {
+	const shapes: [string, { exit: number; stdout: string }][] = [
+		["ok-false", { exit: 0, stdout: serviceEnvelope(false) }],
+		["exit-1", { exit: 1, stdout: serviceEnvelope(true) }],
+		["garbage", { exit: 0, stdout: "not json" }],
+		["legacy-code-shape", { exit: 0, stdout: JSON.stringify({ code: 0, data: {} }) }],
+	];
+	for (const [name, shape] of shapes) {
+		const { root, home, stateRoot } = fixtureDirs(`shape-${name}`);
+		const result = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit", exec: async () => ({ ...shape, stderr: "" }) });
+		expect(result.failed.some((f) => f.item === "service:kit-update"), name).toBe(true);
+	}
+	const { root, home, stateRoot } = fixtureDirs("shape-real");
+	const real = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit", exec: okService(), hookIo: hookIo([]) });
+	expect(real.failed.some((f) => f.item.startsWith("service:"))).toBe(false);
+	expect(real.servicesApplied).toContain("kit-update");
 });
 test("planted: a failed relink reports FINDINGS, never UPDATED", async () => {
 	const out = updatePostApplyEnvelope(envelopeBase,

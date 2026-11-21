@@ -395,7 +395,7 @@ test("HOOKREFRESHALL1 install path: update --apply manifest invokes the same fle
 			pullRepos: () => [{ repo, source: "t:install-path" }],
 			runInstaller: (target) => { written.push(target); return { ok: true, detail: "stub installer" }; },
 		};
-		const exec = async (_argv: readonly string[]) => ({ exit: 0, stdout: JSON.stringify({ code: 0, data: {} }), stderr: "" });
+		const exec = async (_argv: readonly string[]) => ({ exit: 0, stdout: JSON.stringify({ ok: true, data: {} }), stderr: "" });
 		const result = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit", exec, hookIo });
 		expect(written).toEqual([repo]);
 		expect(result.hooksRepos).toBe(1);

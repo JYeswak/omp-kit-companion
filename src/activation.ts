@@ -522,16 +522,17 @@ export async function applyActivationManifest(input: { root: string; home: strin
 		}
 		try {
 			const ran = await exec([binary, "service", "install", name, "--apply", "--yes", "--json"]);
-			let code = -1, detail = "";
+			let applied = false, detail = "";
 			try {
-				const parsed = JSON.parse(ran.stdout) as { code?: unknown; errors?: unknown };
-				if (typeof parsed.code === "number") code = parsed.code;
+				// The CLI's --json output is {ok, tool_version, data, errors, ...}: `ok` is the verdict; the internal exit `code` is never printed.
+				const parsed = JSON.parse(ran.stdout) as { ok?: unknown; errors?: unknown };
+				applied = parsed.ok === true;
 				const firstError = Array.isArray(parsed.errors) ? parsed.errors[0] as { code?: unknown; message?: unknown } | undefined : undefined;
 				if (firstError && (typeof firstError.code === "string" || typeof firstError.message === "string")) {
 					detail = `${String(firstError.code ?? "ERROR")}: ${String(firstError.message ?? "")}`.trim();
 				}
 			} catch { detail = (ran.stdout + ran.stderr).slice(-300).trim(); }
-			if (ran.exit !== 0 || code !== 0) {
+			if (ran.exit !== 0 || !applied) {
 				failed.push({ item, detail: detail || `exit ${ran.exit}: ${(ran.stdout + ran.stderr).slice(-300).trim()}` });
 			} else {
 				servicesApplied.push(name);
