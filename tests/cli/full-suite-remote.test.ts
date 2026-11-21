@@ -185,6 +185,23 @@ test("a shard whose connection drops leaves no verdict, never PASS", async () =>
 	for (const path of timed) expect(remoteFiles).toContain(path);
 }, CASE_MS);
 
+// SHARDEVIDENCE1: a shard that finished with a FAIL holds the only copy of its failing test names (the worker's run
+// directory is cleaned once its evidence is fetched). An INCOMPLETE sibling used to end the run before they were printed.
+// Whichever worker holds the planted failure, dropping the OTHER one must still name it in the coordinator output.
+test("SHARDEVIDENCE1: a failing shard's test names reach the log even when a sibling shard is INCOMPLETE", async () => {
+	const outputs: string[] = [];
+	for (const dropped of ["omp-suite@worker-1", "omp-suite@worker-2"]) {
+		const f = await fixture(`fail-then-drop-${dropped.slice(-1)}`, true);
+		const run = await judge(f, { FIXTURE_DROP: dropped });
+		expect(run.rc, run.out).not.toBe(0);
+		expect(run.out).toContain(`INCOMPLETE shard ${dropped}`);
+		expect(existsSync(await recordPath(f))).toBe(false);
+		outputs.push(run.out);
+	}
+	const named = outputs.filter(out => out.includes("failing rows follow") && out.includes("beta planted failure"));
+	expect(named.length, outputs.join("\n----\n")).toBe(1);
+}, CASE_MS * 2);
+
 // Planted negatives on the reader: each edits one copy of the passing record; the log and filename stay.
 interface Row { path: string; origin?: string; worker?: string; judge: Record<string, unknown> }
 interface Composed { evidence: { files: Row[]; remote: { shards: { worker: string; files: string[] }[]; local_required: string[] } } }

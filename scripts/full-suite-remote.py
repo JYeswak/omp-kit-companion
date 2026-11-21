@@ -389,6 +389,14 @@ def run_shard(shard: dict, plan_doc: dict, payload: bytes, run_id: str, deadline
     return {"summary": summary, "rows": rows, "status": result_doc["status"], "log": log}
 
 
+
+def failing_rows(log: bytes, limit: int = 80) -> list[str]:
+    """The lines of a shard log that name a failing test or suite, capped; everything else stays in the worker's log."""
+    rows = [line[:400] for line in log.decode("utf-8", "replace").splitlines()
+            if line.startswith("(fail)") or " FAIL " in line or line.startswith(("FAIL ", "RED ", "not ok"))]
+    return rows[:limit] + ([f"... {len(rows) - limit} more failing rows"] if len(rows) > limit else [])
+
+
 def run_plan(args: argparse.Namespace) -> int:
     out = Path(args.out)
     plan_doc = json.loads(read_text(out / "plan.json"))
@@ -411,6 +419,19 @@ def run_plan(args: argparse.Namespace) -> int:
     with ThreadPoolExecutor(max_workers=len(shards)) as pool:
         outcomes = list(pool.map(one, shards))
     errors = [outcome["error"] for outcome in outcomes if "error" in outcome]
+    # SHARDEVIDENCE1: a shard that finished holds the only copy of its failing test names (the worker run directory is
+    # cleaned as soon as its evidence is fetched). They reach the coordinator's output, which the verdict log keeps,
+    # before an INCOMPLETE sibling can end the run: the 13100edb20 .46 FAIL was lost exactly that way. A complete run keeps
+    # every shard log in remote.log, so only an INCOMPLETE run prints. The trigger is the shard log's own failing rows, not
+    # the shard's reported verdict, which stays PASS while only per-file rows fail.
+    for outcome in (outcomes if errors else ()):
+        if "error" in outcome:
+            continue
+        named = failing_rows(outcome["log"])
+        if named:
+            say(f"shard {outcome['summary']['worker']}: failing rows follow ({len(named)})")
+            for line in named:
+                print(line, flush=True)
     # Scheduling hints only: a shard that finished measured its files whatever another shard did, and
     # dropping those times left the next split as uneven as the one that timed out.
     record_timings(plan_doc, [outcome for outcome in outcomes if "error" not in outcome])

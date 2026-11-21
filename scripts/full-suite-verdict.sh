@@ -344,6 +344,20 @@ if [ ! -d "$ARCHIVE_DIR/tests" ]; then
 	fail "candidate archive has no tests/ tree"
 	exit 1
 fi
+# JUDGEIDENT1: a main-role verdict qualifies the tree it judges with that tree's own judge. The judging closure is the
+# scripts this run executes (SCRIPT_DIR) and ships to every shard; launched from another checkout (the canonical working
+# directory sat on a stale HEAD: no CATALOG1, no FULLSHA1) it judges a different suite and produces a record no release
+# can read back. Compare the closure's identity over the candidate's own files with this judge's and refuse a mismatch.
+# A candidate tree that carries no judging closure at all (a fixture, never a release) has no identity to compare: its
+# identity is unreadable and it is left to the reader's own judge-root check.
+if [ "$JUDGE_ROLE" = main ] && [ -z "$SHARD_OUT" ]; then
+	candidate_checks=$(python3 "$SCRIPT_DIR/suite-metrics.py" identity --root "$ARCHIVE_DIR" --scope full 2>/dev/null) || candidate_checks=
+	if [ -n "$candidate_checks" ] && [ "$candidate_checks" != "$checks" ]; then
+		cleanup_archive
+		fail "JUDGE_NOT_CANDIDATE: this run's judging scripts ($SCRIPT_DIR) are not byte-identical to the candidate's own (judge $checks, candidate $candidate_checks); launch scripts/full-suite-verdict.sh from a clean checkout of $COMMIT"
+		exit 1
+	fi
+fi
 if [ "$JUDGE_ROLE" = main ]; then
 	# Packaging journeys archive the exact source commit from the qualification export.
 	git -C "$ARCHIVE_DIR" -c init.defaultBranch=main init -q
@@ -407,6 +421,22 @@ set -- $kept_bun; bun_count=$#
 set -- $kept_shell; shell_count=$#
 set -- $kept_py; py_count=$#
 set -- $excluded; excluded_count=$#
+# SUITETREE1: the declared suite is the commit's own. A file enumerated from the staging directory that the commit does not
+# contain (an untracked leftover in a directory passed as --archive-dir) used to reach a worker shard, which refused it
+# ("not in the candidate's declared suite") only after the local stages had run; refuse it here, by name.
+if [ "$JUDGE_ROLE" = main ] && [ -z "$SHARD_OUT" ]; then
+	suite_names=$(printf '%s\n' $kept_bun $kept_shell $kept_py)
+	commit_files=$(git -C "$ROOT" ls-tree -r --name-only "$COMMIT") || { cleanup_archive; fail "SUITE_TREE_UNREADABLE: cannot list the tree of $COMMIT in $ROOT"; exit 1; }
+	suite_extra=$(printf '%s\n' "$commit_files" | SUITE_NAMES="$suite_names" awk '
+		BEGIN { n = split(ENVIRON["SUITE_NAMES"], names, "\n"); for (i = 1; i <= n; i++) if (names[i] != "") want[names[i]] = 1 }
+		{ delete want[$0] }
+		END { for (name in want) print name }' | sort)
+	if [ -n "$suite_extra" ]; then
+		cleanup_archive
+		fail "SUITE_NOT_IN_COMMIT: the staging directory declares files the commit does not contain (an untracked leftover in --archive-dir?): $(printf '%s' "$suite_extra" | tr '\n' ' ')"
+		exit 1
+	fi
+fi
 echo "full-suite: bun=$bun_count shell=$shell_count python=$py_count excluded_ci_only=$excluded_count"
 # NODOUBLEPASS1 (ompkit-bp50d): the focused gate judged part of this same tree already. Its report
 # names the tree and every file it ran GREEN; those files are subtracted from the complete suite and
@@ -972,7 +1002,8 @@ REMOTE_EVIDENCE=""
 if [ -n "$REMOTE_DIR" ]; then
 	if [ "$remote_rc" != 0 ] || ! PYTHONPATH="$SCRIPT_DIR" python3 -B -m full-suite-remote merge --out "$REMOTE_DIR" \
 		--rows "$METRICS_ROWS" --declared "$METRICS_DECLARED"; then
-		grep -F 'FULL-SUITE: REMOTE: INCOMPLETE' "$REMOTE_DIR/run.out" >&2 || :
+		# SHARDEVIDENCE1: the whole coordinator output, not only its INCOMPLETE lines: a finished shard's failing rows are in it.
+		cat "$REMOTE_DIR/run.out" >&2 || :
 		finish_remote
 		finish_logs "$incomplete_log"
 		cleanup_archive
