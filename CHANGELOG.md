@@ -4,6 +4,31 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.139] - 2026-11-21
+
+### Added
+
+- New `omp-kit checkouts plan|reap`: fleet-wide ovnfs checkout inventory with idle age, diff state and best-effort bytes, plus rule-based reap. Reap archives the diff and untracked files first (`checkout.patch` via `ovnfs diff -p --binary`, plus manifest, verified by `git apply --check` against the recorded HEAD tree), then removes only idle checkouts with an empty diff; active checkouts are never touched. The scheduled scratch-reaper run covers up to 10 eligible checkouts per run; no new daemon.
+
+### Changed
+
+- `verify` provisions npm `--prefix`/`-C` package locks, uses Corepack for declared Yarn versions, and passes the explicit actor into export and live replays. Environment-only failures no longer mutate the target tracker; genuine assertion failures still produce `REWORK`.
+- The `br` shim's in_review handoff admission (`HANDOFF_UNGATED`) now also requires the DONE source to be on `origin/main` when its repository has an `origin` remote, so `in_review` means a non-author can verify it now. Only the local remote-tracking ref is read (no network); the refusal points at `omp-kit land`, `omp-kit land --exact-parent` and `git fetch origin main` for a push made from another checkout. A repository without an `origin` remote is unchanged.
+- The release verdict now judges every Bun test under `extensions/` and `src/` and the `tests/kit-gate` Python suite, not only `tests/cli` and `tests/fleet-guard`. Those 55 files ran in no CI group, so a regression in them could not stop a release; a failing test under any of those roots now fails the verdict and is named. Verdict records written before this change no longer match the declared suite and are rejected, so the next release needs one fresh main-role run.
+- The per-file test budget no longer reports `RED` for a CPU overage it measured outside its own qualification envelope. CPU time inflates under load (an unchanged `tests/cli/verify.test.ts` read 34.6 CPU-seconds at load 35 against a 24.6 ceiling it meets at 20-22 solo), so such a run is now the third verdict, `UNQUALIFIED`: `scripts/test-budget.ts` exits 76 and `scripts/fresh-gate.sh` ends `FRESH-GATE: UNQUALIFIED` (exit 76), neither RED nor GREEN, so nothing lands on it. A qualified run is exactly as strict as before (an overage at load 5 is still RED). `FRESH_GATE_QUIET_WAIT_S=N` makes the gate wait for 1-minute load below half the cores and rerun itself until a qualified verdict or N seconds.
+- `tests/cli/verify-depswalk.test.ts` replays each box command from a script file instead of `sh -c <variable>`. The hosted pysafe ratchet cannot read a shell program passed as a variable ("dynamic executable shell argument") and failed both ladder jobs on `6e6440a0eb`; it is a test-only change and the replayed commands are unchanged.
+- `omp-kit verify` keys generated live-readback beads to the verified issue, export, and deferred acceptance. Similar release titles no longer prevent a distinct readback, and retries do not adopt another export’s child.
+
+### Fixed
+
+- `scripts/full-suite-verdict.sh` resolves `--commit` once to its full object name (an abbreviation, `HEAD` or a branch all work), so every consumer of the commit, including a main-role shard's `git fetch --depth 1 <sha>`, sees the full name. An abbreviated sha broke that fetch on 2026-11-20.
+- The suite lease's `SUITE_LEASE_OWNER_UNREADABLE` refusal now says why (the caller's shell reported a virtual `$$`, as the omp bash tool's `sh` and `bash` do) and names the remedy: start the verdict through `/bin/sh` or from a real process.
+- The scratch reaper's run receipt (and its reap-log `run-receipt` line) now carries `lsof_snapshot_failure`: when the system-wide `lsof` snapshot comes back null, the first reason this run, as the exit status plus the first 160 bytes of lsof's own output (null when lsof worked). A run that failed closed on `lsof-evidence-unavailable` no longer hides what lsof said.
+- `omp-kit land --exact-parent` no longer publishes ungated: the private ovnfs checkout it pushes from carries no hooks, so the first release ran no pre-push member. Where `scripts/fresh-gate.sh` exists, land now runs it on the exact candidate in the canonical repository before anything is created, and publishes only on its `FRESH-GATE: GREEN commit=<sha>` line with exit 0; otherwise it refuses `LAND_PUBLICATION_REFUSED` with the gate's last line. The deadline is `OMP_KIT_LAND_EXACT_GATE_DEADLINE_S` (default 2400 s).
+- Scratch quarantine no longer fails across devices: when the global quarantine sits on another device than the scratch root (EXDEV, e.g. ovnfs checkouts on the mount), the reaper falls back to a quarantine inside that root and expires it on the same schedule.
+- Scratch under an ovnfs checkout's `var/agent-tmp` is no longer reported as foreign: it is skipped as checkout-owned (`checkout-owned-scratch`) and left to the checkout lifecycle, instead of failing every run.
+- A release marker now survives an APFS reboot: the retire recheck tolerates the renumbered device id when the machine rebooted since the release (same inode), so pre-reboot scratch is releasable by its owner again.
+
 ## [0.2.138] - 2026-11-20
 
 ### Added

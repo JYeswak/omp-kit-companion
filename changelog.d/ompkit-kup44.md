@@ -1,7 +1,0 @@
-### Changed
-
-- The release verdict now judges every Bun test under `extensions/` and `src/` and the `tests/kit-gate` Python suite, not only `tests/cli` and `tests/fleet-guard`. Those 55 files ran in no CI group, so a regression in them could not stop a release; a failing test under any of those roots now fails the verdict and is named. Verdict records written before this change no longer match the declared suite and are rejected, so the next release needs one fresh main-role run.
-
-- The per-file test budget no longer reports `RED` for a CPU overage it measured outside its own qualification envelope. CPU time inflates under load (an unchanged `tests/cli/verify.test.ts` read 34.6 CPU-seconds at load 35 against a 24.6 ceiling it meets at 20-22 solo), so such a run is now the third verdict, `UNQUALIFIED`: `scripts/test-budget.ts` exits 76 and `scripts/fresh-gate.sh` ends `FRESH-GATE: UNQUALIFIED` (exit 76), neither RED nor GREEN, so nothing lands on it. A qualified run is exactly as strict as before (an overage at load 5 is still RED). `FRESH_GATE_QUIET_WAIT_S=N` makes the gate wait for 1-minute load below half the cores and rerun itself until a qualified verdict or N seconds.
-
-- `tests/cli/verify-depswalk.test.ts` replays each box command from a script file instead of `sh -c <variable>`. The hosted pysafe ratchet cannot read a shell program passed as a variable ("dynamic executable shell argument") and failed both ladder jobs on `6e6440a0eb`; it is a test-only change and the replayed commands are unchanged.
