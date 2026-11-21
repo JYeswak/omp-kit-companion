@@ -9,6 +9,7 @@ import type { ReleaseAsset } from "../src/kit-release.ts";
 import { RELEASE_DATA_FILES } from "../src/release-assets.ts";
 import { authorizeSourceAct } from "../src/source-authority.ts";
 import { record } from "../src/tern/model.ts";
+import { parseMap, SHIPPED_ROOTS } from "./check-flywheel-invariants.ts";
 const root = resolve(import.meta.dir, "..");
 const platformTargets: Record<string, string> = {
 	"darwin-arm64-none": "bun-darwin-arm64",
@@ -259,14 +260,34 @@ function safeSource(name: string): Buffer {
 	if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail(`UNSAFE_RELEASE_SOURCE: ${name}`);
 	return readFileSync(source);
 }
-function expand(directory: string, result: string[]): void {
+// PRIVATELEAK1 (ompkit-jlw58): tests are development files; the installed release is what a stranger runs, so none ships,
+// except the proofs the shipped docs/flywheel-invariants.tsv names under a shipped root: `omp-kit test --full` verifies
+// those in the installed tree (check-flywheel-invariants.ts, packaged mode), so excluding them would fail that stage.
+const TEST_FILE_SUFFIXES = [".test.ts", ".test.tsx", ".test.js", ".test.mjs", ".test.sh", ".test.py"];
+export function flywheelProofFiles(sourceRoot: string): Set<string> {
+	const proofs = new Set<string>();
+	for (const row of parseMap(readFileSync(join(sourceRoot, "docs/flywheel-invariants.tsv"), "utf8")))
+		for (const cell of [row.fire, row.quiet]) {
+			const file = cell.split("::")[0]!;
+			if (SHIPPED_ROOTS.some(prefix => file.startsWith(prefix))) proofs.add(file);
+		}
+	return proofs;
+}
+export function releaseExcluded(path: string, requiredProofs: ReadonlySet<string> = new Set()): boolean {
+	return TEST_FILE_SUFFIXES.some(suffix => path.endsWith(suffix)) && !requiredProofs.has(path);
+}
+/** The package members the exclusion rule forbids (a root walk, a judging file or an installer reference may each have added one). */
+export function checkPackagedPrivatePaths(names: Iterable<string>, requiredProofs: ReadonlySet<string>): string[] {
+	return [...names].filter(name => releaseExcluded(name, requiredProofs)).sort();
+}
+function expand(directory: string, result: string[], requiredProofs: ReadonlySet<string>): void {
 	const absolute = join(root, directory);
 	if (!lstatSync(absolute).isDirectory()) fail(`UNSAFE_RELEASE_DIRECTORY: ${directory}`);
 	for (const name of readdirSync(absolute).sort()) {
 		const child = `${directory}/${name}`;
 		const stat = lstatSync(join(root, child));
-		if (stat.isDirectory()) expand(child, result);
-		else if (stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1) result.push(child);
+		if (stat.isDirectory()) expand(child, result, requiredProofs);
+		else if (stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1) { if (!releaseExcluded(child, requiredProofs)) result.push(child); }
 		else fail(`UNSAFE_RELEASE_SOURCE: ${child}`);
 	}
 }
@@ -416,7 +437,8 @@ async function run(): Promise<void> {
 		});
 		if (build.exitCode !== 0) fail(`COMPILE_FAILED (${build.exitCode}): ${build.stdout.toString()} ${build.stderr.toString()}`);
 		const names = [...files, ...RELEASE_DATA_FILES.filter(path => dirname(path) === ".")];
-		for (const path of roots) expand(path, names);
+		const proofFiles = flywheelProofFiles(root);
+		for (const path of roots) expand(path, names, proofFiles);
 		names.push(RELEASE_BINARY_NAME, "MANIFEST.tsv", "licenses/tern-sdk/LICENSE", "release-components.json");
 		const namedSources = new Set(names);
 		if (namedSources.size !== names.length) fail("DUPLICATE_RELEASE_SOURCE");
@@ -429,6 +451,8 @@ async function run(): Promise<void> {
 		// 0.2.86/0.2.87 installers named check-deploy-step.sh, absent from the package).
 		closeOverInstallerReferences(names, name => safeSource(name).toString("utf8"));
 		names.sort();
+		const privateMembers = checkPackagedPrivatePaths(names, proofFiles);
+		if (privateMembers.length > 0) fail(`PRIVATE_PATH_SHIPPED: ${privateMembers.join(", ")}`);
 		const content = new Map<string, Buffer>();
 		for (const name of names) {
 			if (name === RELEASE_BINARY_NAME) content.set(name, safeCompiled(binary));

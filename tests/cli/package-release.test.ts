@@ -8,7 +8,7 @@ import { previewKitRelease, stageKitRelease, validateReleaseManifest } from "../
 import type { KitReleasePreview, ReleaseAsset, StagedKitRelease } from "../../src/kit-release.ts";
 import { judgeKitPostcheck } from "../../src/kit-update.ts";
 import type { FullTestReport } from "../../src/full-test-runner.ts";
-import { packageSourceRevision, packageSecretOutputGuard, checkPackagedExtensionLoads, checkPackagedScriptDependencies } from "../../scripts/package-release.ts";
+import { packageSourceRevision, packageSecretOutputGuard, checkPackagedExtensionLoads, checkPackagedScriptDependencies, flywheelProofFiles, releaseExcluded } from "../../scripts/package-release.ts";
 import { GATE_DEADLINE_MS, TIMING_SAMPLE_COUNT } from "../../scripts/regex-budget.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
@@ -78,6 +78,11 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(lstatSync(join(staged.root, "scripts", "runtime-adapter.sh")).mode & 0o111).toBeGreaterThan(0);
 	for (const forbidden of ["reports/", ".git/", ".beads/", "var/", "private/"])
 		expect(staged.files.some(file => file.startsWith(forbidden))).toBe(false);
+	// PRIVATELEAK1: no test file ships except the proofs the shipped flywheel registry names (the source tree has 36 under extensions/ alone).
+	const proofFiles = flywheelProofFiles(join(output, "archived-source"));
+	expect(staged.files.filter(file => releaseExcluded(file, proofFiles))).toEqual([]);
+	expect(staged.files.filter(file => file.endsWith(".test.ts"))).toEqual(["extensions/kit-flywheel-guard.test.ts"]);
+	expect(staged.files).toContain("extensions/fleet-guard.ts");
 	for (const asset of ["cc-credential-shapes.v1.json", "secret-output-policy.v1.json"]) {
 		expect(staged.files).toContain(`scripts/${asset}`);
 		expect(readFileSync(join(staged.root, "scripts", asset)))
