@@ -579,6 +579,28 @@ function unxml(value: string): string {
 }
 
 
+/** AMWATCH2 (ompkit-1ra0d.190): the load-watch Agent Mail probe names a registered agent of a project, so it makes the same
+ * `am agents show` call the br shim makes on every write (the call that hangs when the server wedges); both or neither. */
+const LOAD_WATCH_ENV_KEYS = ["OMP_KIT_AM_PROBE_PROJECT", "OMP_KIT_AM_PROBE_AGENT"] as const;
+const AM_PROBE_AGENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** Explicit values from the installing shell replace the installed ones (two empty strings clear them); a re-render from a
+ * shell without them keeps what the installed job file carries, so an update never silently drops the probe target. */
+function loadWatchEnvironment(job: ServiceJobDef, installed: Record<string, string> | null): [string, string][] {
+	if (job.name !== "load-watch") return [];
+	const explicit = LOAD_WATCH_ENV_KEYS.some(key => process.env[key] !== undefined);
+	const source: Record<string, string | undefined> = explicit ? process.env : (installed ?? {});
+	const project = source.OMP_KIT_AM_PROBE_PROJECT ?? "";
+	const agent = source.OMP_KIT_AM_PROBE_AGENT ?? "";
+	if (project === "" && agent === "") return [];
+	const valid = project !== "" && agent !== "" && isAbsolute(project) && resolve(project) === project && !/[\r\n\0]/.test(project) && AM_PROBE_AGENT_PATTERN.test(agent);
+	if (!valid) {
+		// Explicit settings are a caller bug and fail loudly; unusable installed settings persist nothing.
+		if (explicit) throw new Error("AM_PROBE_INVALID: OMP_KIT_AM_PROBE_PROJECT (an absolute path) and OMP_KIT_AM_PROBE_AGENT (a registered agent name) are set together or not at all");
+		return [];
+	}
+	return [["OMP_KIT_AM_PROBE_PROJECT", project], ["OMP_KIT_AM_PROBE_AGENT", agent]];
+}
+
 const KIT_UPDATE_ENV_KEYS = ["OMP_KIT_UPDATE_ENABLED", "OMP_KIT_UPDATE_POLL", "OMP_KIT_UPDATE_REPO", "OMP_KIT_UPDATE_INDEX", "OMP_KIT_UPDATE_ARCHIVE", "OMP_KIT_UPDATE_VERSION", "OMP_KIT_UPDATE_SOURCE_TAG"] as const;
 /** A re-render keeps the validated settings already in the installed job file unless new ones are
  * supplied: a release or service install from a shell without OMP_KIT_UPDATE_* must not wipe the
@@ -676,6 +698,7 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		...ciPollerEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		...kitUpdateEnvironment(job, installedUpdate).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		...amRetentionEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
+		...loadWatchEnvironment(job, installedUpdate).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		"\t\t<key>OMP_KIT_JOB</key>",
 		`\t\t<string>${xml(job.name)}</string>`,
 		"\t</dict>",
@@ -724,7 +747,7 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 	if (installedService !== null) {
 		installedUpdate = {};
 		const parsed = systemdEnvironment(installedService);
-		for (const key of KIT_UPDATE_ENV_KEYS) {
+		for (const key of [...KIT_UPDATE_ENV_KEYS, ...LOAD_WATCH_ENV_KEYS]) {
 			const raw = parsed[key];
 			// systemdQuote writes $ as $$, but unquoteUnit only decodes $$$$: without this a kept $
 			// doubles on every re-render. Kept-path only; contract checks keep their own decode.
@@ -739,6 +762,7 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 		...ciPollerEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		...kitUpdateEnvironment(job, installedUpdate).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		...amRetentionEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
+		...loadWatchEnvironment(job, installedUpdate).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		`Environment=OMP_KIT_JOB=${systemdQuote(job.name)}`,
 	];
 	const service = job.kind === "daemon" ? [
