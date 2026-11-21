@@ -5275,6 +5275,9 @@ registerCommandHandler("verify", async request => {
 	const repo = verifyProject(request.flags.get("--project"));
 	const dryRun = request.flags.get("--dry-run") === true;
 	if (request.flags.get("--all") === true && request.flags.get("--live-readback") !== true) return refusal("INVALID_FLAG", "--all is only valid with --live-readback", "Use omp-kit verify --live-readback --all.");
+	// SELFREPLAY1 (ompkit-1elej): the assignee's own pre-handover replay of the exact published export; it stands alone.
+	const selfReplay = request.flags.get("--self-replay") === true;
+	if (selfReplay && (dryRun || request.flags.get("--live-readback") === true || verifier !== undefined)) return refusal("INVALID_FLAG", "--self-replay cannot combine with --dry-run, --live-readback or a background verifier", "Use omp-kit verify BEAD --export SHA --self-replay on its own, as the bead's assignee.");
 	if (request.flags.get("--live-readback") === true) {
 		if (!actor) return refusal("NO_SEAT_IDENTITY", "no --actor and no AGENT_NAME", "Pass --actor NAME or export AGENT_NAME.");
 		if (request.flags.get("--all") === true) {
@@ -5299,8 +5302,8 @@ registerCommandHandler("verify", async request => {
 	if (!actor && verifier === undefined) return refusal("NO_SEAT_IDENTITY", "no --actor and no AGENT_NAME", "Pass --actor NAME or export AGENT_NAME.");
 	const recorder = actor ?? verifier?.parent ?? "";
 	if (verifier !== undefined && recorder === "") return refusal("NO_SEAT_IDENTITY", "no --actor, no AGENT_NAME and no verifiable parent seat", "Pass --verifier-label L --verifier-parent P --verifier-session S with a registered parent seat.");
-	const res = await verifyBead({ bead: request.argument, exportSha: exportSha.trim(), repo, actor: recorder, family, lesson, dryRun, ...(verifier === undefined ? {} : { verifier }) });
-	const code = res.code === "CLOSED" || res.code === "DRY_RUN" ? 0 : res.code === "REWORK" ? 1 : 2;
+	const res = await verifyBead({ bead: request.argument, exportSha: exportSha.trim(), repo, actor: recorder, family, lesson, dryRun, ...(selfReplay ? { selfReplay } : {}), ...(verifier === undefined ? {} : { verifier }) });
+	const code = res.code === "SELF_REPLAY" ? (res.ok ? 0 : 1) : res.code === "CLOSED" || res.code === "DRY_RUN" ? 0 : res.code === "REWORK" ? 1 : 2;
 	return { code, data: { overall: res.code, bead: res.bead, export: res.export, replays: res.replays, acts: res.acts, log: res.log, ...(res.child === undefined ? {} : { child: res.child }), ...(res.rollback === undefined ? {} : { rollback: res.rollback }) }, verification: res.code === "DRY_RUN" || res.replays.length === 0 ? "NOT_RUN" : "PERFORMED" };
 });
 // SLICEVERIFY1 (ompkit-t7cn7.7): change-vs-export verdict for one overlay.

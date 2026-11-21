@@ -194,7 +194,7 @@ export interface AcceptanceRollback {
 }
 export interface VerifyResult {
 	ok: boolean;
-	code: "CLOSED" | "REWORK" | "ACT_FAILED" | "LESSON_MISSING" | "ENVIRONMENT" | "DEPENDENCIES_NOT_LOCKED" | "NON_AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "PENDING" | "NOT_PUBLISHED" | "UNKNOWN";
+	code: "CLOSED" | "REWORK" | "ACT_FAILED" | "LESSON_MISSING" | "ENVIRONMENT" | "DEPENDENCIES_NOT_LOCKED" | "NON_AUTHOR_REQUIRED" | "AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "SELF_REPLAY" | "PENDING" | "NOT_PUBLISHED" | "UNKNOWN";
 	bead: string;
 	export: string;
 	replays: BoxReplay[];
@@ -697,7 +697,7 @@ export async function ensureBoxDeps(command: string, exportDir: string, env: Rec
 /** `laneParent` overrides LANE_PARENT (a tracker without the omp-kit lane, such as a fixture). */
 /** VERIFYBG1 (ompkit-1ra0d.258): a background task that authored neither the change nor its fixture verifies under its own label. `verifier` carries the background identity (label + parent seat + session id); the recorder stays `actor` (a registered seat, never the author). Absent means an ordinary seat verification. */
 export interface BackgroundVerifier { label: string; parent: string; session: string }
-export interface VerifyInput { bead: string; exportSha: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; laneParent?: string; lesson?: string; verifier?: BackgroundVerifier }
+export interface VerifyInput { bead: string; exportSha: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; /** SELFREPLAY1: the assignee replays their own boxes on the exact published export before handover; never closes, ticks or records an attempt. */ selfReplay?: boolean; family?: string; laneParent?: string; lesson?: string; verifier?: BackgroundVerifier }
 
 function commentLesson(body: string): string | null {
 	for (const raw of body.split("\n")) {
@@ -771,6 +771,10 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const env = { ...process.env, ...(input.env ?? {}) } as Record<string, string>;
 	const verifierAtInvocation = observeWorkingModel(env);
 	const acts: string[][] = [];
+	// SELFREPLAY1 (ompkit-1elej): an author's pre-handover replay. It runs the same export, publication check and box judgement as
+	// verify, but is a dry run in effect (no tracker act, no attempt record, no lesson, no close preflight) and reports SELF_REPLAY.
+	const selfReplay = input.selfReplay === true;
+	const dry = input.dryRun === true || selfReplay;
 	// VERIFYBG1 (ompkit-1ra0d.258): normalize the background identity first, before any tracker act.
 	const raw = input.verifier;
 	const norm = raw === undefined ? undefined : { label: raw.label.trim(), parent: raw.parent.trim(), session: raw.session.trim() };
@@ -781,8 +785,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	// The recorder is the registered seat that owns the tracker writes; the prover is the
 	// background label that ran the replay. Without a background identity they are the same seat.
 	const prover = bg === undefined ? input.actor : bg.label;
-	const pre = await preflightBead("close", input.repo, input.bead, { actor: input.actor, env });
-	const blocking = pre.findings.filter(f => f.blocking);
+	const blocking = selfReplay ? [] : (await preflightBead("close", input.repo, input.bead, { actor: input.actor, env })).findings.filter(f => f.blocking);
 	if (blocking.some(f => f.code === "SELF_CLOSE")) return { ok: false, code: "NON_AUTHOR_REQUIRED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`refused: ${input.actor} is the assignee`).join("\n"), acts };
 	// VERIFYOPEN1 keeps open beads eligible for a non-author replay. Active work must
 	// complete its author's in_review handoff first; replay cannot bypass that transition.
@@ -809,16 +812,18 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake", "--actor", input.actor]] };
 	}
 	if (row === null) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("UNJUDGED: bead became unreadable").join("\n"), acts };
+	if (selfReplay && row.assignee !== input.actor) return { ok: false, code: "AUTHOR_REQUIRED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`refused: --self-replay is the assignee's own pre-handover replay; ${row.assignee ?? "nobody"} is the assignee and ${input.actor} is not (a non-author runs verify --dry-run); no replay ran`).join("\n"), acts };
+	if (selfReplay) log.push("self-replay: the author's own replay; it closes nothing, ticks nothing and records no verification attempt");
 	if (bg !== undefined) {
 		const authorCheck = validateBackgroundVerifierAuthor(bg, row.assignee);
 		if (!authorCheck.ok) return { ok: false, code: authorCheck.code, bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`refused: ${authorCheck.detail}; no replay or tracker act ran`).join("\n"), acts };
 		log.push(`background verifier ${bg.label} of parent seat ${bg.parent} session ${bg.session} records under its label; tracker writes stay with ${input.actor}`);
 	}
-	const lesson = await closeLesson(input.lesson, row, input.repo, env);
+	const lesson = selfReplay ? "Lesson: self-replay closes nothing" : await closeLesson(input.lesson, row, input.repo, env);
 	if (lesson === null) return { ok: false, code: "LESSON_MISSING", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment; no replay or tracker act ran").join("\n"), acts };
 	// VERIFYGATE1-identity: the tracker guard refuses a verifier the target project's Agent Mail does not
 	// know at the first act, after a full replay. Prove the verifier up front, before replaying anything.
-	const identity = await verifierKnownToTargetMail(input.repo, input.actor, env);
+	const identity = selfReplay ? { known: true, detail: "self-replay writes nothing to the tracker" } : await verifierKnownToTargetMail(input.repo, input.actor, env);
 	if (!identity.known) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`UNJUDGED: Agent Mail cannot verify ${input.actor} in ${input.repo} (${identity.detail}); register the verifier in the target project (am agents create --project ${input.repo} --program <program> --model <model>) then retry; no replay or tracker act ran`).join("\n"), acts };
 	const isFullCommit = (value: string) => {
 		if (value.length !== 40 && value.length !== 64) return false;
@@ -839,7 +844,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	let replayAttempted = false;
 	let requiredJudgementPending: string | null = null;
 	let scratchCleanup: (() => void) | null = null;
-	if (!input.dryRun) {
+	if (!dry) {
 		const context = {
 			tracker,
 			bead: input.bead,
@@ -867,7 +872,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const finishAttempt = async (result: VerifyResult): Promise<VerifyResult> => {
 		cleanupScratch();
 		if (attempt === null) {
-			if (!input.dryRun) return result;
+			if (!dry) return result;
 			const reason = "dry run did not allocate an actual verification attempt";
 			return { ...result, verificationEvidence: { status: "NOT_RECORDED", reason },
 				log: `${result.log}\nverify evidence: NOT_RECORDED (${reason})` };
@@ -1083,8 +1088,8 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	if (failed.length > 0) {
 		const comment = `REWORK ${input.bead}: ${failed.map(f => `${tag(f)} ${f.detail}`).join("; ")}\n${log.join("\n")}`;
 		acts.push(["br", "update", input.bead, "--status", "rework", "--transition-comment", comment, "--actor", input.actor]);
-		if (!input.dryRun) for (const a of acts) await run(a, { cwd: input.repo, deadline_s: 60, env });
-		return await finishAttempt({ ok: false, code: input.dryRun ? "DRY_RUN" : "REWORK", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts });
+		if (!dry) for (const a of acts) await run(a, { cwd: input.repo, deadline_s: 60, env });
+		return await finishAttempt({ ok: false, code: selfReplay ? "SELF_REPLAY" : input.dryRun ? "DRY_RUN" : "REWORK", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: selfReplay ? [] : acts });
 	}
 	if (environmentFailures.length > 0) {
 		// A missing or out-of-date lockfile is its own named refusal, never a silent pass or a
@@ -1183,7 +1188,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${prover} (family: ${family})${bg === undefined ? "" : ` background verifier ${bg.label} of ${bg.parent} session ${bg.session}`}\n${lesson}\n${log.join("\n")}`, "--actor", input.actor]);
 	if (homeNote) log.push(`LIVEREADBACK child placed under ${homeNote}`);
 	const child = deferred.length > 0 ? childRef : undefined;
-	if (input.dryRun) return await finishAttempt({ ok: true, code: "DRY_RUN", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts, child });
+	if (dry) return await finishAttempt({ ok: true, code: selfReplay ? "SELF_REPLAY" : "DRY_RUN", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: selfReplay ? [] : acts, child: selfReplay ? undefined : child });
 	const done = await executeActs(acts, input.repo, env, { bead: row, actor: input.actor, ...(resume !== null && "revision" in resume ? { resumedChild: resume.child } : {}) });
 	if (done.failure !== null) return await finishAttempt({ ok: false, code: "ACT_FAILED", bead: input.bead, export: input.exportSha, replays, log: log.concat(done.failure).join("\n"), acts: done.acts, child: done.child ?? reuse, rollback: done.rollback });
 	if (done.skippedGate !== null) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${done.skippedGate}'; skipping gate report`);

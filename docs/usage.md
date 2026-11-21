@@ -37,6 +37,14 @@ verifier model, exact export and outcome under
 The first durable begin wins across retries; corrections append lineage
 without rewriting it. Dry runs allocate no attempts.
 
+`omp-kit verify BEAD --export SHA --self-replay` is the assignee's own
+replay before handover (SELFREPLAY1). It runs every box on the exact
+published export and prints each box's verdict and output, exits 1 when a
+box fails, and closes nothing, ticks nothing, needs no lesson and allocates
+no attempt, so it never counts as the non-author verification. Anyone but
+the assignee is refused `AUTHOR_REQUIRED`; it does not combine with
+`--dry-run` or `--live-readback`.
+
 Unjudged/incomplete attempts and missing, expired or pre-recorder history
 cannot count as judged PASS/FAIL. `counts` covers all scoped attempts;
 `first_attempts` is the separate first-result cohort. Storage retains bounded

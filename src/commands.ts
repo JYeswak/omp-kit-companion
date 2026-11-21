@@ -757,6 +757,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--lesson", value: "TEXT", description: "Close lesson; overrides the author's newest Lesson: comment. Missing both refuses before replay." },
 		{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
 		{ name: "--dry-run", description: "Replay and print the acts; change nothing in the tracker" },
+		{ name: "--self-replay", description: "The bead's assignee replays every box on the exact published export before handing over: runs the literal acceptance commands, prints each box's verdict and output, exits 1 when a box fails; closes nothing, ticks nothing, records no verification attempt and needs no lesson. Not the non-author verify." },
 		{ name: "--live-readback", description: "Run an open LIVEREADBACK child's boxes on the installed kit, no export: a pass ticks them and closes the child, a failure reopens the parent with REWORK naming the box" },
 		{ name: "--all", description: "With --live-readback: every open live-readback child, in id order" },
 		{ name: "--verifier-label", value: "LABEL", description: "Background verifier identity: the task's own label; recorded on the verdict. Requires --verifier-parent and --verifier-session." },
