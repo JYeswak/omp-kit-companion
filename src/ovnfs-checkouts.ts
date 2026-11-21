@@ -1,5 +1,6 @@
 import { lstatSync, realpathSync, type Stats } from "node:fs";
-import { resolve } from "node:path";
+import { createConnection } from "node:net";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { runSync, type RunResult } from "./kitlib/run.ts";
 
 /**
@@ -52,6 +53,8 @@ const DIFF_DEADLINE_S = 2;
 const RM_DEADLINE_S = 5;
 const GIT_DEADLINE_S = 3;
 const MAX_OUTPUT_BYTES = 1 << 20;
+// Wire generation emitted by ovnfs v0.7.0 in Status and admin Welcome, not its build version.
+const OVNFS_ADMIN_GENERATION = 5;
 
 export function isValidCheckoutName(name: string): boolean {
   return OVNFS_NAME_PATTERN.test(name);
@@ -130,12 +133,14 @@ function toCheckoutRow(entry: unknown): OvnfsCheckoutRow | null {
 }
 
 function parseLsJson(stdout: string): LsParse {
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(stdout);
+    return parseLsReply(JSON.parse(stdout));
   } catch {
     return { error: "unparseable" };
   }
+}
+
+function parseLsReply(parsed: unknown): LsParse {
   const list = readLsList(parsed);
   if (!Array.isArray(list)) return { error: "unparseable" };
   const rows: OvnfsCheckoutRow[] = [];
@@ -166,6 +171,102 @@ export function listOvnfsCheckouts(cwd: string, extraArgs: readonly string[] = [
   const parsed = parseLsJson(new TextDecoder().decode(run.stdout));
   if ("error" in parsed) return { unavailable: "unavailable" };
   return { rows: parsed.rows };
+}
+
+/** The public ovnfs admin protocol is the nonstarting list route. Neither ls
+ * nor ctl is suitable here: a daemon lost after status can make either detach
+ * a replacement, even with both state and mount flags pinned.
+ */
+function listOnExistingSocket(socketPath: string, state: string, mount: string): Promise<LsParse> {
+  const localPath = relative(process.cwd(), socketPath);
+  // A relative address can fit sockaddr_un when the same absolute path cannot.
+  const socket = createConnection(localPath.length < socketPath.length ? localPath : socketPath);
+  const { promise, resolve: complete } = Promise.withResolvers<LsParse>();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let done = false;
+  let welcomed = false;
+  let length: number | undefined;
+  const deadline = setTimeout(() => finish(), LS_DEADLINE_S * 1000);
+  function finish(result: LsParse = { error: "unavailable" }): void {
+    if (done) return;
+    done = true;
+    clearTimeout(deadline);
+    socket.destroy();
+    complete(result);
+  }
+  function send(json: string): void {
+    const bytes = Buffer.byteLength(json);
+    const frame = Buffer.allocUnsafe(4 + bytes);
+    frame.writeUInt32LE(bytes);
+    frame.write(json, 4);
+    socket.write(frame);
+  }
+  socket.once("error", () => finish());
+  socket.once("close", () => finish());
+  socket.once("connect", () => send('{"hello":{"client":"omp-kit"}}'));
+  socket.on("readable", () => {
+    try {
+      while (!done) {
+        if (length === undefined) {
+          const header: Buffer | null = socket.read(4);
+          if (header === null) return;
+          length = header.readUInt32LE();
+          if (length < 2 || length > MAX_OUTPUT_BYTES) return finish();
+        }
+        const frame: Buffer | null = socket.read(length);
+        if (frame === null) return;
+        length = undefined;
+        const message: unknown = JSON.parse(decoder.decode(frame));
+        if (message === null || typeof message !== "object") return finish();
+        if (!welcomed) {
+          const peer = "welcome" in message ? message.welcome : null;
+          if (peer === null || typeof peer !== "object" ||
+              !("version" in peer) || peer.version !== OVNFS_ADMIN_GENERATION || !("ops" in peer) ||
+              !Array.isArray(peer.ops) || !peer.ops.includes("ls") ||
+              !("state" in peer) || peer.state !== state ||
+              !("mount" in peer) || peer.mount !== mount) return finish();
+          welcomed = true;
+          send('{"id":1,"ls":{}}');
+        } else {
+          return finish("id" in message && message.id === 1 && "ok" in message && !("error" in message)
+            ? parseLsReply(message.ok) : undefined);
+        }
+      }
+    } catch {
+      finish();
+    }
+  });
+  return promise;
+}
+
+async function listExistingOvnfsCheckouts(cwd: string): Promise<OvnfsListOk | OvnfsListUnavailable> {
+  let status: RunResult;
+  try {
+    status = runSync(["ovnfs", "status", "--json"], { cwd, deadline_s: LS_DEADLINE_S, max_output_bytes: MAX_OUTPUT_BYTES });
+  } catch (error) {
+    return { unavailable: isAbsentError(error instanceof Error ? error.message : String(error)) ? "absent" : "unavailable" };
+  }
+  if (status.timed_out || status.killed || status.truncated || status.rc !== 0) return { unavailable: "unavailable" };
+  try {
+    const info: unknown = JSON.parse(new TextDecoder().decode(status.stdout));
+    if (info === null || typeof info !== "object" || !("version" in info) ||
+        info.version !== OVNFS_ADMIN_GENERATION || !("state" in info) || !("mount" in info) || !("socket" in info)) {
+      return { unavailable: "unavailable" };
+    }
+    const { state, mount, socket } = info;
+    if (typeof state !== "string" || typeof mount !== "string" || typeof socket !== "string" ||
+        !isAbsolute(state) || !isAbsolute(mount) || socket !== join(state, "admin.sock")) {
+      return { unavailable: "unavailable" };
+    }
+    const stateFromMount = relative(mount, state);
+    if (!isAbsolute(stateFromMount) && stateFromMount !== ".." && !stateFromMount.startsWith(`..${sep}`)) {
+      return { unavailable: "unavailable" };
+    }
+    const listed = await listOnExistingSocket(socket, state, mount);
+    return "rows" in listed ? listed : { unavailable: "unavailable" };
+  } catch {
+    return { unavailable: "unavailable" };
+  }
 }
 
 type DiffParse = OvnfsDiffOk | OvnfsDiffUnavailable | { unhandled: true };
@@ -641,11 +742,11 @@ export type RepoCheckoutView = {
  * ovnfs records no creator, so this lists by repository, not by seat.
  * Fail-open: absent or erroring ovnfs yields an empty list with a note.
  */
-export function listRepoCheckouts(repo: string, now: number = Date.now()): {
+export async function listRepoCheckouts(repo: string, now: number = Date.now()): Promise<{
   ovnfs: OvnfsPresence;
   checkouts: RepoCheckoutView[];
   note: string;
-} {
+}> {
   let resolved: string | null = null;
   try {
     resolved = resolve(repo);
@@ -655,7 +756,7 @@ export function listRepoCheckouts(repo: string, now: number = Date.now()): {
   if (resolved === null) {
     return { ovnfs: "unavailable", checkouts: [], note: "ovnfs checkouts unavailable: repository could not be resolved." };
   }
-  const listed = listOvnfsCheckouts(resolved);
+  const listed = await listExistingOvnfsCheckouts(resolved);
   if ("unavailable" in listed) {
     const absent = listed.unavailable === "absent";
     return {

@@ -4801,7 +4801,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		const inventory = repoRoot === null
 			? { ovnfs: "unavailable" as const, checkouts: [], note: "ovnfs checkouts omitted: not inside a Git repository." }
-			: listRepoCheckouts(repoRoot);
+			: await listRepoCheckouts(repoRoot);
 		return { code: 0, data: { overall: unreleased.length > 0 ? "FINDINGS" : "OK", dirs: rows, unreleased: unreleased.length,
 			overBudget: rows.filter(row => row.overBudget).length,
 			ovnfs: inventory.ovnfs, checkouts: inventory.checkouts, ovnfsNote: inventory.note,

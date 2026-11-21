@@ -2,13 +2,14 @@
 // (same agent and session, new pid) and a tool shell whose $$ exited both keep their scratch LIVE while the seat
 // lives; the pid rule is unchanged for pid-only owners.
 import { afterEach, expect, test } from "bun:test";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { join, relative, resolve } from "node:path";
 import { applyReap, callerSeat, createScratch, defaultLiveness, defaultRunner, disposalGate, inspectSession, ownedScratch, parseOwnerFile, parseOwnerFileEx, planScratch, releaseScratch,
 	type InspectDeps, type LivenessDeps, type SeatIdentity } from "../../src/scratch.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { pollUntil } from "../../src/kitlib/poll.ts";
-import { runSync } from "../../src/kitlib/run.ts";
+import { run, runSync } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const repo = resolve(import.meta.dir, "../..");
@@ -573,6 +574,109 @@ test.skipIf(!HAVE_LSOF)("SCRATCHSIBLING1 CLI: SCRATCH_RELEASE_SIBLING_LIVE while
 	}
 }, fixtureDeadlineS(90) * 1000);
 
+// This process-boundary recorder can observe unsafe argv but cannot start a
+// native daemon, even when the old adapter supplies split state and mount.
+function fixtureOvnfs(mode: "stopped" | "configured" | "absent" | "unavailable" | "nested", xdg: string, version: number | null = 5) {
+	const bin = tempDir("sib-ovnfs-bin");
+	const root = tempDir("sib-ovnfs-coordinates");
+	const mount = join(root, "mount");
+	const state = mode === "nested" ? join(mount, "state") : join(root, "state");
+	const socket = join(state, "admin.sock");
+	const trace = join(root, "argv");
+	const executable = join(bin, "ovnfs");
+	if (mode !== "absent") {
+		writeFileSync(executable, `#!/bin/sh
+printf '%s\\n' "$*" >>"$FIXTURE_OVNFS_TRACE"
+if [ "$1" = status ]; then
+  if [ "$FIXTURE_OVNFS_MODE" = stopped ]; then echo 'not running' >&2; exit 1; fi
+  printf '%s\\n' "$FIXTURE_OVNFS_STATUS"
+  exit 0
+fi
+if [ "$FIXTURE_OVNFS_MODE" = unavailable ]; then echo 'admin connection lost' >&2; exit 1; fi
+printf '%s\\n' "$FIXTURE_OVNFS_LIST"
+`);
+		chmodSync(executable, 0o700);
+	}
+	const env = {
+		XDG_STATE_HOME: xdg, FIXTURE_OVNFS_TRACE: trace, FIXTURE_OVNFS_MODE: mode,
+		FIXTURE_OVNFS_STATUS: JSON.stringify({ state, mount, socket, version: version ?? undefined, build_version: "v0.7.0" }),
+		FIXTURE_OVNFS_LIST: JSON.stringify({ checkouts: [{ name: "owned-sibling", path: join(mount, "owned-sibling"), source: repo, dirty: false }] }),
+	};
+	return { bin, state, mount, socket, trace, env };
+}
+
+test("SCRATCHSIBLING1 ovnfs inventory never autostarts after status and keeps configured inventory", async () => {
+	const poisonedState = join(tempDir("sib-ovnfs-poison"), "xdg");
+	// The first case has a successful status but no live admin peer. Even
+	// ls with both flags would auto-start natively, so the recorder forbids it.
+	for (const { mode, statusVersion, welcomeVersion } of [
+		{ mode: "unavailable" }, { mode: "stopped" }, { mode: "configured", welcomeVersion: 5 },
+		{ mode: "configured", welcomeVersion: 6 },
+		{ mode: "configured", welcomeVersion: null },
+		{ mode: "configured", statusVersion: 6, welcomeVersion: 6 },
+		{ mode: "configured", statusVersion: null, welcomeVersion: 5 },
+		{ mode: "absent" }, { mode: "nested" },
+	] as const) {
+		const fx = fixtureOvnfs(mode, poisonedState, statusVersion);
+		const requests: unknown[] = [];
+		const server = mode === "configured" ? createServer(peer => {
+			let pending = Buffer.alloc(0);
+			peer.on("data", (chunk: Buffer) => {
+				pending = Buffer.concat([pending, chunk]);
+				if (pending.length < 4) return;
+				const size = pending.readUInt32LE();
+				if (size > 1024) { peer.destroy(); return; }
+				if (pending.length < size + 4) return;
+				const msg = JSON.parse(pending.subarray(4, size + 4).toString("utf8"));
+				pending = pending.subarray(size + 4);
+				requests.push(msg);
+				const response = Buffer.from(JSON.stringify(msg.hello
+					? { welcome: { version: welcomeVersion ?? undefined, ops: ["ls"], state: fx.state, mount: fx.mount } }
+					: { id: msg.id, ok: JSON.parse(fx.env.FIXTURE_OVNFS_LIST) }));
+				const frame = Buffer.allocUnsafe(4 + response.length);
+				frame.writeUInt32LE(response.length);
+				response.copy(frame, 4);
+				peer.write(frame);
+			});
+		}) : null;
+		if (server !== null) {
+			mkdirSync(fx.state);
+			const listening = Promise.withResolvers<void>();
+			server.once("error", listening.reject);
+			server.listen(relative(process.cwd(), fx.socket), listening.resolve);
+			await listening.promise;
+		}
+		let child;
+		try {
+			child = await run([process.execPath, "--no-env-file", "-e",
+				'import { listRepoCheckouts } from "./src/ovnfs-checkouts.ts"; console.log(JSON.stringify(await listRepoCheckouts(process.cwd())));'],
+			{ cwd: repo, deadline_s: fixtureDeadlineS(30), env: { ...fx.env, PATH: fx.bin } });
+		} finally {
+			if (server !== null) {
+				const closed = Promise.withResolvers<void>();
+				server.close(() => closed.resolve());
+				await closed.promise;
+			}
+		}
+		const stderr = new TextDecoder().decode(child.stderr);
+		expect(child.rc, stderr).toBe(0);
+		const body = JSON.parse(new TextDecoder().decode(child.stdout));
+		const argv = existsSync(fx.trace) ? readFileSync(fx.trace, "utf8").trim().split("\n") : [];
+		const expectedArgv = mode === "absent" ? [] : ["status --json"];
+		const compatible = mode === "configured" && statusVersion === undefined && welcomeVersion === 5;
+		const expected = compatible ? "present" : mode === "absent" ? "absent" : "unavailable";
+		console.log(JSON.stringify({ scenario: "FIXTUREOVNFS1", mode, statusVersion: statusVersion === undefined ? 5 : statusVersion,
+			welcomeVersion, xdg: poisonedState, state: fx.state,
+			mount: fx.mount, socket: fx.socket, argv, requests, expected, observed: body.ovnfs, childExit: child.rc }));
+		expect(argv).toEqual(expectedArgv);
+		expect(body.ovnfs).toBe(expected);
+		expect(body.checkouts.map((row: { name: string }) => row.name)).toEqual(compatible ? ["owned-sibling"] : []);
+		const hello = { hello: { client: "omp-kit" } };
+		expect(requests).toEqual(compatible ? [hello, { id: 1, ls: {} }]
+			: mode === "configured" && statusVersion === undefined ? [hello] : []);
+	}
+}, fixtureDeadlineS(45) * 1000);
+
 // The guard extensions run in the seat's omp process, whose environment names no session (or the main session), so they
 // name the calling agent with `scratch mine|gate --session ID` and keep the command `omp-kit`: every exec stub that
 // recognises `omp-kit scratch` still catches it (the `env PI_SESSION_ID=… omp-kit` form slipped past kit-write-ledger's
@@ -595,6 +699,12 @@ test.skipIf(!HAVE_LSOF)("SCRATCHSIBLING1 CLI: scratch mine and gate --session at
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
 	Object.assign(env, { AGENT_NAME: AGENT, PI_SESSION_ID: SESSION, OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, OMP_KIT_SESSION_OWNERS_DIR: owners });
+	// The ownership test has no native-daemon obligation. Its poisoned XDG
+	// may reach only the controlled executable, even in a real Git checkout.
+	const ovnfs = fixtureOvnfs("stopped", state);
+	Object.assign(env, ovnfs.env, { PATH: `${ovnfs.bin}:${env.PATH ?? ""}` });
+	delete env.OVNFS_STATE;
+	delete env.OVNFS_MOUNT;
 	const cli = (...args: string[]) => {
 		const child = runSync([process.execPath, "--no-env-file", join(repo, "src", "cli.ts"), "scratch", ...args, "--json"],
 			{ deadline_s: fixtureDeadlineS(30), env, max_output_bytes: 1 << 20 });
