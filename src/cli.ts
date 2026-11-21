@@ -2794,10 +2794,14 @@ async function runScratchReaperBody(home: string): Promise<CliResult> {
 	const capOverride = Number(process.env.OMP_KIT_RUN_CAP_MS);
 	const cap = Number.isFinite(capOverride) && capOverride > 0 ? capOverride : RUN_TIME_CAPS_MS["scratch-reaper"];
 	const bodyStartedAt = Date.now();
+	process.send?.({ action: "CENSUS", path: home }); // NFSPROBE1: a hang before the first INSPECT now names its phase in the receipt
 	const result = applyScratch(home, {
 		liveness: defaultLiveness(), run: scratchRunner, home, runtimeRepo: kitIdentity().release.root,
 		onInspect: path => { process.send?.({ action: "INSPECT", path }); },
 		entryBudget: SCRATCH_REAPER_ENTRY_BUDGET,
+		probeNetworkMounts: true,
+		// NFSPROBE1: a mount is probed by this same binary (a platform binary such as ls is denied a removable volume at once while ours blocks on the open).
+		mountProbe: mount => ({ args: [process.execPath, ...(import.meta.path.startsWith("/$bunfs/") ? [] : [import.meta.path]), "service", "run", "scratch-reaper", "--json"], env: { OMP_KIT_SCRATCH_PROBE: mount } }),
 		deadlineMs: Date.now() + Math.max(60_000, cap - SCRATCH_REAPER_HEADROOM_MS),
 	});
 	process.send?.({ action: "BROWSER_INSPECT", path: home });
@@ -2830,6 +2834,8 @@ async function runScratchReaperBody(home: string): Promise<CliResult> {
 	let checkoutEligible = 0;
 	let checkoutFreedBytesDf: number | null = null;
 	try {
+		// NFSPROBE1: the checkouts live on the mount whose opens block for a launchd-launched process; never start their inventory then.
+		if ((result.blockedMounts ?? []).length > 0) throw new Error("network-mount-blocked");
 		// CHECKOUTBUDGET1: no per-checkout `du` (it runs into its 30 s deadline on every NFS checkout; reclaimed bytes are
 		// the df delta below) and no reap starts without 180 s left before the cap, so a slow archive cannot cause TIMEOUT.
 		const checkoutResult = applyCheckoutReap({ idleDays: CHECKOUT_IDLE_DAYS_DEFAULT,
@@ -2845,7 +2851,7 @@ async function runScratchReaperBody(home: string): Promise<CliResult> {
 		checkoutEligible = checkoutResult.eligible;
 		checkoutFreedBytesDf = checkoutResult.freedBytesDf;
 	} catch {
-		checkoutKept = [{ name: "<inventory>", reason: "checkout-inventory-unavailable" }];
+		checkoutKept = [{ name: "<inventory>", reason: (result.blockedMounts ?? []).length > 0 ? "network-mount-blocked" : "checkout-inventory-unavailable" }];
 	}
 	return { code: failed > 0 ? 1 : 0, data: { overall: failed > 0 ? "FINDINGS" : "OK", job: "scratch-reaper",
 		stats: { roots: result.roots.length, sessions: result.applied.length, browser_orphans: browserResult.killed.length, browser_clones: browserResult.quarantined.length, orphans: result.orphans.length,
@@ -2855,7 +2861,7 @@ async function runScratchReaperBody(home: string): Promise<CliResult> {
 			deleted: result.expired.length, failures: failed,
 			reapableBytes: result.reapableBytes, quarantinableBytes: result.quarantinableBytes },
 		sessions: result.applied, orphans: result.orphans, killed: result.killed, expired: result.expired, ledgerRetention,
-		checkouts: { eligible: checkoutEligible, reaped: checkoutReaped, kept: checkoutKept, archives: checkoutArchives, freedBytes: checkoutFreedBytes, freedBytesDf: checkoutFreedBytesDf } },
+		checkouts: { eligible: checkoutEligible, reaped: checkoutReaped, kept: checkoutKept, archives: checkoutArchives, freedBytes: checkoutFreedBytes, freedBytesDf: checkoutFreedBytesDf }, blockedMounts: result.blockedMounts ?? [] },
 		errors: failed > 0 ? [{ code: "SCRATCH_APPLY_FAILED", message: `scratch-reaper had ${failed} failed action(s)${firstFailure(result)}`,
 			remediation: "Inspect the applied verdicts and scratch reap JSONL receipt; refused paths were left in place." }] : [],
 		verification: "UNVERIFIED" };
@@ -3366,6 +3372,17 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		const job = scoped[name!]!;
 		const root = receiptStateRoot();
 		const jobsDir = root ? join(root, "jobs") : join(home, ".local", "state", "omp-kit", "jobs");
+		// NFSPROBE1: the reaper's mount probe is this binary opening one mount point and exiting; it takes no lock and writes no state.
+		const mountProbePath = process.env.OMP_KIT_SCRATCH_PROBE;
+		if (mountProbePath !== undefined && job.name === "scratch-reaper") {
+			try {
+				realpathSync(mountProbePath);
+				readdirSync(mountProbePath);
+				return { code: 0, data: { overall: "OK", job: job.name, probe: mountProbePath }, verification: "UNVERIFIED" };
+			} catch (error) {
+				return { code: 2, data: { overall: "UNVERIFIED", job: job.name, probe: mountProbePath, error: error instanceof Error ? error.message : String(error) }, verification: "UNVERIFIED" };
+			}
+		}
 		// OVNFSTRACK1: native tool-update body. It holds the run lock itself and does its own
 		// high-load swap deferral (binary + skill even when loaded, swap deferred), so it bypasses
 		// the global load gate that would SKIPPED-LOAD the whole tick. lockedRun stays true so the

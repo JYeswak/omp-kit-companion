@@ -224,6 +224,16 @@ receipt. Directory cleanup is limited to recognized scratch roots, not
 unrelated cache directories; eligible abandoned harness-server processes are
 also stopped.
 
+A process started by launchd or systemd can be unable to open anything on a
+network volume or an external disk that a shell can read (the kit's ovnfs
+checkouts mount is such a volume on macOS). Before it touches any scratch
+root, the scheduled run lists the network mounts and the mounts under
+`/Volumes`, probes each with its own binary for 8 seconds, never discovers or
+scans a root under one that does not answer, skips the checkout inventory,
+and names each such mount in `blockedMounts` of its result. Scratch on a
+blocked mount is reclaimed only by `omp-kit scratch apply --apply` run from
+a shell.
+
 ## Update the kit, not OMP
 
 `update` needs an explicit newer version with absolute local index and

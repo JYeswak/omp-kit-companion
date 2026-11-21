@@ -21,7 +21,7 @@ import { runSync } from "./kitlib/run.ts";
  */
 
 export interface ScratchRunResult { code: number | null; stdout: string; stderr: string }
-export type ScratchRunner = (args: readonly string[], opts?: { timeoutMs?: number }) => ScratchRunResult;
+export type ScratchRunner = (args: readonly string[], opts?: { timeoutMs?: number; env?: Record<string, string> }) => ScratchRunResult;
 
 export type ScratchBin = "throwaway" | "evidence" | "promote" | "hold";
 export const SCRATCH_BINS: readonly ScratchBin[] = ["throwaway", "evidence", "promote", "hold"];
@@ -792,11 +792,11 @@ function lsofClearDir(deps: InspectDeps, dir: string): boolean | null {
 	return lsofClear(dir, deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
 }
 
-export function defaultRunner(args: readonly string[], opts?: { timeoutMs?: number }): ScratchRunResult {
+export function defaultRunner(args: readonly string[], opts?: { timeoutMs?: number; env?: Record<string, string> }): ScratchRunResult {
 	try {
 		const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
 		const child = runSync(args, { deadline_s: (opts?.timeoutMs ?? 30_000) / 1000, max_output_bytes: 8 * 1024 * 1024,
-			env: args[0] === "ps" ? { ...env, LC_ALL: "C" } : env });
+			env: args[0] === "ps" ? { ...env, LC_ALL: "C" } : { ...env, ...(opts?.env ?? {}) } });
 		return { code: child.timed_out || child.truncated ? null : child.rc,
 			stdout: new TextDecoder().decode(child.stdout), stderr: new TextDecoder().decode(child.stderr) };
 	} catch (error) {
@@ -829,8 +829,7 @@ export function osErrorText(error: unknown): string {
 }
 
  const APPLY_FAILURE_REASONS: Record<string, true> = {
- "owner-changed-after-initial-check": true, "owner-release-changed-after-initial-check": true,
- "inode-proof-unavailable": true, "lsof-evidence-unavailable": true, "owner-released-but-open-fds-present": true,
+ "inode-proof-unavailable": true, "lsof-evidence-unavailable": true,
  "quarantine-create-failed": true, "atomic-quarantine-failed": true,
 "quarantine-rollback-failed": true,
  "delete-quarantine-failed": true, "quarantine-ttl-config-invalid": true, "quarantine-read-failed": true,
@@ -838,7 +837,8 @@ export function osErrorText(error: unknown): string {
  "idle-proof-unavailable": true,
  };
 
-/** A final-recheck refusal is an expected safety SKIP, not a failed run. */
+/** A recheck that finds the dir still in use or its owner changed (owner-released-but-open-fds-present, owner-changed-after-initial-check,
+ * owner-release-changed-after-initial-check) is a safety refusal counted in refused_count, not a failed run (PeachLeopard AM92344, ompkit-1ra0d.255 [c]). */
 export function isApplyFailure(verdict: ScratchVerdict): boolean {
 	return verdict.action === "SKIP" && APPLY_FAILURE_REASONS[verdict.reason] === true;
 }
@@ -1578,10 +1578,11 @@ function registerScratchRoot(root: string): boolean {
 export function resolveScratchRootEntries(home: string): ScratchRootEntry[] {
 	const override = process.env.OMP_KIT_SCRATCH_ROOTS;
 	if (override !== undefined && override !== "") {
-		return override.split(delimiter).map(part => part.trim()).filter(part => part !== "").map(root => ({ root, sources: ["override"] }));
+		return override.split(delimiter).map(part => part.trim()).filter(part => part !== "" && !underBlockedMount(part)).map(root => ({ root, sources: ["override"] }));
 	}
 	const byReal = new Map<string, ScratchRootEntry>();
 	const add = (root: string, source: string): void => {
+		if (underBlockedMount(root)) return; // NFSPROBE1: realpath of a root on a blocked mount is the call that never returns
 		let key = root;
 		try {
 			key = realpathSync(root);
@@ -1611,6 +1612,7 @@ export function resolveScratchRootEntries(home: string): ScratchRootEntry[] {
 	for (const { repo, source } of fleetWatchRepos(home)) {
 		try {
 			// A fleet repo may be named through an alias; its real path is the repo.
+			if (underBlockedMount(repo)) continue;
 			const real = realpathSync(repo);
 			const candidate = join(real, "var", "agent-tmp");
 			if (statSync(candidate).isDirectory() && !isSymlink(candidate) && !isSymlink(join(real, "var"))) add(candidate, source);
@@ -2152,6 +2154,15 @@ export interface ApplyDeps extends InspectDeps {
 	/** Rename seam for the quarantine move: the default renameSync throws EXDEV across devices, and the
 	 * caller falls back to a same-root quarantine. A test plants an EXDEV thrower for the global dir. */
 	renameDir?: (src: string, dst: string) => void;
+	/** NFSPROBE1: before the census, probe every mount a launchd-launched process may be unable to open (network volumes and
+	 * anything under /Volumes); roots under a mount whose probe times out are never discovered and are reported in
+	 * `blockedMounts`. Off by default (the production reaper job turns it on): a probe is one extra child per mount. */
+	probeNetworkMounts?: boolean;
+	/** The probe command for one mount. Default `ls -A MOUNT`; the reaper job probes with its own binary, because a platform
+	 * binary such as ls is denied a removable volume at once while the kit's binary blocks on the same open. */
+	mountProbe?: (mount: string) => { args: readonly string[]; env?: Record<string, string> };
+	/** Deadline of one mount probe; defaults to NETWORK_PROBE_TIMEOUT_MS. */
+	networkProbeTimeoutMs?: number;
 }
 
 function isBeadClosed(bead: string, deps: ApplyDeps): boolean | null {
@@ -3957,6 +3968,8 @@ export interface ScratchApplyResult extends ScratchPlan {
 	expired: ScratchVerdict[];
 	receipt: ScratchRunReceipt;
 	gapReport: ScratchGapReport;
+	/** NFSPROBE1: network mounts whose probe timed out; their roots were not scanned this run. Absent when probing was off. */
+	blockedMounts?: BlockedMount[];
 }
 
 const NO_GUARD = "NO GUARD: file one";
@@ -4109,7 +4122,78 @@ export function fileGapReports(home: string, report: ScratchGapReport, opts: Fil
 	return { filed, unfiled };
 }
 
+/** NFSPROBE1 (ompkit-bdu5b, ompkit-1ra0d.255): deadline of one network-mount probe. */
+export const NETWORK_PROBE_TIMEOUT_MS = 8000;
+const NETWORK_FSTYPES: Record<string, true> = { nfs: true, smbfs: true, afpfs: true, webdav: true };
+
+export interface BlockedMount { mount: string; probe: string; ms: number; reason: string }
+
+/** Mount points a launchd-launched process can be unable to open: network volumes (nfs, smbfs, afpfs, webdav) and anything mounted under /Volumes (external or removable disks). */
+export function parseProbeMounts(text: string): string[] {
+	const mounts: string[] = [];
+	for (const line of text.split("\n")) {
+		if (line.length > 4096) continue;
+		const open = line.lastIndexOf(" (");
+		const on = open < 0 ? -1 : line.lastIndexOf(" on ", open);
+		if (on < 0) continue;
+		const fstype = line.slice(open + 2).split(/[,)]/, 1)[0]?.trim() ?? "";
+		const mount = line.slice(on + 4, open);
+		if (mount.startsWith("/") && (Object.hasOwn(NETWORK_FSTYPES, fstype) || mount.startsWith("/Volumes/"))) mounts.push(mount);
+	}
+	return mounts;
+}
+
+let blockedMountPrefixes: readonly string[] = [];
+/** NFSPROBE1: true for a path on a mount this run found blocked; root discovery must not realpath, open or list it. */
+function underBlockedMount(path: string): boolean {
+	return blockedMountPrefixes.some(mount => path === mount || path.startsWith(`${mount}/`));
+}
+
+/**
+ * A process launched by launchd cannot open() anything on the user's ovnfs NFS mount (`/Users/josh/checkouts`, hard,intr): stat answers
+ * from cache, every open or readdir blocks until a signal (measured 2026-11-21 with `ls -A`, `head`, `cat`, python and bun in a LaunchAgent,
+ * whatever the job's ProcessType, Nice, LowPriorityIO or SessionCreate; the same calls answer in 50 ms from an interactive shell). The
+ * scheduled reaper's worker therefore sat in realpath/openat on the first checkout root until its 30 minute cap on every run, with no
+ * progress message, which is why the receipt said `interruptedAction: null` and the census size never mattered. One bounded `ls -A` of each
+ * network mount point tells a blocked mount from a readable one, before any root is touched; roots under a blocked one are not discovered.
+ * An answer of any kind, even an error, means the mount is readable enough to scan: the per-root checks already handle EACCES and ENOENT.
+ */
+export function findBlockedNetworkMounts(run: ScratchRunner, timeoutMs: number = NETWORK_PROBE_TIMEOUT_MS, probe: (mount: string) => { args: readonly string[]; env?: Record<string, string> } = mount => ({ args: ["ls", "-A", mount] })): BlockedMount[] {
+	let mounts: string[];
+	try {
+		const listed = run(["mount"], { timeoutMs: 10_000 });
+		if (listed.code !== 0) return [];
+		mounts = parseProbeMounts(listed.stdout);
+	} catch {
+		return [];
+	}
+	const blocked: BlockedMount[] = [];
+	for (const mount of [...new Set(mounts)]) {
+		const started = Date.now();
+		let answered = false;
+		const command = probe(mount);
+		try {
+			answered = run(command.args, { timeoutMs, ...(command.env === undefined ? {} : { env: command.env }) }).code !== null;
+		} catch {
+			answered = false;
+		}
+		if (!answered) blocked.push({ mount, probe: command.args.join(" "), ms: Date.now() - started, reason: `the probe returned nothing within ${timeoutMs} ms: an open on this mount blocks for this process` });
+	}
+	return blocked;
+}
+
 export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult {
+	const blockedMounts = deps.probeNetworkMounts === true ? findBlockedNetworkMounts(deps.run, deps.networkProbeTimeoutMs, deps.mountProbe) : [];
+	blockedMountPrefixes = blockedMounts.map(blocked => blocked.mount);
+	try {
+		const result = applyScratchInner(home, deps);
+		return deps.probeNetworkMounts === true ? { ...result, blockedMounts } : result;
+	} finally {
+		blockedMountPrefixes = [];
+	}
+}
+
+function applyScratchInner(home: string, deps: ApplyDeps): ScratchApplyResult {
 	const now = deps.now ?? Date.now();
 	const startedAt = new Date(now).toISOString();
 	const freePctBefore = measureDiskFreePercent(home, deps.statfs);
