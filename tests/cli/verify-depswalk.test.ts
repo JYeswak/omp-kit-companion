@@ -15,6 +15,16 @@ async function lockedPackage(dir: string, name: string, dependencies: Record<str
 	expect(existsSync(join(dir, "package-lock.json"))).toBe(true);
 }
 
+/**
+ * Replay a box command the way the verifier does: from a script file, never `sh -c` with a dynamic payload. The pysafe
+ * ratchet cannot read a shell program passed as a variable and refuses it ("dynamic executable shell argument").
+ */
+async function replayBox(root: string, command: string, env: Record<string, string>) {
+	const script = join(root, "replay-box.sh");
+	writeFileSync(script, `${command}\n`, { mode: 0o700 });
+	return run(["sh", script], { cwd: root, deadline_s: fixtureDeadlineS(30), env });
+}
+
 test("VERIFYDEPSWALK1: a box in a nested package with its own lockfile also provisions every ancestor lockfile, root first", async () => {
 	const root = ownedTmp("verify-depswalk").path;
 	await lockedPackage(root, "workspace-root");
@@ -70,7 +80,7 @@ for (const { target, flag } of [
 		const command = `npm ${flag} test`;
 		const outcome = await ensureBoxDeps(command, root, env, [], new Map());
 		expect(outcome).toBeNull();
-		const replay = await run(["sh", "-c", command], { cwd: root, deadline_s: fixtureDeadlineS(30), env });
+		const replay = await replayBox(root, command, env);
 		expect(replay.rc, new TextDecoder().decode(replay.stderr)).toBe(0);
 		expect(new TextDecoder().decode(replay.stdout)).toContain("locked-prefix-dependency");
 	}, fixtureDeadlineS(90) * 1000);
@@ -93,7 +103,7 @@ test("VERIFYDEPS1 npm -- stops directory-option parsing before script arguments"
 	const command = "npm --prefix apps/cfs-followup-worker test -- --prefix ../outside";
 	const outcome = await ensureBoxDeps(command, root, env, [], new Map());
 	expect(outcome).toBeNull();
-	const replay = await run(["sh", "-c", command], { cwd: root, deadline_s: fixtureDeadlineS(30), env });
+	const replay = await replayBox(root, command, env);
 	expect(replay.rc, new TextDecoder().decode(replay.stderr)).toBe(0);
 	expect(new TextDecoder().decode(replay.stdout)).toContain("locked-prefix-dependency");
 }, fixtureDeadlineS(90) * 1000);
