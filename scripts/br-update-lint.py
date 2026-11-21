@@ -693,7 +693,7 @@ def _handoff_claim(repo: str, subject: str, request: list[str]) -> int:
                    else _fresh_green(repo, commit) or _push_check_green(repo, commit)):
         if _handoff_published(repo, commit):
             return 0
-        print("br-shim: HANDOFF_UNGATED the DONE source "
+        print("br-shim: HANDOFF_UNGATED NOT_PUBLISHED the DONE source "
               f"{repo}@{commit} is not on origin/main; publish it (omp-kit land, or "
               "omp-kit land --exact-parent SHA), run git fetch origin main if it is already pushed, and name "
               "the published sha in the DONE line", file=sys.stderr)
@@ -705,10 +705,57 @@ def _handoff_claim(repo: str, subject: str, request: list[str]) -> int:
     return 4
 
 
+def _lesson_line(text: str) -> bool:
+    """The predicate `omp-kit verify` uses (commentLesson in src/verify.ts): a line starting `Lesson:` with text after it."""
+    return any(line[:7].lower() == "lesson:" and line[7:].strip() for line in (raw.strip() for raw in text.splitlines()))
+
+
+def _request_actor(request: list[str]) -> str:
+    for index, arg in enumerate(request):
+        if arg == "--actor" and index + 1 < len(request):
+            return request[index + 1]
+        if arg.startswith("--actor="):
+            return arg[len("--actor="):]
+    return os.environ.get("BR_ACTOR") or os.environ.get("AGENT_NAME", "")
+
+
+def _handoff_lesson(request: list[str], inflight: list[str]) -> int:
+    """in_review means a non-author can verify it now, and verify refuses LESSON_MISSING without an author Lesson.
+
+    The author is the bead's assignee, else its creator; a `Lesson:` line in this very handoff comment counts when
+    the actor is that author, and so does any earlier comment the author wrote. One predicate with verify's, not a
+    second guard: the refusal carries verify's own code. A multi-bead update cannot be read per bead and is left to
+    verify's own refusal at close."""
+    bead = os.environ.get("BR_HANDOFF_BEAD", "")
+    real = os.environ.get("BR_HANDOFF_REAL", "")
+    if os.environ.get("BR_HANDOFF_SUBCOMMAND") != "update" or not bead or not real:
+        return 0
+    db = os.environ.get("BR_HANDOFF_DB", "")
+    project = os.environ.get("BR_HANDOFF_TRACKER") or os.getcwd()
+    try:
+        record = show_bead(real, project, db, bead)
+        author = str(record.get("assignee") or record.get("created_by") or "")
+        if author and any(_lesson_line(text) for text in inflight) and _request_actor(request).lower() == author.lower():
+            return 0
+        comments = record.get("comments")
+        if author and isinstance(comments, list) and any(
+                isinstance(row, dict) and str(row.get("author", "")).lower() == author.lower()
+                and _lesson_line(str(row.get("text", ""))) for row in comments):
+            return 0
+    except (RuntimeError, ValueError) as error:
+        print(f"br-shim: HANDOFF_UNGATED LESSON_MISSING could not be judged for {bead}: {error}", file=sys.stderr)
+        return 4
+    print(f"br-shim: HANDOFF_UNGATED LESSON_MISSING {bead} has no author Lesson: comment, and omp-kit verify refuses "
+          "without one; add a line 'Lesson: <what this taught>' to the DONE --transition-comment (as the bead's "
+          f"author {author or 'unknown'}), or write it with br comments add", file=sys.stderr)
+    return 4
+
+
 def _handoff_check(required: bool, texts: Iterable[str], request: list[str]) -> int:
     project = os.path.realpath(os.environ.get("BR_HANDOFF_PROJECT", os.getcwd()))
+    inflight = list(texts)
     claims: list[tuple[str, str]] = []
-    for text in texts:
+    for text in inflight:
         for line in text.splitlines():
             line = line.strip()
             if line == "DONE" or line.startswith("DONE "):
@@ -730,7 +777,7 @@ def _handoff_check(required: bool, texts: Iterable[str], request: list[str]) -> 
         refusal = _handoff_claim(repo, subject, request)
         if refusal:
             return refusal
-    return 0
+    return _handoff_lesson(request, inflight) if required else 0
 
 
 def handoff_file(argv: list[str]) -> int:

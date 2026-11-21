@@ -472,11 +472,13 @@ esac
 		const db = join(tracker, ".beads/beads.db");
 		const br = (args: string[]) => checked([backend, "--db", db, "--no-auto-import", "--no-auto-flush", ...args]);
 		await br(["init", "--prefix", "hh", "--actor", "HandoffAuthor"]);
-		const beads = ["hh-owned", "hh-other"].map(id => ({
+		// LANDPIPE1: in_review needs the author's `Lesson:` comment (verify's predicate); each bead carries one.
+		const beads = ["hh-owned", "hh-other"].map((id, index) => ({
 			id, title: "Preserve native source handoff", issue_type: "task", priority: 2,
 			status: "in_progress", assignee: "HandoffAuthor", created_by: "HandoffAuthor",
 			created_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-01T00:00:00Z",
-			labels: ["fixture"], dependencies: [], comments: [],
+			labels: ["fixture"], dependencies: [],
+			comments: [{ id: 200 + index, issue_id: id, author: "HandoffAuthor", text: "Lesson: a handoff names the exact source", created_at: "2026-11-01T00:00:00Z" }],
 			description: "WHAT: preserve the exact source handoff. WHY: a missing observation must refuse without changing native state.",
 			acceptance_criteria: HANDOFF_AC,
 		}));
@@ -756,11 +758,12 @@ esac
 		const db = join(tracker, ".beads/beads.db");
 		const br = (args: string[]) => checked([backend, "--db", db, "--no-auto-import", "--no-auto-flush", ...args]);
 		await br(["init", "--prefix", "hh", "--actor", "HandoffAuthor"]);
-		const beads = ["hh-owned", "hh-other"].map(id => ({
+		const beads = ["hh-owned", "hh-other"].map((id, index) => ({
 			id, title: "Preserve native source handoff", issue_type: "task", priority: 2,
 			status: "in_progress", assignee: "HandoffAuthor", created_by: "HandoffAuthor",
 			created_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-01T00:00:00Z",
-			labels: ["fixture"], dependencies: [], comments: [],
+			labels: ["fixture"], dependencies: [],
+			comments: [{ id: 300 + index, issue_id: id, author: "HandoffAuthor", text: "Lesson: a handoff names the exact source", created_at: "2026-11-01T00:00:00Z" }],
 			description: "WHAT: preserve the exact source handoff. WHY: a missing observation must refuse without changing native state.",
 			acceptance_criteria: HANDOFF_AC,
 		}));

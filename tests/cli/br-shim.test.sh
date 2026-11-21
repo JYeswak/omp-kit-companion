@@ -282,10 +282,10 @@ REVIEW_DB="$TMP/review-project/.beads/beads.db"
 mkdir -p "$TMP/review-project/.beads"
 : > "$REVIEW_DB"
 cat > "$TMP/review-testshim.json" <<'EOF'
-{"id":"X","title":"Review admission fixture","type":"task","issue_type":"task","status":"in_progress","priority":2,"created_at":"2026-10-30T00:00:00Z","assignee":"TestShim","labels":["gate"],"description":"WHAT: (a) a widget. WHY: needed.","dependencies":[],"acceptance_criteria":"- [x] [a] [build] the widget builds; planted negative: bad input is refused `true` -> rc 0\n- [ ] [v] [live] verification note, never replayed"}
+{"id":"X","title":"Review admission fixture","type":"task","issue_type":"task","status":"in_progress","priority":2,"created_at":"2026-10-30T00:00:00Z","assignee":"TestShim","labels":["gate"],"description":"WHAT: (a) a widget. WHY: needed.","dependencies":[],"acceptance_criteria":"- [x] [a] [build] the widget builds; planted negative: bad input is refused `true` -> rc 0\n- [ ] [v] [live] verification note, never replayed","comments":[{"id":1,"issue_id":"X","author":"TestShim","text":"Lesson: a review handoff needs the author lesson","created_at":"2026-10-30T00:00:00Z"}]}
 EOF
 cat > "$TMP/review-other.json" <<'EOF'
-{"id":"X","title":"Review admission fixture","type":"task","issue_type":"task","status":"in_progress","priority":2,"created_at":"2026-10-30T00:00:00Z","assignee":"OtherWorker","labels":["gate"],"description":"WHAT: (a) a widget. WHY: needed.","dependencies":[],"acceptance_criteria":"- [x] [a] [build] the widget builds; planted negative: bad input is refused `true` -> rc 0\n- [ ] [v] [live] verification note, never replayed"}
+{"id":"X","title":"Review admission fixture","type":"task","issue_type":"task","status":"in_progress","priority":2,"created_at":"2026-10-30T00:00:00Z","assignee":"OtherWorker","labels":["gate"],"description":"WHAT: (a) a widget. WHY: needed.","dependencies":[],"acceptance_criteria":"- [x] [a] [build] the widget builds; planted negative: bad input is refused `true` -> rc 0\n- [ ] [v] [live] verification note, never replayed","comments":[{"id":1,"issue_id":"X","author":"OtherWorker","text":"Lesson: a review handoff needs the author lesson","created_at":"2026-10-30T00:00:00Z"}]}
 EOF
 export AM_EXPECTED_PROJECT="$TMP/review-project"
 export BR_GUARD_JSON_FILE="$TMP/review-testshim.json"

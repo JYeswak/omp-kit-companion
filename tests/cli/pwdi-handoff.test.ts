@@ -1,8 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { run, RunResult } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { verifyBead } from "../../src/verify.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 import { nativeBr } from "./lib/native-br.ts";
 
 afterAll(cleanupAllOwnedTmp);
@@ -10,6 +12,7 @@ const ROOT = resolve(import.meta.dir, "../..");
 const decoder = new TextDecoder();
 const AUTHOR = "FixtureBuilder";
 const REVIEWER = "FixtureReviewer";
+const TEST_TIMEOUT_MS = fixtureDeadlineS(120) * 1000;
 
 async function fixture() {
 	const dir = ownedTmp("pwdi-native-handoff").path;
@@ -43,13 +46,17 @@ async function fixture() {
 	mkdirSync(join(repo, "tests"));
 	writeFileSync(join(repo, "payload.txt"), "preserved\n");
 	writeFileSync(join(repo, "tests/replay.sh"), "#!/bin/sh\n[ -f payload.txt ]\n", { mode: 0o755 });
-	const records = ["owned", "trailer", "other"].map(name => ({
+	// LANDPIPE1: in_review now needs the author's `Lesson:` comment, the same predicate `omp-kit verify` applies, so every
+	// fixture bead carries one from its assignee except the planted `nolesson` and `inline` beads.
+	const assigneeOf = (name: string) => name === "trailer" || name === "other" ? "OtherBuilder" : AUTHOR;
+	const records = ["owned", "trailer", "other", "nolesson", "inline", "missing"].map((name, index) => ({
 		id: `pw-${name}`, title: "Preserve the actual native fixture transition", issue_type: "task", priority: 2,
 		created_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-01T00:00:00Z", created_by: AUTHOR,
-		status: "in_progress", assignee: name === "owned" ? AUTHOR : "OtherBuilder", labels: ["fixture"],
+		status: "in_progress", assignee: assigneeOf(name), labels: ["fixture"],
 		description: "WHAT: (a) preserve native transition state. WHY: ownership must not confuse handoff with close. Planted negative refuses an author close.",
-		acceptance_criteria: "- [x] [a] [build] preserve the fixture payload; planted negative rejects a missing payload `sh tests/replay.sh` -> rc 0",
-		dependencies: [], comments: [],
+		acceptance_criteria: `- [x] [a] [build] preserve the fixture payload; planted negative rejects a missing payload \`sh tests/${name === "missing" ? "missing" : "replay"}.sh\` -> rc 0`,
+		dependencies: [],
+		comments: name === "nolesson" || name === "inline" ? [] : [{ id: 100 + index, issue_id: `pw-${name}`, author: assigneeOf(name), text: "Lesson: a handoff must keep the fixture payload", created_at: "2026-11-01T00:00:00Z" }],
 	}));
 	writeFileSync(join(repo, ".beads/issues.jsonl"), records.map(record => JSON.stringify(record)).join("\n") + "\n");
 	await br(["sync", "--import-only", "--actor", AUTHOR]);
@@ -157,6 +164,75 @@ test("PWDI handoff admits locally present commits on update while close still de
 	expect(await f.state("pw-owned")).toBe("in_progress");
 }, 120_000);
 
+/** The prior GREEN observation the handoff gate reads, for a commit the fixture made after its first one. */
+function greenRow(repo: string, commit: string): void {
+	appendFileSync(join(repo, ".git/omp-kit/fresh-gate-runs.jsonl"), JSON.stringify({ version: 2, commit, rc: 0, evidence: { complete: true } }) + "\n");
+}
+
+test("LANDPIPE1 handoff unpublished: a locally GREEN source is refused with verify's NOT_PUBLISHED and admitted once it is on origin/main", async () => {
+	const f = await fixture();
+	await f.git(["commit", "--allow-empty", "-q", "-m", "unpublished fixture source", "-m", "Bead: pw-owned", "-m", `Agent: ${AUTHOR}`]);
+	const local = await f.git(["rev-parse", "HEAD"]);
+	greenRow(f.repo, local);
+	const handoff = () => f.shim(["update", "pw-owned", "--status", "in_review", "--transition-comment", `DONE ${f.repo}@${local}: unpublished source`]);
+	const refused = await handoff();
+	expect(refused.rc, output(refused)).toBe(4);
+	expect(output(refused)).toContain("HANDOFF_UNGATED NOT_PUBLISHED");
+	expect(await f.state("pw-owned")).toBe("in_progress");
+	// The verifier gives the same reason for the same source: the handoff is refused for what verify refuses.
+	const verifierSays = await f.guard("pw-owned", REVIEWER, "close", `Lesson: none\nexport ${local}`);
+	expect(output(verifierSays)).toContain("NOT_PUBLISHED");
+	// Planted negative: the very same source and bead are admitted once the source is on origin/main.
+	await f.git(["push", "-q", "origin", "main"]);
+	const admitted = await handoff();
+	expect(admitted.rc, output(admitted)).toBe(0);
+	expect(await f.state("pw-owned")).toBe("in_review");
+}, 120_000);
+
+test("LANDPIPE1 handoff lesson: a published source with no author Lesson is refused LESSON_MISSING; the author's Lesson, in the comment or earlier, admits it", async () => {
+	const f = await fixture();
+	const handoff = (id: string, comment: string, actor = AUTHOR) => f.shim(["update", id, "--status", "in_review", "--transition-comment", comment], actor);
+	const refused = await handoff("pw-nolesson", f.reason);
+	expect(refused.rc, output(refused)).toBe(4);
+	expect(output(refused)).toContain("HANDOFF_UNGATED LESSON_MISSING");
+	expect(await f.state("pw-nolesson")).toBe("in_progress");
+	// A Lesson from someone who is not the bead's author is not the author's Lesson: verify would refuse it too.
+	const stranger = await handoff("pw-nolesson", `${f.reason}\nLesson: a stranger wrote this`, "OtherBuilder");
+	expect(stranger.rc, output(stranger)).toBe(4);
+	expect(await f.state("pw-nolesson")).toBe("in_progress");
+	// An earlier comment by the author is enough: write it, then the plain handoff passes.
+	await f.br(["comments", "add", "pw-nolesson", "--author", AUTHOR, "-m", "Lesson: an earlier author comment counts"]);
+	const earlier = await handoff("pw-nolesson", f.reason);
+	expect(earlier.rc, output(earlier)).toBe(0);
+	expect(await f.state("pw-nolesson")).toBe("in_review");
+	// The Lesson in the handoff comment itself, written by the author, is the other way in.
+	const inline = await handoff("pw-inline", `${f.reason}\nLesson: the handoff comment carries it`);
+	expect(inline.rc, output(inline)).toBe(0);
+	expect(await f.state("pw-inline")).toBe("in_review");
+}, TEST_TIMEOUT_MS);
+
+test("LANDPIPE1 handoff trailer: a published GREEN source with no Bead trailer is not read as unpublished, and a failing original command keeps its own exit code", async () => {
+	const f = await fixture();
+	mkdirSync(join(f.repo, "scripts"));
+	writeFileSync(join(f.repo, "scripts/noop.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+	await f.git(["add", "payload.txt", "tests/replay.sh", "scripts/noop.sh"]);
+	await f.git(["commit", "-q", "-m", "published source without any bead trailer"]);
+	await f.git(["push", "-q", "origin", "main"]);
+	const source = await f.git(["rev-parse", "HEAD"]);
+	greenRow(f.repo, source);
+	const handed = await f.shim(["update", "pw-missing", "--status", "in_review", "--transition-comment", `DONE ${f.repo}@${source}: no trailer on this commit`]);
+	expect(handed.rc, output(handed)).toBe(0);
+	expect(output(handed)).not.toContain("NOT_PUBLISHED");
+	expect(await f.state("pw-missing")).toBe("in_review");
+	// The acceptance command (`sh tests/missing.sh`) cannot run in the export. Verify reports that command's own exit code
+	// (127), never a review-admission relabel: the Lesson exists, so nothing here is a handoff refusal.
+	const verdict = await verifyBead({ bead: "pw-missing", exportSha: source, repo: f.repo, actor: REVIEWER, env: { ...f.env, BEADS_DB: join(f.repo, ".beads/beads.db"), AGENT_NAME: REVIEWER }, dryRun: true });
+	expect(verdict.code, String(verdict.log)).not.toBe("LESSON_MISSING");
+	expect(verdict.code).not.toBe("NOT_PUBLISHED");
+	expect(verdict.code).not.toBe("ACCEPTANCE_NOT_REPLAYABLE");
+	expect(verdict.replays.map(replay => replay.rc)).toEqual([127]);
+}, TEST_TIMEOUT_MS);
+
 test("PWDI original sync controls preserve three-behind, fast-forward, dirty and post-push outcomes", async () => {
 	const f = await fixture();
 	const peer = join(f.dir, "peer");
@@ -195,4 +271,4 @@ test("PWDI original sync controls preserve three-behind, fast-forward, dirty and
 	expect(diverged.rc, output(diverged)).toBe(4);
 	expect(output(diverged)).toContain("DIVERGED");
 	expect(await f.git(["rev-parse", "HEAD"])).toBe(divergentHead);
-}, 120_000);
+}, TEST_TIMEOUT_MS);
