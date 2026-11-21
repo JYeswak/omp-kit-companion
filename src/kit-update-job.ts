@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { parseReleaseIndexJson } from "./kit-release.ts";
-import { applyKitUpdate, isLiveDeferredOnly, judgeKitPostcheck, kitPostcheckDetail, planKitUpdate, reconcilePendingUpdate, runKitPostcheck, selectUpdateOmp, undoKitUpdate, type KitPostcheck, type KitPostcheckDetail, type KitUndoResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult, type LiveDeferredOnlyDetail, type UpdateOmpSelection } from "./kit-update.ts";
+import { applyKitUpdate, fetchAttestationBundleFor, isLiveDeferredOnly, judgeKitPostcheck, kitPostcheckDetail, planKitUpdate, reconcilePendingUpdate, runKitPostcheck, selectUpdateOmp, undoKitUpdate, type KitPostcheck, type KitPostcheckDetail, type KitUndoResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult, type LiveDeferredOnlyDetail, type UpdateOmpSelection } from "./kit-update.ts";
 import type { FullTestReport } from "./full-test-runner.ts";
 import { refreshFleetHooksLive, type HookRefreshReport } from "./hook-refresh.ts";
 import { acquireKitUpdateLock, inspectPendingKitUpdate, type PendingKitUpdate, type UpdateLockToken } from "./mutations.ts";
@@ -31,6 +31,8 @@ export type KitUpdateJobDependencies = {
 	/** Test seam for GitHub and plugin relink commands. Production uses spawnSync. */
 	exec?: (argv: readonly string[]) => Promise<{ exit: number; stdout: string; stderr: string }>;
 	relink?: (binary: string, store: string) => Promise<PluginRelinkResult>;
+	/** Test seam for the attestation-bundle fetch; production runs the installer's anonymous fetch (fetchAttestationBundleFor). */
+	fetchBundle?: (archivePath: string, version: string, home: string, tmpdir: string) => Promise<Buffer>;
 	/** Test seam for the new binary's `service install kit-update --apply --yes`. Production uses spawnSync. */
 	reconcile?: (binary: string) => Promise<{ ok: boolean; detail: string }>;
 	/**
@@ -230,14 +232,18 @@ export async function pollPublishedRelease(prefix: string, stateRoot: string, pl
 	if (resolve(indexPath) !== indexPath || dirname(indexPath) !== dirname(archivePath)) throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded tuple failed the same-directory file check");
 	if (!pollTupleVerified(indexPath, archivePath, version, target))
 		throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded archive does not match published index");
-	// Bundles are published in GitHub's attestation store, not necessarily release assets.
-	// Fetch by the archive bytes' digest on every cycle; applyKitUpdate authenticates the bundle before extraction.
-	const digest = createHash("sha256").update(readFileSync(archivePath)).digest("hex");
-	const bundle = await exec(["gh", "api", "--hostname", "github.com", `repos/${repo}/attestations/sha256:${digest}`, "--jq", ".attestations[].bundle | tojson"]);
-	if (bundle.exit !== 0 || !bundle.stdout.trim() || Buffer.byteLength(bundle.stdout) > 16 * 1024 * 1024)
-		throw new Error("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: " + bundle.stderr.trim().slice(0, 1000));
+	// Bundles are published in GitHub's attestation store, not necessarily release assets. Fetch by the archive bytes'
+	// digest on every cycle through the installer's own anonymous client (no `gh auth login`); applyKitUpdate
+	// authenticates the bundle before extraction.
+	const work = join(dir, ".bundle-fetch");
+	rmSync(work, { recursive: true, force: true });
+	mkdirSync(work, { recursive: true, mode: 0o700 });
+	let bundle: Buffer;
+	try {
+		bundle = await (dependencies.fetchBundle ?? fetchAttestationBundleFor)(archivePath, version, process.env.HOME ?? work, work);
+	} finally { rmSync(work, { recursive: true, force: true }); }
 	// Replace atomically: a bundle left by an interrupted cycle must neither block nor be half-read.
-	atomicReplaceBytes(`${archivePath}.sigstore.json`, Buffer.from(bundle.stdout), { mode: 0o600, durability: "none" });
+	atomicReplaceBytes(`${archivePath}.sigstore.json`, bundle, { mode: 0o600, durability: "none" });
 	return { indexPath, archivePath, version, sourceTag: `v${version}` };
 }
 

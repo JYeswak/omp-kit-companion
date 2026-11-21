@@ -6,6 +6,7 @@ import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixture, runFixtureAsync } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
 import { attestStage, downloadStage, helperScript, releaseStage, stagePrelude } from "./release-local-fixture.ts";
+import { startGithubApi } from "./github-api-fixture.ts";
 
 // LOCAL-RELEASE-V1 (ompkit-v66l.27.11, docs/release-signing.md): enabling release.yml must never start the
 // expensive pipeline. Its default mode runs only attest-local; every other job needs mode=ci-pipeline.
@@ -1287,6 +1288,8 @@ for (const surface of ["public", "attest-local"] as const) {
 for (const failure of (surface === "public" ? ["none", "fetch", "verify"] : ["none", "fetch", "verify", "index"]) as readonly string[]) {
 	test(`RELFAST1 ${surface} chains overlap and ${failure === "none" ? "all verify" : failure + " failure refuses the stage"}`, async () => {
 		const work = realpathSync(ownedTmp("release-chains", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+		// The consumer verifier reads the tag's commit from the public API itself; gh here only fetches the bundle (operator tooling).
+		const api = startGithubApi({ version: "0.0.0" });
 		const bin = join(work, "bin");
 		const dist = join(work, "dist");
 		const pub = join(work, "public");
@@ -1319,7 +1322,6 @@ if (args[0] === "api" && args.some(a => a.includes("/attestations/"))) {
   if (process.env.RELEASE_CHAIN_FAILURE === "fetch" && digest === "${digests.get("linux-arm64-gnu")}") process.exit(17);
   console.log("{}"); process.exit(0);
 }
-if (args[0] === "api" && args.some(a => a.includes("/commits/"))) { console.log("a".repeat(40)); process.exit(0); }
 if (args[0] === "attestation" && args[1] === "verify") {
   appendFileSync(join(root, "verified"), args[2] + "\\n");
   if (process.env.RELEASE_CHAIN_FAILURE === "index" && args[2] === "dist/release-index.json") { console.error("index attestation refused"); process.exit(20); }
@@ -1345,7 +1347,7 @@ echo VERIFIED_ALL
 `);
 		try {
 			const result = await runFixtureAsync(["bash", fixture, work, ROOT], { cwd: ROOT,
-				env: { ...process.env, TMPDIR: work, PATH: `${bin}:${process.env.PATH}`, RELEASE_CHAIN_WORK: work, RELEASE_CHAIN_FAILURE: failure }, floor_s: 45 });
+				env: { ...process.env, TMPDIR: work, PATH: `${bin}:${process.env.PATH}`, RELEASE_CHAIN_WORK: work, RELEASE_CHAIN_FAILURE: failure, OMP_KIT_GITHUB_API: api.url }, floor_s: 45 });
 			const stdout = new TextDecoder().decode(result.stdout), stderr = new TextDecoder().decode(result.stderr);
 			expect(readdirSync(work).filter(name => name.startsWith("start-")).sort(), stdout + stderr).toEqual([...digests.values()].map(digest => `start-${digest}`).sort());
 			expect(result.rc, stdout + stderr).toBe(failure === "none" ? 0 : failure === "index" ? 20 : 4);
@@ -1356,7 +1358,7 @@ echo VERIFIED_ALL
 				expect(stdout).not.toContain("VERIFIED_ALL");
 				expect(stderr).toContain(failure === "fetch" ? "no attestation bundle for linux-arm64-gnu" : failure === "index" ? "index attestation refused" : "the consumer verifier refuses linux-arm64-gnu");
 			}
-		} finally { rmSync(work, { recursive: true, force: true }); }
+		} finally { api.stop(); rmSync(work, { recursive: true, force: true }); }
 	}, fixtureDeadlineS(60) * 1_000);
 }
 }

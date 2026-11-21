@@ -19,27 +19,13 @@ Current release: v0.2.139
 A tested rule pack, 15 extensions, six skills, and a guarded CLI for an
 existing OMP install.
 
+Install the newest release with one command. It needs `curl`, `python3` (3.9 or
+newer) and the GitHub CLI `gh`, installed but not logged in. Everything it
+downloads is verified before anything is installed; see
+[Installation](#installation).
+
 ```sh
-# Resolve the newest published release at run time, then dry-run the installer.
-# Requires `gh` authenticated (run `gh auth login` first; in automation export
-# `GH_TOKEN`): attestation refuses without it. See
-# [Installation](#installation) for the canonical block.
-KIT_VERSION=$(curl -fsSL https://api.github.com/repos/JYeswak/omp-kit-companion/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].removeprefix("v"))')
-if [ -z "$KIT_VERSION" ]; then
-  echo "install: could not resolve the latest omp-kit release: the GitHub API request failed (unauthenticated requests are rate-limited to 60/hour)." >&2
-  echo "install: run 'gh auth login' (or export GH_TOKEN) and retry, or resolve the version with: gh api repos/JYeswak/omp-kit-companion/releases/latest --jq .tag_name" >&2
-  echo "install: nothing was downloaded." >&2
-  exit 1
-fi
-KIT_INDEX="https://github.com/JYeswak/omp-kit-companion/releases/download/v${KIT_VERSION}/release-index.json"
-KIT_RAW="https://raw.githubusercontent.com/JYeswak/omp-kit-companion/v${KIT_VERSION}/installer"
-KIT_INSTALLER=$(mktemp -d "${TMPDIR:-/tmp}/omp-kit-installer.XXXXXXXX")
-curl -fsSL -o "$KIT_INSTALLER/install.sh" "$KIT_RAW/install.sh"
-curl -fsSL -o "$KIT_INSTALLER/install.py" "$KIT_RAW/install.py"
-# Token only in each install command's env; no auth refuses (exit 2).
-GH_TOKEN="$(gh auth token)" sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit" --dry-run
-GH_TOKEN="$(gh auth token)" sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit"
-export PATH="$HOME/.local/opt/omp-kit/bin:$PATH"
+curl -fsSL https://raw.githubusercontent.com/JYeswak/omp-kit-companion/main/installer/get.sh | sh
 ```
 
 ## TL;DR
@@ -296,43 +282,30 @@ Moved to [docs/comparison.md](docs/comparison.md).
 ## Installation
 
 Requirements: an existing OMP install with `omp` on PATH (for `status` and
-`test`), plus Python 3, GitHub CLI (`gh`) and `curl` for the installer (the version
-one-liner uses `str.removeprefix`, so Python 3.9 or newer). `gh` must be
-authenticated before you install: run `gh auth login` first (in automation,
-export `GH_TOKEN` from `gh auth token`). Attestation fetch and verification use
-`gh`, so a logged-out `gh` refuses as `KIT_ATTESTATION_BUNDLE_UNAVAILABLE`
-(exit 2) instead of installing. Linux builds need
-GNU libc. Installer and kit updates require a verifying Sigstore/SLSA bundle:
-GitHub Actions issuer, `JYeswak/omp-kit-companion` release workflow and the selected
-tag's authoritative source commit must match. Missing bundles, verifier or online
-tag authority refuse as `KIT_ATTESTATION_*`; there is no hash-only activation.
+`test`), plus Python 3.9 or newer, `curl` and the GitHub CLI (`gh`) for the
+installer. `gh` must be installed, not logged in: it only runs
+`gh attestation verify` on a bundle the installer has already fetched, and the
+installer reads the release tag and that bundle from the public GitHub API
+anonymously (60 requests an hour; export `GH_TOKEN` only to raise that). Linux
+builds need GNU libc. Installer and kit updates require a verifying Sigstore/SLSA
+bundle: GitHub Actions issuer, `JYeswak/omp-kit-companion` release workflow and
+the selected tag's authoritative source commit must match. Missing bundles,
+verifier or online tag authority refuse as `KIT_ATTESTATION_*`; there is no
+hash-only activation.
 Tool list with install and verify commands: [docs/setup.md](docs/setup.md).
 
 ### 1. Latest release installer (recommended)
 
 ```sh
-KIT_VERSION=$(curl -fsSL https://api.github.com/repos/JYeswak/omp-kit-companion/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].removeprefix("v"))')
-if [ -z "$KIT_VERSION" ]; then
-  echo "install: could not resolve the latest omp-kit release: the GitHub API request failed (unauthenticated requests are rate-limited to 60/hour)." >&2
-  echo "install: run 'gh auth login' (or export GH_TOKEN) and retry, or resolve the version with: gh api repos/JYeswak/omp-kit-companion/releases/latest --jq .tag_name" >&2
-  echo "install: nothing was downloaded." >&2
-  exit 1
-fi
-KIT_INDEX="https://github.com/JYeswak/omp-kit-companion/releases/download/v${KIT_VERSION}/release-index.json"
-KIT_RAW="https://raw.githubusercontent.com/JYeswak/omp-kit-companion/v${KIT_VERSION}/installer"
-KIT_INSTALLER=$(mktemp -d "${TMPDIR:-/tmp}/omp-kit-installer.XXXXXXXX")
-curl -fsSL -o "$KIT_INSTALLER/install.sh" "$KIT_RAW/install.sh"
-curl -fsSL -o "$KIT_INSTALLER/install.py" "$KIT_RAW/install.py"
-# Token only in each install command's env; no auth refuses (exit 2).
-GH_TOKEN="$(gh auth token)" sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit" --dry-run
-GH_TOKEN="$(gh auth token)" sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit"
-export PATH="$HOME/.local/opt/omp-kit/bin:$PATH"
+curl -fsSL https://raw.githubusercontent.com/JYeswak/omp-kit-companion/main/installer/get.sh | sh
 ```
 
-`install.sh` needs `install.py` beside it, which is why both are fetched. To
-avoid the raw downloads, clone the tag instead:
-`git clone --depth 1 --branch "v$KIT_VERSION" https://github.com/JYeswak/omp-kit-companion.git`
-and run `sh omp-kit-companion/installer/install.sh` with the same flags.
+[`get.sh`](installer/get.sh) is short enough to read first. It resolves the newest
+tag from github.com's `releases/latest` redirect, downloads that tag's `install.sh`
+and `install.py` (never `main`'s), runs them and prints the `PATH` line to add. It
+takes no arguments and writes nothing itself; what you trust beyond GitHub's TLS
+is the `get.sh` on `main`. To pin a version or skip the pipe, follow the manual
+recipe in [docs/setup.md](docs/setup.md#manual-install).
 
 The online installer downloads only the archive for your platform and its bundle
 from GitHub's attestation store. It checks archive SHA-256, manifest SHA-256,

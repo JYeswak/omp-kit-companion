@@ -13,6 +13,7 @@ import { recordOptOut } from "../../src/activation.ts";
 import { KNOWN_JOBS } from "../../src/service.ts";
 import { releaseProcess } from "./release-process.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
+import { startGithubApi, type GithubApiFixture } from "./github-api-fixture.ts";
 const repoRoot = resolve(import.meta.dir, "../..");
 
 export { sha, platform, hostPlatform, scratch, tar, binary, manifest, fixtureContractFiles, fixture, input,
@@ -30,7 +31,9 @@ const scratch = process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp
 type FixtureFile = { name: string; bytes: Buffer };
 type FixtureContext = { root: string; prefix: string; stateRoot: string; home: string; source: string;
 	indexPath: string; archivePath: string; oldBinary: Buffer; contractFiles: FixtureFile[];
-	platform: ReleasePlatform; currentVersion: string; nextVersion: string };
+	platform: ReleasePlatform; currentVersion: string; nextVersion: string;
+	/** The loopback api.github.com the update path reads (tag lookup and attestation store). */
+	api: GithubApiFixture };
 type FixtureOptions = { platform?: ReleasePlatform; currentVersion?: string; nextVersion?: string; postcheck?: "stub" | "real" };
 
 function tar(entries: { name: string; bytes: Buffer }[]): Buffer {
@@ -119,12 +122,16 @@ async function fixture<T>(run: (ctx: FixtureContext) => Promise<T>, options: Fix
 	writeFileSync(indexPath, JSON.stringify({ schema_version: 1, version: nextVersion, source_tag: "v" + nextVersion, assets: {
 		[key]: { ...selectedPlatform, filename, sha256: sha(archive), manifest_sha256: sha(releaseManifest) },
 	} }));
-	const previousPath = process.env.PATH;
+	const previousPath = process.env.PATH, previousApi = process.env.OMP_KIT_GITHUB_API;
+	const api = startGithubApi({ version: nextVersion });
 	process.env.PATH = join(import.meta.dir, "../fixtures/kit-release") + ":" + previousPath;
+	process.env.OMP_KIT_GITHUB_API = api.url;
 	try { return await run({ root, prefix, stateRoot, home, source, indexPath, archivePath, oldBinary, contractFiles,
-		platform: selectedPlatform, currentVersion, nextVersion }); }
+		platform: selectedPlatform, currentVersion, nextVersion, api }); }
 	finally {
 		if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+		if (previousApi === undefined) delete process.env.OMP_KIT_GITHUB_API; else process.env.OMP_KIT_GITHUB_API = previousApi;
+		api.stop();
 		directory.cleanup();
 	}
 }
@@ -492,9 +499,9 @@ FIXTURE = ${JSON.stringify(fixture)}
 GH_TOKEN = "SYNTHETIC_GH_TOKEN_V66L21_NOT_A_CREDENTIAL"
 GITHUB_TOKEN = "SYNTHETIC_GITHUB_TOKEN_V66L21_NOT_A_CREDENTIAL"
 args = sys.argv[1:]
-source_lookup = args[:1] == ["api"] and any("/commits/v" in arg for arg in args)
 bundle_verify = args[:2] == ["attestation", "verify"]
-if not source_lookup and not bundle_verify:
+if not bundle_verify:
+    # Any other call (a gh api call the consumer must no longer make) reaches the strict double, which refuses it.
     os.execv(sys.executable, [sys.executable, FIXTURE, *args])
 
 config = os.environ.get("GH_CONFIG_DIR", "")
@@ -508,7 +515,6 @@ token_auth = os.environ.get("GH_TOKEN") == GH_TOKEN and os.environ.get("GITHUB_T
 config_auth = "GH_TOKEN" not in os.environ and "GITHUB_TOKEN" not in os.environ and os.path.isfile(os.path.join(config, "synthetic-gh-auth"))
 report = {
     "auth_mode": "tokens" if token_auth else "config-only" if config_auth else "invalid",
-    "source_lookup": source_lookup,
     "bundle_verify": bundle_verify,
     "gh_config_dir_scoped": config_scoped,
     "unrelated_context_absent": all(key not in os.environ for key in (
@@ -519,9 +525,6 @@ if config_scoped:
         output.write(json.dumps(report) + "\\n")
 if not config_scoped or report["auth_mode"] == "invalid" or not report["unrelated_context_absent"]:
     print("synthetic GitHub verifier context refused", file=sys.stderr)
-    sys.exit(1)
-if source_lookup and os.path.isfile(os.path.join(config, "reject-source")):
-    print("synthetic source authority refused", file=sys.stderr)
     sys.exit(1)
 os.execv(sys.executable, [sys.executable, FIXTURE, *args])
 `;
@@ -544,6 +547,8 @@ export async function runCompiledUpdateJourney(mode: "success" | "relink"): Prom
 		for (const directory of [home, buildHome, negativeHome]) mkdirSync(directory, { mode: 0o700 });
 		const previous = await buildCompiledReleaseFixture(scratchRoot, repoRoot, buildHome, "1.2.2", hostPlatform);
 		const candidate = await buildCompiledReleaseFixture(scratchRoot, repoRoot, buildHome, "1.2.3", hostPlatform);
+		// The installer, the compiled updater and the verifier read the tag from this public-API double, anonymously.
+		const api = startGithubApi();
 		const tokenConfig = join(scratchRoot, "gh-config-token");
 		const configOnly = join(scratchRoot, "gh-config-only");
 		mkdirSync(tokenConfig, { mode: 0o700 });
@@ -564,6 +569,7 @@ export async function runCompiledUpdateJourney(mode: "success" | "relink"): Prom
 			GH_TOKEN: "SYNTHETIC_GH_TOKEN_V66L21_NOT_A_CREDENTIAL",
 			GITHUB_TOKEN: "SYNTHETIC_GITHUB_TOKEN_V66L21_NOT_A_CREDENTIAL",
 			GH_CONFIG_DIR: tokenConfig,
+			OMP_KIT_GITHUB_API: api.url,
 		};
 		const installer = await releaseProcess(["/bin/sh", join(repoRoot, "installer/install.sh"),
 			"--version", previous.version, "--index", previous.indexPath, "--offline", previous.archivePath, "--prefix", prefix], { cwd: repoRoot, env: installerEnv, stdout: "pipe", stderr: "pipe", deadline_s: 120 });
@@ -571,7 +577,7 @@ export async function runCompiledUpdateJourney(mode: "success" | "relink"): Prom
 			throw new Error(`synthetic previous install failed (${installer.exitCode}): ${installer.stdout.toString()} ${installer.stderr.toString()}`);
 		}
 
-		const configOnlyEnv = { PATH: path, HOME: home, TMPDIR: scratchRoot, GH_CONFIG_DIR: configOnly };
+		const configOnlyEnv = { PATH: path, HOME: home, TMPDIR: scratchRoot, GH_CONFIG_DIR: configOnly, OMP_KIT_GITHUB_API: api.url };
 		const configOnlyVerifier = await releaseProcess([python, "-I", "-c", readFileSync(join(repoRoot, "installer/install.py"), "utf8"),
 			"attestation", candidate.archivePath, candidate.version, "unused"], { cwd: repoRoot, env: configOnlyEnv, stdout: "pipe", stderr: "pipe", deadline_s: 120 });
 		expect(configOnlyVerifier.exitCode, configOnlyVerifier.stderr.toString()).toBe(0);
@@ -588,6 +594,7 @@ export async function runCompiledUpdateJourney(mode: "success" | "relink"): Prom
 			GH_TOKEN: "SYNTHETIC_GH_TOKEN_V66L21_NOT_A_CREDENTIAL",
 			GITHUB_TOKEN: "SYNTHETIC_GITHUB_TOKEN_V66L21_NOT_A_CREDENTIAL",
 			GH_CONFIG_DIR: tokenConfig,
+			OMP_KIT_GITHUB_API: api.url,
 			GH_ENTERPRISE_TOKEN: "SYNTHETIC_UNRELATED_GH_TOKEN",
 			PI_BRIDGE_SENTINEL: "SYNTHETIC_PI_BRIDGE_CONTEXT",
 			MCP_PROVIDER_SENTINEL: "SYNTHETIC_MCP_PROVIDER_CONTEXT",
@@ -627,7 +634,9 @@ export async function runCompiledUpdateJourney(mode: "success" | "relink"): Prom
 		]));
 		const tokenReports = readFileSync(join(tokenConfig, "observed.ndjson"), "utf8").trim()
 			.split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
-		expect(tokenReports.some(report => report.source_lookup === true && report.auth_mode === "tokens")).toBe(true);
+		// The tag came from the public API with the sha media type; the synthetic GH_TOKEN went to no non-GitHub authority.
+		expect(api.requests.some(request => request.path.includes("/commits/v") && request.accept === "application/vnd.github.sha")).toBe(true);
+		expect(api.requests.every(request => request.authorization === null)).toBe(true);
 		expect(tokenReports.some(report => report.bundle_verify === true && report.auth_mode === "tokens")).toBe(true);
 		expect(tokenReports.every(report => report.gh_config_dir_scoped === true &&
 			report.unrelated_context_absent === true)).toBe(true);
@@ -637,9 +646,9 @@ export async function runCompiledUpdateJourney(mode: "success" | "relink"): Prom
 		if (negativeInstall.exitCode !== 0) {
 			throw new Error(`synthetic negative previous install failed (${negativeInstall.exitCode}): ${negativeInstall.stdout.toString()} ${negativeInstall.stderr.toString()}`);
 		}
-		writeFileSync(join(configOnly, "reject-source"), "synthetic invalid authority\n", { mode: 0o600, flag: "wx" });
+		api.mode = "source-failure";
 		const noTokenUpdaterEnv = {
-			PATH: path, HOME: negativeHome, TMPDIR: scratchRoot, GH_CONFIG_DIR: configOnly,
+			PATH: path, HOME: negativeHome, TMPDIR: scratchRoot, GH_CONFIG_DIR: configOnly, OMP_KIT_GITHUB_API: api.url,
 			OMP_KIT_TEST_WORK_ROOT: callerWorkRoot.path, OMP_KIT_CASE_CWD: repoRoot,
 		};
 		const negativeStable = join(negativePrefix, "bin", "omp-kit");
@@ -651,10 +660,9 @@ export async function runCompiledUpdateJourney(mode: "success" | "relink"): Prom
 		expect(readlinkSync(negativeStable)).toBe(`../releases/${previous.version}/bin/omp-kit`);
 		expect(existsSync(join(negativePrefix, "releases", candidate.version))).toBe(false);
 		expect(inspectPendingKitUpdate(join(negativeHome, ".local", "state", "omp-kit"))).toBeNull();
-		const configOnlyAfterRefusal = readFileSync(join(configOnly, "observed.ndjson"), "utf8").trim()
-			.split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
-		expect(configOnlyAfterRefusal.some(report => report.source_lookup === true &&
-			report.auth_mode === "config-only" && report.gh_config_dir_scoped === true)).toBe(true);
+		// The refusal came from the tag lookup itself, the last request the authority saw.
+		expect(api.requests.at(-1)?.path).toContain("/commits/v");
+		api.mode = "valid";
 		const ompPath = Bun.which("omp");
 		if (!ompPath) throw new Error("omp is required for the successful compiled updater regression");
 		for (const name of Object.keys(KNOWN_JOBS))
@@ -781,6 +789,7 @@ export async function runCompiledUpdateJourney(mode: "success" | "relink"): Prom
 			"SYNTHETIC_GITHUB_TOKEN_V66L21_NOT_A_CREDENTIAL", "SYNTHETIC_UNRELATED_GH_TOKEN",
 			"SYNTHETIC_PI_BRIDGE_CONTEXT", "SYNTHETIC_MCP_PROVIDER_CONTEXT"])
 			expect(visible).not.toContain(sentinel);
+		api.stop();
 		callerWorkRoot.cleanup();
 		scratchOwned.cleanup();
 }

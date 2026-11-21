@@ -67,6 +67,9 @@ PY
 )
 # Synthetic verifier policy double for installer mechanics; not live signature proof.
 export PATH="$ROOT/tests/fixtures/kit-release:$PATH"
+# The installer reads the tag and the bundle store from the public API anonymously; a loopback double answers for it.
+. "$ROOT/tests/fixtures/kit-release/github-api.sh"
+github_api_start "$WORK"
 printf '{"fixture":true}' > "$ARCHIVE.sigstore.json"
 INSTALL="$ROOT/installer/install.sh"
 HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/prefix" --dry-run > "$WORK/dry.log"

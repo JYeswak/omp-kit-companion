@@ -543,21 +543,23 @@ test("poll downloads a newer published release into one directory", async () => 
 	await withPollEnv("o/r", async () => {
 		const value = config(); installSymlink(value.prefix, "1.2.3");
 		const calls: string[][] = [];
+		const fetched: string[] = [];
 		const tuple = await pollPublishedRelease(value.prefix, value.stateRoot, value.platform, { exec: async argv => {
 			calls.push([...argv]);
 			if (argv[2] === "view") return { exit: 0, stdout: "v1.2.4\n", stderr: "" };
-			if (argv[1] === "api") return { exit: 0, stdout: '{"fixture":true}\n', stderr: "" };
 			const dir = argv[argv.indexOf("--dir") + 1]!;
 			mkdirSync(dir, { recursive: true });
 			writePolledIndex(dir, "archive");
 			writeFileSync(join(dir, "omp-kit-v1.2.4-darwin-arm64-none.tar"), "archive");
 			return { exit: 0, stdout: "", stderr: "" };
-		} });
+		}, fetchBundle: bundleFetch(fetched, '{"fixture":true}\n') });
 		expect(tuple).toMatchObject({ version: "1.2.4", sourceTag: "v1.2.4" });
 		expect(tuple!.indexPath).toBe(join(value.stateRoot, "poll-1.2.4", "release-index.json"));
 		expect(tuple!.archivePath).toBe(join(value.stateRoot, "poll-1.2.4", "omp-kit-v1.2.4-darwin-arm64-none.tar"));
 		expect(readFileSync(`${tuple!.archivePath}.sigstore.json`, "utf8")).toBe('{"fixture":true}\n');
-		expect(calls.find(argv => argv[1] === "api")).toContain(`repos/o/r/attestations/sha256:${sha("archive")}`);
+		// The bundle was asked for the published archive's bytes through the installer's anonymous fetch, never through `gh api`.
+		expect(fetched).toEqual([sha("archive")]);
+		expect(calls.some(argv => argv[1] === "api")).toBe(false);
 		expect(calls[0]).toContain("view");
 		expect(calls.filter(argv => argv[2] === "download").map(argv => argv[argv.indexOf("--pattern") + 1])).toEqual(["release-index.json", POLLED_ASSET]);
 	});
@@ -570,12 +572,15 @@ function writePolledIndex(dir: string, published: string): void {
 		"darwin-arm64-none": { os: "darwin", arch: "arm64", libc: "none", filename: POLLED_ASSET, sha256: sha(published), manifest_sha256: "b".repeat(64) },
 	} }));
 }
+/** The attestation-bundle fetch seam: records the sha256 of the archive bytes it is asked about and answers `bytes` as the bundle. */
+function bundleFetch(seen: string[], bytes: string): NonNullable<KitUpdateJobDependencies["fetchBundle"]> {
+	return async archivePath => { seen.push(sha(readFileSync(archivePath, "utf8"))); return Buffer.from(bytes); };
+}
 /** gh as it behaves: `release download` refuses an existing target file unless --clobber, then writes the published bytes. */
 function publishedGh(calls: string[][], published: string): NonNullable<KitUpdateJobDependencies["exec"]> {
 	return async argv => {
 		calls.push([...argv]);
 		if (argv[2] === "view") return { exit: 0, stdout: "v1.2.4\n", stderr: "" };
-		if (argv[1] === "api") return { exit: 0, stdout: '{"fresh":true}\n', stderr: "" };
 		const dir = argv[argv.indexOf("--dir") + 1]!;
 		for (const name of ["release-index.json", POLLED_ASSET])
 			if (existsSync(join(dir, name)) && !argv.includes("--clobber"))
@@ -600,10 +605,11 @@ test("an interrupted poll directory whose index and archive verify is reused: no
 		const value = config(); installSymlink(value.prefix, "1.2.3");
 		const archivePath = interruptedPoll(value.stateRoot, "archive", "archive");
 		const calls: string[][] = [];
-		const tuple = await pollPublishedRelease(value.prefix, value.stateRoot, value.platform, { exec: publishedGh(calls, "archive") });
+		const fetched: string[] = [];
+		const tuple = await pollPublishedRelease(value.prefix, value.stateRoot, value.platform, { exec: publishedGh(calls, "archive"), fetchBundle: bundleFetch(fetched, '{"fresh":true}\n') });
 		expect(tuple).toMatchObject({ version: "1.2.4", sourceTag: "v1.2.4", archivePath });
 		expect(calls.some(argv => argv[2] === "download")).toBe(false);
-		expect(calls.find(argv => argv[1] === "api")).toContain(`repos/o/r/attestations/sha256:${sha("archive")}`);
+		expect(fetched).toEqual([sha("archive")]);
 		expect(readFileSync(`${archivePath}.sigstore.json`, "utf8")).toBe('{"fresh":true}\n');
 		expect(readdirSync(dirname(archivePath)).sort()).toEqual([POLLED_ASSET, `${POLLED_ASSET}.sigstore.json`, "release-index.json"].sort());
 	});
@@ -614,29 +620,32 @@ test("planted: a corrupted archive in an interrupted poll directory is re-downlo
 		const value = config(); installSymlink(value.prefix, "1.2.3");
 		const archivePath = interruptedPoll(value.stateRoot, "archive", "archive cut short by a reboot");
 		const calls: string[][] = [];
-		const tuple = await pollPublishedRelease(value.prefix, value.stateRoot, value.platform, { exec: publishedGh(calls, "archive") });
+		const fetched: string[] = [];
+		const tuple = await pollPublishedRelease(value.prefix, value.stateRoot, value.platform, { exec: publishedGh(calls, "archive"), fetchBundle: bundleFetch(fetched, '{"fresh":true}\n') });
 		const downloads = calls.filter(argv => argv[2] === "download");
 		expect(downloads.map(argv => argv[argv.indexOf("--pattern") + 1])).toEqual(["release-index.json", POLLED_ASSET]);
 		expect(downloads.every(argv => argv.includes("--clobber"))).toBe(true);
 		expect(tuple?.archivePath).toBe(archivePath);
 		expect(readFileSync(archivePath, "utf8")).toBe("archive");
 		// The bundle is fetched for the published bytes, never for the corrupted ones.
-		expect(calls.find(argv => argv[1] === "api")).toContain(`repos/o/r/attestations/sha256:${sha("archive")}`);
+		expect(fetched).toEqual([sha("archive")]);
 	});
 });
 
 test("published archive without retrievable provenance refuses before planning or activation", async () => {
 	await withPollEnv("o/r", async () => {
 		const value = config(); installSymlink(value.prefix, "1.2.3");
-		await expect(pollPublishedRelease(value.prefix, value.stateRoot, value.platform, { exec: async argv => {
-			if (argv[2] === "view") return { exit: 0, stdout: "v1.2.4\n", stderr: "" };
-			if (argv[1] === "api") return { exit: 1, stdout: "", stderr: "attestation unavailable" };
-			const dir = argv[argv.indexOf("--dir") + 1]!;
-			mkdirSync(dir, { recursive: true });
-			writePolledIndex(dir, "archive");
-			writeFileSync(join(dir, "omp-kit-v1.2.4-darwin-arm64-none.tar"), "archive");
-			return { exit: 0, stdout: "", stderr: "" };
-		} })).rejects.toThrow("KIT_ATTESTATION_BUNDLE_UNAVAILABLE");
+		await expect(pollPublishedRelease(value.prefix, value.stateRoot, value.platform, {
+			exec: async argv => {
+				if (argv[2] === "view") return { exit: 0, stdout: "v1.2.4\n", stderr: "" };
+				const dir = argv[argv.indexOf("--dir") + 1]!;
+				mkdirSync(dir, { recursive: true });
+				writePolledIndex(dir, "archive");
+				writeFileSync(join(dir, "omp-kit-v1.2.4-darwin-arm64-none.tar"), "archive");
+				return { exit: 0, stdout: "", stderr: "" };
+			},
+			fetchBundle: async () => { throw new Error("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: attestation unavailable"); },
+		})).rejects.toThrow("KIT_ATTESTATION_BUNDLE_UNAVAILABLE");
 	});
 });
 
@@ -697,13 +706,13 @@ test("poll-only install uses the published tuple when the static fallback is nul
 		const result = await runKitUpdateJob(value, {
 			exec: async argv => {
 				if (argv[2] === "view") return { exit: 0, stdout: "v1.2.4\n", stderr: "" };
-				if (argv[1] === "api") return { exit: 0, stdout: '{"fixture":true}\n', stderr: "" };
 				const dir = argv[argv.indexOf("--dir") + 1]!;
 				mkdirSync(dir, { recursive: true });
 				writePolledIndex(dir, "archive");
 				writeFileSync(join(dir, "omp-kit-v1.2.4-darwin-arm64-none.tar"), "archive");
 				return { exit: 0, stdout: "", stderr: "" };
 			},
+			fetchBundle: async () => Buffer.from('{"fixture":true}\n'),
 			plan: async input => { seen.push(input.version); return { ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never; },
 			apply: async () => ({ status: "UPDATED", exitCode: 0, receiptId: "r6", activeVersion: "1.2.4", postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY" }),
 			relink: async () => ({ ok: true, detail: "", receiptId: "plugin-r6", undoCommand: "omp-kit undo plugin-r6 --yes" }),

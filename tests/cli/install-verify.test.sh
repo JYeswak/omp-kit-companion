@@ -39,6 +39,9 @@ expect_refuse() {
 }
 # Shared policy-enforcing test double: never claim this as live signature proof.
 export PATH="$ROOT/tests/fixtures/kit-release:$PATH"
+# The installer reads the tag and the bundle store from the public API anonymously; a loopback double answers for it.
+. "$ROOT/tests/fixtures/kit-release/github-api.sh"
+github_api_start "$WORK"
 # 1. tampered archive (one byte, correct filename) is refused by the hash check (planted)
 mkdir -p "$WORK/t2"
 TAMPERED="$WORK/t2/$(basename "$ARCHIVE")"

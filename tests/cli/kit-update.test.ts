@@ -183,23 +183,36 @@ test("a missing attestation bundle is fetched from the authority and verified be
  expect(inspectPendingKitUpdate(ctx.stateRoot)?.id).toBe(result.receiptId);
 }));
 
-/** A gh double for the attestation authority: offline fetch, or a bundle filed for another archive. */
-function fakeAuthorityGh(dir: string, behavior: "offline" | "wrong"): void {
- mkdirSync(dir, { recursive: true });
- const real = join(import.meta.dir, "../fixtures/kit-release/gh");
- const attestations = behavior === "offline"
-  ? `if printf '%s\\n' "$@" | grep -q "attestations/sha256:"; then echo "fake gh: attestation store offline" >&2; exit 1; fi`
-  : `if printf '%s\\n' "$@" | grep -q "attestations/sha256:"; then printf '{"fixture":false}'; exit 0; fi`;
- writeFileSync(join(dir, "gh"), `#!/bin/sh\n${attestations}\nexec "${real}" "$@"\n`, { mode: 0o755 });
- chmodSync(join(dir, "gh"), 0o755);
- process.env.PATH = `${dir}:${process.env.PATH}`;
-}
+// OUTSIDERAUTH1: a logged-out host (no GH_TOKEN, no gh login) updates: the tag and the bundle are read from the public API
+// anonymously, and the fake gh double refuses any `gh api` call, so a regression to the login-gated path fails here.
+test("OUTSIDERAUTH1: the update reads the tag and the attestation bundle anonymously, never through gh api", async () => fixture(async ctx => {
+ const saved = { gh: process.env.GH_TOKEN, github: process.env.GITHUB_TOKEN };
+ delete process.env.GH_TOKEN;
+ delete process.env.GITHUB_TOKEN;
+ try {
+  const plan = await planKitUpdate(input(ctx));
+  if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+  rmSync(`${ctx.archivePath}.sigstore.json`);
+  const result = await applyKitUpdate(plan);
+  expect(result.provenance).toBe("SIGSTORE_VERIFIED");
+ } finally {
+  if (saved.gh !== undefined) process.env.GH_TOKEN = saved.gh;
+  if (saved.github !== undefined) process.env.GITHUB_TOKEN = saved.github;
+ }
+ const lookups = ctx.api.requests.filter(request => request.path.includes("/commits/v"));
+ const stores = ctx.api.requests.filter(request => request.path.includes("/attestations/sha256:"));
+ expect(lookups.length).toBeGreaterThan(0);
+ expect(stores.length).toBeGreaterThan(0);
+ expect(lookups.every(request => request.accept === "application/vnd.github.sha")).toBe(true);
+ expect(ctx.api.requests.every(request => request.authorization === null)).toBe(true);
+}));
+
 
 test("planted: an unreachable attestation authority refuses without extraction or activation", async () => fixture(async ctx => {
  const plan = await planKitUpdate(input(ctx));
  if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
  rmSync(`${ctx.archivePath}.sigstore.json`);
- fakeAuthorityGh(join(ctx.root, "gh-offline"), "offline");
+ ctx.api.mode = "download-failure";
  await expect(applyKitUpdate(plan)).rejects.toThrow("KIT_ATTESTATION_BUNDLE_UNAVAILABLE");
  expect(existsSync(join(ctx.prefix, "releases", ctx.nextVersion))).toBe(false);
  expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe(`../releases/${ctx.currentVersion}/bin/omp-kit`);
@@ -210,7 +223,7 @@ test("planted: a fetched bundle filed for another archive refuses without extrac
  const plan = await planKitUpdate(input(ctx));
  if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
  rmSync(`${ctx.archivePath}.sigstore.json`);
- fakeAuthorityGh(join(ctx.root, "gh-wrong"), "wrong");
+ ctx.api.mode = "bundle-wrong";
  await expect(applyKitUpdate(plan)).rejects.toThrow("KIT_ATTESTATION_UNVERIFIED");
  expect(existsSync(join(ctx.prefix, "releases", ctx.nextVersion))).toBe(false);
  expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe(`../releases/${ctx.currentVersion}/bin/omp-kit`);

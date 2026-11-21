@@ -8,6 +8,7 @@ import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { runSync } from "../../src/kitlib/run.ts";
 import { releaseProcess } from "./release-process.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
+import { startGithubApiProcess } from "./github-api-fixture.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 
@@ -112,7 +113,12 @@ function copyExportTree(root: string, dest: string): void {
 	visit("");
 }
 
+// The installer reads the tag and the attestation bundle from the public API; the double answers for it, out of process
+// because several tests block the event loop with spawnSync. Children inherit OMP_KIT_GITHUB_API through process.env.
+let githubApi: { url: string; stop(): void } | undefined;
 beforeAll(async () => {
+	githubApi = startGithubApiProcess({ dir: output, version: "1.2.3" });
+	process.env.OMP_KIT_GITHUB_API = githubApi.url;
 	const metadata: unknown = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
 	const exported = metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
 		&& "source_revision" in metadata && typeof metadata.source_revision === "string"
@@ -158,6 +164,8 @@ beforeAll(async () => {
 	writeFileSync(join(output, `${asset.filename}.sigstore.json`), '{"fixture":true}\n');
 }, fixtureDeadlineS(300) * 1_000);
 afterAll(() => {
+	githubApi?.stop();
+	delete process.env.OMP_KIT_GITHUB_API;
 	const archived = join(output, "archived-source");
 	try {
 		if (existsSync(archived)) sourceTree(archived, "release");

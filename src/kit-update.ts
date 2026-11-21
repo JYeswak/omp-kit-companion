@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { run } from "./kitlib/run.ts";
@@ -338,17 +338,8 @@ function sameOmpSnapshot(before: OmpSnapshot | null, after: OmpSnapshot | null):
   before.launcherSha256 === after.launcherSha256 && before.manifestSha256 === after.manifestSha256 &&
   before.matcherSha256 === after.matcherSha256;
 }
-/** owner/repo slug for the attestation authority; mirrors kit-update-job.ts so the compiled updater never imports it. */
-const UPDATE_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-const UPDATE_REPO_DEFAULT = "JYeswak/omp-kit-companion";
 const MAX_ATTESTATION_BYTES = 16 * 1024 * 1024;
 
-/** The attestation authority: OMP_KIT_UPDATE_REPO or the release default both release-local.sh and install.py assume. */
-function attestationRepo(): string {
- const repo = process.env.OMP_KIT_UPDATE_REPO ?? UPDATE_REPO_DEFAULT;
- if (!UPDATE_REPO_PATTERN.test(repo)) throw new Error("KIT_UPDATE_POLL_CONFIG: OMP_KIT_UPDATE_REPO must be owner/repo");
- return repo;
-}
 
 /** Child environment for the authority calls: caller GitHub authentication without unrelated process secrets. */
 function attestationEnv(home: string, tmpdir: string): Record<string, string> {
@@ -358,7 +349,7 @@ function attestationEnv(home: string, tmpdir: string): Record<string, string> {
   TMPDIR: tmpdir,
   XDG_CACHE_HOME: join(tmpdir, "cache"),
  };
- for (const key of ["GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN"] as const) {
+ for (const key of ["GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "OMP_KIT_GITHUB_API"] as const) {
   const value = process.env[key];
   if (value) env[key] = value;
  }
@@ -366,52 +357,63 @@ function attestationEnv(home: string, tmpdir: string): Record<string, string> {
 }
 
 /**
- * Fetch the Sigstore bundle the authority filed for this exact archive digest, exactly as
- * scripts/release-local.sh:383 and kit-update-job.ts do. Anything short of usable bytes refuses with
- * KIT_ATTESTATION_BUNDLE_UNAVAILABLE: the fetch, never the archive, is what failed.
+ * Run one mode of the embedded installer verifier (`bundle` fetches the archive's Sigstore bundle, `attestation`
+ * verifies it) on a staged artifact. The installer owns both: one anonymous GitHub API client and one fail-closed
+ * policy for the installer, the updater and its poll, so none of them needs `gh auth login`. A refusal keeps the
+ * installer's own KIT_ATTESTATION_* code; an unnamed failure is KIT_ATTESTATION_UNVERIFIED (verify) or
+ * KIT_ATTESTATION_BUNDLE_UNAVAILABLE (fetch): the fetch, never the archive, is what failed.
  */
-async function fetchAttestationBundle(archive: Buffer, home: string, tmpdir: string): Promise<Buffer> {
- const digest = createHash("sha256").update(archive).digest("hex");
- const fetched = await run(["gh", "api", "--hostname", "github.com", `repos/${attestationRepo()}/attestations/sha256:${digest}`,
-  "--jq", ".attestations[].bundle | tojson"], { deadline_s: 60, env: attestationEnv(home, tmpdir) });
- // The lead's manual fetch of this exact endpoint completed in under 2 s; 60 s is a generous bound.
- if (fetched.timed_out) throw new Error("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: gh api timed out after 60 s");
- const stderr = new TextDecoder().decode(fetched.stderr);
- if (fetched.rc !== 0 || fetched.stdout.byteLength === 0 || fetched.stdout.byteLength > MAX_ATTESTATION_BYTES)
-  throw new Error(`KIT_ATTESTATION_BUNDLE_UNAVAILABLE: ${stderr.trim().slice(-1000)}`);
- return Buffer.from(fetched.stdout);
+async function runInstallerMode(mode: "bundle" | "attestation", artifact: string, version: string, home: string, tmpdir: string): Promise<void> {
+ let result;
+ try {
+  // The embedded installer runs as a file in an owned directory beside the work, so the call names a static script;
+  // its own API requests carry timeouts, and the deadline bounds the whole mode: a call that exceeds it fails closed.
+  const scriptDir = join(tmpdir, ".verifier");
+  mkdirSync(scriptDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(scriptDir, "install.py"), readFileSync(installerVerifierPath, "utf8"), { mode: 0o600 });
+  result = await run(["python3", "-I", "install.py", mode, artifact, version, "unused"], {
+   cwd: scriptDir, env: attestationEnv(home, tmpdir), deadline_s: 180, // product-deadline: one anonymous GitHub API fetch or one offline verification; a hung authority must fail closed
+  });
+ } catch { throw new Error("KIT_ATTESTATION_VERIFIER_UNAVAILABLE"); }
+ if (result.rc !== 0) {
+  const stderr = new TextDecoder().decode(result.stderr);
+  const reason = ["KIT_ATTESTATION_BUNDLE_MISSING", "KIT_ATTESTATION_BUNDLE_INVALID", "KIT_ATTESTATION_BUNDLE_UNAVAILABLE", "KIT_ATTESTATION_SOURCE_UNVERIFIED", "KIT_ATTESTATION_API_UNTRUSTED", "KIT_ATTESTATION_VERIFIER_UNAVAILABLE"]
+   .find(known => stderr.includes(known)) ?? (mode === "bundle" ? "KIT_ATTESTATION_BUNDLE_UNAVAILABLE" : "KIT_ATTESTATION_UNVERIFIED");
+  throw new Error(`${reason}: ${stderr.trim().slice(-1200)}`);
+ }
+}
+
+/**
+ * The Sigstore bundle the authority filed for the archive at `archivePath`, fetched through the installer's anonymous
+ * client into `tmpdir` (an owned scratch directory): the archive is linked there so the installer's `<archive>.sigstore.json`
+ * lands beside the link, never beside the caller's file. The bytes are returned, capped at 16 MiB.
+ */
+export async function fetchAttestationBundleFor(archivePath: string, version: string, home: string, tmpdir: string): Promise<Buffer> {
+ const link = join(tmpdir, basename(archivePath));
+ symlinkSync(archivePath, link);
+ await runInstallerMode("bundle", link, version, home, tmpdir);
+ const bundlePath = `${link}.sigstore.json`;
+ const stat = lstatSync(bundlePath);
+ if (!stat.isFile() || stat.size === 0 || stat.size > MAX_ATTESTATION_BYTES) throw new Error("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: the fetched bundle is empty or over 16 MiB");
+ return regular(bundlePath);
 }
 
 /** Verify the exact in-memory archive subsequently staged, never a mutable source pathname. */
 async function authenticateUpdateArchive(plan: KitUpdatePlan, archive: Buffer): Promise<void> {
  const snapshot = ownedTmp("kit-attestation", { root: plan.stateRoot }).path;
  try {
+  const artifact = join(snapshot, basename(plan.archivePath));
+  writeFileSync(artifact, archive, { mode: 0o600, flag: "wx" });
   // A co-hosted bundle still wins; only an absent sibling is fetched, never a present-but-unusable one.
   const bundlePath = `${plan.archivePath}.sigstore.json`;
   const bundleStat = lstatSync(bundlePath, { throwIfNoEntry: false });
-  let bundle: Buffer;
-  if (bundleStat === undefined) bundle = await fetchAttestationBundle(archive, plan.home, snapshot);
+  if (bundleStat === undefined) await runInstallerMode("bundle", artifact, plan.version, plan.home, snapshot);
   else {
    if (!bundleStat.isFile() || bundleStat.isSymbolicLink()) throw new Error("KIT_ATTESTATION_BUNDLE_MISSING");
    if (bundleStat.size > MAX_ATTESTATION_BYTES) throw new Error("KIT_ATTESTATION_BUNDLE_INVALID");
-   bundle = regular(bundlePath);
+   writeFileSync(`${artifact}.sigstore.json`, regular(bundlePath), { mode: 0o600, flag: "wx" });
   }
-  const artifact = join(snapshot, basename(plan.archivePath));
-  writeFileSync(artifact, archive, { mode: 0o600, flag: "wx" });
-  writeFileSync(`${artifact}.sigstore.json`, bundle, { mode: 0o600, flag: "wx" });
-  let child;
-  try {
-   child = Bun.spawn(["python3", "-I", "-c", readFileSync(installerVerifierPath, "utf8"), "attestation", artifact, plan.version, "unused"], {
-    env: attestationEnv(plan.home, snapshot),
-    stdout: "pipe", stderr: "pipe",
-   });
-  } catch { throw new Error("KIT_ATTESTATION_VERIFIER_UNAVAILABLE"); }
-  const [code, , stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
-  if (code !== 0) {
-   const reason = ["KIT_ATTESTATION_BUNDLE_MISSING", "KIT_ATTESTATION_BUNDLE_INVALID", "KIT_ATTESTATION_BUNDLE_UNAVAILABLE", "KIT_ATTESTATION_SOURCE_UNVERIFIED", "KIT_ATTESTATION_VERIFIER_UNAVAILABLE"]
-    .find(code => stderr.includes(code)) ?? "KIT_ATTESTATION_UNVERIFIED";
-   throw new Error(`${reason}: ${stderr.trim().slice(-1200)}`);
-  }
+  await runInstallerMode("attestation", artifact, plan.version, plan.home, snapshot);
  } finally { rmSync(snapshot, { recursive: true, force: true }); }
 }
 

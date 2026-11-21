@@ -12,6 +12,7 @@ and staged identity probe 1 MiB. Truncated output never authorizes installation.
 from __future__ import annotations
 
 import base64
+import http.client
 import hashlib
 import json
 import os
@@ -21,6 +22,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 import zlib
 import types
 from typing import NoReturn
@@ -847,22 +851,74 @@ def verify_manifest(members, manifest, version):
             refuse("unlisted empty release directory")
 
 
-AUTH_HINT = ("run `gh auth login` first (in automation, export GH_TOKEN from"
-             " `gh auth token`): attestation fetch and verification need an authenticated gh.")
+GITHUB_API = "https://api.github.com"
+GITHUB_API_ENV = "OMP_KIT_GITHUB_API"
+NETWORK_HINT = ("check the network: the public GitHub API answers anonymously (60 requests an hour per address), so no"
+                " `gh auth login` is needed; export GH_TOKEN only to raise that limit")
+
+
+class _SameBaseRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect may stay on the API base the request started on, never leave it."""
+
+    def __init__(self, base):
+        self.base = base
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.startswith(self.base + "/"):
+            raise urllib.error.HTTPError(req.full_url, code, "redirect leaves " + self.base, headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def github_get(path, *, accept, deadline_s, max_bytes):
+    """One GET of the public GitHub API with the standard library. The repository is public, so an anonymous caller
+    needs no `gh auth login`; GH_TOKEN/GITHUB_TOKEN, when exported, is sent to api.github.com only, for the higher
+    rate limit. The base may be overridden (OMP_KIT_GITHUB_API) only with a loopback http fixture, the same rule the
+    installer applies to --index. The body is capped at max_bytes and the whole read at deadline_s."""
+    base = os.environ.get(GITHUB_API_ENV, GITHUB_API).rstrip("/")
+    if base != GITHUB_API and not re.fullmatch(r"http://(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]{1,5}", base):
+        refuse("KIT_ATTESTATION_API_UNTRUSTED: " + GITHUB_API_ENV + " must be " + GITHUB_API + " or a loopback http fixture")
+    headers = {"Accept": accept, "User-Agent": "omp-kit-installer", "X-GitHub-Api-Version": "2022-11-28"}
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token and base == GITHUB_API:
+        headers["Authorization"] = "Bearer " + token
+    started = time.monotonic()
+    opener = urllib.request.build_opener(_SameBaseRedirect(base))
+    try:
+        with opener.open(urllib.request.Request(base + "/" + path, headers=headers), timeout=min(deadline_s, 15)) as response:
+            chunks, size = [], 0
+            while True:
+                if time.monotonic() - started > deadline_s:
+                    raise TimeoutError("no complete answer within " + str(deadline_s) + " s")
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ValueError("response exceeds " + str(max_bytes) + " bytes")
+                chunks.append(chunk)
+    except urllib.error.HTTPError as exc:
+        limited = " (rate limited)" if exc.code in (403, 429) and exc.headers.get("X-RateLimit-Remaining") == "0" else ""
+        raise OSError("HTTP " + str(exc.code) + " " + str(exc.reason) + limited + " from " + base + "/" + path) from exc
+    except http.client.HTTPException as exc:
+        raise OSError("malformed HTTP answer (" + type(exc).__name__ + ") from " + base + "/" + path) from exc
+    return b"".join(chunks)
 
 
 def download_attestation(archive):
     digest = sha(Path(archive).read_bytes())
-    result = _run(
-        ["gh", "api", "--hostname", "github.com",
-         "repos/JYeswak/omp-kit-companion/attestations/sha256:" + digest,
-         "--jq", ".attestations[].bundle | tojson"],
-        deadline_s=60, max_output_bytes=16 * 1024 * 1024)
-    if result.rc != 0 or result.truncated or not result.stdout.strip():
-        refuse("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: " + result.stderr.decode(errors="replace").strip()[-1000:]
-               + " " + AUTH_HINT)
+    try:
+        data = github_get("repos/JYeswak/omp-kit-companion/attestations/sha256:" + digest,
+                          accept="application/vnd.github+json", deadline_s=60, max_bytes=16 * 1024 * 1024)
+        doc = parse_json(data)
+        entries = doc.get("attestations") if isinstance(doc, dict) else None
+        bundles = [entry["bundle"] for entry in entries
+                   if isinstance(entry, dict) and isinstance(entry.get("bundle"), dict)] if isinstance(entries, list) else []
+    except (OSError, ValueError) as exc:
+        refuse("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: " + str(exc)[-1000:] + " " + NETWORK_HINT)
+    if not bundles:
+        refuse("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: the attestation store holds no bundle for sha256:" + digest)
     with open(str(archive) + ".sigstore.json", "xb") as output:
-        output.write(result.stdout)
+        output.write("".join(json.dumps(item) + "\n" for item in bundles).encode())
 
 
 def verify_attestation(archive, version):
@@ -875,14 +931,15 @@ def verify_attestation(archive, version):
     if bundle.stat().st_size > 16 * 1024 * 1024:
         refuse("KIT_ATTESTATION_BUNDLE_INVALID")
     try:
-        source = _run(
-            ["gh", "api", "--hostname", "github.com",
-             "repos/JYeswak/omp-kit-companion/commits/v" + version, "--jq", ".sha"],
-            deadline_s=30, max_output_bytes=64 * 1024)
-        digest = source.stdout.decode(errors="replace").strip()
-        if source.rc != 0 or source.truncated or len(digest) != 40 or any(c not in "0123456789abcdef" for c in digest):
-            refuse("KIT_ATTESTATION_SOURCE_UNVERIFIED: " + source.stderr.decode(errors="replace").strip()[-1000:]
-                   + " " + AUTH_HINT)
+        # The sha media type answers the tag's commit as 40 bytes of text, so the answer cannot be flooded.
+        digest = github_get("repos/JYeswak/omp-kit-companion/commits/v" + version,
+                            accept="application/vnd.github.sha", deadline_s=30, max_bytes=64 * 1024
+                            ).decode(errors="replace").strip()
+    except (OSError, ValueError) as exc:
+        refuse("KIT_ATTESTATION_SOURCE_UNVERIFIED: " + str(exc)[-1000:] + " " + NETWORK_HINT)
+    if len(digest) != 40 or any(c not in "0123456789abcdef" for c in digest):
+        refuse("KIT_ATTESTATION_SOURCE_UNVERIFIED: the tag lookup returned no 40-hex commit")
+    try:
         # gh selects JSON-lines decoding by extension. Release siblings retain
         # .sigstore.json even when the authority returns both SBOM and SLSA bundles.
         raw = bundle.read_bytes()
@@ -895,6 +952,8 @@ def verify_attestation(archive, version):
         with tempfile.TemporaryDirectory(prefix="omp-kit-attestation-") as work:
             normalized = Path(work) / "bundle.jsonl"
             normalized.write_text("".join(json.dumps(item) + "\n" for item in bundles))
+            # `gh attestation verify --bundle` checks the signature, signer workflow, source digest and predicate
+            # offline against the pinned Sigstore trust root: it needs the gh binary but no GitHub login.
             result = _run(
                 ["gh", "attestation", "verify", str(archive),
                  "--hostname", "github.com", "--repo", "JYeswak/omp-kit-companion",

@@ -5,6 +5,7 @@ import { delimiter, join } from "node:path";
 import { validateReleaseIndex, validateReleaseManifest, previewKitRelease, verifyKitArchive, assertFreshKitPlan, stageKitRelease, type KitReleasePlan } from "../../src/kit-release";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { run } from "../../src/kitlib/run";
+import { startGithubApiProcess } from "./github-api-fixture.ts";
 
 const fixture = join(import.meta.dir, "..", "fixtures", "kit-release", "release-manifest.json");
 const manifestBytes = readFileSync(fixture);
@@ -182,12 +183,15 @@ describe("versioned release contract", () => {
      writeFileSync(indexPath, JSON.stringify(releaseIndex));
      // This policy double is explicitly synthetic; no real Sigstore claim.
      writeFileSync(`${archivePath}.sigstore.json`, '{"fixture":true}\n');
+     // Bun.spawnSync blocks this event loop, so the loopback API double runs as its own process.
+     const api = startGithubApiProcess({ dir: work, version: "1.2.3" });
      const result = Bun.spawnSync(["python3", join(repo, "installer/install.py"), "install",
       indexPath, "1.2.3", key, archivePath, prefix, "0"], {
-      cwd: work, env: { ...process.env, TMPDIR: work, PYTHONDONTWRITEBYTECODE: "1",
+      cwd: work, env: { ...process.env, TMPDIR: work, PYTHONDONTWRITEBYTECODE: "1", OMP_KIT_GITHUB_API: api.url,
        PATH: [join(repo, "tests/fixtures/kit-release"), process.env.PATH ?? ""].join(delimiter) },
       stdout: "pipe", stderr: "pipe",
      });
+     api.stop();
      expect(result.exitCode, result.stdout.toString() + result.stderr.toString()).toBe(0);
      installed = join(prefix, "releases", "1.2.3");
     }
@@ -268,11 +272,13 @@ describe("versioned release contract", () => {
      writeFileSync(indexPath, JSON.stringify(releaseIndex));
      // This policy double is explicitly synthetic; no real Sigstore claim.
      writeFileSync(`${archivePath}.sigstore.json`, '{"fixture":true}\n');
+     const api = startGithubApiProcess({ dir: work, version: "1.2.3" });
      const result = Bun.spawnSync(["python3", join(repo, "installer/install.py"), "install", indexPath, "1.2.3", key, archivePath, prefix, "0"], {
-      cwd: work, env: { ...process.env, TMPDIR: work, PYTHONDONTWRITEBYTECODE: "1",
+      cwd: work, env: { ...process.env, TMPDIR: work, PYTHONDONTWRITEBYTECODE: "1", OMP_KIT_GITHUB_API: api.url,
        PATH: [join(repo, "tests/fixtures/kit-release"), process.env.PATH ?? ""].join(delimiter) },
       stdout: "pipe", stderr: "pipe",
      });
+     api.stop();
      expect(result.exitCode, result.stdout.toString() + result.stderr.toString()).toBe(0);
      installed = join(prefix, "releases", "1.2.3");
     }

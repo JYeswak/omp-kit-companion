@@ -19,8 +19,8 @@ the doctor command.
 | `omp` | required | The harness this kit plugs into (`status`, `test`) | Bring your own OMP install with `omp` on PATH (the kit never installs OMP) | Bring your own OMP install with `omp` on PATH (the kit never installs OMP) | `omp --version` | No kit verb runs; the installer refuses before writing |
 | `bun` | required | Every test, gate and CLI runs on Bun | `curl -fsSL https://bun.sh/install \| bash` | `curl -fsSL https://bun.sh/install \| bash` | `bun --version` | Scripts refuse with named `Bun is required` errors; nothing runs |
 | `git` | required | Version control, archive exports, installer | `xcode-select --install` or `brew install git` | Distro package (`apt`, `dnf`, `pacman`) | `git --version` | No export, commit or install works; commands fail before writing |
-| `gh` | required | Release attestation fetch and verify, installer version lookup | `brew install gh`, then `gh auth login` | `brew install gh` or distro package, then `gh auth login` | `gh --version` (`gh auth status` for attestation paths) | Attestation paths refuse `KIT_ATTESTATION_BUNDLE_UNAVAILABLE`; the installer resolves nothing |
-| `python3` | required | Installer one-liner, `.py` gate members | Xcode CLT or `brew install python` | Distro package | `python3 --version` (3.9+, 3.11+ for the regexploit gate) | Python-based gates refuse with named errors instead of running |
+| `gh` | required | Offline attestation verify (`gh attestation verify --bundle`); the installer reads the tag and bundle from the public API itself | `brew install gh` (no login needed) | `brew install gh` or distro package (no login needed) | `gh --version` | Verification refuses `KIT_ATTESTATION_VERIFIER_UNAVAILABLE`; nothing installs |
+| `python3` | required | Installer (`get.sh` runs `install.sh`, which runs `install.py`), `.py` gate members | Xcode CLT or `brew install python` | Distro package | `python3 --version` (3.9+, 3.11+ for the regexploit gate) | Python-based gates refuse with named errors instead of running |
 | `curl` | required | Installer downloads | Ships with macOS | Distro package | `curl --version` | The installer fails before downloading anything |
 | `docker` | optional | Contributors' pinned shellcheck container | `brew install --cask docker` | See docker.com and the distro docs | `docker --version` | Container-backed lint reports the missing runner instead of passing (slice-verify: `SHELLCHECK_UNAVAILABLE`) |
 | `tern` | optional | Terminal host; seats address as `tern:<id>` | Tern host terminal (no kit install) | Tern host terminal (no kit install) | Address a `tern:<id>` seat | The kit runs headless; `tern:`-addressed sends without a host refuse `OBSERVATION_UNKNOWN` with zero sends |
@@ -54,3 +54,37 @@ the doctor command.
 | `caut` | optional | LLM usage tracker | No tap formula; build from github.com/Dicklesworthstone/coding_agent_usage_tracker | No tap formula; build from github.com/Dicklesworthstone/coding_agent_usage_tracker | `caut --version` | Doctor reports `absent` and names the install source; kit features needing it are unavailable |
 | `acfs` | optional | Fleet worker coordination | No tap formula; build from github.com/Dicklesworthstone/agentic_coding_flywheel_setup | No tap formula; build from github.com/Dicklesworthstone/agentic_coding_flywheel_setup | `acfs --version` | Doctor reports `absent` and names the install source; kit features needing it are unavailable |
 | `apr` | optional | Plan revision | No tap formula; build from github.com/Dicklesworthstone/automated_plan_reviser_pro | No tap formula; build from github.com/Dicklesworthstone/automated_plan_reviser_pro | `apr --version` | Doctor reports `absent` and names the install source; kit features needing it are unavailable |
+
+## Manual install
+
+`get.sh` is the documented install command. To pin a version, read the installer
+before it runs, or avoid the pipe, do by hand what it does (`X.Y.Z` is the release
+without its `v`; every step before the last two writes only to the temporary
+directory):
+
+```sh
+KIT_VERSION=X.Y.Z
+KIT_INDEX="https://github.com/JYeswak/omp-kit-companion/releases/download/v${KIT_VERSION}/release-index.json"
+KIT_RAW="https://raw.githubusercontent.com/JYeswak/omp-kit-companion/v${KIT_VERSION}/installer"
+KIT_INSTALLER=$(mktemp -d "${TMPDIR:-/tmp}/omp-kit-installer.XXXXXXXX")
+curl -fsSL -o "$KIT_INSTALLER/install.sh" "$KIT_RAW/install.sh"
+curl -fsSL -o "$KIT_INSTALLER/install.py" "$KIT_RAW/install.py"
+sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit" --dry-run
+sh "$KIT_INSTALLER/install.sh" --version "$KIT_VERSION" --index "$KIT_INDEX" --prefix "$HOME/.local/opt/omp-kit"
+export PATH="$HOME/.local/opt/omp-kit/bin:$PATH"
+```
+
+Or clone the tag (`git clone --depth 1 --branch "v$KIT_VERSION" https://github.com/JYeswak/omp-kit-companion.git`)
+and run `sh omp-kit-companion/installer/install.sh` with the same flags.
+
+## When the installer refuses
+
+Nothing is written to the prefix until every check passes. A refusal names its cause:
+
+- `install: curl is required.` or `installer: Python 3 is required`: a prerequisite is missing. Install it (rows above) and run the command again.
+- `install: could not resolve the latest omp-kit release`: github.com is unreachable. Check the network and retry.
+- `installer: unsupported platform`: only darwin-arm64, linux-arm64-gnu and linux-x64-gnu are published. Build from source or use a supported host.
+- `installer: GNU libc not detected; refusing a GNU build`: a musl Linux host. Use a glibc host.
+- `KIT_ATTESTATION_VERIFIER_UNAVAILABLE`: `gh` is not installed (it need not be logged in). `brew install gh` or the distro package.
+- `check the network: the public GitHub API answers anonymously (60 requests an hour per address)`: the tag or the attestation bundle could not be read, or the hourly limit is spent. Wait, or export `GH_TOKEN` to raise the limit; no `gh auth login` is needed.
+- `KIT_ATTESTATION_UNVERIFIED`, `KIT_ATTESTATION_SOURCE_UNVERIFIED`, `KIT_ATTESTATION_BUNDLE_*`: the archive does not match its signed provenance. Do not install it; report the release.

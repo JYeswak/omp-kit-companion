@@ -13,6 +13,7 @@ import { GATE_DEADLINE_MS, TIMING_SAMPLE_COUNT } from "../../scripts/regex-budge
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
+import { startGithubApiProcess } from "./github-api-fixture.ts";
 import { repo, caseCwd, nativeCacheEnv, output, stubFirstPath, authorityPath, platform, key, indexPath,
  asset, bytes, index, sourceRevision, sourceGit, installArgs, installCandidate, run, candidateEnv,
 } from "./package-release-fixture.ts";
@@ -342,15 +343,17 @@ asset = dict(json.loads(platform), filename=archive.name, sha256=digest(archive.
 	expect(generated.exitCode, generated.stderr.toString()).toBe(0);
 	writeFileSync(`${archive}.sigstore.json`, '{"fixture":true}\n');
 	const expected = createHash("sha256").update(readFileSync(archive)).digest("hex");
+	// Bun.spawnSync blocks this event loop, so the loopback API double runs as its own process.
+	const api = startGithubApiProcess({ dir: root, version: "1.2.3", ...(substitute ? { replaceArchive: archive } : {}) });
 	const installed = Bun.spawnSync(["python3", join(repo, "installer/install.py"), "install", fixtureIndex,
 		"1.2.3", key, archive, join(root, "prefix"), "0"], {
 		cwd: output, env: { ...process.env, PATH: authorityPath, TMPDIR: output, HOME: root,
 			GH_TOKEN: "private-credential-sentinel", OMP_KIT_PRIVATE_SENTINEL: "private-env-sentinel",
 			XDG_CONFIG_HOME: root, BUN_OPTIONS: "private-tool-config-sentinel",
-			SYNTHETIC_GH_EXPECT_SHA256: expected,
-			...(substitute ? { SYNTHETIC_GH_REPLACE_ARCHIVE: archive } : {}) },
+			OMP_KIT_GITHUB_API: api.url, SYNTHETIC_GH_EXPECT_SHA256: expected },
 		stdout: "pipe", stderr: "pipe",
 	});
+	api.stop();
 	expect(installed.exitCode, installed.stdout.toString() + installed.stderr.toString()).toBe(0);
 	if (substitute) expect(readFileSync(archive, "utf8")).toBe("substituted original archive");
 	return { root, binary, environment: Object.fromEntries(readFileSync(capture, "utf8").trim().split("\n").map(line => {

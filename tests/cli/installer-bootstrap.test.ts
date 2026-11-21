@@ -1,5 +1,5 @@
-// Controlled gh children test installer policy and cancellation, not live Sigstore cryptography.
-import { expect, test } from "bun:test";
+// Controlled gh children test installer policy and verification, a loopback API stands in for api.github.com, none touch live Sigstore cryptography.
+import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -7,6 +7,7 @@ import { checkInstallerBootstrap } from "../../scripts/package-release";
 import { run, runSync, type RunResult } from "../../src/kitlib/run";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp";
 import { fixtureDeadlineS, fixtureLoad } from "./fixture-process.ts";
+import { startGithubApi, type GithubApiFixture } from "./github-api-fixture.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const installerSource = readFileSync(join(root, "installer/install.py"), "utf8");
@@ -36,36 +37,16 @@ const digest = (data: Uint8Array) => createHash("sha256").update(data).digest("h
 const version = "1.2.3";
 const platform = `${process.platform}-${process.arch}-${process.platform === "darwin" ? "none" : "gnu"}`;
 const fakeGh = `#!${python}
-import json, os, signal, sys, time
+import json, os, sys
 from pathlib import Path
 args = sys.argv[1:]
 mode = os.environ.get("GH_CASE", "valid")
-if args[:3] == ["api", "--hostname", "github.com"]:
-    if "/attestations/sha256:" in args[3]:
-        assert args[4:] == ["--jq", ".attestations[].bundle | tojson"], args
-        size = int(os.environ.get("BUNDLE_BYTES", "0"))
-        data = b'{"fixture":true}'
-        if size:
-            prefix, suffix = b'{"fixture":true,"pad":"', b'"}'
-            data = prefix + b'x' * (size - len(prefix) - len(suffix)) + suffix
-            assert len(data) == size
-        if mode == "download-failure":
-            os.write(2, b"\\xffdownload refused"); sys.exit(17)
-        sys.stdout.buffer.write(data)
-    else:
-        assert args[3:] == ["repos/JYeswak/omp-kit-companion/commits/v1.2.3", "--jq", ".sha"], args
-        if mode == "source-timeout":
-            signal.signal(signal.SIGTERM, signal.SIG_IGN)
-            child = os.fork()
-            if child == 0:
-                os.write(1, b"descendant-ready\\n")
-                time.sleep(120)
-                os._exit(0)
-            Path(os.environ["CHILD_RECORD"]).write_text(json.dumps({"pid": child, "pgid": os.getpgrp()}))
-            time.sleep(120)
-        if mode == "source-failure":
-            os.write(2, b"\\xffsource refused"); sys.exit(19)
-        sys.stdout.write("a" * 40 + (" " * 65537 if mode == "source-flood" else "") + "\\n")
+if os.environ.get("GH_CALL_LOG"):
+    with open(os.environ["GH_CALL_LOG"], "a") as log:
+        log.write(json.dumps(args) + "\\n")
+if args[:1] == ["api"]:
+    # OUTSIDERAUTH1: the installer fetches the tag and the bundle itself; a call to \`gh api\` (which needs a login) is a regression.
+    os.write(2, b"fake gh: the installer must not call gh api"); sys.exit(41)
 elif args[:2] == ["attestation", "verify"]:
     expected = {"--hostname":"github.com", "--repo":"JYeswak/omp-kit-companion",
                 "--cert-oidc-issuer":"https://token.actions.githubusercontent.com",
@@ -80,7 +61,17 @@ else:
     raise AssertionError(args)
 `;
 
-interface Fixture { work: string; scratch: OwnedTmp; env: Record<string, string> }
+interface Fixture { work: string; scratch: OwnedTmp; env: Record<string, string>; api: GithubApiFixture }
+
+// The loopback stand-in for api.github.com (tests/cli/github-api-fixture.ts): every request is recorded so the tests
+// can show what the installer sent.
+const apis = new Set<GithubApiFixture>();
+afterAll(() => { for (const api of apis) api.stop(); });
+function startApi(): GithubApiFixture {
+	const api = startGithubApi({ version });
+	apis.add(api);
+	return api;
+}
 
 function fixture(): Fixture {
 	const scratch = ownedTmp("installer-bootstrap");
@@ -97,7 +88,7 @@ function fixture(): Fixture {
 		symlinkSync(command, join(work, "bin", name));
 	}
 	return {
-		work, scratch,
+		work, scratch, api: startApi(),
 		env: { HOME: join(work, "home"), PATH: join(work, "bin"),
 			TMPDIR: work, TMP: work, TEMP: work, SENTINEL_PRIVATE_ENV: "must-not-reach-probe" },
 	};
@@ -107,7 +98,7 @@ async function invoke(f: Fixture, args: string[], mode: "isolated" | "file" | "s
 	const argv = mode === "isolated" ? [python, "-I", "-c", installerSource, ...args]
 		: mode === "file" ? [python, "-I", join(f.work, "bootstrap/install.py"), ...args]
 		: ["/bin/sh", join(f.work, "bootstrap/install.sh"), ...args];
-	return run(argv, { cwd: f.work, env: { ...f.env, ...extra }, deadline_s: deadline, grace_s: 1, max_output_bytes: 1 << 20 });
+	return run(argv, { cwd: f.work, env: { ...f.env, OMP_KIT_GITHUB_API: f.api.url, ...extra }, deadline_s: deadline, grace_s: 1, max_output_bytes: 1 << 20 });
 }
 
 function expectSuccess(result: RunResult): void {
@@ -180,8 +171,15 @@ test("isolated attestation accepts JSON-lines policy control, rejects invalid/mi
 		writeFileSync(`${a.path}.sigstore.json`, '{"fixture":true}\n{"fixture":true}\n');
 		expectSuccess(await invoke(f, ["attestation", a.path, version, platform]));
 		expectRefusal(await invoke(f, ["attestation", a.path, version, platform], "isolated", { PATH: "/nonexistent-installer-test-bin" }), "KIT_ATTESTATION_VERIFIER_UNAVAILABLE");
-		for (const [mode, code] of [["source-failure", "KIT_ATTESTATION_SOURCE_UNVERIFIED"], ["source-flood", "KIT_ATTESTATION_SOURCE_UNVERIFIED"],
-			["verify-failure", "KIT_ATTESTATION_UNVERIFIED"], ["verify-flood", "KIT_ATTESTATION_UNVERIFIED"]]) {
+		for (const mode of ["source-failure", "source-flood", "source-short", "source-rate-limit", "source-redirect-away"]) {
+			f.api.mode = mode;
+			expectRefusal(await invoke(f, ["attestation", a.path, version, platform]), "KIT_ATTESTATION_SOURCE_UNVERIFIED");
+		}
+		// A redirect that stays on the API base (a renamed repository) is followed.
+		f.api.mode = "source-redirect-same";
+		expectSuccess(await invoke(f, ["attestation", a.path, version, platform]));
+		f.api.mode = "valid";
+		for (const [mode, code] of [["verify-failure", "KIT_ATTESTATION_UNVERIFIED"], ["verify-flood", "KIT_ATTESTATION_UNVERIFIED"]]) {
 			expectRefusal(await invoke(f, ["attestation", a.path, version, platform], "isolated", { GH_CASE: mode! }), code!);
 		}
 		writeFileSync(`${a.path}.sigstore.json`, '{"fixture":false}');
@@ -192,21 +190,25 @@ test("isolated attestation accepts JSON-lines policy control, rejects invalid/mi
 	} finally { f.scratch.cleanup(); }
 });
 
-test("download keeps a complete 16 MiB valid bundle, refuses overflow and checked gh failure without writing", async () => {
+test("download keeps a complete 16 MiB valid answer, refuses overflow, an empty store and a checked API failure without writing", async () => {
 	const f = fixture();
 	try {
 		const path = join(f.work, "download.tar");
 		writeFileSync(path, "controlled archive digest input");
-		expectSuccess(await invoke(f, ["bundle", path, version, platform], "isolated", { BUNDLE_BYTES: String(16 << 20) }));
-		expect(readFileSync(`${path}.sigstore.json`).byteLength).toBe(16 << 20);
-		expect(JSON.parse(readFileSync(`${path}.sigstore.json`, "utf8")).fixture).toBe(true);
-		for (const [name, extra] of [["overflow", { BUNDLE_BYTES: String((16 << 20) + 1) }], ["failed", { GH_CASE: "download-failure" }]] as const) {
+		f.api.bundleBytes = 16 << 20;
+		expectSuccess(await invoke(f, ["bundle", path, version, platform], "isolated", {}, fixtureDeadlineS(30)));
+		const written = readFileSync(`${path}.sigstore.json`);
+		expect(written.byteLength).toBeLessThanOrEqual(16 << 20);
+		expect(written.byteLength).toBeGreaterThan((16 << 20) - 4096);
+		expect(JSON.parse(written.toString("utf8")).fixture).toBe(true);
+		for (const [name, mode, bytes] of [["overflow", "valid", (16 << 20) + 1], ["failed", "download-failure", 0], ["empty", "download-empty", 0]] as const) {
+			f.api.mode = mode; f.api.bundleBytes = bytes;
 			const input = join(f.work, `${name}.tar`); writeFileSync(input, "input");
-			expectRefusal(await invoke(f, ["bundle", input, version, platform], "isolated", extra), "KIT_ATTESTATION_BUNDLE_UNAVAILABLE");
+			expectRefusal(await invoke(f, ["bundle", input, version, platform], "isolated", {}, fixtureDeadlineS(30)), "KIT_ATTESTATION_BUNDLE_UNAVAILABLE");
 			expect(existsSync(`${input}.sigstore.json`)).toBe(false);
 		}
 	} finally { f.scratch.cleanup(); }
-}, fixtureDeadlineS(30) * 1000);
+}, fixtureDeadlineS(60) * 1000);
 
 test("staged identity probe preserves checked failures and never activates truncated or tampered candidate bytes", async () => {
 	const f = fixture();
@@ -253,41 +255,87 @@ else:
 	} finally { f.scratch.cleanup(); }
 }, fixtureDeadlineS(15) * 1000);
 
-test("original 30-second tag lookup deadline kills a TERM-ignoring descendant and preserves unavailable classification", async () => {
+// OUTSIDERAUTH1: the tag lookup and the bundle fetch speak to the public GitHub API with the standard library, so a
+// machine with `gh` but no GitHub login installs. The helper is exercised in memory against loopback servers.
+function githubGetProbe(f: Fixture, body: string): Promise<RunResult> {
+	const code = `import json, sys
+ns = {'__name__': 'installer_api_contract'}
+exec(compile(${JSON.stringify(installerSource)}, '<standalone installer>', 'exec'), ns)
+def attempt(**kw):
+    try:
+        data = ns['github_get']('repos/JYeswak/omp-kit-companion/commits/v1.2.3', accept='application/vnd.github.sha', **kw)
+        return ['ok', data.decode()[:60]]
+    except (OSError, ValueError) as error:
+        return [type(error).__name__, str(error)[:160]]
+${body}
+`;
+	return run([python, "-I", "-c", code], { cwd: f.work, env: { ...f.env, OMP_KIT_GITHUB_API: f.api.url }, deadline_s: fixtureDeadlineS(25), grace_s: 1, max_output_bytes: 65536 });
+}
+
+function answers(result: RunResult): Record<string, string[]> {
+	expectSuccess(result);
+	return JSON.parse(decoder.decode(result.stdout)) as Record<string, string[]>;
+}
+
+test("OUTSIDERAUTH1 github_get answers only complete in-cap responses inside its deadline and never follows a redirect off its base", async () => {
 	const f = fixture();
-	const record = join(f.work, "owned-child.json");
-	let needsCleanup = true;
+	try {
+		f.api.mode = "source-hang";
+		const hang = answers(await githubGetProbe(f, `print(json.dumps({'hang': attempt(deadline_s=${fixtureDeadlineS(1)}, max_bytes=4096)}))`)).hang!;
+		expect(hang[0]).not.toBe("ok"); // a server that never answers is refused at the deadline, not waited on
+		f.api.mode = "source-flood";
+		const flood = answers(await githubGetProbe(f, `print(json.dumps({'flood': attempt(deadline_s=${fixtureDeadlineS(10)}, max_bytes=4096), 'roomy': attempt(deadline_s=${fixtureDeadlineS(10)}, max_bytes=1 << 20)}))`));
+		expect(flood.flood).toEqual(["ValueError", "response exceeds 4096 bytes"]); // the cap is on the body, not on a slice of it
+		expect(flood.roomy![0]).toBe("ok");
+		f.api.mode = "source-redirect-away";
+		expect(answers(await githubGetProbe(f, `print(json.dumps({'away': attempt(deadline_s=${fixtureDeadlineS(10)}, max_bytes=4096)}))`)).away![0]).toBe("OSError");
+		f.api.mode = "source-rate-limit";
+		const limited = answers(await githubGetProbe(f, `print(json.dumps({'limited': attempt(deadline_s=${fixtureDeadlineS(10)}, max_bytes=4096)}))`)).limited!;
+		expect(limited[1]).toContain("HTTP 403");
+		expect(limited[1]).toContain("(rate limited)");
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(60) * 1000);
+
+test("OUTSIDERAUTH1 an installer with gh but no login fetches anonymously, never calls gh api, and sends a token only to api.github.com", async () => {
+	const f = fixture();
 	try {
 		const a = archive(f);
-		// The installer's own 30 s lookup deadline is the subject; only the outer fixture bound scales.
-		const result = await invoke(f, ["attestation", a.path, version, platform], "isolated", { GH_CASE: "source-timeout", CHILD_RECORD: record }, fixtureDeadlineS(40));
-		expectRefusal(result, "KIT_ATTESTATION_VERIFIER_UNAVAILABLE");
-		expect(decoder.decode(result.stderr)).toContain("timed out after 30 seconds");
-		const child = JSON.parse(readFileSync(record, "utf8")) as { pid: number; pgid: number };
-		const end = performance.now() + 3000 * fixtureLoad().factor;
-		let alive = true;
-		do {
-			const observed = await run(["/bin/ps", "-p", String(child.pid), "-o", "stat="], { deadline_s: fixtureDeadlineS(2), grace_s: 0.1, max_output_bytes: 1024 });
-			expect(observed.timed_out).toBe(false);
-			expect([0, 1]).toContain(observed.rc);
-			const state = decoder.decode(observed.stdout).trim();
-			alive = state.length > 0 && !state.startsWith("Z");
-			needsCleanup = alive;
-			// A real OS process-group death/reap cannot be advanced by fake timers.
-			if (alive) await Bun.sleep(50);
-		} while (alive && performance.now() < end);
-		expect(alive, "installer leaked its controlled descendant").toBe(false);
-	} finally {
-		// Only the process group created by this controlled gh fixture is eligible.
-		if (needsCleanup && existsSync(record)) {
-			const { pid, pgid } = JSON.parse(readFileSync(record, "utf8")) as { pid: number; pgid: number };
-			const cleanup = await run([python, "-I", "-c", "import os,signal,sys\npid,pgid = map(int, sys.argv[1:])\ntry:\n    if os.getpgid(pid) == pgid and pgid != os.getpgrp(): os.killpg(pgid, signal.SIGKILL)\nexcept ProcessLookupError: pass", String(pid), String(pgid)],
-				{ deadline_s: fixtureDeadlineS(3), grace_s: 0.1, max_output_bytes: 1024 });
-			expectSuccess(cleanup);
+		const log = join(f.work, "gh-calls.jsonl");
+		const env = { GH_CALL_LOG: log, GH_CONFIG_DIR: join(f.work, "empty-gh-config") };
+		expectSuccess(await invoke(f, ["attestation", a.path, version, platform], "isolated", env));
+		const input = join(f.work, "fetch.tar"); writeFileSync(input, "controlled archive digest input");
+		expectSuccess(await invoke(f, ["bundle", input, version, platform], "isolated", env));
+		// The lookup and the bundle fetch asked the fixture API, with the documented media types and no credential.
+		expect(f.api.requests.map(r => [r.path.replace(/sha256:[0-9a-f]{64}/, "sha256:DIGEST"), r.accept])).toEqual([
+			["/repos/JYeswak/omp-kit-companion/commits/v1.2.3", "application/vnd.github.sha"],
+			["/repos/JYeswak/omp-kit-companion/attestations/sha256:DIGEST", "application/vnd.github+json"],
+		]);
+		expect(f.api.requests.every(r => r.authorization === null)).toBe(true);
+		// A token in the environment still never reaches a non-GitHub base.
+		expectSuccess(await invoke(f, ["attestation", a.path, version, platform], "isolated", { ...env, GH_TOKEN: "ghp_fixture_token_must_not_leave_the_machine" }));
+		expect(f.api.requests.every(r => r.authorization === null)).toBe(true);
+		// gh was only ever asked to verify: a regression to `gh api` shows here and in the fake's own refusal.
+		const calls = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
+		expect(calls.length).toBeGreaterThan(0);
+		expect(calls.every(call => call[0] === "attestation" && call[1] === "verify")).toBe(true);
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(40) * 1000);
+
+test("OUTSIDERAUTH1 an untrusted API base is refused before any request, and an unreachable one is a named, actionable refusal", async () => {
+	const f = fixture();
+	try {
+		const a = archive(f);
+		for (const base of ["https://evil.example", "http://example.com:80", "http://127.0.0.1:80@evil.example", "http://127.0.0.1", "ftp://127.0.0.1:21", "https://api.github.com.evil.example"]) {
+			expectRefusal(await invoke(f, ["attestation", a.path, version, platform], "isolated", { OMP_KIT_GITHUB_API: base }), "KIT_ATTESTATION_API_UNTRUSTED");
 		}
-		f.scratch.cleanup();
-	}
-}, fixtureDeadlineS(45) * 1000);
+		expect(f.api.requests).toEqual([]);
+		// Nothing listens on port 1: the refusal names the code and the remedy, and no longer demands `gh auth login`.
+		const down = await invoke(f, ["attestation", a.path, version, platform], "isolated", { OMP_KIT_GITHUB_API: "http://127.0.0.1:1" });
+		expectRefusal(down, "KIT_ATTESTATION_SOURCE_UNVERIFIED");
+		expect(decoder.decode(down.stderr)).toContain("so no `gh auth login` is needed");
+		expect(decoder.decode(down.stderr)).not.toContain("run `gh auth login` first");
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(30) * 1000);
 
 test("release preflight accepts canonical payload, rejects source drift, and explicit regeneration repairs only generated delivery", async () => {
 	const f = fixture();

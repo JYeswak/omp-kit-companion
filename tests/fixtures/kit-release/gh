@@ -12,16 +12,10 @@ import sys
 
 args = sys.argv[1:]
 if args[:1] == ["api"]:
-    if any(item.startswith("repos/JYeswak/omp-kit-companion/commits/v") for item in args):
-        # Deterministic original-path replacement at the authority boundary.
-        # Only this explicitly synthetic subprocess double supports these knobs.
-        if os.environ.get("SYNTHETIC_GH_REPLACE_ARCHIVE"):
-            Path(os.environ["SYNTHETIC_GH_REPLACE_ARCHIVE"]).write_bytes(b"substituted original archive")
-        print("a" * 40)
-        sys.exit(0)
-    if any("/attestations/sha256:" in item for item in args):
-        print('{"fixture":true}')
-        sys.exit(0)
+    # OUTSIDERAUTH1: the installer and the updater read the tag and the attestation bundle from the public API themselves
+    # (tests/cli/github-api-fixture.ts stands in for it). `gh api` needs a login, so a consumer that calls it has regressed.
+    print("synthetic gh: refusing `gh api`; the consumer must read the public API anonymously", file=sys.stderr)
+    sys.exit(41)
 elif args[:2] == ["attestation", "verify"]:
     policy = {
         "--hostname": "github.com",
