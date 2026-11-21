@@ -286,8 +286,42 @@ if [ "$tracker_write" = 1 ]; then
 	fi
 	tracker_db_path=${tracker_db_path:-"$tracker_project/.beads/beads.db"}
 	if [ "$fixture_identity_project" != "$tracker_project" ]; then
-		identity_out=$(am agents show --project "$tracker_project" --json "$AGENT_NAME" 2>&1)
-		identity_rc=$?
+		# WHOISCACHE1: the registration check is one Agent Mail round trip per tracker write. With
+		# OMP_KIT_BR_SHIM_WHOIS_TTL_S=N (seconds, 1..3600; unset or 0 is off) a POSITIVE answer for this
+		# exact (project, agent) pair is remembered for N seconds, so a seat writing many times a minute
+		# asks once. A miss, an expired entry or any unreadable entry asks Agent Mail again and fails closed
+		# exactly as before; a refusal is never cached; the reservation read below is never cached.
+		whois_ttl=${OMP_KIT_BR_SHIM_WHOIS_TTL_S:-0}
+		case "$whois_ttl" in ''|*[!0-9]*) whois_ttl=0 ;; esac
+		[ "${#whois_ttl}" -le 4 ] || whois_ttl=0
+		[ "$whois_ttl" -le 3600 ] || whois_ttl=3600
+		whois_file=""
+		whois_hit=0
+		if [ "$whois_ttl" -gt 0 ]; then
+			whois_dir=${OMP_KIT_BR_SHIM_WHOIS_DIR:-${XDG_STATE_HOME:-${HOME:-/nonexistent}/.local/state}/omp-kit/br-shim-whois}
+			whois_sum=$(printf '%s\n%s\n' "$tracker_project" "$AGENT_NAME" | cksum | { read -r whois_crc _; printf '%s' "$whois_crc"; })
+			whois_file="$whois_dir/$whois_sum"
+			whois_now=$(date +%s)
+			if [ -f "$whois_file" ] && [ ! -L "$whois_file" ]; then
+				whois_proj=""; whois_agent=""; whois_exp=""
+				{ IFS= read -r whois_proj; IFS= read -r whois_agent; IFS= read -r whois_exp; } < "$whois_file" || true
+				case "$whois_exp" in
+					''|*[!0-9]*) ;;
+					*) if [ "$whois_proj" = "$tracker_project" ] && [ "$whois_agent" = "$AGENT_NAME" ] && [ "$whois_exp" -gt "$whois_now" ]; then whois_hit=1; fi ;;
+				esac
+			fi
+		fi
+		if [ "$whois_hit" = 1 ]; then
+			identity_out=""
+			identity_rc=0
+		else
+			identity_out=$(am agents show --project "$tracker_project" --json "$AGENT_NAME" 2>&1)
+			identity_rc=$?
+			if [ "$identity_rc" -eq 0 ] && [ -n "$whois_file" ]; then
+				# Best effort and atomic: a failed write only costs the next call one more round trip.
+				if (umask 077; mkdir -p "$whois_dir" && printf '%s\n%s\n%s\n' "$tracker_project" "$AGENT_NAME" "$((whois_now + whois_ttl))" > "$whois_file.$$" && mv -f "$whois_file.$$" "$whois_file"); then :; else rm -f "$whois_file.$$"; fi
+			fi
+		fi
 	fi
 	[ "$identity_rc" -eq 0 ] || fail "BR_SHIM_RESERVATION_UNKNOWN Agent Mail cannot verify $AGENT_NAME in $tracker_project (rc=$identity_rc): $identity_out"
 	conflict_out=$(am file_reservations conflicts "$tracker_project" .beads/issues.jsonl .beads/beads.db 2>&1)

@@ -732,5 +732,68 @@ handoff_carrier_case handoff-content-alias-admitted 0 --content "$HANDOFF_MESSAG
 handoff_carrier_case handoff-file-admitted 0 -f"$TMP/handoff-message"
 handoff_carrier_case handoff-stdin-admitted 0 --file -
 
+# 18. WHOISCACHE1: an opt-in short-TTL positive cache of the registration check. While fresh it asks Agent Mail once
+# per (project, agent); a miss, an expiry or another agent asks again and fails closed as before; a refusal is never
+# cached; the reservation read is never cached.
+export XDG_STATE_HOME="$TMP/state"
+export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$ORIGINAL_PATH"
+export AGENT_NAME=TestShim
+export AM_EXPECTED_PROJECT="$REPO_ROOT"
+export BR_GUARD_JSON_FILE="$TMP/bead.json"
+printf '{"id":"X","status":"in_progress","assignee":"OtherWorker","labels":[]}' > "$TMP/bead.json"
+WHOIS_DIR="$TMP/whois-cache"
+export OMP_KIT_BR_SHIM_WHOIS_DIR="$WHOIS_DIR"
+whois_write() {
+	AM_FAKE_MODE=$1
+	: > "$TMP/argv"
+	br --db "$REPO_ROOT/.beads/beads.db" update X --status open > "$TMP/out" 2>&1
+	got_rc=$?
+}
+whois_case() { # <name> <want rc> <want registration reads>
+	whois_calls=$(grep -c '<agents> <show>' "$AM_LOG" || true)
+	if [ "$got_rc" = "$2" ] && [ "$whois_calls" = "$3" ]; then pass=$((pass + 1))
+	else fail=$((fail + 1)); printf 'FAIL %s: rc=%s want %s, registration reads %s want %s out<<<%s>>>\n' "$1" "$got_rc" "$2" "$whois_calls" "$3" "$(cat "$TMP/out")"; fi
+}
+whois_check() { # <name> <command...> passes when the command succeeds
+	whois_name=$1; shift
+	if "$@"; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL %s\n' "$whois_name"; fi
+}
+whois_reads() { [ "$(grep -c "<file_reservations> <conflicts>" "$AM_LOG" || true)" = "$1" ]; }
+rm -rf "$WHOIS_DIR"
+unset OMP_KIT_BR_SHIM_WHOIS_TTL_S
+: > "$AM_LOG"; whois_write clear; whois_write clear
+whois_case whois-cache-off-by-default 0 2
+whois_check whois-cache-off-writes-nothing test ! -e "$WHOIS_DIR"
+export OMP_KIT_BR_SHIM_WHOIS_TTL_S=300
+: > "$AM_LOG"; whois_write clear; whois_write clear; whois_write clear
+whois_case whois-cache-hit-asks-once 0 1
+whois_check whois-cache-reservation-read-never-cached whois_reads 3
+: > "$AM_LOG"; whois_write foreign
+whois_case whois-cache-hit-still-refuses-foreign-lease 4 0
+whois_check whois-cache-foreign-lease-named grep -q BR_SHIM_TRACKER_RESERVED "$TMP/out"
+rm -rf "$WHOIS_DIR"; : > "$AM_LOG"; whois_write unreachable
+whois_case whois-cache-miss-fails-closed 4 1
+whois_check whois-cache-miss-refusal-named grep -q BR_SHIM_RESERVATION_UNKNOWN "$TMP/out"
+whois_check whois-cache-miss-never-ran-br test ! -s "$TMP/argv"
+whois_check whois-cache-failure-writes-nothing test -z "$(ls "$WHOIS_DIR" 2>/dev/null || true)"
+rm -rf "$WHOIS_DIR"; whois_write clear
+export AGENT_NAME=OtherSeat; : > "$AM_LOG"; whois_write clear; export AGENT_NAME=TestShim
+whois_case whois-cache-keyed-by-agent 0 1
+rm -rf "$WHOIS_DIR"; whois_write clear
+set -- "$WHOIS_DIR"/*
+printf '%s\n%s\n%s\n' "$REPO_ROOT" TestShim 1 > "$1"
+: > "$AM_LOG"; whois_write clear
+whois_case whois-cache-expired-asks-again 0 1
+rm -rf "$WHOIS_DIR"; : > "$AM_LOG"; whois_write unregistered; whois_write unregistered
+whois_case whois-cache-refusal-never-cached 4 2
+whois_write clear
+whois_case whois-cache-after-refusal-asks-again 0 3
+export OMP_KIT_BR_SHIM_WHOIS_TTL_S=abc
+rm -rf "$WHOIS_DIR"; : > "$AM_LOG"; whois_write clear; whois_write clear
+whois_case whois-cache-bad-ttl-is-off 0 2
+whois_check whois-cache-bad-ttl-writes-nothing test ! -e "$WHOIS_DIR"
+unset OMP_KIT_BR_SHIM_WHOIS_TTL_S OMP_KIT_BR_SHIM_WHOIS_DIR
+AM_FAKE_MODE=clear
+
  printf 'br-shim: %s pass %s fail\n' "$pass" "$fail"
  [ "$fail" = "0" ]
