@@ -15,6 +15,15 @@
  * state dir and rate-limited to once per 30 min. A missing launchd label
  * reports and does nothing; this step adds no refusal code.
  *
+ * A third trigger covers the wedge that has neither signal (2026-11-21: three
+ * wedges with RSS under the ceiling and no fatal line, every br write refused
+ * for hours): a real Agent Mail call that times out at 30 s or prints a pool
+ * exhaustion error on two consecutive ticks restarts the server once, inside
+ * the same cooldown. The call is `am agents show` for
+ * OMP_KIT_AM_PROBE_PROJECT + OMP_KIT_AM_PROBE_AGENT (the br-shim whois call),
+ * else `am list-projects --json`. Any other failure (agent not found, am not
+ * installed) neither counts nor resets the streak.
+ *
  * Every external call (process runs, log tail, clock, uid, paths) is
  * injectable through AmWatchDeps so tests never touch the live server.
  */
@@ -34,6 +43,16 @@ export const AM_WATCH_RECEIPT_NAME = "am-watch.json";
 /** Bounded tail read of the server stderr log per tick. */
 export const AM_WATCH_LOG_TAIL_BYTES = 256 * 1024;
 export const AM_WATCH_SCHEMA_VERSION = 1;
+/** Wall-clock limit of the liveness probe. */
+export const AM_WATCH_PROBE_DEADLINE_S = 30;
+/** Consecutive wedged probes (one per load-watch tick) before a restart. */
+export const AM_WATCH_PROBE_FAILS = 2;
+/** Probe streak file inside the load-watch state dir. */
+export const AM_WATCH_PROBE_NAME = "am-watch-probe.json";
+
+export type AmProbeOutcome = "ok" | "wedged" | "inconclusive";
+export interface AmProbeResult { outcome: AmProbeOutcome; detail: string }
+export type AmWatchProbe = () => AmProbeResult;
 
 export interface AmWatchRunResult { code: number; stdout: string; stderr: string }
 export type AmWatchRunner = (argv: readonly string[]) => AmWatchRunResult;
@@ -48,10 +67,11 @@ export interface AmWatchDeps {
 	stderrLogPath?: string;
 	rssCeilingBytes?: number;
 	cooldownMs?: number;
+	probe?: AmWatchProbe;
 }
 
 export type AmWatchStatus = "RESTARTED" | "COOLDOWN" | "OK" | "NO_LABEL" | "NO_PROCESS" | "NO_LOG" | "UNKNOWN";
-export type AmWatchReason = "rss-ceiling" | "fatal-pressure";
+export type AmWatchReason = "rss-ceiling" | "fatal-pressure" | "unresponsive";
 
 export interface AmWatchResult {
 	status: AmWatchStatus;
@@ -62,6 +82,7 @@ export interface AmWatchResult {
 	fatalAt: string | null;
 	restartedAt: string | null;
 	kickstartRc: number | null;
+	probeStreak: number | null;
 	detail: string;
 }
 
@@ -169,10 +190,64 @@ function readAmReceipt(stateRoot: string): { finishedAt: string; finishedMs: num
 	}
 }
 
+const WEDGE_TEXT = /no connections available|acquire timeout|pool error/i;
+
+/** Pure verdict of one probe run: a timeout or a pool-exhaustion message is a wedge; success is ok; the rest says nothing. */
+export function classifyAmProbe(rc: number | null, timedOut: boolean, text: string): AmProbeResult {
+	if (timedOut) return { outcome: "wedged", detail: `am probe timed out after ${AM_WATCH_PROBE_DEADLINE_S} s` };
+	if (rc === 0) return { outcome: "ok", detail: "am probe answered" };
+	if (WEDGE_TEXT.test(text)) return { outcome: "wedged", detail: `am probe reported pool exhaustion (exit ${rc})` };
+	return { outcome: "inconclusive", detail: `am probe exited ${rc} without a pool error` };
+}
+
+function defaultAmProbe(): AmProbeResult {
+	const project = process.env.OMP_KIT_AM_PROBE_PROJECT ?? "";
+	const agent = process.env.OMP_KIT_AM_PROBE_AGENT ?? "";
+	if (project.startsWith("-") || agent.startsWith("-")) return { outcome: "inconclusive", detail: "am probe target refused: a value starts with '-'" };
+	const argv = project !== "" && agent !== ""
+		? ["am", "agents", "show", "--project", project, "--json", agent]
+		: ["am", "list-projects", "--json"];
+	try {
+		const child = runSync(argv, { deadline_s: AM_WATCH_PROBE_DEADLINE_S, max_output_bytes: 4 << 20, env: { ...process.env, LC_ALL: "C" } });
+		const decoder = new TextDecoder();
+		return classifyAmProbe(child.rc, child.timed_out, `${decoder.decode(child.stdout)}\n${decoder.decode(child.stderr)}`);
+	} catch {
+		return { outcome: "inconclusive", detail: "am probe could not start" };
+	}
+}
+
+function readProbeStreak(stateRoot: string): number {
+	try {
+		const raw = JSON.parse(readFileSync(join(stateRoot, AM_WATCH_PROBE_NAME), "utf8")) as Record<string, unknown>;
+		const count = raw.consecutive_failures;
+		return raw.schema_version === AM_WATCH_SCHEMA_VERSION && typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : 0;
+	} catch {
+		return 0;
+	}
+}
+
+function writeProbeStreak(stateRoot: string, streak: number, nowMs: number): void {
+	try {
+		mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+		const body = { schema_version: AM_WATCH_SCHEMA_VERSION, updated_at: new Date(nowMs).toISOString(), consecutive_failures: streak };
+		writeFileSync(join(stateRoot, AM_WATCH_PROBE_NAME), `${JSON.stringify(body)}\n`, { mode: 0o600 });
+	} catch {
+		// A streak that cannot be persisted can only under-count, so the server is never restarted on a guess.
+	}
+}
+
+/** Applies one probe outcome to the persisted streak: wedged adds one, ok clears it, inconclusive leaves it. */
+function nextProbeStreak(stateRoot: string, outcome: AmProbeOutcome, nowMs: number): number {
+	const previous = readProbeStreak(stateRoot);
+	const next = outcome === "wedged" ? previous + 1 : outcome === "ok" ? 0 : previous;
+	if (next !== previous) writeProbeStreak(stateRoot, next, nowMs);
+	return next;
+}
+
 function baseResult(overrides: Partial<AmWatchResult> & { status: AmWatchStatus; detail: string }): AmWatchResult {
 	return {
 		reason: null, pid: null, rssBytes: null, stderrPath: null,
-		fatalAt: null, restartedAt: null, kickstartRc: null, ...overrides,
+		fatalAt: null, restartedAt: null, kickstartRc: null, probeStreak: null, ...overrides,
 	};
 }
 
@@ -264,13 +339,26 @@ function checkAmWatchInner(stateRoot: string, deps: AmWatchDeps): AmWatchResult 
 			}
 		}
 	}
+	let probeStreak: number | null = null;
+	let probeDetail = "";
 	if (reason === null) {
-		return baseResult({ status: "OK", pid: target.pid, rssBytes: target.rssBytes, stderrPath,
-			detail: `am serve-http pid=${target.pid} rss=${target.rssBytes} B under ceiling ${ceiling} B with no fresh fatal line` });
+		let probed: AmProbeResult;
+		try {
+			probed = (deps.probe ?? defaultAmProbe)();
+		} catch {
+			probed = { outcome: "inconclusive", detail: "am probe threw" };
+		}
+		probeStreak = nextProbeStreak(stateRoot, probed.outcome, now);
+		probeDetail = `; ${probed.detail} (streak ${probeStreak}/${AM_WATCH_PROBE_FAILS})`;
+		if (probed.outcome === "wedged" && probeStreak >= AM_WATCH_PROBE_FAILS) reason = "unresponsive";
+	}
+	if (reason === null) {
+		return baseResult({ status: "OK", pid: target.pid, rssBytes: target.rssBytes, stderrPath, probeStreak,
+			detail: `am serve-http pid=${target.pid} rss=${target.rssBytes} B under ceiling ${ceiling} B with no fresh fatal line${probeDetail}` });
 	}
 	if (lastRestartMs !== null && now - lastRestartMs < cooldownMs) {
 		return baseResult({ status: "COOLDOWN", reason, pid: target.pid, rssBytes: target.rssBytes, stderrPath,
-			fatalAt, restartedAt: receipt?.finishedAt ?? null,
+			fatalAt, restartedAt: receipt?.finishedAt ?? null, probeStreak,
 			detail: `am restart for ${reason} suppressed: last restart ${receipt?.finishedAt} is inside the 30 min cooldown` });
 	}
 	let kicked: AmWatchRunResult;
@@ -294,7 +382,8 @@ function checkAmWatchInner(stateRoot: string, deps: AmWatchDeps): AmWatchResult 
 		return baseResult({ status: "UNKNOWN", reason, pid: target.pid, rssBytes: target.rssBytes, stderrPath, fatalAt,
 			kickstartRc: kicked.code, detail: "am restart kickstarted but the receipt could not be written" });
 	}
+	writeProbeStreak(stateRoot, 0, now);
 	return baseResult({ status: "RESTARTED", reason, pid: target.pid, rssBytes: target.rssBytes, stderrPath, fatalAt,
-		restartedAt: finishedAt, kickstartRc: kicked.code,
+		restartedAt: finishedAt, kickstartRc: kicked.code, probeStreak,
 		detail: `restarted ${domainLabel} for ${reason}: pid=${target.pid} rss=${target.rssBytes} B` });
 }

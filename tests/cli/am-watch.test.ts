@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, expect, test } from "bun:test";
-import { AM_WATCH_RECEIPT_NAME, checkAmWatch, type AmWatchDeps, type AmWatchRunResult } from "../../src/am-watch.ts";
+import { AM_WATCH_PROBE_NAME, AM_WATCH_RECEIPT_NAME, checkAmWatch, classifyAmProbe, type AmProbeResult, type AmWatchDeps, type AmWatchRunResult } from "../../src/am-watch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 
 afterAll(cleanupAllOwnedTmp);
@@ -72,8 +72,19 @@ function makeWorld(opts: { print?: string; printCode?: number; printStderr?: str
 	return world;
 }
 
+const PROBE_OK: AmProbeResult = { outcome: "ok", detail: "fixture answered" };
+const PROBE_WEDGED: AmProbeResult = { outcome: "wedged", detail: "fixture pool exhausted" };
+const PROBE_INCONCLUSIVE: AmProbeResult = { outcome: "inconclusive", detail: "fixture agent not found" };
+
 function depsFor(world: FakeWorld, extra?: Partial<AmWatchDeps>): AmWatchDeps {
-	return { run: world.run, readTail: world.readTail, nowMs: () => world.clock.now, uid: 501, ...extra };
+	// The probe is injected everywhere so no test ever calls the live Agent Mail.
+	return { run: world.run, readTail: world.readTail, nowMs: () => world.clock.now, uid: 501, probe: () => PROBE_OK, ...extra };
+}
+
+/** A probe whose answers are scripted per tick, with a call counter. */
+function scriptedProbe(...answers: AmProbeResult[]) {
+	const state = { calls: 0 };
+	return { state, probe: () => { const answer = answers[Math.min(state.calls, answers.length - 1)] as AmProbeResult; state.calls += 1; return answer; } };
 }
 
 test("AMWATCH1: an over-ceiling RSS restarts exactly once and records a receipt", () => {
@@ -132,4 +143,79 @@ test("AMWATCH1: a missing launchd label reports and does nothing", () => {
 	expect(world.kickstarts).toHaveLength(0);
 	expect(world.tailCalls).toHaveLength(0);
 	expect(existsSync(join(root, AM_WATCH_RECEIPT_NAME))).toBe(false);
+});
+
+test("AMWATCH2: two consecutive wedged probes at low RSS restart once as unresponsive", () => {
+	const root = fixtureRoot();
+	const world = makeWorld({ ps: PS_QUIET, tail: QUIET_LOG });
+	const probe = scriptedProbe(PROBE_WEDGED);
+	const first = checkAmWatch(root, depsFor(world, { probe: probe.probe }));
+	expect(first.status).toBe("OK");
+	expect(first.probeStreak).toBe(1);
+	expect(world.kickstarts).toHaveLength(0);
+	world.clock.now = BASE_NOW + 5 * 60 * 1000;
+	const second = checkAmWatch(root, depsFor(world, { probe: probe.probe }));
+	expect(second.status).toBe("RESTARTED");
+	expect(second.reason).toBe("unresponsive");
+	expect(world.kickstarts).toEqual([["launchctl", "kickstart", "-k", "gui/501/com.agent-mail"]]);
+	const receipt = JSON.parse(readFileSync(join(root, AM_WATCH_RECEIPT_NAME), "utf8")) as Record<string, unknown>;
+	expect(receipt).toMatchObject({ reason: "unresponsive", kickstart_rc: 0 });
+	const streak = JSON.parse(readFileSync(join(root, AM_WATCH_PROBE_NAME), "utf8")) as Record<string, unknown>;
+	expect(streak.consecutive_failures).toBe(0);
+});
+
+test("AMWATCH2 planted negative: a successful probe between two wedged ones resets the streak", () => {
+	const root = fixtureRoot();
+	const world = makeWorld({ ps: PS_QUIET, tail: QUIET_LOG });
+	const probe = scriptedProbe(PROBE_WEDGED, PROBE_OK, PROBE_WEDGED);
+	const results = [0, 1, 2].map(tick => {
+		world.clock.now = BASE_NOW + tick * 5 * 60 * 1000;
+		return checkAmWatch(root, depsFor(world, { probe: probe.probe }));
+	});
+	expect(results.map(r => r.status)).toEqual(["OK", "OK", "OK"]);
+	expect(results.map(r => r.probeStreak)).toEqual([1, 0, 1]);
+	expect(world.kickstarts).toHaveLength(0);
+});
+
+test("AMWATCH2: an inconclusive probe neither counts nor resets the streak", () => {
+	const root = fixtureRoot();
+	const world = makeWorld({ ps: PS_QUIET, tail: QUIET_LOG });
+	const probe = scriptedProbe(PROBE_WEDGED, PROBE_INCONCLUSIVE, PROBE_WEDGED);
+	const results = [0, 1, 2].map(tick => {
+		world.clock.now = BASE_NOW + tick * 5 * 60 * 1000;
+		return checkAmWatch(root, depsFor(world, { probe: probe.probe }));
+	});
+	expect(results.map(r => r.probeStreak)).toEqual([1, 1, 2]);
+	expect(results[2]?.status).toBe("RESTARTED");
+	expect(world.kickstarts).toHaveLength(1);
+});
+
+test("AMWATCH2: a restart is not repeated inside the 30 min cooldown", () => {
+	const root = fixtureRoot();
+	const world = makeWorld({ ps: PS_QUIET, tail: QUIET_LOG });
+	const probe = scriptedProbe(PROBE_WEDGED);
+	const statuses: string[] = [];
+	for (let tick = 0; tick < 4; tick += 1) {
+		world.clock.now = BASE_NOW + tick * 5 * 60 * 1000;
+		statuses.push(checkAmWatch(root, depsFor(world, { probe: probe.probe })).status);
+	}
+	expect(statuses).toEqual(["OK", "RESTARTED", "OK", "COOLDOWN"]);
+	expect(world.kickstarts).toHaveLength(1);
+});
+
+test("AMWATCH2: no probe call is made when RSS already forces a restart", () => {
+	const root = fixtureRoot();
+	const world = makeWorld({ tail: QUIET_LOG });
+	const probe = scriptedProbe(PROBE_WEDGED);
+	const result = checkAmWatch(root, depsFor(world, { probe: probe.probe }));
+	expect(result.reason).toBe("rss-ceiling");
+	expect(probe.state.calls).toBe(0);
+});
+
+test("AMWATCH2: classifyAmProbe judges only a timeout or a pool error as wedged", () => {
+	expect(classifyAmProbe(null, true, "").outcome).toBe("wedged");
+	expect(classifyAmProbe(1, false, "error: Pool error: acquire timeout: no connections available").outcome).toBe("wedged");
+	expect(classifyAmProbe(0, false, "[]").outcome).toBe("ok");
+	expect(classifyAmProbe(1, false, "error: agent 'X' not found").outcome).toBe("inconclusive");
+	expect(classifyAmProbe(127, false, "spawn failed").outcome).toBe("inconclusive");
 });
