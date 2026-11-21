@@ -2220,14 +2220,53 @@ const EXACT_PARENT_EXCLUSIVE = ["--paths", "--patch", "--base", "--message", "--
 
 const LAND_EXACT_GATE_DEADLINE_ENV = "OMP_KIT_LAND_EXACT_GATE_DEADLINE_S";
 
+type ParentGate = { cwd: string; cleanup: () => void };
+
+/**
+ * LANDGATE2: the gate that judges an exact-parent candidate is the PARENT's (fresh origin/main, already landed and
+ * trusted), run from an owned export of that tree. The canonical working tree's copy is not trustworthy: it can be a stale
+ * checkout with a peer's uncommitted hunks (5ad54d5a8e with 26 dirty paths on 2026-11-21), and it lacked the staged
+ * pre-commit members, so two commits reached main past the hosted pysafe ratchet. "absent" when the parent ships no
+ * scripts/fresh-gate.sh; null when it ships one that cannot be exported (the caller refuses, never falls back).
+ */
+async function exportParentGate(repo: string, base: string): Promise<ParentGate | "absent" | null> {
+	const tracked = git(repo, ["cat-file", "-e", `${base}:scripts/fresh-gate.sh`]);
+	if (tracked.interrupted) return null;
+	if (tracked.code !== 0) return "absent";
+	let scratch: OwnedTmp;
+	try {
+		const root = join(repo, "var", "agent-tmp");
+		mkdirSync(root, { recursive: true });
+		scratch = ownedTmp("land-parent-gate", { root });
+	} catch { return null; }
+	const cleanup = (): void => { try { scratch.cleanup(); } catch { /* the owned-temp exit hook retries */ } };
+	try {
+		const tree = join(scratch.path, "parent");
+		mkdirSync(tree);
+		const tar = join(scratch.path, "parent.tar");
+		const bounded = { cwd: repo, env: gitEnvironment(), deadline_s: 120, max_output_bytes: 64 * 1024 };
+		const packed = await kitlibRun(["git", "-C", repo, "archive", "--format=tar", "-o", tar, base], bounded);
+		if (packed.rc !== 0 || packed.timed_out || packed.killed) { cleanup(); return null; }
+		const unpacked = await kitlibRun(["tar", "-xf", tar, "-C", tree], bounded);
+		if (unpacked.rc !== 0 || unpacked.timed_out || unpacked.killed) { cleanup(); return null; }
+		return { cwd: tree, cleanup };
+	} catch { cleanup(); return null; }
+}
+
 /**
  * A repository that ships scripts/fresh-gate.sh gets that gate run on the exact candidate (it judges the commit's
  * own archive) before anything is created or pushed, and publishes only on its `FRESH-GATE: GREEN commit=<sha>`
- * line with exit 0. Deadline: OMP_KIT_LAND_EXACT_GATE_DEADLINE_S (integer, clamped to 1..7200) or 2400 s, the
- * publication push deadline's bound for the same gate. A repository without the script is unchanged.
+ * line with exit 0. The gate is the parent's, exported (LANDGATE2); FRESH_GATE_REPO names this repository for objects and
+ * the ledger, the way pre-push-gate.sh runs the base archive's gate. A parent that ships no gate falls back to the
+ * working tree's script when there is one (a repository's first gate), and a repository with neither is unchanged.
+ * Deadline: OMP_KIT_LAND_EXACT_GATE_DEADLINE_S (integer, clamped to 1..7200) or 2400 s, the publication push
+ * deadline's bound for the same gate.
  */
-async function exactParentCandidateGate(repo: string, candidate: string): Promise<CliResult | null> {
-	if (!existsSync(join(repo, "scripts", "fresh-gate.sh"))) return null;
+async function exactParentCandidateGate(repo: string, candidate: string, base: string): Promise<CliResult | null> {
+	const parent = await exportParentGate(repo, base);
+	if (parent === null)
+		return refused("LAND_PUBLICATION_REFUSED", `The parent's scripts/fresh-gate.sh could not be exported from ${base}, so the exact candidate ${candidate} was not gated`, "Restore the repository or the disk and retry; the canonical working tree's gate is never a substitute, and nothing was created or published.");
+	if (parent === "absent" && !existsSync(join(repo, "scripts", "fresh-gate.sh"))) return null;
 	const raw = process.env[LAND_EXACT_GATE_DEADLINE_ENV];
 	const parsed = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
 	const deadlineS = Number.isSafeInteger(parsed) ? Math.min(7200, Math.max(1, parsed)) : 2400;
@@ -2235,9 +2274,12 @@ async function exactParentCandidateGate(repo: string, candidate: string): Promis
 	try {
 		// UNQUALIFIED (load put a file-budget measurement outside its envelope) is the one verdict a quieter machine decides:
 		// the gate waits for a window and reruns itself inside this deadline, keeping 600 s for the runs themselves.
-		run = await kitlibRun(["sh", "scripts/fresh-gate.sh", "--commit", candidate], { cwd: repo, env: { ...gitEnvironment(), FRESH_GATE_QUIET_WAIT_S: String(Math.max(0, deadlineS - 600)) }, deadline_s: deadlineS, max_output_bytes: 8 * 1024 * 1024 });
+		const env = { ...gitEnvironment(), FRESH_GATE_QUIET_WAIT_S: String(Math.max(0, deadlineS - 600)), ...(parent === "absent" ? {} : { FRESH_GATE_REPO: repo }) };
+		run = await kitlibRun(["sh", "scripts/fresh-gate.sh", "--commit", candidate], { cwd: parent === "absent" ? repo : parent.cwd, env, deadline_s: deadlineS, max_output_bytes: 8 * 1024 * 1024 });
 	} catch (error) {
 		return refused("LAND_PUBLICATION_REFUSED", `The exact candidate ${candidate} could not be gated: ${error instanceof Error ? error.message : String(error)}`, "Repair scripts/fresh-gate.sh or the host and retry; nothing was created or published.");
+	} finally {
+		if (parent !== "absent") parent.cleanup();
 	}
 	const decoder = new TextDecoder();
 	const lines = `${decoder.decode(run.stdout)}\n${decoder.decode(run.stderr)}`.split("\n");
@@ -2288,7 +2330,7 @@ async function landExactParentCommand(repo: string, request: ParsedCommand): Pro
 		if (entry === null) return refused("LAND_CANDIDATE_UNREADABLE", `The commit tree could not be read for ${path}`, "Repair the repository and retry; nothing was created or published.");
 		qualifiedBlobs[path] = entry;
 	}
-	const gateRefusal = await exactParentCandidateGate(repo, candidate);
+	const gateRefusal = await exactParentCandidateGate(repo, candidate, base);
 	if (gateRefusal !== null) return gateRefusal;
 	const name = `exact-parent-${candidate.slice(0, 12)}`;
 	const ovnfs = (args: string[]) => kitlibRun(["ovnfs", ...args], { cwd: repo, env: gitEnvironment(), deadline_s: 120, max_output_bytes: 64 * 1024 });

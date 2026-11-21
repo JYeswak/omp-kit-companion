@@ -1,6 +1,6 @@
 // Affected-test source dependencies: src/land.ts
 import { expect, setDefaultTimeout, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 import { EXPECTED_SERVICE, LAND_DEFAULT_TIMEOUT_MS, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, patchHold, registerPushCheck, remoteHead, repoRoot, responseCode, scratch, type HunkSetup } from "./private-index-land.helpers.ts";
@@ -1050,11 +1050,25 @@ function writeExactParentGate(work: string, body: string, log: string | null = n
 }
 
 /** Local main holds two unpushed commits; the reviewed commit is built directly on the origin tip on a side branch. */
-function exactParentSetup(secretIn: "reviewed" | "held" | null = null): ExactParentSetup {
+function exactParentSetup(secretIn: "reviewed" | "held" | null = null, baseGate: string | null = null): ExactParentSetup {
 	const { work, fakeBin } = fixture();
 	installOnMainAndRangeScan(work);
 	writeExactParentGate(work, `printf 'FRESH-GATE: GREEN commit=%s\\n' "$2"`);
 	writeExactParentOvnfs(fakeBin);
+	if (baseGate === null) {
+		// Default: the parent ships no gate of its own (the fixture seed's real one is removed and pushed), so land falls back to
+		// the working tree's stand-in written above.
+		git(work, ["rm", "-qf", "--ignore-unmatch", "--", "scripts/fresh-gate.sh"]);
+		git(work, ["commit", "--allow-empty", "-m", "feat(gate): the parent ships no gate [test]"]);
+		git(work, ["-c", "core.hooksPath=/dev/null", "push", "-q", "origin", "HEAD:refs/heads/main"]);
+		writeExactParentGate(work, `printf 'FRESH-GATE: GREEN commit=%s\\n' "$2"`);
+	} else {
+		// LANDGATE2: the parent ships its own gate (committed and pushed); a test may then leave a different copy in the working tree.
+		writeExactParentGate(work, baseGate);
+		git(work, ["add", "--", "scripts/fresh-gate.sh"]);
+		git(work, ["commit", "-m", "feat(gate): the parent's own gate [test]"]);
+		git(work, ["-c", "core.hooksPath=/dev/null", "push", "-q", "origin", "HEAD:refs/heads/main"]);
+	}
 	const bare = git(work, ["remote", "get-url", "origin"]).trim();
 	const base = remoteHead(work);
 	const id = globalThis.fixtureNumber++;
@@ -1200,6 +1214,63 @@ test("LANDSIBLING1 exact-parent refuses a candidate whose gate outlives its dead
 	expect(remoteHead(setup.work)).toBe(setup.base);
 	expectUnpublished(setup, setup.reviewed);
 	expect(readFileSync(setup.calls, "utf8")).toBe("");
+});
+
+// LANDGATE2: the candidate is judged by the PARENT's committed gate, exported, never by the canonical working tree's copy
+// (a stale checkout with peers' uncommitted hunks lacked the staged members and let two commits reach main RED).
+test("LANDGATE2 exact-parent: a RED parent gate refuses although the working-tree copy is permissive, and nothing is created or published", () => {
+	const setup = exactParentSetup(null, `printf 'FRESH-GATE: RED: planted parent gate\\n'\nexit 1`);
+	// The working tree now holds a permissive copy: before LANDGATE2 this alone decided the verdict.
+	writeExactParentGate(setup.work, `printf 'FRESH-GATE: GREEN commit=%s\\n' "$2"`);
+	const run = exactParentRun(setup, setup.reviewed);
+	expect(run.status, JSON.stringify(run.body)).not.toBe(0);
+	expect(responseCode(run.body)).toBe("LAND_PUBLICATION_REFUSED");
+	expect(JSON.stringify(run.body)).toContain("planted parent gate");
+	expect(remoteHead(setup.work)).toBe(setup.base);
+	expectUnpublished(setup, setup.reviewed);
+	expect(readFileSync(setup.calls, "utf8")).toBe("");
+	expect(readdirSync(join(setup.work, "var", "agent-tmp")).filter(name => name.startsWith("land-parent-gate."))).toEqual([]);
+});
+
+test("LANDGATE2 exact-parent: a GREEN parent gate publishes over a RED working-tree copy, runs from an owned export and sees the repository through FRESH_GATE_REPO", () => {
+	const log = join(scratch, `parent-gate-${globalThis.fixtureNumber++}.log`);
+	const setup = exactParentSetup(null, `printf 'repo=%s cwd=%s\\n' "$FRESH_GATE_REPO" "$(pwd)" >> ${JSON.stringify(log)}\nprintf 'FRESH-GATE: GREEN commit=%s\\n' "$2"`);
+	writeExactParentGate(setup.work, `printf 'FRESH-GATE: RED: the working-tree copy must not run\\n'\nexit 1`);
+	const run = exactParentRun(setup, setup.reviewed);
+	expect(run.status, JSON.stringify(run.body)).toBe(0);
+	expect(remoteHead(setup.work)).toBe(setup.reviewed);
+	const [seen] = readFileSync(log, "utf8").trim().split("\n");
+	const match = /^repo=(.+) cwd=(.+)$/.exec(seen ?? "");
+	expect(match, seen).not.toBeNull();
+	expect(realpathSync(match![1]!)).toBe(realpathSync(setup.work));
+	// The gate ran from an export under the repository's owned scratch (physical path, as `pwd` prints it), not from the working tree.
+	expect(match![2]!.startsWith(`${realpathSync(join(setup.work, "var", "agent-tmp"))}/land-parent-gate.`), match![2]).toBe(true);
+	expect(readdirSync(join(setup.work, "var", "agent-tmp")).filter(name => name.startsWith("land-parent-gate."))).toEqual([]);
+});
+
+test("LANDGATE2 exact-parent: only the parent's GREEN for exactly the candidate publishes; another sha, GREEN with a non-zero exit and UNQUALIFIED are refusals, a hung gate times out", () => {
+	const refusals: [string, string][] = [
+		["a GREEN line for another commit", `printf 'FRESH-GATE: GREEN commit=%s\\n' "${"0".repeat(40)}"`],
+		["GREEN text with a non-zero exit", `printf 'FRESH-GATE: GREEN commit=%s\\n' "$2"\nexit 1`],
+		["UNQUALIFIED", `printf 'FRESH-GATE: UNQUALIFIED: still outside the qualification envelope\\n' >&2\nexit 76`],
+	];
+	for (const [label, body] of refusals) {
+		const setup = exactParentSetup(null, body);
+		const run = exactParentRun(setup, setup.reviewed);
+		expect(responseCode(run.body), label).toBe("LAND_PUBLICATION_REFUSED");
+		expect(remoteHead(setup.work), label).toBe(setup.base);
+		expectUnpublished(setup, setup.reviewed);
+	}
+	const slow = exactParentSetup(null, `sleep 60\nprintf 'FRESH-GATE: GREEN commit=%s\\n' "$2"`);
+	const hung = command(slow.work, ["--exact-parent", slow.reviewed, "--apply", "--yes"], slow.hold, { amDir: slow.fakeBin, gitEnv: { ...slow.env, OMP_KIT_LAND_EXACT_GATE_DEADLINE_S: "2" } });
+	expect(responseCode(hung.body)).toBe("LAND_PUBLICATION_REFUSED");
+	expect(JSON.stringify(hung.body)).toContain("timed out after 2 s");
+	expect(remoteHead(slow.work)).toBe(slow.base);
+	// The parent's gate gets the quiet-window budget: the 2400 s default deadline less 600 s for the runs themselves.
+	const waitFile = join(scratch, `parent-gate-quiet-${globalThis.fixtureNumber++}.txt`);
+	const quiet = exactParentSetup(null, `printf '%s' "\${FRESH_GATE_QUIET_WAIT_S:-unset}" >'${waitFile}'\nprintf 'FRESH-GATE: GREEN commit=%s\\n' "$2"`);
+	expect(exactParentRun(quiet, quiet.reviewed).status).toBe(0);
+	expect(readFileSync(waitFile, "utf8")).toBe("1800");
 });
 
 test("LANDSIBLING1 exact-parent gives the gate its quiet-window budget and refuses an UNQUALIFIED verdict like any non-GREEN", () => {
