@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readlinkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readlinkSync, renameSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import kitUpgradeNotice, {
@@ -272,6 +272,70 @@ for (const outcome of ["reconciled", "compensated", "compensated during observat
 		}
 	});
 }
+
+/** A temp home with kit releases 0.2.57 and 0.2.58, the stable link on 0.2.58 and an optional hold file in the state dir. */
+function heldHome(hold: Record<string, unknown> | null): { home: string; holdFile: string; marker: string; cleanup: () => void } {
+	const temp = ownedTmp("notice-hold");
+	const home = temp.path;
+	const prefix = join(home, ".local", "opt", "omp-kit");
+	const state = join(home, ".local", "state", "omp-kit");
+	mkdirSync(join(prefix, "bin"), { recursive: true });
+	mkdirSync(state, { recursive: true });
+	for (const version of ["0.2.57", "0.2.58"]) {
+		const bin = join(prefix, "releases", version, "bin");
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(join(bin, "omp-kit"), "fixture");
+	}
+	symlinkSync(INSTALLED_58, join(prefix, "bin", "omp-kit"));
+	const holdFile = join(state, "upgrade-hold.json");
+	if (hold !== null) writeFileSync(holdFile, JSON.stringify(hold));
+	return { home, holdFile, marker: join(state, `upgrade-notice-${sessionKey("seat-1")}.json`), cleanup: temp.cleanup };
+}
+
+test("UPGRADEHOLD1: a fleet hold sends no notice and consumes no marker; deleting the file lets the notice through once", async () => {
+	const held = heldHome({ reason: "consent prompt pending", by: "PeachLeopard", until: new Date(Date.now() + 3_600_000).toISOString() });
+	try {
+		const { api, sent, handlers } = fakePi(IDLE);
+		await kitUpgradeNotice(api, { selfPath: LOADED, home: held.home, isTTY: true });
+		handlers["session_start"]!(null, IDLE);
+		handlers["tool_execution_end"]!(null, IDLE);
+		expect(sent).toEqual([]);
+		expect(existsSync(held.marker)).toBe(false);
+		unlinkSync(held.holdFile);
+		handlers["tool_execution_end"]!(null, IDLE);
+		handlers["tool_execution_end"]!(null, IDLE);
+		expect(sent).toHaveLength(1);
+		expect(existsSync(held.marker)).toBe(true);
+	} finally {
+		held.cleanup();
+	}
+});
+
+test("UPGRADEHOLD1: an expired hold, and a hold file that cannot be read as one only for a day, never block for good", async () => {
+	const expired = heldHome({ reason: "consent prompt pending", by: "PeachLeopard", until: new Date(Date.now() - 3_600_000).toISOString() });
+	try {
+		const { api, sent, handlers } = fakePi(IDLE);
+		await kitUpgradeNotice(api, { selfPath: LOADED, home: expired.home, isTTY: true });
+		handlers["session_start"]!(null, IDLE);
+		expect(sent).toHaveLength(1);
+	} finally {
+		expired.cleanup();
+	}
+	const junk = heldHome(null);
+	try {
+		writeFileSync(junk.holdFile, "not json");
+		const fresh = fakePi(IDLE);
+		await kitUpgradeNotice(fresh.api, { selfPath: LOADED, home: junk.home, isTTY: true });
+		fresh.handlers["session_start"]!(null, IDLE);
+		expect(fresh.sent).toEqual([]);
+		utimesSync(junk.holdFile, new Date(Date.now() - 2 * 24 * 3_600_000), new Date(Date.now() - 2 * 24 * 3_600_000));
+		fresh.handlers["tool_execution_end"]!(null, IDLE);
+		fresh.handlers["tool_execution_end"]!(null, IDLE);
+		expect(fresh.sent).toHaveLength(1);
+	} finally {
+		junk.cleanup();
+	}
+});
 
 test("planted (d): busy delivery goes aside, idle goes nextTurn", async () => {
 	const f = files();

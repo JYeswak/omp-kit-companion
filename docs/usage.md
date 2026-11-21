@@ -261,6 +261,14 @@ whose plugin link differs from the installed release. OMP updates belong to
 your existing OMP install method. A v0.1.x kit cannot self-update on a real
 HOME; reinstall with the installer instead.
 
+To keep the whole fleet on its current release (for example while seats cannot restart), write
+`~/.local/state/omp-kit/upgrade-hold.json` as `{"reason": "...", "by": "<agent>", "until": "<ISO time>"}`. While it holds,
+the `kit-update` job polls, downloads and installs nothing (it still finishes a half-done update), and `kit-upgrade-notice`
+sends no notice and consumes no per-seat marker, so each seat is told once when the hold ends. A hold always ends: at
+`until` or 14 days after the file was written, whichever is first, and a file that cannot be read as a hold (bad JSON, a
+missing field) holds only one day from its mtime and is reported as `UPGRADE_HOLD_INVALID`. Release it by deleting the file.
+A manual `update --apply` ignores it.
+
 ## For rule authors
 
 Selected-pack testing, paired rule review, and false-fire reduction use

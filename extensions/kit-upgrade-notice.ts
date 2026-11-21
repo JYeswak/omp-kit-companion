@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { readUpgradeHold } from "../src/upgrade-hold.ts";
 
 export const UPGRADE_NOTICE = "UPGRADE_NOTICE";
 
@@ -273,6 +274,8 @@ export default async function kitUpgradeNotice(pi: UpgradeNoticeApi, deps: Upgra
 			const stateHome = join(home, ".local", "state");
 			const xdg = deps.home === undefined ? process.env.XDG_STATE_HOME ?? stateHome : stateHome;
 			if (!isAbsolute(xdg) || resolve(xdg) !== xdg) return;
+			// UPGRADEHOLD1: a fleet hold sends no notice and consumes no marker, so the release is noticed once the hold ends.
+			if (readUpgradeHold(join(stateHome, "omp-kit")).held || (xdg !== stateHome && readUpgradeHold(join(xdg, "omp-kit")).held)) return;
 			// A scheduled or manual update writes its receipt before switching the link and
 			// clears it only after reconciliation or restoration. Re-read the link after the
 			// receipt check: a compensating update may have finished since the first read.

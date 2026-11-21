@@ -847,6 +847,34 @@ test("KITUPDATEOMP1-once: a second scheduled run after an UNDONE for the same ca
 	});
 });
 
+test("UPGRADEHOLD1: an active upgrade hold keeps the installed release (nothing polled, planned or installed, no run record), and the job installs once the hold file is gone", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		mkdirSync(value.stateRoot, { recursive: true, mode: 0o700 });
+		const holdFile = join(value.stateRoot, "upgrade-hold.json");
+		writeFileSync(holdFile, JSON.stringify({ reason: "consent prompt pending", by: "PeachLeopard", until: new Date(Date.now() + 3_600_000).toISOString() }));
+		const freshOmp = { launcher: "/seat/omp", version: "18.18.8", resolvedFrom: "tern-bundle" as const };
+		let planned = 0;
+		let applied = 0;
+		const dependencies: KitUpdateJobDependencies = {
+			plan: async input => { planned++; return { ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never; },
+			apply: async () => { applied++; return { status: "UPDATED", exitCode: 0, receiptId: "r-held", activeVersion: "1.2.4", postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY", omp: freshOmp }; },
+			relink: async () => ({ ok: true, detail: "", receiptId: "plugin-held", undoCommand: "omp-kit undo plugin-held --yes" }),
+			reconcile: async () => ({ ok: true, detail: "" }),
+			omp: () => freshOmp,
+		};
+		const held = await runKitUpdateJob(value, dependencies);
+		expect(held).toMatchObject({ status: "SKIPPED", reason: "KIT_UPDATE_HELD", notification: false, activeVersion: "1.2.3" });
+		expect(kitUpdateJobOverall(held)).toBe("OK");
+		expect({ planned, applied }).toEqual({ planned: 0, applied: 0 });
+		expect(readdirSync(value.stateRoot).filter(name => name.startsWith("kit-update-job-"))).toEqual([]);
+		rmSync(holdFile);
+		const released = await runKitUpdateJob(value, dependencies);
+		expect(applied).toBe(1);
+		expect(released).toMatchObject({ status: "UPDATED", targetVersion: "1.2.4" });
+	});
+});
+
 test("KITUPDATEOMP1-once: transient causes retry after six hours, deterministic causes never do", async () => {
 	await withPollEnv(null, async () => {
 		const staleOmp = { launcher: "/service/omp", version: "18.10.3", resolvedFrom: "path" as const };

@@ -9,6 +9,7 @@ import { applyKitUpdate, fetchAttestationBundleFor, isLiveDeferredOnly, judgeKit
 import type { FullTestReport } from "./full-test-runner.ts";
 import { refreshFleetHooksLive, type HookRefreshReport } from "./hook-refresh.ts";
 import { acquireKitUpdateLock, inspectPendingKitUpdate, type PendingKitUpdate, type UpdateLockToken } from "./mutations.ts";
+import { readUpgradeHold } from "./upgrade-hold.ts";
 import { makeDirsWritable } from "./kitlib/tmp.ts";
 
 /** The job installs the kit for the whole machine: it has no project, and its service cwd (HOME) is never watched as one. */
@@ -648,6 +649,10 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 			return record(config.stateRoot, runId, { status: "PENDING", receiptId: pending.id, activeVersion,
 				notification: !recorded, reason, receipt: "PENDING", relink: "NOT_RUN", service: "NOT_RUN" });
 		}
+		// UPGRADEHOLD1: a fleet hold keeps the installed release; a half-finished update above is still reconciled. Nothing is
+		// polled, downloaded or written (a held tick leaves no per-run record, like a CURRENT tick) until the hold ends.
+		const hold = readUpgradeHold(config.stateRoot);
+		if (hold.held) return { status: "SKIPPED", receiptId: null, activeVersion: installedVersion(config.prefix), notification: false, reason: "KIT_UPDATE_HELD", relink: "NOT_RUN", service: "NOT_RUN" };
 		// Install-on-publish: a newer published release replaces the static tuple.
 		// Anything else (disabled poll, nothing newer) keeps today's static path.
 		const published = await pollPublishedRelease(config.prefix, config.stateRoot, config.platform, dependencies);
