@@ -171,6 +171,61 @@ test("COMPACTION_REREAD: mid-run compaction injects at the next step boundary an
 	expect(h.sent[0]!.message.content).toContain("AmberHeron");
 });
 
+/** An operator-setup home, with or without the chief_tick.py owner-rules digest producer (COMPACTRULES1). */
+function ownerRulesHome(withProducer: boolean, prefix = "home-"): { home: string; script: string } {
+	const home = freshDir(base, prefix);
+	const scripts = join(home, ".claude", "skills", "omp-kit-chief", "scripts");
+	const script = join(scripts, "chief_tick.py");
+	if (withProducer) {
+		mkdirSync(scripts, { recursive: true });
+		writeFileSync(script, "#!/usr/bin/env python3\n");
+	}
+	return { home, script };
+}
+
+test("COMPACTION_REREAD: with the operator digest producer installed the reminder names the runnable 72 h digest after AGENTS.md and blocks nothing", async () => {
+	const repo = freshDir(base, "proj-");
+	writeFileSync(join(repo, "AGENTS.md"), "rules\n");
+	mkdirSync(join(repo, ".beads"));
+	const { home, script } = ownerRulesHome(true);
+	const h = await createFlywheelHost(base, { env: { PATH: brPath(repo) }, home });
+	await h.emit("session_compact", { compactionEntry: {}, fromExtension: false }, h.ctx(repo));
+	expect(h.sent).toHaveLength(1);
+	const content = h.sent[0]!.message.content;
+	expect(content).toContain(`python3 '${script}' rules --days 3`);
+	expect(content).toContain("last 72 h");
+	expect(content.indexOf("AGENTS.md:")).toBeLessThan(content.indexOf("Owner rules"));
+	expect(h.execs).toEqual([]);
+	expect(await toolCall(h, repo, "ls -la")).toBeUndefined();
+});
+
+test("COMPACTION_REREAD: without the digest producer the reminder is the stock AGENTS and held-bead reminder", async () => {
+	const repo = freshDir(base, "proj-");
+	writeFileSync(join(repo, "AGENTS.md"), "rules\n");
+	mkdirSync(join(repo, ".beads"));
+	const { home } = ownerRulesHome(false);
+	const h = await createFlywheelHost(base, { env: { PATH: brPath(repo) }, home });
+	await h.emit("session_compact", { compactionEntry: {}, fromExtension: false }, h.ctx(repo));
+	expect(h.sent).toHaveLength(1);
+	const content = h.sent[0]!.message.content;
+	expect(content).toContain(join(repo, "AGENTS.md"));
+	expect(content).toContain("none held");
+	expect(content).not.toContain("Owner rules");
+	expect(content).not.toContain("chief_tick");
+	expect(await toolCall(h, repo, "ls -la")).toBeUndefined();
+});
+
+test("COMPACTION_REREAD: a producer path holding a single quote is quoted so the digest command stays one runnable word", async () => {
+	const repo = freshDir(base, "proj-");
+	writeFileSync(join(repo, "AGENTS.md"), "rules\n");
+	const { home, script } = ownerRulesHome(true, "o'brien-");
+	const h = await createFlywheelHost(base, { env: {}, home });
+	await h.emit("session_compact", { compactionEntry: {}, fromExtension: false }, h.ctx(repo));
+	const content = h.sent[0]!.message.content;
+	expect(script).toContain("'");
+	expect(content).toContain(`python3 '${script.replaceAll("'", "'\\''")}' rules --days 3`);
+});
+
 test("COMPACTION_REREAD negative: an ordinary turn emits nothing", async () => {
 	const cwd = freshDir(base, "proj-");
 	writeFileSync(join(cwd, "AGENTS.md"), "rules\n");

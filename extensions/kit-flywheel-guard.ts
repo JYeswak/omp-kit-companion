@@ -225,6 +225,22 @@ export function nearestAgentsMd(cwd: string): string | null {
 	}
 }
 
+/** The operator-setup producer of the recent owner-rules digest (J-2026-11-17-56). Detected, never required:
+ * a stock install has no such file and gets the plain reminder. Unreadable discovery is also "absent",
+ * since the reminder is advisory and must never fail a compaction. */
+const OWNER_RULES_PRODUCER = [".claude", "skills", "omp-kit-chief", "scripts", "chief_tick.py"];
+const OWNER_RULES_DAYS = 3;
+
+export function ownerRulesDigestCommand(home: string): string | null {
+	const script = join(home, ...OWNER_RULES_PRODUCER);
+	try {
+		if (!rereadPathExists(script)) return null;
+	} catch {
+		return null;
+	}
+	return `python3 '${script.replaceAll("'", "'\\''")}' rules --days ${OWNER_RULES_DAYS}`;
+}
+
 function trackerRereadApplies(cwd: string, env: Record<string, string | undefined>): boolean {
 	let hasBr = false;
 	for (const directory of (env.PATH ?? "").split(delimiter)) {
@@ -259,6 +275,7 @@ function compactionSummaryMessage(summary: {
 	identities: string[];
 	held: ReadonlyMap<string, { status: string; title: string | null }>;
 	failures: readonly { path: string; why: string }[];
+	ownerRulesCommand: string | null;
 }): string {
 	const lines = [
 		"<system-reminder>",
@@ -267,6 +284,9 @@ function compactionSummaryMessage(summary: {
 			? `AGENTS.md: ${summary.agentsPath} (re-read it before continuing).`
 			: `AGENTS.md: none found above ${summary.cwd}.`,
 	];
+	if (summary.ownerRulesCommand !== null) {
+		lines.push(`Owner rules, last ${OWNER_RULES_DAYS * 24} h (J-2026-11-17-56): run \`${summary.ownerRulesCommand}\` after AGENTS.md and before your next mutation.`);
+	}
 	if (summary.identities.length === 0) {
 		lines.push("Held beads: none held (seat identity unknown, so the guard ran no bead query).");
 	} else if (summary.held.size === 0) {
@@ -2887,7 +2907,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			agentsPath = null;
 		}
 		pi.sendMessage(
-			{ customType: "kit-flywheel-guard", content: compactionSummaryMessage({ agentsPath, cwd: ctx.cwd, identities, held, failures }), display: true,
+			{ customType: "kit-flywheel-guard", content: compactionSummaryMessage({ agentsPath, cwd: ctx.cwd, identities, held, failures, ownerRulesCommand: ownerRulesDigestCommand(home) }), display: true,
 				details: { behavior: COMPACTION_REREAD } },
 			// Idle: append to context now. Streaming (auto-compaction mid-run): inject at the next step boundary.
 			{ deliverAs: ctx.isIdle?.() === false ? "aside" : "nextTurn" },
