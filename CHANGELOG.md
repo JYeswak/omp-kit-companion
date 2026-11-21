@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.143] - 2026-11-21
+
+### Added
+
+- The load-watch Agent Mail step now restarts a wedged server that has neither of its old signals (AMWATCH2, AMWATCH1). On 2026-11-21 the server wedged three times with its RSS under the 6 GB ceiling and no `memory pressure ... fatal` line, so every `br` write, reservation and mail call was refused for hours until a person restarted it. Each load-watch tick now also makes one real Agent Mail call (`am agents show` for `OMP_KIT_AM_PROBE_PROJECT` plus `OMP_KIT_AM_PROBE_AGENT` when both are set, else `am list-projects --json`) with a 30 s deadline; a timeout or a `Pool error ... no connections available` on two consecutive ticks gives one `launchctl kickstart -k` with reason `unresponsive`, inside the same 30 minute cooldown. A successful call clears the count; any other failure (agent not found, `am` not installed) neither counts nor clears it. The streak is kept in `am-watch-probe.json` in the load state dir and the `load watch --json` result reports it as `amWatch.probeStreak`.
+
 ## [0.2.142] - 2026-11-21
 
 ### Added
