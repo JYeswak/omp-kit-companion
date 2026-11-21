@@ -339,3 +339,41 @@ test("checkout apply reports df-delta beside the du estimate", () => {
 	const unmeasured = applyCheckoutReap({ list: () => ({ rows: [] }), archiveRoot: fixtureBase(), freeBytes: () => null });
 	expect(unmeasured.freedBytesDf).toBe(null);
 });
+
+// CHECKOUTBUDGET1: the scheduled reaper timed out (30 min cap, interruptedAction misleadingly BROWSER_INSPECT) because the checkout
+// phase ran `du -sk` on every eligible NFS checkout (30 s deadline each, 18 rows = 540 s) to reap at most ten, then archived them
+// with no regard for the cap. Only reapable rows are sized, and no reap starts when it cannot finish before the run deadline.
+function idleRows(count: number, now: number): CheckoutListRow[] {
+	return Array.from({ length: count }, (_, index) => ({ name: `idle-${index}`, path: join("/checkouts", `idle-${index}`), source: "/repo/proj",
+		dirty: false, created: null, touched: new Date(now - (10 + index) * 86_400_000).toISOString() }));
+}
+
+test("CHECKOUTBUDGET1: only the checkouts that can be reaped are sized, idlest first", () => {
+	const now = Date.parse("2026-11-20T04:00:00Z");
+	const sized: string[] = [];
+	const result = applyCheckoutReap({ now, idleDays: 7, archiveRoot: fixtureBase(), freeBytes: () => null, rm: () => true,
+		list: () => ({ rows: idleRows(5, now) }), maxReaps: 2, sizeBytes: (path) => { sized.push(path); return 1024; } });
+	expect(result.eligible).toBe(5);
+	expect(sized).toEqual([join("/checkouts", "idle-4"), join("/checkouts", "idle-3")]);
+});
+
+test("CHECKOUTBUDGET1: a reap that cannot finish before the run deadline is not started", () => {
+	const now = Date.parse("2026-11-20T04:00:00Z");
+	const started: string[] = [];
+	const result = applyCheckoutReap({ now, idleDays: 7, archiveRoot: fixtureBase(), freeBytes: () => null, rm: () => true,
+		list: () => ({ rows: idleRows(3, now) }), maxReaps: 10, deadlineMs: Date.now() + 60_000, reserveMs: 180_000,
+		onReap: (name) => { started.push(name); } });
+	expect(started).toEqual([]);
+	expect(result.reaped).toEqual([]);
+	expect(result.kept.map((row) => row.reason)).toEqual(["run-deadline", "run-deadline", "run-deadline"]);
+});
+
+test("CHECKOUTBUDGET1: while time remains each reap is reported before it starts, idlest first", () => {
+	const now = Date.parse("2026-11-20T04:00:00Z");
+	const started: string[] = [];
+	const result = applyCheckoutReap({ now, idleDays: 7, archiveRoot: fixtureBase(), freeBytes: () => null, rm: () => true,
+		list: () => ({ rows: idleRows(3, now) }), maxReaps: 10, deadlineMs: Date.now() + 3_600_000, reserveMs: 1_000,
+		onReap: (name) => { started.push(name); } });
+	expect(started).toEqual(["idle-2", "idle-1", "idle-0"]);
+	expect(result.kept.some((row) => row.reason === "run-deadline")).toBe(false);
+});

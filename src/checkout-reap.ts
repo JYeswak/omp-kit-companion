@@ -19,6 +19,8 @@ export const CHECKOUT_IDLE_DAYS_DEFAULT = 7;
 export const CHECKOUT_MAX_PATCH_BYTES = 100_000_000;
 const DU_DEADLINE_S = 30;
 const DIFF_DEADLINE_S = 30;
+/** What one reap is budgeted to need (diff, archive, verify, rm); a reap is not started when less than this remains before the run deadline. */
+export const CHECKOUT_REAP_RESERVE_MS_DEFAULT = 180_000;
 
 export interface CheckoutListRow {
 	name: string;
@@ -77,6 +79,8 @@ export interface CheckoutPlanDeps {
 	list?: () => { rows: CheckoutListRow[] } | { unavailable: string };
 	diff?: (name: string) => CheckoutDiffInput;
 	sizeBytes?: (path: string) => number | null;
+	/** Size at most this many eligible rows (the idlest first); the rest stay unmeasured. Default: all. */
+	sizeLimit?: number;
 }
 
 export interface CheckoutPlanRow extends CheckoutJudgment {
@@ -108,12 +112,21 @@ export function planCheckoutReap(deps: CheckoutPlanDeps = {}): CheckoutPlan {
 	for (const row of listed.rows) {
 		const diffInput = row.dirty ? (deps.diff?.(row.name) ?? { available: false }) : { available: true, empty: true };
 		const judged = judgeCheckoutRow(row, diffInput, now, idleMs);
-		const bytes = judged.eligible ? (deps.sizeBytes?.(row.path) ?? null) : null;
 		rows.push({ ...judged, name: row.name, path: row.path, source: row.source, dirty: row.dirty,
-			touched: row.touched, diffEmpty: diffInput.available ? (diffInput.empty ?? null) : null, bytes });
+			touched: row.touched, diffEmpty: diffInput.available ? (diffInput.empty ?? null) : null, bytes: null });
 	}
 	rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || (b.idleHours ?? -1) - (a.idleHours ?? -1));
 	const eligible = rows.filter((row) => row.eligible);
+	// CHECKOUTBUDGET1: `du -sk` of an NFS-served checkout runs into its deadline (30 s) nearly every time, and the
+	// reaper sized every eligible row (18 rows: 540 s) to reap at most ten, so the job spent its 30 minute cap
+	// measuring. Only the rows that can be acted on are sized, in reap order.
+	let sized = 0;
+	const sizeLimit = Math.max(0, deps.sizeLimit ?? Number.POSITIVE_INFINITY);
+	for (const row of eligible) {
+		if (sized >= sizeLimit) break;
+		row.bytes = deps.sizeBytes?.(row.path) ?? null;
+		sized += 1;
+	}
 	return {
 		rows,
 		eligible,
@@ -245,6 +258,11 @@ export interface CheckoutApplyDeps extends CheckoutPlanDeps {
 	log?: (event: Record<string, unknown>) => void;
 	/** Physical free bytes beside the archive root; defaults to a statfs probe, null fails open. A test pins both ends. */
 	freeBytes?: () => number | null;
+	/** Epoch ms after which no further reap may start; a reap is also not started when less than `reserveMs` remains. Unset: unbounded. */
+	deadlineMs?: number;
+	reserveMs?: number;
+	/** Called with the checkout name just before its reap starts (the reaper forwards it as the action a timeout interrupted). */
+	onReap?: (name: string) => void;
 }
 
 export interface CheckoutApplyResult {
@@ -270,13 +288,18 @@ export function applyCheckoutReap(deps: CheckoutApplyDeps): CheckoutApplyResult 
 	const idleDays = deps.idleDays ?? CHECKOUT_IDLE_DAYS_DEFAULT;
 	const measure = deps.freeBytes ?? (() => diskFreeBytes(deps.archiveRoot));
 	const freeBytesBefore = measure();
-	const plan = planCheckoutReap(deps);
+	const plan = planCheckoutReap({ ...deps, sizeLimit: Math.min(deps.sizeLimit ?? Number.POSITIVE_INFINITY, deps.maxReaps ?? Number.POSITIVE_INFINITY) });
 	const kept: { name: string; reason: string }[] = [];
 	const reaped: string[] = [];
 	const archives: string[] = [];
 	let freedBytes = 0;
 	const maxReaps = deps.maxReaps ?? plan.eligible.length;
 	for (const row of plan.eligible.slice(0, Math.max(0, maxReaps))) {
+		if (deps.deadlineMs !== undefined && Date.now() + (deps.reserveMs ?? CHECKOUT_REAP_RESERVE_MS_DEFAULT) > deps.deadlineMs) {
+			kept.push({ name: row.name, reason: "run-deadline" });
+			continue;
+		}
+		try { deps.onReap?.(row.name); } catch { /* progress reports never fail a reap */ }
 		const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
 		const archiveDir = join(deps.archiveRoot, stamp.slice(0, 10), `${row.name}-${stamp.slice(11, 19)}`);
 		const archived = archiveCheckout({ name: row.name, checkoutPath: row.path, sourceRepo: row.source,

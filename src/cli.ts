@@ -2793,6 +2793,7 @@ async function runScratchReaperBody(home: string): Promise<CliResult> {
 	// The deadline keeps headroom past applyScratch for browser, ledger and receipt work inside the cap.
 	const capOverride = Number(process.env.OMP_KIT_RUN_CAP_MS);
 	const cap = Number.isFinite(capOverride) && capOverride > 0 ? capOverride : RUN_TIME_CAPS_MS["scratch-reaper"];
+	const bodyStartedAt = Date.now();
 	const result = applyScratch(home, {
 		liveness: defaultLiveness(), run: scratchRunner, home, runtimeRepo: kitIdentity().release.root,
 		onInspect: path => { process.send?.({ action: "INSPECT", path }); },
@@ -2829,10 +2830,14 @@ async function runScratchReaperBody(home: string): Promise<CliResult> {
 	let checkoutEligible = 0;
 	let checkoutFreedBytesDf: number | null = null;
 	try {
+		// CHECKOUTBUDGET1: no per-checkout `du` (it runs into its 30 s deadline on every NFS checkout; reclaimed bytes are
+		// the df delta below) and no reap starts without 180 s left before the cap, so a slow archive cannot cause TIMEOUT.
 		const checkoutResult = applyCheckoutReap({ idleDays: CHECKOUT_IDLE_DAYS_DEFAULT,
 			list: () => listIdleEmptyCheckouts(cwd, CHECKOUT_IDLE_DAYS_DEFAULT),
-			diff: (name) => diffCheckoutEmpty(name, cwd), sizeBytes: sizeCheckoutBytes,
-			archiveRoot: checkoutArchiveRoot(home), maxReaps: 10, log: (event) => appendLog(home, event) });
+			diff: (name) => diffCheckoutEmpty(name, cwd),
+			archiveRoot: checkoutArchiveRoot(home), maxReaps: 10, log: (event) => appendLog(home, event),
+			deadlineMs: bodyStartedAt + cap - 30_000,
+			onReap: name => { process.send?.({ action: "CHECKOUT_REAP", path: name }); } });
 		checkoutReaped = checkoutResult.reaped;
 		checkoutKept = checkoutResult.kept;
 		checkoutArchives = checkoutResult.archives;
