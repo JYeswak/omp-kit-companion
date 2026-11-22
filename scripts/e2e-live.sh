@@ -394,6 +394,8 @@ run_scenario() {
   fi
   case " ${ONLY:-$name} " in *" $name "*) ;; *) return 0 ;; esac
   printf '%s\n' "$name" >"$T/result-$i.name"
+  attempt=1
+  while :; do
   H="$T/home-$i"
   cp -R "$BASE_HOME" "$H" || return 2
   for compiled in "$BUN_SEED"/*/*.pile; do
@@ -442,6 +444,22 @@ run_scenario() {
     [ "$verdict_rc" -ne 0 ] || verdict_rc=2
     KEEP_WORK=1; echo "verdict producer_rc=$verdict_rc scenario=$name" >&2; exit "$verdict_rc"
   fi
+  # RELFLAKE1 (ompkit-1ra0d.109): a tripwire scenario whose rule fires and aborts the turn must continue to a second model request.
+  # omp (18.11.3 on hosted CI, 19.0.1 on the Studio) sometimes exits 1 right after "TTSR matched rule" with one request, under load only
+  # (hosted ladder 2026-11-21, the 0.2.144 updater postcheck 13:25Z; 0 failures in 80 idle runs). Exactly that signature is rerun once
+  # on a fresh home, project and mock and printed as FLAKY_OMP_TTSR_ABORT so it stays counted; any other failure, or a second failure,
+  # is the verdict. OMP_KIT_E2E_TTSR_RETRY=0 turns the rerun off.
+  if [ "$verdict" != ok ] && [ "$attempt" = 1 ] && [ "$rc" = 1 ] && [ "${OMP_KIT_E2E_TTSR_RETRY:-1}" = 1 ] \
+    && grep -q 'TTSR matched rule' "$T/out-$name.txt" && case "$verdict" in *"model request(s), want >="*) true ;; *) false ;; esac; then
+    echo "FLAKY_OMP_TTSR_ABORT scenario=$name: omp exited 1 after a TTSR abort with too few model requests; rerunning once (first verdict: $verdict)"
+    for moved in "home-$i" "proj-$name" "log-$name.jsonl" "scen-$name.json" "port-$name" "mock-$name.txt" "out-$name.txt"; do
+      mv "$T/$moved" "$T/$moved.first" || { KEEP_WORK=1; echo "cannot set aside $T/$moved for the TTSR-abort rerun" >&2; exit 2; }
+    done
+    attempt=2
+    continue
+  fi
+  break
+  done
   if [ "$name" = omp-late-interrupt-probe ]; then
     # Report-only OMP race probe: prints PROBE omp-late-interrupt: continued|aborted and
     # never counts toward pass/fail, so the gate does not depend on OMP's continuation race.
