@@ -23,7 +23,11 @@ for arg in "$@"; do
 		prev=""
 		continue
 	fi
+	# BRSHIMSEP1 (ompkit-d4uv3): only words before the first `--`
+	# end-of-options separator are options. Words after it are literal
+	# ids, so a `--actor` there is data, never the fleet identity.
 	case "$arg" in
+		--) break ;;
 		--actor) prev="--actor" ;;
 		--actor=*) found="${arg#--actor=}" ;;
 	esac
@@ -552,8 +556,31 @@ if [ "$gate_sub" = dep ] && [ "$gate_id" = add ]; then
 		echo "br-shim: PARENT_BLOCK_UNVERIFIED dep lint or python3 absent, passing through" >&2
 	fi
 fi
+# BRSHIMSEP1 (ompkit-d4uv3): insert the verified actor before the first `--`
+# end-of-options separator. Appending after it makes the real br read a
+# literal '--actor' id (bv single-bead reads fail rc 3). The queue below
+# rebuilds argv as head + --actor NAME + tail with one $@ rotation.
+shim_native_exec_insert_actor() {
+	shim_mark="__br_shim_mark_$$"
+	set -- "$@" "$shim_mark"
+	shim_inserted=0
+	while [ "$1" != "$shim_mark" ]; do
+		shim_cur="$1"; shift
+		if [ "$shim_inserted" = 0 ] && [ "$shim_cur" = "--" ]; then
+			shim_inserted=1
+			set -- "$@" --actor "$AGENT_NAME" --
+		else
+			set -- "$@" "$shim_cur"
+		fi
+	done
+	shift
+	if [ "$shim_inserted" = 0 ]; then
+		set -- "$@" --actor "$AGENT_NAME"
+	fi
+	native_exec "$@"
+}
 if [ -n "$found" ]; then
 	native_exec "$@"
 else
-	native_exec "$@" --actor "$AGENT_NAME"
+	shim_native_exec_insert_actor "$@"
 fi
