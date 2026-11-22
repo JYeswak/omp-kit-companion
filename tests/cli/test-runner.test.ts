@@ -541,7 +541,7 @@ describe("runFastTest", () => {
 		const rules = join(root, "rules");
 		const cases = join(root, "cases.tsv");
 		mkdirSync(rules, { recursive: true });
-		writeFileSync(join(rules, "external-zebra.md"), "---\ncondition: 'ZEBRA_42'\nscope: text\ninterruptMode: never\n---\nExternal witness.\n");
+		writeFileSync(join(rules, "external-zebra.md"), "---\ncondition: 'ZEBRA_42'\nscope: text\ninterruptMode: always\n---\nExternal witness.\n");
 		writeFileSync(cases, CASE_HEADER + "\nexternal-zebra\tfire\ttext\t-\t-\tZEBRA_42 trailing context\tpositive\t\nexternal-zebra\tquiet\ttext\t-\t-\tZEBRA_4x\tnear miss\t\n");
 		const expectedRuleHash = createHash("sha256").update(readFileSync(join(rules, "external-zebra.md"))).digest("hex");
 		const home = makeTestHome("external-witness-home");
@@ -656,7 +656,7 @@ describe("runFastTest", () => {
 		const rules = join(root, "rules");
 		const cases = join(root, "cases.tsv");
 		mkdirSync(rules, { recursive: true });
-		writeFileSync(join(rules, "external-anchor.md"), "---\ncondition: '^AAAAAAA$'\nscope: text\ninterruptMode: never\n---\nAnchor witness.\n");
+		writeFileSync(join(rules, "external-anchor.md"), "---\ncondition: '^AAAAAAA$'\nscope: text\ninterruptMode: always\n---\nAnchor witness.\n");
 		writeFileSync(cases, CASE_HEADER + "\nexternal-anchor\tquiet\ttext\t-\t-\tAAAAAAAB\tearlier prefix only\t\n");
 		const result = Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", rules, "--cases", cases, "--rule", "external-anchor", "--line", "2"], { cwd: REPO_ROOT, env: { ...process.env, OMP_SRC: identity.source, OMP_BIN: identity.launcher }, stdout: "pipe", stderr: "pipe" });
 		expect(result.exitCode).toBe(0);
@@ -681,7 +681,7 @@ describe("runFastTest", () => {
 		const rules = join(root, "rules");
 		const cases = join(root, "cases.tsv");
 		mkdirSync(rules, { recursive: true });
-		writeFileSync(join(rules, "external-bash-wire.md"), "---\ncondition: '\"command\":\"WIRE_KEY\"'\nscope: tool:bash\ninterruptMode: never\n---\nBash wire witness.\n");
+		writeFileSync(join(rules, "external-bash-wire.md"), "---\ncondition: '\"command\":\"WIRE_KEY\"'\nscope: tool:bash\ninterruptMode: always\n---\nBash wire witness.\n");
 		writeFileSync(cases, CASE_HEADER + "\nexternal-bash-wire\tfire\ttool\tbash\t-\tWIRE_KEY\tJSON wire\t\nexternal-bash-wire\tquiet\ttool\tbash\t-\tWIRE_KEy\tnear miss\t\n");
 		const run = (line: number) => Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", rules, "--cases", cases, "--rule", "external-bash-wire", "--line", String(line)], { cwd: REPO_ROOT, env: { ...process.env, OMP_SRC: identity.source, OMP_BIN: identity.launcher }, stdout: "pipe", stderr: "pipe" });
 		const positive = run(2);
