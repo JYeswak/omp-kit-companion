@@ -411,6 +411,27 @@ if [ -n "${base_ref:-}" ]; then
 	git -C "$ROOT" archive "$base_ref" | tar -xf - -C "$base_archive" || { printf 'pre-push-gate: cannot extract base archive\n' >&2; exit 1; }
 	gate_scripts="$base_archive"
 fi
+ # PUSHIDENTITY1 (ompkit-fp72.135.3.75): the push hook resolves the pushing
+ # seat FIRST, before any judging stage. An unidentified push is refused here,
+ # with its remedy, instead of failing deep in the gate. The checker comes
+ # from the base archive like every other range checker, so a candidate cannot
+ # weaken it; skipped until the base archive carries it (first landing).
+ if [ ! -f "$gate_scripts/scripts/check-push-identity.sh" ]; then
+ 	printf 'SKIP push-identity: checker absent from base archive\n' >&2
+ else
+ 	printf '== push-identity\n'
+ 	identity_out=$(sh "$gate_scripts/scripts/check-push-identity.sh") && identity_rc=0 || identity_rc=$?
+ 	if [ "$identity_rc" = 0 ]; then
+ 		identity_seat=${identity_out#seat=}
+ 		printf 'GREEN push-identity %s\n' "$identity_out"
+ 		OMP_KIT_PUSH_SEAT="$identity_seat"
+ 		export OMP_KIT_PUSH_SEAT
+ 	else
+ 		printf '%s\n' "$identity_out" >&2
+ 		printf 'RED push-identity producer_rc=%s\n' "$identity_rc" >&2
+ 		exit "$identity_rc"
+ 	fi
+ fi
 # GATE1 item 6: audit candidate bytes with the base's checker and repo policy.
 # On first adoption only, the candidate supplies the checker/policy. Never read
 # these from the shared worktree, and never turn an absent checker into a pass.
