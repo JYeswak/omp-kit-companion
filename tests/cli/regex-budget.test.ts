@@ -3,10 +3,13 @@ import { createHash } from "node:crypto";
 import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { OMP_SRC, loadRuleFile } from "../../scripts/rule-class.ts";
-import { DEFAULT_ENCODINGS, DEFAULT_REFERENCE_FILE, DEFAULT_SHAPES, DEFAULT_SIZES, DEFAULT_WRITE_EDIT_STREAM_FILE, INCONCLUSIVE_EXIT_CODE, REFERENCE_RATIO_CLAMP, STREAM_BUDGET_MS, TRACKING_BAND, WRITE_EDIT_STREAM_BUDGET_MS, appliesToWriteEditStream, buildWriteEditWire, failsNearMissBudget, failsSingleCheckCeiling, failsStreamBudget, failsWriteEditStreamBudget, gateExitCode, judgeReference, judgeTracking, lintCondition, literalProbe, loadReference, medianMs, measureCondition, runGate, verdictLine } from "../../scripts/regex-budget.ts";
+import { DEFAULT_ENCODINGS, DEFAULT_REFERENCE_FILE, DEFAULT_SHAPES, DEFAULT_SIZES, DEFAULT_WRITE_EDIT_STREAM_FILE, INCONCLUSIVE_EXIT_CODE, REFERENCE_RATIO_CLAMP, STREAM_BUDGET_MS, TRACKING_BAND, WRITE_EDIT_STREAM_BUDGET_MS, appliesToWriteEditStream, buildWriteEditWire, detectStreamModel, failsNearMissBudget, failsSingleCheckCeiling, failsStreamBudget, failsWriteEditStreamBudget, gateExitCode, judgeReference, judgeTracking, lintCondition, literalProbe, loadReference, medianMs, measureCondition, runGate, verdictLine } from "../../scripts/regex-budget.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
+
+// The planted-slow CLI runs below time rules by bare-regex prefix sweep. On an omp whose TtsrManager the gate times instead (19.1+) they measure another cost model, so they run where the sweep is the model; CI's minimum and certified omp tracks run them.
+const MANAGER_MODEL = await detectStreamModel(OMP_SRC) === "omp-manager";
 
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = join(root, "var/agent-tmp");
@@ -173,7 +176,7 @@ test("overlapping-alternative fixture fails the measured doubling ratio", async 
 	try {
 		const result = await measureCondition({
 			rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern,
-			sizes: [8, 16, 32], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 20_000,
+			sizes: [8, 16, 32], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 20_000, compile: "native",
 		});
 		expect(result.rule).toBe("fixture-quadratic");
 		expect(result.status).toBe("MEASURED");
@@ -236,7 +239,7 @@ test("median of five (a+)+b timings still fails the single-check ceiling widely"
 	try {
 		const repeatedMs: number[][] = [];
 		for (let run = 0; run < 5; run++) {
-			const measurement = await measureCondition({ rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern, scope: ["tool:bash"], sizes: [16, 20, 26], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 10_000, streamWire: "x".repeat(33) } as const);
+			const measurement = await measureCondition({ rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern, scope: ["tool:bash"], sizes: [16, 20, 26], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 10_000, streamWire: "x".repeat(33), compile: "native" } as const);
 			expect(measurement.status).toBe("MEASURED");
 			const sample = measurement.samples[0];
 			if (!sample) throw new Error("catastrophic timing sample missing");
@@ -396,7 +399,7 @@ function expectSlowRuleFails(run: GateCliRun): void {
 	}
 }
 
-test("REGEXREF1 planted slow rule: ten copies of kit-no-gh-poll#1 (2x over budget) FAIL on a quiet host by more than the divergence bound", async () => {
+test.skipIf(MANAGER_MODEL)("REGEXREF1 planted slow rule: ten copies of kit-no-gh-poll#1 (2x over budget) FAIL on a quiet host by more than the divergence bound", async () => {
 	const slowRuleQuietMs = loadReference().baseline?.live.find(row => row.rule === "kit-no-gh-poll" && row.condition_index === 1)?.ms ?? 0;
 	expect(HEAVY_SLOW_RULE_COPIES * slowRuleQuietMs).toBeGreaterThan(2 * STREAM_BUDGET_MS);
 	const nearQuietMs = NEAR_BUDGET_SLOW_RULE_COPIES * slowRuleQuietMs;
@@ -413,7 +416,7 @@ test("REGEXREF1 planted slow rule: ten copies of kit-no-gh-poll#1 (2x over budge
 // This plant sits inside the tracking band: at reference ratio 1 (a quiet host) it must FAIL. On a slower host
 // the scaled budget can cover it and the tracking guard reads INCONCLUSIVE. It must never PASS.
 // 6d7575c212 ran at ratio 2.69 and correctly reported INCONCLUSIVE rc 75.
-test("REGEXREF1 planted slow rule: five copies of kit-no-gh-poll#1 FAIL on a quiet host and never PASS on a loaded one", async () => {
+test.skipIf(MANAGER_MODEL)("REGEXREF1 planted slow rule: five copies of kit-no-gh-poll#1 FAIL on a quiet host and never PASS on a loaded one", async () => {
 	const dir = plantedSlowRules(NEAR_BUDGET_SLOW_RULE_COPIES);
 	try {
 		const run = await runGateCli(["--rules", dir], "near-budget-slow-rule-quiet");
@@ -466,6 +469,7 @@ function seamFixture(planted: number): { dir: string; streamFile: string; refere
 async function seamGate(fixture: { dir: string; streamFile: string; referenceFile: string }, refRatio: number, ruleSlowdown: number, plantedQuietMs = 0) {
 	return runGate(fixture.dir, fixture.streamFile, undefined, {
 		referenceFile: fixture.referenceFile,
+		streamModel: "prefix-sweep",
 		referenceSampleSeam: () => SEAM_CALIBRATED_MS * refRatio,
 		streamTimingSeam: (_sample, rule) => (rule === "fixture-unchanged" ? SEAM_UNCHANGED_BASELINE_MS : plantedQuietMs) * ruleSlowdown,
 	});
@@ -541,6 +545,7 @@ test("REGEXREF1 paired write/edit seam: captured divergence refuses while a trac
 		]) {
 			const report = await runGate(fixture.dir, fixture.streamFile, undefined, {
 				referenceFile: fixture.referenceFile,
+				streamModel: "prefix-sweep",
 				referenceSampleSeam: () => SEAM_CALIBRATED_MS * control.ratio,
 				streamTimingSeam: (_sample, _rule, _index, _measured, stream) => stream === "live" ? 1675.549227 : 581.5211989999997,
 			});
@@ -623,13 +628,13 @@ test("REGEXREF1 gate seam: an injected missing, NaN or 0 reference FAILs with it
 	const { dir, streamFile, referenceFile } = fixture;
 	try {
 		// Paired control: the same rule with an injected reference equal to calibration passes at the base budget.
-		const control = await runGate(dir, streamFile, undefined, { referenceFile, referenceSampleSeam: () => SEAM_CALIBRATED_MS });
+		const control = await runGate(dir, streamFile, undefined, { referenceFile, streamModel: "prefix-sweep", referenceSampleSeam: () => SEAM_CALIBRATED_MS });
 		expect(control.status).toBe("PASS");
 		expect(control.reference).toMatchObject({ status: "OK", ratio: 1, scale: 1 });
 		expect(control.stream.budget_ms).toBe(STREAM_BUDGET_MS);
 		expect(gateExitCode(control)).toBe(0);
 		for (const [injected, reason] of [[undefined, "REFERENCE_MISSING"], [Number.NaN, "REFERENCE_NAN"], [0, "REFERENCE_ZERO"]] as const) {
-			const report = await runGate(dir, streamFile, undefined, { referenceFile, referenceSampleSeam: sample => sample === 2 ? injected : SEAM_CALIBRATED_MS });
+			const report = await runGate(dir, streamFile, undefined, { referenceFile, streamModel: "prefix-sweep", referenceSampleSeam: sample => sample === 2 ? injected : SEAM_CALIBRATED_MS });
 			expect(report.status).toBe("FAIL");
 			expect(report.reference.reason).toBe(reason);
 			expect(report.stream.budget_ms).toBe(STREAM_BUDGET_MS);
@@ -646,4 +651,69 @@ test("REGEXREF1 gate seam: an injected missing, NaN or 0 reference FAILs with it
 		expect(noFixture.reference.reason).toBe("REFERENCE_MISSING");
 		expect(noFixture.reference.load_error).toBeDefined();
 	} finally { cleanup(dir); }
+}, fixtureDeadlineS(60) * 1000);
+
+
+// The gate reads TtsrManager.prototype, not a version string, so a stub omp source classifies an engine.
+function stubOmpSource(withInterruptsToolStream: boolean): string {
+	mkdirSync(scratchRoot, { recursive: true });
+	const dir = ownedTmp("regex-budget-omp-stub", { root: scratchRoot }).path;
+	mkdirSync(join(dir, "export"));
+	writeFileSync(join(dir, "export/ttsr.ts"), "export class TtsrManager {" + (withInterruptsToolStream ? " interruptsToolStream() { return false; }" : "") + " }\n");
+	return dir;
+}
+
+test("the engine decides the stream model: a manager that skips non-interrupting partial checks is timed through itself, an older one by prefix sweep", async () => {
+	const modern = stubOmpSource(true);
+	const legacy = stubOmpSource(false);
+	try {
+		expect(await detectStreamModel(modern)).toBe("omp-manager");
+		expect(await detectStreamModel(legacy)).toBe("prefix-sweep");
+	} finally { cleanup(modern); cleanup(legacy); }
+});
+
+test("manager stream mode times the bash stream through omp's TtsrManager: a partial check per 16 bytes plus the final check", async () => {
+	const fixture = fixtureRule("fixture-manager-wire", "^a+b$");
+	try {
+		const input = { rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern, scope: ["tool:bash"], streamWire: "x".repeat(100), sizes: [8], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 20_000 } as const;
+		const swept = await measureCondition(input);
+		expect(swept.stream_mode).toBe("sweep");
+		expect(swept.stream_deltas).toBe(7);
+		const managed = await measureCondition({ ...input, streamMode: "manager", rulePath: join(fixture.dir, fixture.name + ".md") });
+		expect(managed.status).toBe("MEASURED");
+		expect(managed.stream_mode).toBe("manager");
+		expect(managed.stream_deltas).toBe(8);
+		expect(typeof managed.stream_ms).toBe("number");
+	} finally { cleanup(fixture.dir); }
+}, fixtureDeadlineS(60) * 1000);
+
+test("manager stream mode without a rule file fails closed instead of timing nothing", async () => {
+	const fixture = fixtureRule("fixture-manager-norule", "^a+b$");
+	try {
+		const result = await measureCondition({ rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern, scope: ["tool:bash"], streamWire: "x".repeat(33), streamMode: "manager", sizes: [8], shapes: ["literal"], encodings: ["raw"], workerTimeoutMs: 20_000 });
+		expect(result.status).toBe("COMPILE_ERROR");
+		expect(result.stream_ms).toBeUndefined();
+	} finally { cleanup(fixture.dir); }
+}, fixtureDeadlineS(60) * 1000);
+
+test("REGEXREF1 manager model: a stream timed through the manager has no sweep baseline, so the scaled reference cannot admit it", async () => {
+	const fixture = seamFixture(0);
+	try {
+		const managed = await runGate(fixture.dir, fixture.streamFile, undefined, {
+			referenceFile: fixture.referenceFile,
+			streamModel: "omp-manager",
+			referenceSampleSeam: () => SEAM_CALIBRATED_MS * 5,
+			streamTimingSeam: () => SEAM_UNCHANGED_BASELINE_MS * 4.5,
+		});
+		expect(managed.engine.stream_model).toBe("omp-manager");
+		expect(managed.measurements.every(measurement => measurement.stream_mode === "manager")).toBe(true);
+		expect(failsStreamBudget(managed.stream.total_ms)).toBe(true);
+		expect(managed.stream.tracking.status).toBe("UNVERIFIED");
+		expect(managed.status).toBe("INCONCLUSIVE");
+		// Paired control: the same numbers timed by prefix sweep have a baseline row, so tracking admits them.
+		const swept = await seamGate(fixture, 5, 4.5);
+		expect(swept.engine.stream_model).toBe("prefix-sweep");
+		expect(swept.stream.tracking.status).toBe("OK");
+		expect(swept.status).toBe("PASS");
+	} finally { cleanup(fixture.dir); }
 }, fixtureDeadlineS(60) * 1000);

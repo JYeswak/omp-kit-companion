@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { loadavg } from "node:os";
 import path from "node:path";
-import { OMP_SRC, loadRules } from "./rule-class.ts";
+import { OMP_SRC, loadRuleFile, loadRules } from "./rule-class.ts";
 import type { LoadedRule } from "./rule-class.ts";
 
 const KIT = path.resolve(import.meta.dir, "..");
@@ -61,6 +61,10 @@ type WorkerSample = {
 	matched: boolean[];
 	bytes: number[];
 };
+/** How a condition's bash stream wire is timed: every 16-byte prefix through the bare regex (`sweep`), or through omp's own TtsrManager driven as the coordinator drives it (`manager`). */
+export type StreamMode = "sweep" | "manager";
+/** Which mode the omp source being measured needs. omp 19.1 (LinearRegExp, TtsrManager#interruptsToolStream) skips rules that cannot interrupt a tool call in partial checks and rescans only the changed region, so a bare-regex prefix sweep no longer models what it pays; older omp re-tests the whole buffer on every delta, which the sweep models. */
+export type StreamModel = "prefix-sweep" | "omp-manager";
 type WorkerRequest = {
 	rule: string;
 	conditionIndex: number;
@@ -73,6 +77,11 @@ type WorkerRequest = {
 	writeEditWire?: string;
 	reference?: StreamReference;
 	ompSource: string;
+	/** `native` compiles the pattern with the engine's own RegExp, not omp's compileRuleCondition; a fixture that must stay exponential uses it, because omp 19.1 compiles to a linear matcher. */
+	compile?: "native";
+	streamMode?: StreamMode;
+	/** The rule file whose frontmatter (scope, interruptMode) the `manager` stream mode registers with its condition. */
+	rulePath?: string;
 };
 /** Reference conditions and their encoded wires, swept exactly like the corresponding stream conditions. */
 export type StreamReference = { patterns: string[]; wire: string; write_edit?: { patterns: string[]; wire: string } };
@@ -96,6 +105,7 @@ export type ConditionMeasurement = {
 	sample_stream_ms?: number[];
 	sample_stream_load1?: number[];
 	stream_deltas?: number;
+	stream_mode?: StreamMode;
 	write_edit_ms?: number;
 	sample_write_edit_ms?: number[];
 	sample_write_edit_load1?: number[];
@@ -114,6 +124,9 @@ export type MeasureOptions = {
 	writeEditWire?: string;
 	reference?: StreamReference;
 	workerTimeoutMs?: number;
+	compile?: "native";
+	streamMode?: StreamMode;
+	rulePath?: string;
 };
 
 function classEnd(pattern: string, start: number): number {
@@ -392,13 +405,41 @@ function measureStreamWire(re: RegExp, wire: string): { ms: number; deltas: numb
 	return { ms: performance.now() - start, deltas };
 }
 
+type StreamManager = { addRule(rule: unknown): boolean; checkDelta(delta: string, context: Record<string, unknown>): unknown; checkSnapshot(snapshot: string, context: Record<string, unknown>): unknown };
+
+/** The bash stream as omp's coordinator drives one rule's manager: a partial check per 16-byte delta, then the final check when the tool call ends. */
+function measureManagerWire(manager: StreamManager, wire: string): { ms: number; deltas: number } {
+	const context = { source: "tool", toolName: "bash", streamKey: "toolcall:rx-budget:-" };
+	const start = performance.now();
+	let deltas = 0;
+	for (let offset = 0; offset < wire.length; offset += 16) {
+		manager.checkDelta(wire.slice(offset, offset + 16), context);
+		deltas++;
+	}
+	manager.checkSnapshot(wire, context);
+	return { ms: performance.now() - start, deltas: deltas + 1 };
+}
+
+/** One-rule manager under the kit's TTSR policy; the rule keeps its own scope and interruptMode and carries only the measured condition. */
+async function oneRuleManager(request: WorkerRequest): Promise<StreamManager> {
+	if (!request.rulePath) throw new Error("manager stream mode needs the rule file");
+	const ttsr = await import(path.join(request.ompSource, "export/ttsr.ts"));
+	const policy = JSON.parse(readFileSync(path.join(KIT, "policy/ttsr.json"), "utf8")) as Record<string, unknown>;
+	const manager = new ttsr.TtsrManager({ ...policy, enabled: true, disabledRules: [] }) as StreamManager;
+	const rule = loadRuleFile(request.rulePath).rule;
+	if (!manager.addRule({ ...rule, condition: [request.pattern], astCondition: [] })) throw new Error("TtsrManager refused rule=" + rule.name + "; the stream cost would be measured on nothing");
+	return manager;
+}
+
 async function workerMain(): Promise<void> {
 	const payloadIndex = process.argv.indexOf("--regex-budget-worker") + 1;
 	try {
 		const request = JSON.parse(Buffer.from(process.argv[payloadIndex] ?? "", "base64").toString("utf8")) as WorkerRequest;
 		// OMP_SRC is selected from the installed OMP build at runtime; a static import would pin a version-specific path.
 		const ruleModule = await import(path.join(request.ompSource, "capability/rule.ts"));
-		const compileRuleCondition = ruleModule.compileRuleCondition as (pattern: string) => RegExp;
+		const compileRuleCondition = request.compile === "native"
+			? (pattern: string): RegExp => new RegExp(pattern)
+			: ruleModule.compileRuleCondition as (pattern: string) => RegExp;
 		const re = compileRuleCondition(request.pattern);
 		const literal = request.literal ?? "x";
 		for (const shape of request.shapes) {
@@ -443,7 +484,7 @@ async function workerMain(): Promise<void> {
 	if (request.streamWire !== undefined) {
 		process.stderr.write("RX_BUDGET_STREAM_START\n");
 		streamLoad1 = loadavg()[0] ?? Number.NaN;
-		const sweep = measureStreamWire(re, request.streamWire);
+		const sweep = request.streamMode === "manager" ? measureManagerWire(await oneRuleManager(request), request.streamWire) : measureStreamWire(re, request.streamWire);
 		streamMs = sweep.ms;
 		streamDeltas = sweep.deltas;
 	}
@@ -558,6 +599,9 @@ export async function measureCondition(input: {
 		...(input.streamWire === undefined || !appliesToBashStream(input.scope) ? {} : { streamWire: input.streamWire }),
 		...(input.writeEditWire === undefined || !appliesToWriteEditStream(input.scope) ? {} : { writeEditWire: input.writeEditWire }),
 		...(input.reference === undefined ? {} : { reference: input.reference }),
+		...(input.compile === undefined ? {} : { compile: input.compile }),
+		...(input.streamMode === undefined ? {} : { streamMode: input.streamMode }),
+		...(input.rulePath === undefined ? {} : { rulePath: input.rulePath }),
 		ompSource: OMP_SRC,
 	};
 	const payload = Buffer.from(JSON.stringify(request), "utf8").toString("base64");
@@ -620,6 +664,7 @@ export async function measureCondition(input: {
 		...(typeof result.streamMs === "number" ? { stream_ms: result.streamMs, sample_stream_ms: [result.streamMs] } : {}),
 		...(typeof result.streamLoad1 === "number" ? { sample_stream_load1: [result.streamLoad1] } : {}),
 		...(typeof result.streamDeltas === "number" ? { stream_deltas: result.streamDeltas } : {}),
+		...(typeof result.streamMs === "number" ? { stream_mode: input.streamMode ?? "sweep" } : {}),
 		...(typeof result.writeEditMs === "number" ? { write_edit_ms: result.writeEditMs, sample_write_edit_ms: [result.writeEditMs] } : {}),
 		...(typeof result.writeEditLoad1 === "number" ? { sample_write_edit_load1: [result.writeEditLoad1] } : {}),
 		...(typeof result.writeEditDeltas === "number" ? { write_edit_deltas: result.writeEditDeltas } : {}),
@@ -646,7 +691,7 @@ type ReferenceSection = ReferenceVerdict & { file: string; wire_bytes: number | 
 type GateReport = {
 	status: "PASS" | "FAIL" | "INCONCLUSIVE";
 	timing_samples: number;
-	engine: { bun: string; omp_source: string };
+	engine: { bun: string; omp_source: string; stream_model: StreamModel };
 	load_average_before: number[];
 	load_average_after: number[];
 	rules_loaded: number;
@@ -723,7 +768,8 @@ function referenceSection(loaded: LoadedReference, sampleRefMs: Array<number | n
 function streamTracking(measurements: readonly ConditionMeasurement[], field: "stream_ms" | "write_edit_ms", baseline: readonly TrackingRow[] | undefined, reference: ReferenceVerdict, totalMs: number, baseBudgetMs: number): TrackingVerdict {
 	const rows = measurements.flatMap(measurement => {
 		const ms = measurement[field];
-		return typeof ms === "number" && measurement.pattern_sha256 ? [{ rule: measurement.rule, condition_index: measurement.condition_index, pattern_sha256: measurement.pattern_sha256, ms }] : [];
+		// The calibration baseline holds bare-regex prefix sweeps; a condition timed through the manager has no sweep to compare.
+		return typeof ms === "number" && measurement.pattern_sha256 && measurement.stream_mode !== "manager" ? [{ rule: measurement.rule, condition_index: measurement.condition_index, pattern_sha256: measurement.pattern_sha256, ms }] : [];
 	});
 	const needed = reference.status === "OK" && totalMs > baseBudgetMs && totalMs <= baseBudgetMs * reference.scale;
 	return judgeTracking(rows, baseline, reference.ratio, needed);
@@ -739,12 +785,19 @@ function gateStatus(ruleFailed: boolean, reference: ReferenceVerdict, stream: St
 	return "PASS";
 }
 
-async function runGateSample(rulesDir: string, streamFile: string, writeEditStreamFile: string, reference: LoadedReference, streamSeam?: (rule: string, conditionIndex: number, measuredMs: number, stream: "live" | "write_edit") => number): Promise<GateReport> {
+/** Whether the omp source needs the manager stream mode: 19.1+ has TtsrManager#interruptsToolStream (partial checks skip rules that cannot interrupt). Read from the manager the gate measures against, not from a version string. */
+export async function detectStreamModel(ompSource: string): Promise<StreamModel> {
+	// The omp source directory is chosen at runtime (OMP_SRC), so this cannot be a static import.
+	const ttsr = await import(path.join(ompSource, "export/ttsr.ts"));
+	return typeof ttsr.TtsrManager?.prototype?.interruptsToolStream === "function" ? "omp-manager" : "prefix-sweep";
+}
+
+async function runGateSample(rulesDir: string, streamFile: string, writeEditStreamFile: string, reference: LoadedReference, streamModel: StreamModel, streamSeam?: (rule: string, conditionIndex: number, measuredMs: number, stream: "live" | "write_edit") => number): Promise<GateReport> {
 	const started = performance.now();
 	const deadline = Date.now() + GATE_DEADLINE_MS;
 	const before = loadavg();
 	const loaded: LoadedRule[] = loadRules(rulesDir);
-	const rules = loaded.flatMap(item => (item.rule.condition ?? []).filter((condition): condition is string => typeof condition === "string" && condition.length > 0).map((pattern, conditionIndex) => ({ rule: item.name, conditionIndex, pattern, scope: item.rule.scope ?? [] })));
+	const rules = loaded.flatMap(item => (item.rule.condition ?? []).filter((condition): condition is string => typeof condition === "string" && condition.length > 0).map((pattern, conditionIndex) => ({ rule: item.name, conditionIndex, pattern, scope: item.rule.scope ?? [], file: item.file })));
 	const lintViolations: GateReport["lint_violations"] = [];
 	for (const condition of rules) {
 		// Time every condition; literal-first lint is specific to streamed Bash arguments.
@@ -771,6 +824,8 @@ async function runGateSample(rulesDir: string, streamFile: string, writeEditStre
 			scope: condition.scope,
 			streamWire,
 			writeEditWire,
+			// On an engine whose manager no longer sweeps the buffer, the bash stream is timed through that manager, one rule at a time.
+			...(streamModel === "omp-manager" ? { streamMode: "manager" as const, rulePath: condition.file } : {}),
 			...(reference.reference && index % referenceStride === 0 ? { reference: reference.reference } : {}),
 			workerTimeoutMs: Math.min(DEFAULT_WORKER_TIMEOUT_MS, remaining - 500),
 		});
@@ -815,7 +870,7 @@ async function runGateSample(rulesDir: string, streamFile: string, writeEditStre
 		file: streamFile,
 		wire_bytes: Buffer.byteLength(streamWire, "utf8"),
 		chunk_bytes: 16,
-		deltas: byRule.length ? (measurements.find(measurement => measurement.stream_deltas !== undefined)?.stream_deltas ?? 0) : 0,
+		deltas: Math.max(0, ...measurements.map(measurement => measurement.stream_deltas ?? 0)),
 		total_ms: streamTotal,
 		budget_ms: STREAM_BUDGET_MS * referenceReport.scale,
 		sample_total_ms: [streamTotal],
@@ -839,7 +894,7 @@ async function runGateSample(rulesDir: string, streamFile: string, writeEditStre
 	return {
 		status: gateStatus(ruleFailed, referenceReport, stream, writeEdit),
 		timing_samples: 1,
-		engine: { bun: Bun.version, omp_source: OMP_SRC },
+		engine: { bun: Bun.version, omp_source: OMP_SRC, stream_model: streamModel },
 		load_average_before: before,
 		load_average_after: after,
 		rules_loaded: loaded.length,
@@ -912,6 +967,7 @@ function summarizeRepeatedReports(reports: readonly GateReport[], reference: Loa
 			merged.sample_stream_load1 = repeated.map(measurement => measurement?.sample_stream_load1?.[0] ?? Number.NaN);
 			merged.stream_ms = medianMs(sample_stream_ms);
 			merged.stream_deltas = firstMeasurement.stream_deltas;
+			if (firstMeasurement.stream_mode) merged.stream_mode = firstMeasurement.stream_mode;
 		}
 		const writeEditRuns = repeated.map(measurement => measurement?.sample_write_edit_ms?.[0] ?? measurement?.write_edit_ms);
 		if (writeEditRuns.some(value => typeof value === "number")) {
@@ -988,15 +1044,18 @@ export type GateOptions = {
 	referenceSampleSeam?: (sampleIndex: number, measuredMs: number | null) => number | null | undefined;
 	/** Test seam: replaces each condition's applicable live or write/edit stream time in each sample before judging. Not reachable from the CLI. */
 	streamTimingSeam?: (sampleIndex: number, rule: string, conditionIndex: number, measuredMs: number, stream: "live" | "write_edit") => number;
+	/** Test seam: judge as if the omp source had this stream model; defaults to what the omp source being measured does. Not reachable from the CLI. */
+	streamModel?: StreamModel;
 };
 
 /** Run every case once per round so samples for each case are separated by a full pass over the others. */
 export async function runGate(rulesDir: string, streamFile: string, writeEditStreamFile: string = DEFAULT_WRITE_EDIT_STREAM_FILE, options: GateOptions = {}): Promise<GateReport> {
 	const reference = loadReference(options.referenceFile ?? DEFAULT_REFERENCE_FILE);
+	const streamModel = options.streamModel ?? await detectStreamModel(OMP_SRC);
 	const reports: GateReport[] = [];
 	for (let sample = 0; sample < TIMING_SAMPLE_COUNT; sample++) {
 		const streamSeam = options.streamTimingSeam;
-		const report = await runGateSample(rulesDir, streamFile, writeEditStreamFile, reference, streamSeam && ((rule, conditionIndex, measuredMs, stream) => streamSeam(sample, rule, conditionIndex, measuredMs, stream)));
+		const report = await runGateSample(rulesDir, streamFile, writeEditStreamFile, reference, streamModel, streamSeam && ((rule, conditionIndex, measuredMs, stream) => streamSeam(sample, rule, conditionIndex, measuredMs, stream)));
 		if (options.referenceSampleSeam) report.reference.sample_ref_ms = [options.referenceSampleSeam(sample, report.reference.sample_ref_ms[0] ?? null) ?? null];
 		reports.push(report);
 	}
@@ -1032,6 +1091,7 @@ function formatMs(value: number | undefined): string {
 function printReport(report: GateReport): void {
 	console.log(verdictLine(report));
 	console.log("Bun=" + report.engine.bun + " OMP_SRC=" + report.engine.omp_source);
+	console.log("stream model: " + report.engine.stream_model + (report.engine.stream_model === "omp-manager" ? " (" + report.measurements.filter(measurement => measurement.stream_mode === "manager").length + " bash stream conditions timed through omp's TtsrManager: partial check per 16-byte delta, final check at the end)" : " (every condition tested on every 16-byte prefix)"));
 	console.log("loadavg before=" + report.load_average_before.map(n => n.toFixed(2)).join(",") + " after=" + report.load_average_after.map(n => n.toFixed(2)).join(","));
 	console.log("rules=" + report.rules_loaded + " regex-conditions=" + report.conditions_measured + " elapsed=" + report.gate_elapsed_ms.toFixed(1) + "ms");
 	console.log("timing samples=" + report.timing_samples + " round-robin passes; JSON sample_ms and sample_load1 rows align by run and size");
