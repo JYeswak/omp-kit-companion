@@ -1,0 +1,2 @@
+### Fixed
+- The daily scheduled CI run no longer fails its README currency check on a published release. The core `cli-contracts` checkout is depth 1 outside a push, so it had no tags and `scripts/readme-check.ts` (`git tag -l vX.Y.Z`) read the release line's tag as absent: scheduled run 45007154834 on e47ae229d2 failed with "README.md release line says v0.2.144 and package.json is its next patch 0.2.145, but tag v0.2.144 does not exist" although the tag and release were published. The checkout now sets `fetch-tags: true` (JOURNEYPAIR1, ompkit-bx4or).
