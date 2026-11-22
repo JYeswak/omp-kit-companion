@@ -1,0 +1,9 @@
+{
+  "name": "omp-kit-tern-integration", "version": "0.1.0", "private": true, "type": "module",
+  "description": "Native Tern adapters, context-preserving Luau bindings and documentation coverage gates for omp-kit",
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/tern/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "catalog": "node --experimental-strip-types scripts/tern.ts catalog"
+  }
+}
