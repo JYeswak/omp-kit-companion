@@ -201,6 +201,19 @@ test("literal-first fixture control compiles and stays below the budget", async 
 	} finally { cleanup(fixture.dir); }
 });
 
+// kit-structure-not-truth#3 on omp 19.1 LinearRegExp costs 10.5 ms cold at 4K and 4.5 ms at the first 16K, then 0.05 ms: the timed pass is the second one at each size, so the 5 ms near-miss floor is not crossed by engine start-up (verdict 35c890647f failed on it at load 16-29). An engine without that start-up cost passes this trivially.
+test("near-miss timing is steady-state: engine start-up and lazy growth are not read as growth in the input", async () => {
+	const fixture = fixtureRule("fixture-sign-off", "(?i)\\bexecution\\s+sign-?off\\s+(?:is\\s+|was\\s+|has\\s+been\\s+)?(?:done|complete|given|granted|received|obtained|recorded|in\\s+place)\\b");
+	try {
+		const result = await measureCondition({ rule: fixture.name, conditionIndex: 0, pattern: fixture.pattern, sizes: [4096, 8192, 16384], shapes: ["single-quote"], encodings: ["raw"], workerTimeoutMs: 20_000 });
+		expect(result.status).toBe("MEASURED");
+		const sample = result.samples[0];
+		if (!sample) throw new Error("single-quote sample missing");
+		expect(sample.ms.every(value => value < 2)).toBe(true);
+		expect(result.failures).toEqual([]);
+	} finally { cleanup(fixture.dir); }
+}, fixtureDeadlineS(60) * 1000);
+
 test("runner load is recorded and never gates regex measurements", async () => {
 	const fixture = fixtureRule("fixture-under-load", "^a+b$");
 	const streamFile = join(fixture.dir, "stream.sh");

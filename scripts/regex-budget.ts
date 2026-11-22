@@ -452,6 +452,8 @@ async function workerMain(): Promise<void> {
 					const raw = rawInput(shape, size, literal);
 					const input = encoding === "json" ? JSON.stringify({ command: raw }) : raw;
 					load1.push(loadavg()[0] ?? Number.NaN);
+					// One untimed pass per size: the first call at a size pays engine start-up and lazy growth, which is not growth in the input (omp 19.1 LinearRegExp: 10.5 ms cold at 4K, 4.5 ms at the first 16K, 0.05 ms on the next 16K; kit-structure-not-truth#3 sat 0.5 ms under the 5 ms floor and failed the verdict). A catastrophic pattern costs the same on every pass.
+					measureRegex(re, input);
 					const timing = measureRegex(re, input);
 					ms.push(timing.ms);
 					matched.push(timing.matched);
