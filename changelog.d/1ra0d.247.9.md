@@ -1,0 +1,1 @@
+- Let `omp-kit project add` use the full goal-proof window. A fresh director journal that first appears with the adopted goal can prove delivery and unblock worker orientation without a second send.

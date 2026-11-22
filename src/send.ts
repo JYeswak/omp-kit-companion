@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -1015,7 +1015,7 @@ function goalOf(record: Record<string, unknown>): Record<string, unknown> | null
 	return recordOf(recordOf(record.data)?.goal);
 }
 
-function entryProves(record: Record<string, unknown>, key: TernProofKey): { steering: boolean } | null {
+function entryProves(record: Record<string, unknown>, key: TernProofKey, createdNotBefore?: number): { steering: boolean } | null {
 	if (key.kind === "message") {
 		const message = record.type === "message" ? recordOf(record.message) : null;
 		if (!message || message.role !== "user") return null;
@@ -1026,9 +1026,16 @@ function entryProves(record: Record<string, unknown>, key: TernProofKey): { stee
 	const goal = goalOf(record);
 	if (!goal || goal.status !== "active" || goal.objective !== key.objective
 		|| typeof goal.id !== "string" || key.priorGoalIds.includes(goal.id)) return null;
-	// An older goal outside a tail read is not in priorGoalIds; a goal this send created is first journaled
-	// with createdAt === updatedAt, while an older goal's later progress record has moved updatedAt on.
-	if (!key.priorGoalIdsComplete && (goal.createdAt === undefined || goal.createdAt !== goal.updatedAt)) return null;
+	// A first-send goal must have been created after dispatch, not merely
+	// journaled again after a resume. Native creation sets both clocks equally.
+	if (createdNotBefore !== undefined) {
+		const { createdAt, updatedAt } = goal;
+		if (typeof createdAt !== "number" || !Number.isSafeInteger(createdAt)
+			|| createdAt < createdNotBefore || updatedAt !== createdAt) return null;
+	} else if (!key.priorGoalIdsComplete && (goal.createdAt === undefined || goal.createdAt !== goal.updatedAt)) {
+		// A tail may omit older goal IDs, so only a creation record proves.
+		return null;
+	}
 	return { steering: false };
 }
 
@@ -1057,7 +1064,7 @@ const TERN_PROOF_ANCHOR_BYTES = 64 * 1024;
  * key's range read on the same fd and snapshot); without one it stays UNCERTAIN,
  * and a range that stops before the file's end never reports ABSENT.
  */
-export function proveTernEntry(journal: string | SessionJournalView, key: TernProofKey): TernProof {
+export function proveTernEntry(journal: string | SessionJournalView, key: TernProofKey, first?: { activeLeaf: string; createdNotBefore: number }): TernProof {
 	const view = typeof journal === "string" ? sessionViewOfText(journal) : journal;
 	if (key.fileIdentity !== null && view.identity !== null && view.identity !== key.fileIdentity) {
 		return { status: "UNCERTAIN", reason: "JOURNAL_REPLACED" };
@@ -1112,11 +1119,13 @@ export function proveTernEntry(journal: string | SessionJournalView, key: TernPr
 		}
 		const parentId = typeof record.parentId === "string" ? record.parentId : null;
 		parents.set(record.id, parentId);
-		const match = entryProves(record, key);
+		const match = entryProves(record, key, first?.createdNotBefore);
 		if (match) hits.push({ offset: base + start, parentId, id: record.id, steering: match.steering });
 	}
 	for (const hit of hits) {
-		if (descendsFromLeaf(hit.parentId, key.leafId, parents)) {
+		if (first === undefined
+			? descendsFromLeaf(hit.parentId, key.leafId, parents)
+			: descendsFromLeaf(first.activeLeaf, hit.id, parents)) {
 			return { status: "PROVEN", offset: hit.offset, entryId: hit.id, steering: hit.steering };
 		}
 	}
@@ -1824,17 +1833,27 @@ export async function deliverFirstSeatGoal(input: {
 			return fail("FIRST_SEAT_TAKEN", "seat already has a session file; deliver through omp-kit send",
 				known);
 		}
+		try {
+			lstatSync(known);
+			return fail("FIRST_SEAT_TAKEN", "seat already has an unreadable session file; zero sends", known);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+				return fail("SESSION_FILE_UNAVAILABLE", "cannot establish that the seat's session file is absent; zero sends", known);
+			}
+		}
 	}
 	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
 	const payload = payloadKind.kind === "goal-set" ? input.text.trim() : `${input.text.trim()}\n[${marker}]`;
 	const objective = payloadKind.kind === "goal-set" ? payloadKind.objective : "";
 	const window = windowKey !== "" ? ["--window", windowKey] : [];
+	let submitStartedAt: number;
 	try {
 		const pasted = io.run([ternCtlBin(), ...window, "send", block, "paste", payload]);
 		if (pasted.code !== 0) {
 			return { status: "PENDING_CONSUME", sends: 1, sessionFile: known, offset: null,
 				detail: `paste exited ${pasted.code}, effect unknown; proof never attempted`, code: "SEND_AMBIGUOUS" };
 		}
+		submitStartedAt = Date.now();
 		const entered = io.run([ternCtlBin(), ...window, "send", block, "keys", "Enter"]);
 		if (entered.code !== 0) {
 			return { status: "PENDING_CONSUME", sends: 1, sessionFile: known, offset: null,
@@ -1848,10 +1867,12 @@ export async function deliverFirstSeatGoal(input: {
 	const pollMs = input.pollMs ?? TERN_PROOF_POLL_MS;
 	const deadlineMs = input.deadlineMs ?? TERN_PROOF_DEADLINE_MS;
 	const wait = input.wait ?? (async (ms: number) => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); });
-	const polls = Math.max(1, Math.ceil(deadlineMs / pollMs));
+	// Observe both at dispatch and at the end of the configured proof window.
+	// The final delay may be shorter than the polling interval.
 	let path: string | null = known;
 	let key: TernProofKey | null = null;
-	for (let poll = 0; poll < polls; poll++) {
+	const started = performance.now();
+	for (let elapsed = 0; ;) {
 		try {
 			const seen = (await observe(seat, io)).sessionFile;
 			if (seen !== null) path = seen;
@@ -1860,12 +1881,23 @@ export async function deliverFirstSeatGoal(input: {
 			const view = readSessionView(io, path);
 			if (view !== null) {
 				const journal = parseSessionView(view);
-				if (journal.status === "KNOWN") {
+				if (journal.status === "KNOWN" && journal.cwd === seat.cwd && view.tailStart === 0) {
 					if (key === null) {
-						key = buildTernProofKey(view, journal, { kind: payloadKind.kind, payload, marker, objective });
+						// The first readable snapshot can already contain adoption.
+						// Start at its beginning, not after the record we need.
+						const body = ternJournalBodyStart(view.head);
+						key = {
+							kind: payloadKind.kind, marker, objective, payloadSha256: sha256Hex(payload),
+							sessionId: journal.sessionId, leafId: journal.leafId, fileIdentity: view.identity,
+							bodyStart: body, prefixStart: body, cursorBytes: body, prefixSha256: sha256Hex(""),
+							priorGoalIds: [], priorGoalIdsComplete: true,
+						};
 					}
-					const proof = proveTernEntry(view, key);
-					if (proof.status === "PROVEN") {
+					// A matching resume or a restored goal is not this first send's adoption.
+					const proof = journal.sessionId === key.sessionId ? proveTernEntry(view, key, {
+						activeLeaf: journal.leafId, createdNotBefore: submitStartedAt,
+					}) : null;
+					if (proof?.status === "PROVEN") {
 						return { status: "OK", sends: 1, sessionFile: path, offset: proof.offset,
 							detail: payloadKind.kind === "goal-set"
 								? `goal adopted at offset ${proof.offset} in the new session file`
@@ -1875,8 +1907,11 @@ export async function deliverFirstSeatGoal(input: {
 				}
 			}
 		}
-		if (poll + 1 >= polls) break;
-		await wait(pollMs);
+		if (input.wait === undefined) elapsed = performance.now() - started;
+		if (elapsed >= deadlineMs) break;
+		const interval = Math.min(pollMs, deadlineMs - elapsed);
+		await wait(interval);
+		elapsed += interval;
 	}
 	return { status: "PENDING_CONSUME", sends: 1, sessionFile: path, offset: null,
 		detail: key === null ? "new session file never settled for proof; effect unknown"

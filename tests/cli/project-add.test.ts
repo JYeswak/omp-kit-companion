@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { readdirSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { deliverFirstSeatGoal } from "../../src/send.ts";
@@ -69,7 +69,10 @@ test("PROJECTADD1 fixture apply writes stores, delivers the goal with proof, and
 
 		// Apply: the full act.
 		const applied = await cli(f, ["project", "add", f.repo, "--session", "skillgrowth", "--workers", "1", "--profile", "codex", "--mission", "skillgrowth:104", "--goal", "Grow the skill library", "--orientation", "Take goals from the director", "--apply", "--yes", "--json"]);
-		expect(applied.code, applied.out + applied.err).toBe(0);
+		if (applied.code !== 0) {
+			const file = f.sessionFile(f.directorBlock);
+			throw new Error(`${applied.out}${applied.err}\nDirector fixture journal: ${existsSync(file) ? readFileSync(file, "utf8") : "(absent)"}`);
+		}
 		const done = JSON.parse(applied.out).data;
 		expect(done.action).toBe("APPLIED");
 		expect(done.census).toEqual({ named: "2/2" });
@@ -139,6 +142,118 @@ test("PROJECTADD1 fixture apply writes stores, delivers the goal with proof, and
 		f.mail.server.stop(true);
 	}
 }, fixtureDeadlineS(300) * 1000);
+
+test.each(["adopted", "never", "wrong-goal", "unreadable-restored", "hidden-restored", "resumed-old-goal"])("GOALPROOFWAIT1 %s at the existing 20-second bound", async scenario => {
+	const f = await fixture();
+	const previous = process.env.OMP_KIT_FLEET_WATCH_CONFIG;
+	process.env.OMP_KIT_FLEET_WATCH_CONFIG = f.fleetWatchPath;
+	const attempts: { block: string; payload: string; at: number }[] = [];
+	const pending = new Map<string, string>();
+	let elapsed = 0;
+	const resumed = scenario === "resumed-old-goal";
+	const restored = scenario === "unreadable-restored" || scenario === "hidden-restored" || resumed;
+	const originalTime = Date.UTC(2026, 0, 1);
+	const directorPath = f.sessionFile(f.directorBlock);
+	const journal = (block: string) => {
+		const payload = pending.get(block)!;
+		const isGoal = payload.startsWith("/goal set ");
+		const now = Date.now();
+		const createdAt = restored && isGoal ? originalTime : now;
+		const entry = isGoal
+			? { type: "mode_change", mode: "goal", data: { goal: {
+				id: "goal-fresh", status: "active", createdAt, updatedAt: createdAt,
+				objective: scenario === "wrong-goal" ? "Different objective" : payload.slice("/goal set ".length),
+			} } }
+			: { type: "message", message: { role: "user", content: [{ type: "text", text: payload }] } };
+		writeFileSync(f.sessionFile(block), [
+			JSON.stringify({ type: "session", version: 3, id: `s1-${block}`, cwd: f.repo }),
+			assistantEntry("m1", null).trimEnd(),
+			JSON.stringify({ ...entry, id: "accepted", parentId: "m1", timestamp: new Date(createdAt).toISOString() }),
+		].join("\n") + "\n");
+	};
+	try {
+		if (restored) {
+			pending.set(f.directorBlock, "/goal set Grow the skill library");
+			journal(f.directorBlock);
+			pending.delete(f.directorBlock);
+		}
+		const result = await applyProjectAdd({
+			repo: f.repo, session: "skillgrowth", workers: 1, profile: "codex", goal: "Grow the skill library",
+			orientation: "Take goals from the director", env: f.env,
+			deps: {
+				exec: { async run(argv, options) {
+					const r = await run(argv, { cwd: options?.cwd ?? f.repo, env: f.env, deadline_s: fixtureDeadlineS(15) });
+					return { code: r.rc ?? 1, out: decoder.decode(r.stdout), err: decoder.decode(r.stderr) };
+				} },
+				mail: { async call(name, args) {
+					const response = await fetch(`http://127.0.0.1:${f.mail.port}`, {
+						method: "POST", body: JSON.stringify({ params: { name, arguments: args } }),
+					});
+					if (!response.ok) throw new Error(`owned mail fixture: ${response.status}`);
+					return (await response.json()).result.structuredContent;
+				} },
+				io: {
+					run(argv) {
+						const [, verb, block, action, payload] = argv;
+						if (verb !== "send" || block === undefined) throw new Error(`unexpected terminal command ${argv.join(" ")}`);
+						if (action === "paste" && payload !== undefined) pending.set(block, payload);
+						else if (action === "keys" && payload === "Enter" && pending.has(block)) {
+							attempts.push({ block, payload: pending.get(block)!, at: elapsed });
+							if (block === f.workerBlock) journal(block);
+						} else throw new Error(`unexpected terminal payload ${argv.join(" ")}`);
+						return { code: 0, out: "" };
+					},
+					readSessionFile(path) {
+						if (scenario === "unreadable-restored" && path === directorPath && attempts.length === 0) return null;
+						return existsSync(path) ? readFileSync(path, "utf8") : null;
+					},
+					async wait(ms) { throw new Error(`unowned wait ${ms}`); },
+				},
+				async observe(seat) {
+					const block = seat.pane.slice("tern:".length);
+					const path = f.sessionFile(block);
+					if ((scenario === "hidden-restored" || resumed) && path === directorPath && attempts.length === 0) return { sessionFile: null };
+					return { sessionFile: existsSync(path) ? path : null };
+				},
+				async wait(ms) {
+					elapsed += ms;
+					if (elapsed !== 20_000) return;
+					if (resumed) {
+						const now = Date.now();
+						const entry = { type: "mode_change", mode: "goal", id: "resumed", parentId: "accepted",
+							timestamp: new Date(now).toISOString(), data: { goal: { id: "goal-fresh", status: "active",
+								createdAt: originalTime, updatedAt: now, objective: "Grow the skill library" } } };
+						appendFileSync(directorPath, JSON.stringify(entry) + "\n");
+					} else if (scenario !== "never" && !existsSync(directorPath)) journal(f.directorBlock);
+				},
+			},
+		});
+		console.log(JSON.stringify({ obligation: "GOALPROOFWAIT1", scenario, elapsed, attempts, result }));
+		if (scenario === "unreadable-restored") {
+			expect(result).toMatchObject({ ok: false, code: "PROJECT_GOAL_UNPROVEN" });
+			expect(attempts).toEqual([]);
+			expect(pending.size).toBe(0);
+			return;
+		}
+		expect(attempts[0]).toEqual({ block: f.directorBlock, payload: "/goal set Grow the skill library", at: 0 });
+		expect(elapsed).toBe(20_000);
+		if (scenario === "adopted") {
+			expect(result.ok, JSON.stringify(result)).toBe(true);
+			expect(attempts).toHaveLength(2);
+			expect(attempts[1]).toMatchObject({ block: f.workerBlock, at: 20_000 });
+			expect(attempts[1]!.payload).toContain("Take goals from the director");
+		} else {
+			expect(result).toMatchObject({ ok: false, code: "PROJECT_GOAL_UNPROVEN" });
+			expect(attempts).toHaveLength(1);
+			expect(existsSync(directorPath)).toBe(scenario !== "never");
+		}
+	} finally {
+		if (previous === undefined) delete process.env.OMP_KIT_FLEET_WATCH_CONFIG;
+		else process.env.OMP_KIT_FLEET_WATCH_CONFIG = previous;
+		f.killDecoys();
+		f.mail.server.stop(true);
+	}
+}, fixtureDeadlineS(45) * 1000);
 
 test("PROJECTADD1 first goal needs a virgin seat and a real form; a taken seat refuses", async () => {
 	const f = await fixture();

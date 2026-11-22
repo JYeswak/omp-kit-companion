@@ -125,9 +125,10 @@ if (args[0] === "inspect") {
 		const staged = (() => { try { return JSON.parse(fs.readFileSync(stageFile(block), "utf8")); } catch { return null; } })();
 		if (staged !== null && !staged.adopted && n - staged.createdAt >= 4) {
 			const objective = staged.payload.startsWith("/goal set ") ? staged.payload.slice("/goal set ".length).trim() : null;
+			const now = Date.now();
 			const entry = objective === null
 				? { type: "message", id: "u1", parentId: "m1", message: { role: "user", content: [{ type: "text", text: staged.payload }] } }
-				: { type: "mode_change", id: "g1", parentId: "m1", mode: "goal", data: { goal: { id: "goal-1", objective, status: "active" } } };
+				: { type: "mode_change", id: "g1", parentId: "m1", mode: "goal", data: { goal: { id: "goal-1", objective, status: "active", createdAt: now, updatedAt: now } } };
 			fs.appendFileSync(staged.file, JSON.stringify(entry) + "\\n");
 			staged.adopted = true;
 			fs.writeFileSync(stageFile(block), JSON.stringify(staged));
