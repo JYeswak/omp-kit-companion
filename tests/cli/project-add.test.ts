@@ -1,7 +1,9 @@
 import { afterAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { readdirSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { deliverFirstSeatGoal } from "../../src/send.ts";
+import { applyProjectAdd } from "../../src/project-add.ts";
 import { projectStatus, resolveTurnOnPath, resolveRosterPath } from "../../src/project-add.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
@@ -392,5 +394,132 @@ test("PROJECTSTATUS108 odd id beyond 2^53 resolves and reads alive", async () =>
 		expect(reported.status.seats.map((seat) => seat.alive)).toEqual([true, true]);
 	} finally {
 		h.cleanup();
+	}
+}, fixtureDeadlineS(60) * 1000);
+
+test("REPOMANAGED1 conflicting duplicate registration refuses and preserves every store", async () => {
+	const f = await fixture();
+	try {
+		const applied = await cli(f, ["project", "add", f.repo, "--session", "skillgrowth", "--workers", "1", "--profile", "codex", "--apply", "--yes", "--json"]);
+		expect(applied.code, applied.out + applied.err).toBe(0);
+		const fleetBefore = readFileSync(f.fleetWatchPath, "utf8");
+		const rosterBefore = readFileSync(f.rosterPath, "utf8");
+		const optInBefore = readFileSync(join(f.repo, ".omp", "fleet.json"), "utf8");
+		const receiptsBefore = readdirSync(f.stateRoot).filter((name) => name.startsWith("project-add-")).sort();
+		expect(f.mail.calls.filter((call) => call.tool === "create_agent_identity").length).toBe(2);
+
+		// Planted negative: the same repo under a second session must not register.
+		const duplicate = await cli(f, ["project", "add", f.repo, "--session", "secondseat", "--profile", "codex", "--apply", "--yes", "--json"]);
+		expect(duplicate.code, duplicate.out + duplicate.err).toBe(2);
+		const refusal = JSON.parse(duplicate.out).errors[0];
+		expect(refusal.code).toBe("PROJECT_REPO_MANAGED");
+		expect(refusal.message).toContain("skillgrowth");
+		expect(refusal.message).toContain(f.repo);
+
+		// A symlinked input resolves to the same canonical repo and refuses too.
+		const alias = join(f.dir, "aliasrepo");
+		symlinkSync(f.repo, alias);
+		const aliased = await cli(f, ["project", "add", alias, "--session", "thirdseat", "--profile", "codex", "--apply", "--yes", "--json"]);
+		expect(aliased.code, aliased.out + aliased.err).toBe(2);
+		expect(JSON.parse(aliased.out).errors[0].code).toBe("PROJECT_REPO_MANAGED");
+		expect(JSON.parse(aliased.out).errors[0].message).toContain("skillgrowth");
+
+		// Neither refusal minted, wrote, or receipted anything.
+		expect(f.mail.calls.filter((call) => call.tool === "create_agent_identity").length).toBe(2);
+		expect(readFileSync(f.fleetWatchPath, "utf8")).toBe(fleetBefore);
+		expect(readFileSync(f.rosterPath, "utf8")).toBe(rosterBefore);
+		expect(readFileSync(join(f.repo, ".omp", "fleet.json"), "utf8")).toBe(optInBefore);
+		expect(readdirSync(f.stateRoot).filter((name) => name.startsWith("project-add-")).sort()).toEqual(receiptsBefore);
+	} finally {
+		f.killDecoys();
+		f.mail.server.stop(true);
+	}
+}, fixtureDeadlineS(300) * 1000);
+
+test("REPOMANAGED1 unrelated new repo still applies past a stale registry row", async () => {
+	const f = await fixture();
+	try {
+		// A verified-absent registry repo cannot be the live repo, so it never blocks.
+		writeFileSync(f.fleetWatchPath, JSON.stringify({ enabled: true, intervalSeconds: 120, noDecisionChecks: 5,
+			sessions: [{ session: "ghost", coordinatorPane: "tern:9", coordinatorSession: "ghost", repo: join(f.dir, "gone-repo"), workerPanes: [] }] }, null, 2) + "\n");
+		const other = join(f.dir, "repo2");
+		mkdirSync(other, { recursive: true });
+		// The fake tern reports its baked repo cwd; point it at the control repo
+		// so seat observation binds (the product compares real repo paths only).
+		const ternPath = join(f.bin, "tern");
+		const ternBefore = readFileSync(ternPath, "utf8");
+		const baked = JSON.stringify(f.repo);
+		if (ternBefore.split(baked).length !== 2) throw new Error("fake tern repo line changed shape");
+		writeFileSync(ternPath, ternBefore.replace(baked, JSON.stringify(other)));
+		const applied = await cli(f, ["project", "add", other, "--session", "skillgrowth", "--workers", "1", "--profile", "codex", "--apply", "--yes", "--json"]);
+		expect(applied.code, applied.out + applied.err).toBe(0);
+		expect(JSON.parse(applied.out).data.action).toBe("APPLIED");
+		const fleet = JSON.parse(readFileSync(f.fleetWatchPath, "utf8"));
+		expect(fleet.sessions.find((row: { session: string }) => row.session === "ghost").repo).toBe(join(f.dir, "gone-repo"));
+		expect(fleet.sessions.find((row: { session: string }) => row.session === "skillgrowth").repo).toBe(realpathSync(other));
+	} finally {
+		f.killDecoys();
+		f.mail.server.stop(true);
+	}
+}, fixtureDeadlineS(300) * 1000);
+
+test("REPOMANAGED1 stored symlink pane-less session still names the live coordinator", async () => {
+	// No seat host: the refusal lands before any mint, write, turn-on, or receipt.
+	const task = ownedTmp("repomanage-symlink");
+	try {
+		const root = realpathSync(task.path);
+		const home = join(root, "home");
+		const repo = join(root, "repo");
+		mkdirSync(join(home, ".config", "omp-kit"), { recursive: true });
+		mkdirSync(repo, { recursive: true });
+		const alias = join(root, "oldlink");
+		symlinkSync(repo, alias);
+		const fleetWatchPath = join(home, ".config", "omp-kit", "fleet-watch.json");
+		writeFileSync(fleetWatchPath, JSON.stringify({ enabled: true, intervalSeconds: 120, noDecisionChecks: 5,
+			sessions: [{ session: "oldseat", coordinatorPane: "", coordinatorSession: "oldseat", repo: alias, workerPanes: [] }] }, null, 2) + "\n");
+		const fleetBefore = readFileSync(fleetWatchPath, "utf8");
+		let minted = 0;
+		const refused = await applyProjectAdd({ repo, session: "newseat", workers: 1, profile: "codex",
+			env: { HOME: home, OMP_KIT_RESPAWN_SEAT: join(root, "turn-on") } as NodeJS.ProcessEnv,
+			deps: { mail: { call: async () => { minted += 1; return { agent_name: "Minted" }; } } } });
+		expect(refused.ok).toBe(false);
+		if (refused.ok) throw new Error("duplicate registered");
+		expect(refused.code).toBe("PROJECT_REPO_MANAGED");
+		expect(refused.detail).toContain("oldseat");
+		expect(refused.detail).toContain(repo);
+		expect("receiptId" in refused ? refused.receiptId : undefined).toBeUndefined();
+		expect(minted).toBe(0);
+		expect(readFileSync(fleetWatchPath, "utf8")).toBe(fleetBefore);
+		expect(existsSync(join(repo, ".omp", "fleet.json"))).toBe(false);
+	} finally {
+		task.cleanup();
+	}
+}, fixtureDeadlineS(60) * 1000);
+
+test("REPOMANAGED1 registry row without verifiable repo aborts unverified", async () => {
+	const task = ownedTmp("repomanage-unverified");
+	try {
+		const root = realpathSync(task.path);
+		const home = join(root, "home");
+		const repo = join(root, "repo");
+		mkdirSync(join(home, ".config", "omp-kit"), { recursive: true });
+		mkdirSync(repo, { recursive: true });
+		const fleetWatchPath = join(home, ".config", "omp-kit", "fleet-watch.json");
+		const config = JSON.stringify({ enabled: true, intervalSeconds: 120, noDecisionChecks: 5,
+			sessions: [{ session: "ghost", coordinatorPane: "tern:9", coordinatorSession: "ghost", workerPanes: [] }] }, null, 2) + "\n";
+		writeFileSync(fleetWatchPath, config);
+		let minted = 0;
+		const refused = await applyProjectAdd({ repo, session: "newseat", workers: 1, profile: "codex",
+			env: { HOME: home, OMP_KIT_RESPAWN_SEAT: join(root, "turn-on") } as NodeJS.ProcessEnv,
+			deps: { mail: { call: async () => { minted += 1; return { agent_name: "Minted" }; } } } });
+		expect(refused.ok).toBe(false);
+		if (refused.ok) throw new Error("unverified registry admitted");
+		expect(refused.code).toBe("PROJECT_FLEET_WATCH_INVALID");
+		expect("receiptId" in refused ? refused.receiptId : undefined).toBeUndefined();
+		expect(minted).toBe(0);
+		expect(readFileSync(fleetWatchPath, "utf8")).toBe(config);
+		expect(existsSync(join(repo, ".omp", "fleet.json"))).toBe(false);
+	} finally {
+		task.cleanup();
 	}
 }, fixtureDeadlineS(60) * 1000);

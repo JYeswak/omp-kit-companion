@@ -380,6 +380,58 @@ function parseTurnOn(stdout: string, workers: number): { coordinatorPane: string
 	const tab = record.tab === undefined || record.tab === null ? null : typeof record.tab === "string" && record.tab.trim() !== "" ? record.tab.trim() : null;
 	return { coordinatorPane, workerPanes: panes, tab };
 }
+/**
+ * REPOMANAGED1 (ompkit-1ra0d.247.11.1): refuse a second coordinator for the
+ * same canonical repo. Only authoritative fleet-watch session rows count, and
+ * only their real paths compare: a row whose repo identity is missing,
+ * non-absolute, non-canonical or unreadable aborts unverified (never guessed),
+ * while a verified ENOENT means that row cannot be this live repo and is
+ * skipped. Same-named rows are the existing session check's business.
+ */
+function refuseManagedRepo(fleetWatchPath: string, session: string, repo: string): { code: string; detail: string; remediation: string } | null {
+	const unverified = (name: string) => ({
+		code: "PROJECT_FLEET_WATCH_INVALID",
+		detail: `fleet-watch session ${name} has no verifiable repo identity`,
+		remediation: "Repair the fleet-watch entry with a canonical absolute repo, or remove the stale entry; the run changed nothing.",
+	});
+	let fleetText: string;
+	try {
+		fleetText = readFileSync(fleetWatchPath, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+		return { code: "PROJECT_FLEET_WATCH_UNREADABLE", detail: `fleet-watch config ${fleetWatchPath} is unreadable`, remediation: "Repair the JSON file or point OMP_KIT_FLEET_WATCH_CONFIG at a readable one." };
+	}
+	let sessions: FleetWatchSession[];
+	try {
+		sessions = loadFleetWatchConfig(fleetWatchPath).sessions;
+	} catch (error) {
+		return { code: "PROJECT_FLEET_WATCH_INVALID", detail: `fleet-watch config ${fleetWatchPath} is invalid: ${error instanceof Error ? error.message : String(error)}`, remediation: "Repair the file; the run changed nothing." };
+	}
+	for (const row of sessions) {
+		if (row.session === session) continue;
+		const name = typeof row.session === "string" && row.session !== "" ? row.session : "(unnamed)";
+		const stored: unknown = row !== null && typeof row === "object" && "repo" in row ? row.repo : undefined;
+		if (typeof stored !== "string" || stored.trim() === "" || !isAbsolute(stored) || resolve(stored) !== stored) {
+			return unverified(JSON.stringify(name));
+		}
+		let canonical: string;
+		try {
+			canonical = realpathSync(stored);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+			return unverified(JSON.stringify(name));
+		}
+		if (canonical === repo) {
+			return {
+				code: "PROJECT_REPO_MANAGED",
+				detail: `repo ${repo} is already managed by session ${name}`,
+				remediation: `Coordinate through session ${name} (project status ${name}); a second coordinator for the same repo is not admitted and joining is not implemented.`,
+			};
+		}
+	}
+	return null;
+}
+
 
 export interface ProjectApplyResult {
 	status: "APPLIED";
@@ -428,6 +480,11 @@ export async function applyProjectAdd(input: ProjectAddInput): Promise<{ ok: tru
 			return failed("PROJECT_SESSION_EXISTS", `session ${session} is already a managed project`, "Undo it first (project add --undo RECEIPT) or pick another --session.");
 		}
 	}
+	// One repo, one coordinator: a different session already managing this
+	// canonical repo refuses before any roster read, mint, write, turn-on,
+	// delivery or receipt; the refusal names the live session.
+	const managed = refuseManagedRepo(paths.fleetWatchPath, session, repo);
+	if (managed !== null) return failed(managed.code, managed.detail, managed.remediation);
 
 	// Roster names are reused on resume so a retried run never mints duplicates.
 	let rosterText: string | null = null;

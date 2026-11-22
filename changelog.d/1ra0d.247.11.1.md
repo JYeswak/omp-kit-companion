@@ -1,0 +1,2 @@
+### Fixed
+- `project add` refuses a second coordinator for the same repo (REPOMANAGED1). Adding an already-managed repository under another `--session` now exits 2 with `PROJECT_REPO_MANAGED` naming the live session, before any seat is minted or any store, goal, or identity is touched. Adding a truly new repo is unchanged. A registry row whose repo identity is missing or unreadable aborts unverified (`PROJECT_FLEET_WATCH_INVALID`) instead of guessing; a row whose repo path is verified absent never blocks.
