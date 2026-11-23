@@ -4,6 +4,13 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.147] - 2026-11-23
+
+### Fixed
+
+- The autocut job cuts from an owned clone of origin switched to the commit being released (not from the shared working tree, which lags main), passes `--no-install` to release-local and installs from the public assets itself, and resumes a draft that release-local kept after a transient attest failure once with `--resume-from-draft`, so a cut can publish, install and land its own next-version commit without a lead. The install step verifies the downloaded archive against `SHA256SUMS` before updating, captures the update envelope, and treats an `omp-kit update` that exits 1 with the release active and matcher, live and postcheck all PASS (manifest findings only) as an installed release, logged as `INSTALLED_WITH_FINDINGS` with the findings named, instead of dying on the exit code.
+- `omp-kit land` finds the release-qualification starter in the kit release when the working tree it runs from lags main and lacks it, and the release now ships `scripts/release-verdict-start.py`, so a land publishes with a scheduled main-role verdict even from the lagging canonical tree (its local main had no merge base with origin/main on 2026-11-23).
+
 ## [0.2.146] - 2026-11-23
 
 ### Changed
