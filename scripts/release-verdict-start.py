@@ -10,9 +10,9 @@ must not take it down. Every subprocess below uses kitlib_run with a deadline.
 
 FULLONRELEASE1 (J-2026-11-10-03): default-on after 600 quiet seconds; OMP_KIT_RELEASE_VERDICT_QUIET_S sets 0..86400.
 
-Two callers share this file: the pre-push chain member (a push made from the canonical repository) and omp-kit land,
-whose exact-parent publication pushes from a private checkout that has no hooks and so never reached the hook. The
-caller redirects stdout and stderr to <git-dir>/omp-kit/release-verdict.log.
+Callers: omp-kit land, whose exact-parent publication pushes from a private checkout that has no hook chain, and the pre-push
+chain member when the repository has this file. The kit release ships it because the canonical working tree can lag behind
+main and lack it (land then runs the release copy). The caller redirects stdout and stderr to <git-dir>/omp-kit/release-verdict.log.
 """
 import os
 import sys
@@ -34,7 +34,11 @@ def main(argv: list[str]) -> int:
     priority = os.getpriority(os.PRIO_PROCESS, 0)
     if priority < 10:
         os.nice(10 - priority)
-    sys.path.insert(0, os.path.join(root, "scripts"))
+    # kitlib_run comes from the repository's scripts when it has them, else from the directory this file sits in (a kit release).
+    for base in (os.path.join(root, "scripts"), os.path.dirname(os.path.abspath(__file__))):
+        if os.path.exists(os.path.join(base, "kitlib_run.py")):
+            sys.path.insert(0, base)
+            break
     from kitlib_run import run
 
     print(f"release-verdict: quiet interval {quiet}s for {sha}", flush=True)

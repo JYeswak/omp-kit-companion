@@ -637,10 +637,16 @@ export type ReleaseQualificationStart = "SCHEDULED" | "OPTED_OUT" | "UNAVAILABLE
  * published schedules the same child from the canonical repository. A missing script or log directory never fails a
  * landing that already published; OMP_KIT_RELEASE_VERDICT=0 opts out exactly as it does for the hook.
  */
-export function scheduleReleaseQualification(repo: string, sha: string, env: NodeJS.ProcessEnv = process.env): ReleaseQualificationStart {
+export function scheduleReleaseQualification(repo: string, sha: string, env: NodeJS.ProcessEnv = process.env, executablePath: string = process.execPath): ReleaseQualificationStart {
 	if (env.OMP_KIT_RELEASE_VERDICT === "0") return "OPTED_OUT";
-	const starter = join(repo, "scripts", "release-verdict-start.py");
-	if (!existsSync(starter) || !existsSync(join(repo, "scripts", "release-verdict.sh"))) return "UNAVAILABLE";
+	if (!existsSync(join(repo, "scripts", "release-verdict.sh"))) return "UNAVAILABLE";
+	// The canonical working tree can lag behind main (2026-11-23: its local main had no merge base with origin/main) and so lack
+	// the starter; the kit release ships it. The repository's own copy wins when it has one.
+	let starter = join(repo, "scripts", "release-verdict-start.py");
+	if (!existsSync(starter)) {
+		try { starter = join(releaseRoot(executablePath), "scripts", "release-verdict-start.py"); } catch { return "UNAVAILABLE"; }
+		if (!existsSync(starter)) return "UNAVAILABLE";
+	}
 	const gitDir = git(repo, ["rev-parse", "--absolute-git-dir"]);
 	if (gitDir.code !== 0) return "UNAVAILABLE";
 	const log = join(gitDir.out.trim(), "omp-kit", "release-verdict.log");
