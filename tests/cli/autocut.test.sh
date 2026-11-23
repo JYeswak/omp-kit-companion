@@ -154,6 +154,50 @@ out=$(AUTOCUT_RELEASE_LOCAL="sh $TMP/release-twice" AUTOCUT_INSTALL="echo" sh "$
 rc=$?
 if [ "$rc" = 4 ] && [ "$(field "$out" action)" = FAILED ] && [ "$(wc -l < "$TMP/twice-args" | tr -d ' ')" = 2 ]; then ok; else bad "one resume only: rc=$rc $out / $(cat "$TMP/twice-args" 2>/dev/null)"; fi
 
+# 8e. The default install path (no AUTOCUT_INSTALL seam) with a fake gh and a fake omp-kit on PATH and a private HOME.
+# The fake omp-kit prints $FAKE_ENVELOPE for `update` and exits $FAKE_RC; `--version` prints $FAKE_VERSION.
+mkdir -p "$TMP/fakebin" "$TMP/fakehome"
+cat > "$TMP/fakebin/gh" <<'EOF'
+#!/bin/sh
+dir=''
+while [ $# -gt 0 ]; do [ "$1" = --dir ] && dir=$2; shift; done
+printf '{}\n' > "$dir/release-index.json"
+printf 'archive-bytes\n' > "$dir/omp-kit-v0.1.2-darwin-arm64-none.tar.gz"
+if [ "${FAKE_BAD_SUMS:-0}" = 1 ]; then printf '%064d  omp-kit-v0.1.2-darwin-arm64-none.tar.gz\n' 0 > "$dir/SHA256SUMS"
+else (cd "$dir" && shasum -a 256 omp-kit-v0.1.2-darwin-arm64-none.tar.gz > SHA256SUMS); fi
+EOF
+cat > "$TMP/fakebin/omp-kit" <<'EOF'
+#!/bin/sh
+if [ "$1" = --version ]; then printf 'omp-kit %s\n' "$FAKE_VERSION"; exit 0; fi
+printf 'update called\n' >> "$FAKE_CALLS"
+cat "$FAKE_ENVELOPE"
+exit "${FAKE_RC:-0}"
+EOF
+chmod +x "$TMP/fakebin/gh" "$TMP/fakebin/omp-kit"
+envelope() { # POSTCHECK -> an update envelope for 0.1.2 with manifest findings
+	printf '{"ok":false,"data":{"action":"UPDATED","overall":"FINDINGS","active_version":"0.1.2","matcher":"PASS","live":"PASS","postcheck":"%s"},"errors":[{"code":"MANIFEST_APPLY_FAILED","message":"service:cc: FLEET_ADAPTER_ABSENT: no fleet checkout"},{"code":"MANIFEST_APPLY_FAILED","message":"rules:rules: RULE_COLLISION"}]}\n' "$1" > "$TMP/envelope.json"
+}
+default_install() { # RC VERSION POSTCHECK [BAD_SUMS] -> output; leaves the calls file for the caller
+	envelope "$3"
+	rm -f "$TMP/update-calls"
+	HOME="$TMP/fakehome" PATH="$TMP/fakebin:$PATH" FAKE_ENVELOPE="$TMP/envelope.json" FAKE_CALLS="$TMP/update-calls" FAKE_RC="$1" FAKE_VERSION="$2" FAKE_BAD_SUMS="${4:-0}" \
+		AUTOCUT_RELEASE_LOCAL="sh $TMP/release-stub" sh "$AUTOCUT" run --repo "$repo" 2>&1
+}
+# an update that exits 1 with the release active and every judge PASS is an installed release with named findings
+out=$(default_install 1 0.1.2 PASS)
+if [ "$(field "$out" action)" = CUT ] && printf '%s' "$out" | grep -q 'INSTALLED_WITH_FINDINGS' && printf '%s' "$out" | grep -q 'FLEET_ADAPTER_ABSENT' && printf '%s' "$out" | grep -q 'RULE_COLLISION'; then ok; else bad "installed with findings: $out"; fi
+# the same exit with a failed postcheck, or with another version active, is a refusal
+out=$(default_install 1 0.1.2 FAIL); rc=$?
+if [ "$rc" = 4 ] && ! printf '%s' "$out" | grep -q '"action":"CUT"'; then ok; else bad "failed postcheck must refuse: rc=$rc $out"; fi
+out=$(default_install 1 0.0.9 PASS); rc=$?
+if [ "$rc" = 4 ] && ! printf '%s' "$out" | grep -q '"action":"CUT"'; then ok; else bad "other active version must refuse: rc=$rc $out"; fi
+# a clean exit is a plain CUT with no findings decision
+out=$(default_install 0 0.1.2 PASS)
+if [ "$(field "$out" action)" = CUT ] && ! printf '%s' "$out" | grep -q 'INSTALLED_WITH_FINDINGS'; then ok; else bad "clean install: $out"; fi
+# assets that do not match SHA256SUMS never reach the updater
+out=$(default_install 0 0.1.2 PASS 1); rc=$?
+if [ "$rc" = 4 ] && [ ! -e "$TMP/update-calls" ]; then ok; else bad "bad checksums must stop before update: rc=$rc $(cat "$TMP/update-calls" 2>/dev/null) $out"; fi
+
 # 9. Every decision is logged.
 if [ "$(wc -l < "$repo/.git/omp-kit/autocut.log" | tr -d ' ')" -ge 9 ]; then ok; else bad "autocut.log has $(wc -l < "$repo/.git/omp-kit/autocut.log") lines"; fi
 

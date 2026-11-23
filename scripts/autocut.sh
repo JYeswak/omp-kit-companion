@@ -142,10 +142,27 @@ if [ -z "$install_cmd" ]; then
 	assets="$HOME/.local/opt/omp-kit/update-assets/$version"
 	mkdir -p "$assets" || die "cannot create $assets"
 	gh release download "v$version" --repo "$REPO_SLUG" --dir "$assets" --clobber \
-		--pattern release-index.json --pattern "omp-kit-v$version-darwin-arm64-none.tar.gz" >&2 || die "downloading v$version assets failed"
+		--pattern release-index.json --pattern SHA256SUMS --pattern "omp-kit-v$version-darwin-arm64-none.tar.gz" >&2 || die "downloading v$version assets failed"
+	(cd "$assets" && shasum -a 256 -c SHA256SUMS --ignore-missing >&2) || die "v$version assets do not match SHA256SUMS"
+	# AUTOCUTINSTALL1 (ompkit-2uubn): the envelope is captured, not sent to stderr. omp-kit update exits 1 with ok:false when its
+	# manifest section has findings (a service that needs operator config, a RULE_COLLISION on an edited managed rule, hooks of
+	# one repo) even though the release is installed and every judge passed: the 0.2.146 install did exactly that. That is an
+	# installed release with findings, never a refused install, so the run does not die on the exit code alone.
+	update_json="$WORK/update.json"
+	update_rc=0
 	omp-kit update --apply --yes --version "$version" --index "$assets/release-index.json" \
-		--archive "$assets/omp-kit-v$version-darwin-arm64-none.tar.gz" --json >&2 || die "omp-kit update --apply refused v$version"
+		--archive "$assets/omp-kit-v$version-darwin-arm64-none.tar.gz" --json >"$update_json" 2>"$WORK/update.err" || update_rc=$?
+	cat "$WORK/update.err" >&2
 	installed=$(omp-kit --version | awk '{print $2}')
+	if [ "$update_rc" != 0 ]; then
+		if [ "$installed" = "$version" ] && jq -e --arg v "$version" \
+			'.data.action == "UPDATED" and .data.active_version == $v and .data.matcher == "PASS" and .data.live == "PASS" and .data.postcheck == "PASS"' "$update_json" >/dev/null 2>&1; then
+			findings=$(jq -r '[.errors[]? | (.code + " " + (.message | .[0:90]))] | .[0:6] | join("; ")' "$update_json" 2>/dev/null) || findings=
+			decide INSTALLED_WITH_FINDINGS "omp-kit update exited $update_rc with v$version active and matcher, live and postcheck PASS; manifest findings: ${findings:-unreadable}" "$source_sha" "$version"
+		else
+			die "omp-kit update --apply refused v$version (exit $update_rc; installed reads '$installed')"
+		fi
+	fi
 else
 	# shellcheck disable=SC2086
 	installed=$($install_cmd "$version") || die "install command failed for v$version"
