@@ -84,6 +84,35 @@ function landCommitDeadlineSeconds(): number {
 	return Number.isSafeInteger(value) ? Math.min(7200, Math.max(1, value)) : 2400;
 }
 
+const LAND_COMMIT_FLOCK_TIMEOUT_ENV = "OMP_KIT_LAND_COMMIT_FLOCK_TIMEOUT_S";
+
+/** How long the candidate commit waits for the per-checkout commit lock (GITLOCK1, ompkit-fp72.19.1.9):
+ * OMP_KIT_LAND_COMMIT_FLOCK_TIMEOUT_S (integer, clamped to 1..1200) or 120, the wrapper default. */
+function landCommitFlockTimeoutSeconds(): number {
+	const raw = process.env[LAND_COMMIT_FLOCK_TIMEOUT_ENV];
+	const value = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+	return Number.isSafeInteger(value) ? Math.min(1200, Math.max(1, value)) : 120;
+}
+
+/** GITLOCK1 (ompkit-fp72.19.1.9): run the candidate commit through the per-checkout
+ * serializer scripts/kit-commit.py instead of a bare `git commit`, so concurrent
+ * lands queue on <gitdir>/omp-kit-commit.lock instead of colliding on index.lock.
+ * The trampoline scripts/kit-commit.sh pins the interpreter and payload by
+ * static name; the repo travels as --repo (the wrapper chdirs there itself).
+ * `git -c` does not survive the wrapper boundary (it strips only a leading
+ * "commit"), so the reflog config travels as GIT_CONFIG_* environment instead.
+ * Returns the wrapper's exit: git's own code on success or refusal, 75 when the
+ * queue wait exceeds the flock timeout. */
+function commitSerialized(repo: string, commitArgs: string[], reflogAction: string, commitDeadlineS: number): GitResult {
+	const env = gitEnvironment(reflogAction);
+	env.GIT_CONFIG_COUNT = "1";
+	env.GIT_CONFIG_KEY_0 = "core.logAllRefUpdates";
+	env.GIT_CONFIG_VALUE_0 = "true";
+	const run = kitlibRunSync([join(import.meta.dir, "../scripts/kit-commit.sh"), "--flock-timeout", String(landCommitFlockTimeoutSeconds()), "--repo", resolve(repo), "--", ...commitArgs],
+		{ cwd: repo, env, deadline_s: commitDeadlineS, max_output_bytes: 8 * 1024 * 1024 });
+	return { code: run.rc, out: new TextDecoder().decode(run.stdout), err: new TextDecoder().decode(run.stderr), interrupted: run.timed_out || run.killed, timedOut: run.timed_out };
+}
+
 // LANDPATCH1: patch mode publishes through commitOwnedPathsAndPublish, the same
 // local-main publisher path mode uses; no second (private-index) publisher remains.
 
@@ -1687,7 +1716,9 @@ async function commitOwnedPathsAndPublish(
 	// our save through a per-call native reflog action, never through the later tip.
 	const action = `omp-kit-land-${randomUUID()}`;
 	const commitDeadlineS = landCommitDeadlineSeconds();
-	const commit = git(repo, ["-c", "core.logAllRefUpdates=true", "commit", "--only", "-m", message, "--", ...paths.map((path) => `:(literal)${path}`)], action, commitDeadlineS * 1000);
+	// GITLOCK1: the candidate commit goes through the per-checkout serializer, so a
+	// concurrent land queues on omp-kit-commit.lock instead of colliding on index.lock.
+	const commit = commitSerialized(repo, ["commit", "--only", "-m", message, "--", ...paths.map((path) => `:(literal)${path}`)], action, commitDeadlineS);
 	const reflog = git(repo, ["reflog", "show", "--format=%H%x00%gs", "refs/heads/main"]);
 	const matches = reflog.out.split("\n").map((line) => line.split("\0"))
 		.filter((fields) => fields[1]?.startsWith(`${action}: `)).map((fields) => fields[0]);

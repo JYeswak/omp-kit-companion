@@ -19,9 +19,10 @@ Wraps one `git commit` invocation for agents committing in the same checkout
      reaper (120 s) and the next wrapper run never touches a live holder.
 
 Non-interactive only: stdin is DEVNULL, so `git commit` without -m fails
-instead of opening an editor. Fleet callers always pass `-m`.
+instead of opening an editor. Fleet callers always pass `-m`. With --repo
+DIR the wrapper chdirs there first, so callers never depend on caller cwd.
 
-Usage: kit-commit.py [--flock-timeout S] [--retries N] [--] [commit] <git commit args...>
+Usage: kit-commit.py [--flock-timeout S] [--retries N] [--repo DIR] [--] [commit] <git commit args...>
 Exit: git commit's exit code; 75 when the flock times out; 2 on usage errors.
 """
 
@@ -48,7 +49,7 @@ BACKOFF_S = (1, 2, 4, 8, 16)
 
 
 def parse(argv):
-    flock_timeout, retries, rest = FLOCK_TIMEOUT_S, RETRIES, []
+    flock_timeout, retries, repo, rest = FLOCK_TIMEOUT_S, RETRIES, None, []
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -63,6 +64,10 @@ def parse(argv):
             retries = int(argv[i + 1])
             i += 2
             continue
+        if arg == "--repo" and i + 1 < len(argv):
+            repo = argv[i + 1]
+            i += 2
+            continue
         if arg.startswith("--flock-timeout="):
             flock_timeout = int(arg.split("=", 1)[1])
             i += 1
@@ -71,13 +76,17 @@ def parse(argv):
             retries = int(arg.split("=", 1)[1])
             i += 1
             continue
+        if arg.startswith("--repo="):
+            repo = arg.split("=", 1)[1]
+            i += 1
+            continue
         rest.append(arg)
         i += 1
     if flock_timeout < 0 or retries < 0:
         raise ValueError("--flock-timeout and --retries must be non-negative")
     if rest[:1] == ["commit"]:
         rest = rest[1:]
-    return flock_timeout, retries, rest
+    return flock_timeout, retries, repo, rest
 
 
 def reap_leftover(repo):
@@ -132,10 +141,16 @@ def stop_child_group(child):
 
 def main(argv):
     try:
-        flock_timeout, retries, rest = parse(argv)
+        flock_timeout, retries, repo_arg, rest = parse(argv)
     except (ValueError, IndexError) as error:
         print("kit-commit: %s" % error, file=sys.stderr)
         return 2
+    if repo_arg is not None:
+        try:
+            os.chdir(repo_arg)
+        except OSError as error:
+            print("kit-commit: cannot enter --repo %s: %s" % (repo_arg, error), file=sys.stderr)
+            return 1
     try:
         top = run_bounded(["git", "rev-parse", "--show-toplevel"], timeout=30)
     except OSError:

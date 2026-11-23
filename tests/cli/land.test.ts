@@ -2,8 +2,9 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
-import { EXPECTED_SERVICE, LAND_DEFAULT_TIMEOUT_MS, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, patchHold, registerPushCheck, remoteHead, repoRoot, responseCode, scratch, type HunkSetup } from "./private-index-land.helpers.ts";
+import { fixtureDeadlineS, runFixture, runFixtureAsync } from "./fixture-process.ts";
+import { EXPECTED_SERVICE, LAND_DEFAULT_TIMEOUT_MS, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, patchHold, registerPushCheck, remoteHead, repoRoot, responseCode, scratch, stringEnvironment, type HunkSetup } from "./private-index-land.helpers.ts";
+
 import { disposalGate, type InspectDeps, type LivenessDeps, type OwnedScratchRow, type SeatIdentity } from "../../src/scratch.ts";
 import { scratchOwedUnderRepo } from "../../src/land.ts";
 import { createHash } from "node:crypto";
@@ -1316,3 +1317,137 @@ test("LANDSIBLING1 pushed-range secret scan judges exactly the published commit,
 	expectUnpublished(setup, setup.held[0]!);
 	git(setup.work, ["merge-base", "--is-ancestor", setup.held[0]!, "main"]);
 });
+
+/** GITLOCK1 two-land rig: a pre-commit hook whose first arrival holds the
+ * commit (and the wrapper's flock with it) until the test writes `release`,
+ * so the second land provably queues behind the first. Whichever land reaches
+ * the hook first holds; assertions match lands by path, never by start order. */
+function gitlockTwoLandSetup(): { work: string; fakeBin: string; seed: string; barrier: string } {
+	const { work, fakeBin } = fixture();
+	const seed = remoteHead(work);
+	writeFileSync(join(work, "owned.txt"), "gitlock owned bytes\n");
+	writeFileSync(join(work, "peer.txt"), "gitlock peer bytes\n");
+	const barrier = join(work, "gitlock-barrier");
+	mkdirSync(barrier);
+	const waitS = Math.ceil(fixtureDeadlineS(300));
+	writeFileSync(join(work, ".git", "hooks", "pre-commit"),
+		`#!/bin/sh\nB="${barrier}"\nif mkdir "$B/claimed" 2>/dev/null; then\n: > "$B/arrived"\nEND=$(( $(date +%s) + ${waitS} ))\nwhile [ ! -e "$B/release" ] && [ "$(date +%s)" -lt "$END" ]; do sleep 1; done\nexit 0\nfi\nexit 0\n`);
+	chmodSync(join(work, ".git", "hooks", "pre-commit"), 0o755);
+	return { work, fakeBin, seed, barrier };
+}
+
+function gitlockEnv(work: string, fakeBin: string, path: string, extra?: Record<string, string>): Record<string, string> {
+	const holds = [{ agent: "DarkFern", path, exclusive: true, remaining_seconds: 3600 }];
+	return stringEnvironment(commandEnvironment(work, holds, { amDir: fakeBin, gitEnv: extra }));
+}
+
+function gitlockArgv(path: string, message: string): string[] {
+	return ["bun", cliPath, "land", "--paths", path, "--message", message, "--apply", "--yes", "--json"];
+}
+
+/** Live wrapper processes for this run's two lands, matched by the per-run queue timeout in their argv. */
+function gitlockWrappersAlive(work: string, timeoutTag: string): number {
+	const found = runFixture(["pgrep", "-f", `kit-commit.py.*--flock-timeout ${timeoutTag}`], { cwd: work, floor_s: 10 });
+	if (found.rc !== 0) return 0;
+	return new TextDecoder().decode(found.stdout).trim().split("\n").filter((line) => line.trim().length > 0).length;
+}
+
+async function gitlockPoll(seen: () => boolean, timeoutMs: number): Promise<boolean> {
+	const until = Date.now() + timeoutMs;
+	for (;;) {
+		if (seen()) return true;
+		if (Date.now() >= until) return false;
+		// Poll step on the platform clock: hook files and live wrapper
+		// processes appear only there, so fake timers cannot advance them.
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setTimeout(resolve, 100);
+		await promise;
+	}
+}
+
+function parseLandResponse(finished: { rc: number | null; stdout: Uint8Array }): { status: number; body: Record<string, unknown> } {
+	const body = JSON.parse(new TextDecoder().decode(finished.stdout)) as Record<string, unknown>;
+	return { status: finished.rc === null || finished.rc < 0 ? 1 : finished.rc, body };
+}
+
+test("GITLOCK1 two concurrent lands serialize on the commit lock without index-lock errors", async () => {
+	const { work, fakeBin, barrier } = gitlockTwoLandSetup();
+	const ownedMessage = "feat(land): gitlock owned [test]\n\nBead: gitlock-fixture";
+	const peerMessage = "feat(land): gitlock peer [test]\n\nBead: gitlock-fixture";
+	const queueTimeout = String(200 + (process.pid % 700));
+	const ownedP = runFixtureAsync(gitlockArgv("owned.txt", ownedMessage), { cwd: work, env: gitlockEnv(work, fakeBin, "owned.txt", { OMP_KIT_LAND_COMMIT_FLOCK_TIMEOUT_S: queueTimeout }), floor_s: 300 });
+	const peerP = runFixtureAsync(gitlockArgv("peer.txt", peerMessage), { cwd: work, env: gitlockEnv(work, fakeBin, "peer.txt", { OMP_KIT_LAND_COMMIT_FLOCK_TIMEOUT_S: queueTimeout }), floor_s: 300 });
+	expect(await gitlockPoll(() => existsSync(join(barrier, "arrived")), Math.round(fixtureDeadlineS(60) * 1000))).toBe(true);
+	// Both wrappers are alive while the holder still waits for release:
+	// the second land reached the serializer and necessarily queued.
+	expect(await gitlockPoll(() => gitlockWrappersAlive(work, queueTimeout) >= 2, Math.round(fixtureDeadlineS(60) * 1000))).toBe(true);
+	// Grace after both wrappers are observed alive: a live wrapper still
+	// runs imports and rev-parse before its first flock attempt, and that
+	// prefix exists only on the platform clock.
+	const { promise: grace, resolve: releaseGrace } = Promise.withResolvers<void>();
+	setTimeout(releaseGrace, Math.round(fixtureDeadlineS(5) * 1000));
+	await grace;
+	writeFileSync(join(barrier, "release"), "go\n");
+	const [ownedRun, peerRun] = await Promise.all([ownedP, peerP]);
+	expect(ownedRun.timed_out).toBe(false);
+	expect(peerRun.timed_out).toBe(false);
+	const owned = parseLandResponse(ownedRun);
+	const peer = parseLandResponse(peerRun);
+	expect(JSON.stringify(owned.body)).not.toContain("index.lock");
+	expect(JSON.stringify(peer.body)).not.toContain("index.lock");
+	// Exactly one land published; the queuer committed through the serializer
+	// but its parent had moved, so it carries a clean mismatch refusal naming
+	// the saved candidate instead of a lock collision.
+	const outcomes = [
+		{ name: "owned", run: owned, message: ownedMessage, path: "owned.txt" },
+		{ name: "peer", run: peer, message: peerMessage, path: "peer.txt" },
+	];
+	const pushed = outcomes.filter(({ run: outcome }) => outcome.status === 0);
+	const refused = outcomes.filter(({ run: outcome }) => outcome.status !== 0);
+	expect(pushed).toHaveLength(1);
+	expect(refused).toHaveLength(1);
+	expectLandSchema(pushed[0]!.run.body.data);
+	expect((pushed[0]!.run.body.data as { overall: string }).overall).toBe("PUSHED");
+	expect(responseCode(refused[0]!.run.body)).toBe("LAND_ACTUAL_PARENT_MISMATCH");
+	const saved = refused[0]!.run.body.data as { commit: string; candidate_sha: string };
+	expect(typeof saved.candidate_sha).toBe("string");
+	expect(git(work, ["rev-parse", "refs/heads/main"]).trim()).toBe(saved.candidate_sha);
+	// Both commits stacked on shared main in order with every peer byte
+	// intact: the queuer's save sits directly atop the published commit, so
+	// the serializer queued the two contenders instead of colliding them.
+	const names = git(work, ["log", "--format=%s", "-n", "2"]).trim().split("\n");
+	expect(names).toEqual([refused[0]!.message.split("\n")[0], pushed[0]!.message.split("\n")[0]]);
+	const tip = git(work, ["rev-parse", "HEAD"]).trim();
+	expect(git(work, ["show", `${tip}:owned.txt`])).toBe("gitlock owned bytes\n");
+	expect(git(work, ["show", `${tip}:peer.txt`])).toBe("gitlock peer bytes\n");
+}, Math.round(fixtureDeadlineS(600) * 1000));
+
+test("GITLOCK1 a queued land past its flock timeout refuses naming the wait and commits nothing", async () => {
+	const { work, fakeBin, seed, barrier } = gitlockTwoLandSetup();
+	const holderP = runFixtureAsync(gitlockArgv("owned.txt", "feat(land): gitlock owned [test]"),
+		{ cwd: work, env: gitlockEnv(work, fakeBin, "owned.txt"), floor_s: 300 });
+	holderP.then(() => {}, () => {});
+	expect(await gitlockPoll(() => existsSync(join(barrier, "arrived")), Math.round(fixtureDeadlineS(60) * 1000))).toBe(true);
+	// The holder is inside its commit, so this land cannot reach its own:
+	// with a short queue bound it refuses naming the wait instead of
+	// publishing around the serializer. The refusal proves the attempt
+	// landed inside the hold, so no process poll is needed before releasing.
+	const refusedRun = await runFixtureAsync(gitlockArgv("peer.txt", "feat(land): gitlock peer [test]"),
+		{ cwd: work, env: gitlockEnv(work, fakeBin, "peer.txt", { OMP_KIT_LAND_COMMIT_FLOCK_TIMEOUT_S: "8" }), floor_s: 180 });
+	expect(refusedRun.timed_out).toBe(false);
+	const refused = parseLandResponse(refusedRun);
+	expect(refused.status, JSON.stringify(refused.body)).toBe(1);
+	expect(responseCode(refused.body)).toBe("COMMIT_CREATION_REFUSED");
+	expectLandSchema(refused.body.data);
+	expect(String((refused.body.errors as { message?: string }[])[0]?.message)).toContain("timed out");
+	writeFileSync(join(barrier, "release"), "go\n");
+	// Nothing was committed for the refused path: the holder's bytes are the
+	// only new commit, the refused bytes stay in the worktree, and the remote
+	// has not moved yet.
+	expect(git(work, ["log", "--format=%s"]).trim().split("\n")).not.toContain("feat(land): gitlock peer [test]");
+	expect(remoteHead(work)).toBe(seed);
+	expect(readFileSync(join(work, "peer.txt"), "utf8")).toBe("gitlock peer bytes\n");
+	const holder = parseLandResponse(await holderP);
+	expect(holder.status, JSON.stringify(holder.body)).toBe(0);
+	expect((holder.body.data as { overall: string }).overall).toBe("PUSHED");
+}, Math.round(fixtureDeadlineS(600) * 1000));
