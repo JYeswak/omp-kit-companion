@@ -1,1 +1,0 @@
-- Move `kit-write-ledger` out of `extensions/` into `src/`. The save guard still records writes and reads the same ledger; the package no longer ships it as an unloaded extension.

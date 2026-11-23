@@ -1,1 +1,0 @@
-- The `br` shim inserts the pane identity before the `--` end-of-options separator instead of appending it after: single-bead reads such as `br show --json -- <id>` reach the real tracker again instead of failing on a literal `--actor` id, while a mutation carrying another agent's name is still refused.

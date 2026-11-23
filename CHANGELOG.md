@@ -4,6 +4,36 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.146] - 2026-11-23
+
+### Changed
+
+- Let `omp-kit project add` use the full goal-proof window. A fresh director journal that first appears with the adopted goal can prove delivery and unblock worker orientation without a second send.
+- The stale-worktree hook records a missing `Authored-On` trailer from `HEAD` for ordinary edits in the current non-linked tree, only after the whole commit passes. Linked sources still need proven provenance; explicit stale or malformed claims, stale file timestamps, and restoration checks remain fail-closed.
+- Release metadata commits retain their explicit supersession scope; a reused release message cannot claim implicit authorship of peer metadata.
+- Reconstructed land patches still need an explicit authoring base for peer-line edits; the target checkout does not prove where the patch was written.
+- Push gate: the pinned shellcheck now runs once per push over all changed shell files (one container, one tree copy) instead of once per file, cutting the shellcheck stage about 8x on multi-file pushes with identical findings.
+- The `br` shim inserts the pane identity before the `--` end-of-options separator instead of appending it after: single-bead reads such as `br show --json -- <id>` reach the real tracker again instead of failing on a literal `--actor` id, while a mutation carrying another agent's name is still refused.
+- fix(scratch): keep unseated `scratch new --print-dir` output owned by its invoking shell, so the directory stays live after command substitution and that shell can release it without a token.
+- The release archive ships scripts/check-gap-mention.sh beside the findings library it sources, and the release build refuses an archive in which a shipped extension references a scripts/ path the archive does not contain.
+- Land's commit-serializer path is resolvable in tests: `kitCommitSh` takes the executable path explicitly, with a release-layout proof covering helper lookup outside the source tree.
+- Bind the session’s owned `TMPDIR` and scratch budget to its seat at startup, before the first tool call. Disabled projects keep their inherited temporary directory.
+- Move `kit-write-ledger` out of `extensions/` into `src/`. The save guard still records writes and reads the same ledger; the package no longer ships it as an unloaded extension.
+- Non-blocking reminders now point common shell reads, symbol searches, source rewrites, and polling loops to the native tools. Git commits and `omp-kit land` also suggest `ubs --files` when the active session has no successful UBS scan. The routing rules also fire after an env assignment prefix or after `;` / `&&` chained simple commands (`FOO=1 cat f`, `true && grep -rn Sym src`), not only at the start of the command.
+- Direct `update --apply` activation now retains the actual per-repository/member hook refresh outcomes with before/after digests through the manifest result and update JSON envelopes, alongside the unchanged counters: refreshed, pending-commit, failed and never-enrolled member evidence survives the update boundary without changing refresh, opt-outs, failure handling or tracked-owner safety.
+- The upgrade notice is limited to the first session started in a process, so later sub-agent session IDs do not receive the parent's release notice.
+
+### Fixed
+
+- `kit-no-gh-poll` bash conditions now anchor on their required literals (`gh`, `for`/`while`/`until`) and check the left context with a lookbehind instead of retrying it at every stream position: the pair's live-stream cost fell from ~262 ms to ~66 ms per sweep (budget 500 ms), with zero verdict changes across the corpus, generated, and live-scenario wires.
+- `project add --model` now pins the requested model on every seat instead of only recording it (SEATMODEL1). The roster session entry carries the pin (`seats: { profile, model }`), each live seat gets `/switch <model>` after its first goal, and the apply proves the seat's next journal `model_usage` row carries the requested model. A seat answering on another model fails the apply with `SEAT_MODEL_MISMATCH`; a seat that never journals a model fails with `SEAT_MODEL_UNPROVEN` rather than running the wrong model silently. Adds without `--model` are unchanged.
+- `install-commit-msg-bead.sh --check` now names a byte-identical installed member that lost its exec bit as STALE (the chain runner only runs executable members, so git would silently skip it), and names a missing chain runner or a runner without its exec bit instead of reporting the repo fresh. A reinstall repairs the mode in place: a kit runner is rewritten, never adopted as a bespoke `10-` entry.
+- The hook census keeps a missing or inactive chain runner STALE (never silently FRESH): it parses the installer's `MISSING/STALE chain runner` lines, pinning the runner row at the runner itself, so per-repo missing/stale diagnosis still flows from the installer's own `--check`.
+- Kit updates now run a model-free omp start probe (`omp -p "Reply ok." --no-session --model omp-kit-start-probe/none`, about 2 s, no credential or network) with a 45 s deadline before moving the plugin link or emitting the update notice, and hold with `UPGRADE_HELD` when the start does not finish inside the deadline, so a hung seat is never updated underneath itself. A start that exits (zero or not) and a missing omp never hold.
+- A service install or update from a shell without `AGENT_MAIL_STORAGE_ROOT` or `OMP_KIT_CI_REPOS` no longer drops the am-retain storage root or the ci-poller repo scope already in the installed job file; an explicit value replaces it, an empty string clears the root, and an unusable installed value persists nothing (the same keep-installed rule the load-watch probe target, the Agent Mail RSS ceiling and the kit-update poll settings already follow).
+- `omp-kit land --exact-parent` can now land a candidate that changes the full-suite judging closure: `scripts/fresh-gate.sh` reads the exact-tree main-role PASS back under the candidate archive as judge root when the candidate's judging identity differs from the land parent's, and the refusal teaches the candidate recipe instead of the base one.
+- A service install or update no longer drops a hand-set `OMP_KIT_AM_RSS_CEILING_BYTES` from the load-watch job: a re-render from a shell without it keeps the installed value, an explicit positive integer replaces it, an empty string clears it, and a bad explicit value is refused as `AM_CEILING_INVALID`. The 0.2.145 install dropped it, the 6 GiB default applied to a 6.7 GB Agent Mail server, and am-watch killed it. The default Agent Mail RSS ceiling of the am-watch job is now 24 GiB (was 6 GiB), so a dropped variable can no longer restart a healthy large server.
+
 ## [0.2.145] - 2026-11-22
 
 ### Added
