@@ -19,6 +19,7 @@ import { parseReservationRead } from "./fleet-guard/git.ts";
 import { reapLandedCheckouts, listOvnfsCheckouts, diffOvnfsCheckout } from "./ovnfs-checkouts.ts";
 import { commandOf, expectedOf, judge, parseBoxes, unreplayableReason } from "./verify.ts";
 import { previewText, scrubText } from "../extensions/secret-output-guard.ts";
+import { appendReapReceipt, defaultGitLockLedgerPath, reapStaleAfterMs, reapStaleIndexLock } from "./index-lock.ts";
 import { releaseRoot } from "./paths.ts";
 
 
