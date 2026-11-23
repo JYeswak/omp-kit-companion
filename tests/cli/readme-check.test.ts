@@ -380,11 +380,11 @@ test("doc counts: stale AGENTS scenario and usage install claims are RED naming 
 	const manifestRows = manifestText.split("\n").filter(line => line.length > 0);
 	const ruleRows = manifestRows.length - 1;
 	expect(checkDocCounts(liveAgents, liveUsage, scenarios, ruleRows)).toEqual([]);
-	const staleScenarios = checkDocCounts(liveAgents.replace(`${scenarios} scenarios`, "70 scenarios"), liveUsage, scenarios, ruleRows);
+	const staleScenarios = checkDocCounts(`${liveAgents}\n70 scenarios\n`, liveUsage, scenarios, ruleRows);
 	expect(staleScenarios).toHaveLength(1);
 	expect(staleScenarios[0]).toContain('"70 scenarios"');
 	expect(staleScenarios[0]).toContain(`ships ${scenarios}`);
-	const staleInstall = checkDocCounts(liveAgents, liveUsage.replace(`${ruleRows}-rule install`, "18-rule install"), scenarios, ruleRows);
+	const staleInstall = checkDocCounts(liveAgents, `${liveUsage}\nPreviews the 18-rule install.\n`, scenarios, ruleRows);
 	expect(staleInstall).toHaveLength(1);
 	expect(staleInstall[0]).toContain('"18-rule install"');
 	expect(staleInstall[0]).toContain(`ships ${ruleRows} rules`);
