@@ -1247,6 +1247,10 @@ git -C "$vrepro" push -q origin HEAD:refs/heads/main
 export RV_PUSH_LOG="$TMP/push-judgments"
 # shellcheck disable=SC2016 # expanded by the detached fixture producer, not this shell
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"$RV_PUSH_LOG"\n' >"$vrepro/scripts/release-verdict.sh"
+# AUTOCUTVERDICT1: the hook starts the detached child through scripts/release-verdict-start.py and schedules nothing when it is absent
+# from the pushed repository, so this fixture carries the real starter (it imports the already carried kitlib_run.py).
+cp "$KITREPO/scripts/release-verdict-start.py" "$vrepro/scripts/release-verdict-start.py"
+chmod +x "$vrepro/scripts/release-verdict-start.py"
 for push_mode in push release; do
 	: >"$RV_PUSH_LOG"
 	rc=$(unset OMP_KIT_RELEASE_VERDICT; OMP_KIT_RELEASE_VERDICT_QUIET_S=0 PRE_PUSH_FULL_SUITE=$push_mode run_adapter "$vrepro")
