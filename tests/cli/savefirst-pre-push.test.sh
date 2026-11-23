@@ -22,7 +22,7 @@ SOURCE_IDENTITY=$(bun "$KITREPO/scripts/exact-source.ts" --root "$SOURCE_ROOT") 
 SOURCE="$TMP/exact-source"
 mkdir -p "$SOURCE"
 judging_files=$(PYTHONPATH="$SOURCE_ROOT/scripts" python3 -m suite-metrics judging-files) || exit 1
-# Heavy's load census imports load-doctor -> service-run -> infra; carry the same closure in both source modes.
+# Heavy's load census imports load-doctor -> service-run -> infra and service-launcher; carry the same closure in both source modes.
 if [ "$SOURCE_IDENTITY" = "GIT" ]; then
 	git -C "$SOURCE_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || {
 		printf 'FAIL SAVEFIRST1 fixture: no Git source checkout at %s\n' "$SOURCE_ROOT" >&2
@@ -33,7 +33,7 @@ if [ "$SOURCE_IDENTITY" = "GIT" ]; then
 	git -C "$SOURCE_ROOT" archive --format=tar "$SOURCE_SHA" \
 		$judging_files scripts/pre-push-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts \
 		src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib src/mutations.ts src/regex-guards.ts \
-		src/load-doctor.ts src/service-run.ts src/infra.ts \
+		src/load-doctor.ts src/service-run.ts src/service-launcher.ts src/infra.ts \
 		config/heavy-labels.json \
 		> "$TMP/exact-source.tar"
 else
@@ -43,7 +43,7 @@ else
 		tar -cf "$TMP/exact-source.tar" \
 			$judging_files scripts/pre-push-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts \
 			src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib src/mutations.ts src/regex-guards.ts \
-			src/load-doctor.ts src/service-run.ts src/infra.ts \
+			src/load-doctor.ts src/service-run.ts src/service-launcher.ts src/infra.ts \
 			config/heavy-labels.json
 	)
 fi
