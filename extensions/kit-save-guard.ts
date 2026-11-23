@@ -21,7 +21,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
 import { trackerRequests, type TrackerRequest } from "./kit-flywheel-guard";
 import { fleetPolicyState } from "./fleet-policy";
-import { appendLedgerEntry, isCurrentSessionWriter, lastWriters, ledgerRowsFor, ledgerStateRoot, resolveLedgerAgent } from "./kit-write-ledger";
+import { appendLedgerEntry, isCurrentSessionWriter, lastWriters, ledgerRowsFor, ledgerStateRoot, resolveLedgerAgent } from "../src/kit-write-ledger";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 
 export interface SaveGuardExecResult {

@@ -16,7 +16,7 @@ import {
 	ledgerStateRoot,
 	resolveLedgerAgent,
 	type WriteLedgerEntry,
-} from "./kit-write-ledger";
+} from "../src/kit-write-ledger";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 
 let freshSeq = 0;

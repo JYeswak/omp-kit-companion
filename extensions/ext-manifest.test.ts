@@ -8,7 +8,7 @@ import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import secretOutputGuard from "./secret-output-guard";
-import * as writeLedger from "./kit-write-ledger";
+import * as writeLedger from "../src/kit-write-ledger";
 import * as mailWake from "./kit-mail-wake";
 const ROOT = resolve(import.meta.dir, "..");
 
@@ -81,10 +81,10 @@ test("planted: an unlisted new extension fails the check", () => {
 
 test("planted: dropping a not-loaded reason re-opens the gap", () => {
 	const manifest = loadManifest(ROOT);
-	const { "extensions/kit-write-ledger.ts": _dropped, ...rest } = manifest.notLoadedExtensions;
+	const { "extensions/kit-mail-wake.ts": _dropped, ...rest } = manifest.notLoadedExtensions;
 	const check = checkExtensionCoverage(shippedExtensions(ROOT), manifest.extensions, rest);
 	expect(check.ok).toBe(false);
-	expect(check.unlisted).toEqual(["extensions/kit-write-ledger.ts"]);
+	expect(check.unlisted).toEqual(["extensions/kit-mail-wake.ts"]);
 });
 
 test("secret-output-guard is a loaded entrypoint with a default export", () => {
@@ -93,18 +93,16 @@ test("secret-output-guard is a loaded entrypoint with a default export", () => {
 	expect(typeof secretOutputGuard).toBe("function");
 });
 
-test("kit-write-ledger is a not-loaded library with no default export", () => {
+test("kit-write-ledger ships as an internal library, not an extension", () => {
 	const manifest = loadManifest(ROOT);
-	expect(manifest.extensions).not.toContain("extensions/kit-write-ledger.ts");
-	const reason = manifest.notLoadedExtensions["extensions/kit-write-ledger.ts"];
-	expect(typeof reason).toBe("string");
-	expect(reason!.length).toBeGreaterThan(0);
+	expect(shippedExtensions(ROOT)).not.toContain("extensions/kit-write-ledger.ts");
+	expect(manifest.extensions).not.toContain("src/kit-write-ledger.ts");
 	expect("default" in writeLedger).toBe(false);
 	expect(typeof writeLedger.appendLedgerEntry).toBe("function");
 });
 
 test("both modules import from the packaged tree (packaging load probe)", () => {
-	for (const entry of ["extensions/secret-output-guard.ts", "extensions/kit-write-ledger.ts"]) {
+	for (const entry of ["extensions/secret-output-guard.ts", "extensions/kit-save-guard.ts"]) {
 		const probed = Bun.spawnSync([process.execPath, "-e", `import("./${entry}")`], {
 			cwd: ROOT,
 			stdout: "pipe",
