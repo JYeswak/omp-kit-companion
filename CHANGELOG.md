@@ -4,6 +4,20 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.148] - 2026-11-23
+
+### Added
+
+- A seat whose goal is active and whose turn ended with no tool call now gets exactly one continuation message (`kit-goal-continue`) instead of parking idle until a heartbeat; paused goals, turns with pending user input, and consecutive idle turns get none, and the latch re-arms on observed tool use, a new goal id, consumed user input or a session reset.
+
+### Fixed
+
+- The autocut job cuts from an owned clone of origin switched to the commit being released (not from the shared working tree, which lags main), passes `--no-install` to release-local and installs from the public assets itself, and resumes a draft that release-local kept after a transient attest failure once with `--resume-from-draft`, so a cut can publish, install and land its own next-version commit without a lead. The install step verifies the downloaded archive against `SHA256SUMS` before updating, captures the update envelope, and treats an `omp-kit update` that exits 1 with the release active and matcher, live and postcheck all PASS (manifest findings only) as an installed release, logged as `INSTALLED_WITH_FINDINGS` with the findings named, instead of dying on the exit code. The verdict read now runs under the pinned tool order of `scripts/fixed-env.sh` (the producer's order): the launchd job's PATH put Homebrew python 3.15 before `/usr/bin` 3.9.6 and the store rejected every record judged under 3.9.6 as "local file evidence is incomplete or mixes producers", so the hourly job never saw a PASS that a seat shell read as PASS.
+- A kit update no longer ends `PARTIAL` (`KIT_POSTCHECK_FAILED`) because a fleet process wrote its own state during the postcheck window: `pregrade/`, `verify-evidence/`, `verify-ledger-control/`, `tracker-snapshot/`, `reopen-rate/`, `suite-lease/`, `checkout-archive/` and `scratch-quarantine/` under the kit state root are now declared live-fleet namespaces the isolated-test snapshot does not judge. Any other state write still fails the postcheck.
+- `omp-kit service doctor kit-update` now reports FAIL on a named `kit-update-config` check when the job is installed and loaded but carries neither poll (`OMP_KIT_UPDATE_POLL=github` with `OMP_KIT_UPDATE_REPO=owner/repo`) nor static (`OMP_KIT_UPDATE_INDEX`, `OMP_KIT_UPDATE_ARCHIVE`, `OMP_KIT_UPDATE_VERSION`, `OMP_KIT_UPDATE_SOURCE_TAG`) configuration; every run in that state refuses `KIT_UPDATE_JOB_CONFIG`, so the silent bare-shell reinstall that strips the config is now named instead of staying green.
+- `omp-kit land` now schedules the release-qualification verdict from the installed kit: it runs the starter through `python3`, because the kit release packages `.py` files 0644 and executing `releases/<v>/scripts/release-verdict-start.py` directly returned 126, so every land by 0.2.147 reported `release_qualification: UNAVAILABLE` and scheduled no verdict.
+- `omp-kit update --apply` on a clean home no longer exits 1 with 23 `MANIFEST_APPLY_FAILED` errors after a successful install. A service job the host never set up (no plist or unit) whose install refuses with `LAUNCHER_UNAVAILABLE`, `FLEET_ADAPTER_ABSENT` or `*_UNCONFIGURED` is listed under `manifest.skipped`, and a rules pack blocked by a locally edited managed rule is listed there too (the edit is untouched; the entry names the files and `omp-kit migrate --plan`). An installed job that fails and any other refusal still fail the update.
+
 ## [0.2.147] - 2026-11-23
 
 ### Fixed
