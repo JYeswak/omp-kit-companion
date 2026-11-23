@@ -663,6 +663,27 @@ function kitUpdateEnvironment(job: ServiceJobDef, installed: Record<string, stri
 	return persisted;
 }
 
+/** KITUPDENV1 AC2 (ompkit-botcn): doctor names the stripped-config state explicitly. A kit-update job that is
+ * installed and loaded but carries neither poll nor static configuration fails every run with
+ * KIT_UPDATE_JOB_CONFIG; the bare-shell reinstall that strips it is otherwise silent. */
+function kitUpdateConfigCheck(env: Record<string, string>, active: boolean): ServiceCheck {
+	const get = (key: string): string => unxml(env[key] ?? "");
+	const repo = get("OMP_KIT_UPDATE_REPO");
+	const pollConfigured = get("OMP_KIT_UPDATE_POLL") === "github" && repo !== "" && KIT_UPDATE_REPO_PATTERN.test(repo);
+	const staticConfigured = get("OMP_KIT_UPDATE_INDEX") !== "" && get("OMP_KIT_UPDATE_ARCHIVE") !== ""
+		&& get("OMP_KIT_UPDATE_VERSION") !== "" && get("OMP_KIT_UPDATE_SOURCE_TAG") !== "";
+	if (!active) {
+		return { id: "kit-update-config", status: "PASS", message: "Job is not installed and loaded; the config check applies to the loaded job", remediation: "None." };
+	}
+	if (pollConfigured || staticConfigured) {
+		const shape = pollConfigured && staticConfigured ? "poll and static" : pollConfigured ? "poll" : "static";
+		return { id: "kit-update-config", status: "PASS", message: `kit-update carries ${shape} configuration`, remediation: "None." };
+	}
+	return { id: "kit-update-config", status: "FAIL",
+		message: "kit-update is installed and loaded with neither poll (OMP_KIT_UPDATE_POLL=github with OMP_KIT_UPDATE_REPO=owner/repo) nor static (OMP_KIT_UPDATE_INDEX, OMP_KIT_UPDATE_ARCHIVE, OMP_KIT_UPDATE_VERSION, OMP_KIT_UPDATE_SOURCE_TAG) configuration; every run refuses KIT_UPDATE_JOB_CONFIG",
+		remediation: "Run omp-kit service install kit-update --apply --yes from a shell carrying the poll or static configuration." };
+}
+
 const CI_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 /** Persist the explicitly approved CI scope in the native service definition. A re-render from a shell without it keeps the
  * installed scope (the botcn class: a hand-set job variable survives an install), an explicit value replaces it, and an
@@ -1037,6 +1058,12 @@ export function checkService(input: DoctorInput): ServiceCheck[] {
 	} else {
 		checks.push({ id: "loaded", status: "PASS", message: `Loaded from ${expectedPath}`, remediation: "None." });
 	}
+	if (input.job.name === "kit-update") {
+		checks.push(kitUpdateConfigCheck(
+			Object.fromEntries(Object.entries(plistEnvironment(input.installed?.text ?? "")).map(([key, value]) => [key, unxml(value)])),
+			input.installed !== null && input.print.loaded === true));
+	}
+
 	// CC14 (ompkit-fp72.120.16.18.2): a KeepAlive daemon running again after its previous instance died on SIGTERM
 	// (143: launchctl kickstart -k, bootout, or a kill) was restarted, not failed; exiting 0 on SIGTERM instead would stop
 	// KeepAlive {SuccessfulExit: false} from ever restarting it. SIGKILL (137), any other code, or a daemon that is not
@@ -1170,6 +1197,12 @@ export function checkServiceLinux(input: LinuxUnitInput): ServiceCheck[] {
 	} else {
 		checks.push({ id: "loaded", status: "PASS", message: `${input.unit} enabled=${input.enabled} active=${input.active}`, remediation: "None." });
 	}
+	if (input.job.name === "kit-update") {
+		checks.push(kitUpdateConfigCheck(
+			Object.fromEntries(Object.entries(systemdEnvironment(installed ?? "")).map(([key, value]) => [key, unquoteUnit(value).replace(/\$\$/g, "$")])),
+			installed !== null && (input.enabled || input.active)));
+	}
+
 	checks.push({ id: "logs", status: "PASS", message: "Output goes to the journal; use omp-kit service logs (journalctl) to inspect", remediation: "None." });
 	// SVC1 contract checks over the installed (or freshly rendered) unit.
 	checks.push(...checkSystemdContract(input.job.name, installed ?? input.renderedService, input.job.restart ?? "on-failure"));
