@@ -1,8 +1,9 @@
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Readable } from "node:stream";
 import { finished } from "node:stream/promises";
 import { loadGate } from "./infra.ts";
+import { SERVICE_LAUNCHER_NAME } from "./service-launcher.ts";
 import { randomUUID } from "node:crypto";
 import { constants as sqliteConstants, Database } from "bun:sqlite";
 
@@ -318,6 +319,9 @@ export function observeServiceLaunchers(run: (args: readonly string[]) => { code
 		if (tokens.length < 4) continue;
 		const pid = Number(tokens[0]);
 		if (!Number.isSafeInteger(pid)) continue;
+		// STABLETCC1: the stable service launcher (omp-kit-svc) only parents the real `service run <job>` process and shares its
+		// arguments; counting it would read every run as a second launcher of the job.
+		if (basename(tokens[1] ?? "") === SERVICE_LAUNCHER_NAME) continue;
 		for (let i = 1; i + 2 < tokens.length; i++) {
 			if (tokens[i] === "service" && tokens[i + 1] === "run" && tokens[i + 2] === job) {
 				if (scope === undefined || pid === process.pid || launcherSharesScope(run, pid, scope)) launchers.push({ pid, command });

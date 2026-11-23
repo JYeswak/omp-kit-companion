@@ -1,0 +1,3 @@
+### Changed
+
+- macOS kit jobs now run one stable service launcher, `~/.local/opt/omp-kit/service/omp-kit-svc`, instead of the per-release binary path. macOS keeps its "omp-kit would like to access files on a network volume" consent per executable path, so every release used to ask again; the launcher is a copy of the active release made at `omp-kit service install` and replaced in place by each release, starts the active release as a child with the same arguments, and forwards signals and the exit status. The first prompt after this release is the last one.

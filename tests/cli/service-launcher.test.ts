@@ -1,0 +1,140 @@
+// Coverage: src/service-launcher.ts, src/cli.ts (runServiceLauncher), src/service-run.ts (observeServiceLaunchers).
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { runServiceLauncher } from "../../src/cli.ts";
+import { renderLaunchdPlist, KNOWN_JOBS } from "../../src/service.ts";
+import { observeServiceLaunchers } from "../../src/service-run.ts";
+import { ensureServiceLauncher, installPrefix, isServiceLauncher, launcherChildPath, launcherExitStatus, serviceLauncherPath } from "../../src/service-launcher.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
+
+// STABLETCC1 (ompkit-ck2av): macOS keys the network-volume consent of a bundle-less tool by its path, so every launchd job
+// runs one copy of the kit binary at one path (the service launcher) that starts the active release as a child.
+afterAll(cleanupAllOwnedTmp);
+
+/** A prefix with one release (a shell script standing in for the binary), the active-release symlink, and nothing else. */
+function fixturePrefix(version = "1.0.0", body = "#!/bin/sh\nexit 0\n"): string {
+	const prefix = realpathSync(ownedTmp("service-launcher").path);
+	installRelease(prefix, version, body);
+	mkdirSync(join(prefix, "bin"), { recursive: true });
+	return prefix;
+}
+
+function installRelease(prefix: string, version: string, body: string): void {
+	mkdirSync(join(prefix, "releases", version, "bin"), { recursive: true });
+	writeFileSync(join(prefix, "releases", version, "bin", "omp-kit"), body, { mode: 0o755 });
+	const link = join(prefix, "bin", "omp-kit");
+	mkdirSync(join(prefix, "bin"), { recursive: true });
+	rmSync(link, { force: true });
+	symlinkSync(`../releases/${version}/bin/omp-kit`, link);
+}
+
+test("STABLETCC1: the launcher is a byte-identical executable copy of the active release at a fixed path, replaced in place by the next release", () => {
+	const prefix = fixturePrefix("1.0.0", "#!/bin/sh\necho one\n");
+	const first = ensureServiceLauncher(prefix);
+	expect(first.path).toBe(serviceLauncherPath(prefix));
+	expect(first.changed).toBe(true);
+	expect(readFileSync(first.path, "utf8")).toBe("#!/bin/sh\necho one\n");
+	expect(statSync(first.path).mode & 0o777).toBe(0o755);
+	expect(lstatSync(first.path).isSymbolicLink()).toBe(false);
+	// Idempotent: the same active release leaves the launcher untouched.
+	const inode = statSync(first.path).ino;
+	expect(ensureServiceLauncher(prefix).changed).toBe(false);
+	expect(statSync(first.path).ino).toBe(inode);
+	// The next release replaces the content at the SAME path.
+	installRelease(prefix, "1.0.1", "#!/bin/sh\necho two\n");
+	const second = ensureServiceLauncher(prefix);
+	expect(second.path).toBe(first.path);
+	expect(second.changed).toBe(true);
+	expect(readFileSync(second.path, "utf8")).toBe("#!/bin/sh\necho two\n");
+	expect(second.source).toBe(join(prefix, "releases", "1.0.1", "bin", "omp-kit"));
+	expect(existsSync(join(prefix, "service", ".omp-kit-svc.tmp"))).toBe(false);
+}, fixtureDeadlineS() * 1000);
+
+test("STABLETCC1 planted: a launcher that is a symlink to a release is replaced by a real file, never followed", () => {
+	const prefix = fixturePrefix("1.0.0", "#!/bin/sh\necho real\n");
+	mkdirSync(join(prefix, "service"), { recursive: true });
+	symlinkSync(join(prefix, "releases", "1.0.0", "bin", "omp-kit"), serviceLauncherPath(prefix));
+	expect(lstatSync(serviceLauncherPath(prefix)).isSymbolicLink()).toBe(true);
+	const result = ensureServiceLauncher(prefix);
+	expect(result.changed).toBe(true);
+	expect(lstatSync(result.path).isSymbolicLink()).toBe(false);
+	expect(readFileSync(result.path, "utf8")).toBe("#!/bin/sh\necho real\n");
+	expect(() => readlinkSync(result.path)).toThrow();
+}, fixtureDeadlineS() * 1000);
+
+test("STABLETCC1 planted: no active release, or an active link that leaves the releases directory, builds no launcher", () => {
+	const empty = realpathSync(ownedTmp("service-launcher-empty").path);
+	expect(() => ensureServiceLauncher(empty)).toThrow();
+	expect(existsSync(serviceLauncherPath(empty))).toBe(false);
+	const prefix = fixturePrefix();
+	const elsewhere = realpathSync(ownedTmp("service-launcher-elsewhere").path);
+	mkdirSync(join(elsewhere, "bin"), { recursive: true });
+	writeFileSync(join(elsewhere, "bin", "omp-kit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+	rmSync(join(prefix, "bin", "omp-kit"), { force: true });
+	symlinkSync(join(elsewhere, "bin", "omp-kit"), join(prefix, "bin", "omp-kit"));
+	expect(() => ensureServiceLauncher(prefix)).toThrow(/SERVICE_LAUNCHER_SOURCE_INVALID/);
+	expect(existsSync(serviceLauncherPath(prefix))).toBe(false);
+}, fixtureDeadlineS() * 1000);
+
+test("STABLETCC1: the install prefix honors an absolute OMP_KIT_INSTALL_PREFIX and the launcher is recognized by its name only", () => {
+	expect(installPrefix("/home/x", {})).toBe("/home/x/.local/opt/omp-kit");
+	expect(installPrefix("/home/x", { OMP_KIT_INSTALL_PREFIX: "/opt/kit" })).toBe("/opt/kit");
+	expect(installPrefix("/home/x", { OMP_KIT_INSTALL_PREFIX: "relative/kit" })).toBe("/home/x/.local/opt/omp-kit");
+	expect(isServiceLauncher("/p/service/omp-kit-svc")).toBe(true);
+	expect(isServiceLauncher("/p/releases/1.0.0/bin/omp-kit")).toBe(false);
+	expect(isServiceLauncher("/p/service/omp-kit-svc-old")).toBe(false);
+	expect(launcherChildPath("/p/service/omp-kit-svc")).toBe("/p/bin/omp-kit");
+	expect(launcherExitStatus(7, null)).toBe(7);
+	expect(launcherExitStatus(0, undefined)).toBe(0);
+	expect(launcherExitStatus(-1, "SIGTERM")).toBe(143);
+	expect(launcherExitStatus(-1, "SIGKILL")).toBe(137);
+});
+
+test("STABLETCC1: a rendered job program is the launcher, never a per-release path", () => {
+	const prefix = fixturePrefix();
+	const home = realpathSync(ownedTmp("service-launcher-home").path);
+	const job = { ...KNOWN_JOBS["load-watch"]!, label: "com.omp-kit.test.stabletcc1.load-watch" };
+	const plist = renderLaunchdPlist(home, job, serviceLauncherPath(prefix), null).text;
+	const arguments_ = plist.slice(plist.indexOf("<key>ProgramArguments</key>"), plist.indexOf("</array>", plist.indexOf("<key>ProgramArguments</key>")));
+	expect(arguments_).toContain(`<string>${join(prefix, "service", "omp-kit-svc")}</string>`);
+	expect(arguments_).not.toContain("/releases/");
+	expect(arguments_.indexOf("omp-kit-svc")).toBeLessThan(arguments_.indexOf("<string>service</string>"));
+});
+
+test("STABLETCC1: the launcher starts the active release with the same arguments and environment and returns its exit status", async () => {
+	const out = join(realpathSync(ownedTmp("service-launcher-run").path), "seen");
+	const prefix = fixturePrefix("1.0.0", `#!/bin/sh\nprintf '%s|%s|%s\\n' "$*" "$OMP_KIT_JOB" "$(basename "$0")" > "${out}"\nexit 7\n`);
+	const launcher = ensureServiceLauncher(prefix).path;
+	const status = await runServiceLauncher(launcher, ["service", "run", "load-watch"], { ...process.env, OMP_KIT_JOB: "load-watch" });
+	expect(status).toBe(7);
+	expect(readFileSync(out, "utf8").trim()).toBe("service run load-watch|load-watch|omp-kit");
+}, fixtureDeadlineS() * 1000);
+
+test("STABLETCC1 planted: a forwarded SIGTERM ends the child with 143 and a missing active release exits 127", async () => {
+	const ready = join(realpathSync(ownedTmp("service-launcher-ready").path), "ready");
+	const prefix = fixturePrefix("1.0.0", `#!/bin/sh\n: > "${ready}"\nexec sleep 60\n`);
+	const launcher = ensureServiceLauncher(prefix).path;
+	// runServiceLauncher spawns and installs its signal handlers before its first await, so they exist once it returns its promise.
+	const sleeper = runServiceLauncher(launcher, ["service", "run", "x"], { ...process.env });
+	for (let waited = 0; waited < 2000 && !existsSync(ready); waited++) Bun.sleepSync(5);
+	expect(existsSync(ready)).toBe(true);
+	process.emit("SIGTERM");
+	expect(await sleeper).toBe(143);
+	rmSync(join(prefix, "bin", "omp-kit"), { force: true });
+	expect(await runServiceLauncher(launcher, ["service", "run", "x"], { ...process.env })).toBe(127);
+}, fixtureDeadlineS() * 1000);
+
+test("STABLETCC1: the job-launcher observation skips the launcher row, so one run is one launcher", () => {
+	const ps = [
+		"101 /Users/josh/.local/opt/omp-kit/service/omp-kit-svc service run cc",
+		"102 /Users/josh/.local/opt/omp-kit/bin/omp-kit service run cc",
+		"103 /Users/josh/.local/bin/omp-kit service run ci-poller",
+	].join("\n");
+	const observed = observeServiceLaunchers(() => ({ code: 0, stdout: ps }), "cc");
+	expect(observed).toEqual({ launchers: [{ pid: 102, command: "service run cc" }] });
+	// Planted negative: a second real launcher of the job is still counted.
+	const two = observeServiceLaunchers(() => ({ code: 0, stdout: `${ps}\n104 /Users/josh/.local/bin/omp-kit service run cc` }), "cc");
+	expect("launchers" in two ? two.launchers.map(row => row.pid) : []).toEqual([102, 104]);
+});

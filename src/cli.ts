@@ -114,6 +114,7 @@ import { inspectMissionRch, liveMissionRchIo } from "./mission-rch.ts";
 import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
 import { readHotPaths } from "./fleet-guard/hot-cap.ts";
 import { acquireDaemonLock, acquireRunLock, claimIncarnation, DAEMON_HELD_EXIT, gateRunLoad, observeServiceLaunchers, OVERLAP_EXIT, readJobOff, readRunClaim, RUN_TIME_CAPS_MS, runWithCap, SKIPPED_LOAD_EXIT } from "./service-run.ts";
+import { ensureServiceLauncher, installPrefix, isServiceLauncher, launcherChildPath, launcherExitStatus, serviceLauncherPath } from "./service-launcher.ts";
 import { type RunLock } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, isLessonClass, latestCheckinAt, lessonIdentity, lessonRecordId, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput } from "./lessons.ts";
 import { buildFleetLessonsReport, FleetRepoSnapshot, readFleetRepoSnapshot, runFleetLessonsOnce } from "./fleet-lessons.ts";
@@ -2947,6 +2948,12 @@ async function runCacheRetainJob(home: string, jobsDir: string, claim: string, c
 	return result;
 }
 
+type InheritedChild = Bun.Subprocess<"inherit" | "ignore", "inherit", "inherit">;
+function spawnInheritedChild(argv: readonly string[], env: Record<string, string | undefined>, stdin: "inherit" | "ignore"): InheritedChild {
+	// The one inherited-stdio supervised child of the service plane (the cc daemon and the service launcher): live stdio and no deadline are its contract, so run() (captured, bounded) cannot stand in.
+	return Bun.spawn(argv as [string, ...string[]], { env: env as Record<string, string>, stdout: "inherit", stderr: "inherit", stdin }); // kitlib: inherited-stdio supervised child, see above
+}
+
 /**
  * CC14 (.18.2): the `service run cc` body. Holds the one-instance lock for
  * the child lifetime (launchd restarts us; a second concurrent holder is
@@ -2956,12 +2963,9 @@ async function runCacheRetainJob(home: string, jobsDir: string, claim: string, c
  */
 async function runCcService(home: string, adapter: string, lock: RunLock): Promise<CliResult> {
 	const cmd = ccServiceCommand(home, adapter);
-	let child: Bun.Subprocess<"inherit", "inherit", "ignore"> | null = null;
+	let child: InheritedChild | null = null;
 	try {
-		child = Bun.spawn(cmd.argv as [string, ...string[]], {
-			env: { ...process.env, CC_STATE: cmd.env.CC_STATE },
-			stdout: "inherit", stderr: "inherit", stdin: "ignore",
-		});
+		child = spawnInheritedChild(cmd.argv, { ...process.env, CC_STATE: cmd.env.CC_STATE }, "ignore");
 	} catch (error) {
 		lock.release();
 		return refusal("CC_SERVICE_SPAWN_FAILED", `Could not start the cc service: ${(error as Error).message}`,
@@ -3140,9 +3144,12 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		return refusal(code, `${name} has no usable command: ${command.reason}`,
 			`Add "${def.commandConfigKey}": {"argv": ["/absolute/program", "arg", ...], "cwd": "/absolute/dir"} to ${command.configPath}; nothing was changed.`);
 	};
+	// STABLETCC1: what a rendered job runs. macOS: the service launcher at one path that survives releases (src/service-launcher.ts);
+	// elsewhere the stable CLI path, whose symlink chain is fine because only macOS keys consent by path.
+	const programFor = (): string => linux ? stableLauncher(home) : serviceLauncherPath(installPrefix(home));
 	const resolveJob = (name: string) => {
 		const job = scoped[name]!;
-		const launcher = stableLauncher(home);
+		const launcher = programFor();
 		const watch = job.kind === "watch" ? resolveWatchTarget() : null;
 		return { job, launcher, watch };
 	};
@@ -3184,10 +3191,19 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					"Run on the fleet host with the omp-kit checkout present (OMP_KIT_FLEET_ROOT or fleet-watch.json); the shipped companion stays inert without it.");
 			}
 		}
-		if (!executableFile(launcher)) {
+		// STABLETCC1: the CLI must exist at the stable path; on macOS the rendered program is the service launcher, a copy of the
+		// active release made here (an apply) so the job never names a per-release path. A plan or dry run only names it.
+		if (!executableFile(stableLauncher(home))) {
 			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
-				errors: [{ code: "LAUNCHER_UNAVAILABLE", message: `Stable launcher ${launcher} is missing or not executable`,
+				errors: [{ code: "LAUNCHER_UNAVAILABLE", message: `Stable launcher ${stableLauncher(home)} is missing or not executable`,
 					remediation: "Install the kit at the stable path first; no service was changed." }], verification: "UNVERIFIED" };
+		}
+		if (!linux && !dry && !wantPlan) {
+			try { ensureServiceLauncher(installPrefix(home)); } catch (error) {
+				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+					errors: [{ code: "SERVICE_LAUNCHER_UNAVAILABLE", message: `The service launcher ${launcher} could not be made: ${error instanceof Error ? error.message : String(error)}`,
+						remediation: "Install a kit release at the stable path (omp-kit update), then reinstall the job; no service was changed." }], verification: "UNVERIFIED" };
+			}
 		}
 		if (job.kind === "watch" && !watch) {
 			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
@@ -3319,7 +3335,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				allChecks.push({ ...check, job: name });
 				continue;
 			}
-			const launcher = stableLauncher(home);
+			const launcher = programFor();
 			const watch = job.kind === "watch" ? resolveWatchTarget() : null;
 			const checks = linux
 				? checkServiceLinux({ home, job, launcher, unit: `omp-kit-${name}.service`, timer: null, pathUnit: null,
@@ -3332,6 +3348,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				const unloaded = checks.find(check => check.id === "loaded" && check.status === "FAIL");
 				if ((drifted && drifted.status !== "PASS") || missing || unloaded) {
 					const installed = linux ? null : readInstalledPlist(home, job.label);
+					if (!linux) { try { ensureServiceLauncher(installPrefix(home)); } catch { /* installService below reports a launcher that is still missing */ } }
 					const result = linux
 						? installSystemd(home, job, renderSystemdUnits(home, job, launcher, watch), defaultRunner)
 						: installService(home, job, launcher, watch, installed, queryPrint(job.label), defaultRunner);
@@ -5931,7 +5948,7 @@ async function corpusReport(request: ParsedCommand): Promise<CliResult> {
 			}
 			const units = renderSystemdUnits(home, job, launcher, ompPackageJson);
 			return { code: 0, data: { label: job.label, watch_path: ompPackageJson,
-				launchd_plist: renderLaunchdPlist(home, job, launcher, ompPackageJson).text,
+				launchd_plist: renderLaunchdPlist(home, job, serviceLauncherPath(installPrefix(home)), ompPackageJson).text,
 				systemd_path_unit: units.path, systemd_service_unit: units.service,
 				guidance: "Render-only: installs nothing. Run omp-kit service install omp-watch --dry-run to preview the managed install, then --apply --yes to install it." }, verification: "UNVERIFIED" };
 		}
@@ -6145,8 +6162,42 @@ export async function runCli(args: readonly string[] = process.argv.slice(2)): P
 	return exitCode;
 }
 
+/**
+ * STABLETCC1 (ompkit-ck2av): the body of `<prefix>/service/omp-kit-svc`, the stable-path copy of the kit binary every macOS
+ * launchd job program points at (src/service-launcher.ts says why). It starts the active release, `<prefix>/bin/omp-kit`, as a
+ * child with the same arguments and environment and live stdio, forwards the signals launchd sends, and returns the child's
+ * exit status. 127 names a missing active release: the job fails visibly rather than running stale code.
+ */
+export async function runServiceLauncher(executablePath: string, args: readonly string[], env: Record<string, string | undefined>): Promise<number> {
+	const release = launcherChildPath(executablePath);
+	if (!executableFile(release)) {
+		process.stderr.write(`omp-kit-svc: the active release ${release} is missing or not executable; reinstall the kit\n`);
+		return 127;
+	}
+	let child: InheritedChild;
+	try {
+		child = spawnInheritedChild([release, ...args], env, "inherit");
+	} catch (error) {
+		process.stderr.write(`omp-kit-svc: could not start ${release}: ${error instanceof Error ? error.message : String(error)}\n`);
+		return 126;
+	}
+	const started = child;
+	const handlers = (["SIGTERM", "SIGINT", "SIGHUP", "SIGUSR1", "SIGUSR2"] as const).map(signal => {
+		const handler = () => { try { started.kill(signal); } catch { /* the child already exited; the wait below reports it */ } };
+		process.on(signal, handler);
+		return [signal, handler] as const;
+	});
+	try {
+		const code = await started.exited;
+		return launcherExitStatus(code, started.signalCode);
+	} finally {
+		for (const [signal, handler] of handlers) process.off(signal, handler);
+	}
+}
+
 if (import.meta.main) {
-	runCli().then((code) => { process.exitCode = code; }, (error: unknown) => {
+	const entry = isServiceLauncher(process.execPath) ? runServiceLauncher(process.execPath, process.argv.slice(2), process.env) : runCli();
+	entry.then((code) => { process.exitCode = code; }, (error: unknown) => {
 		const message = error instanceof Error ? error.message : String(error);
 		process.stderr.write(`CLI_FAILURE: ${message}\n`);
 		process.exitCode = 1;
