@@ -209,18 +209,24 @@ test("regex: a 1 MiB non-matching path completes without hanging", () => {
 	expect(installedRelease(`../releases/${"8".repeat(1024 * 1024)}/bin/omp-kit`)).toBeNull();
 });
 
-test("live: a behind seat gets exactly one notice per release, idle nextTurn, busy aside", async () => {
+test("live: a behind first session gets one notice; a later session gets none even after memory reset", async () => {
 	const f = files();
+	const processSent = new Set<string>();
 	const { api, sent, handlers } = fakePi(IDLE);
-	await kitUpgradeNotice(api, { selfPath: LOADED, session: "seat-1", home: "/h", ...f.deps });
+	await kitUpgradeNotice(api, { selfPath: LOADED, home: "/h", sentMemory: processSent, ...f.deps });
 	handlers["session_start"]!(null, IDLE);
-	expect(sent.length).toBe(1);
+	expect(sent).toHaveLength(1);
 	expect(sent[0]!.content).toContain("0.2.58 is installed; this seat runs 0.2.57");
 	expect(sent[0]!.deliverAs).toBe("nextTurn");
-	handlers["tool_execution_end"]!(null, BUSY);
-	handlers["tool_execution_end"]!(null, IDLE);
-	expect(sent.length).toBe(1);
-	expect(f.writes.length).toBe(1);
+
+	processSent.clear();
+	const laterSession: UpgradeNoticeContext = {
+		sessionManager: { getSessionId: () => "seat-2" },
+		isIdle: () => true,
+	};
+	handlers["session_start"]!(null, laterSession);
+	expect(sent).toHaveLength(1);
+	expect(f.writes).toHaveLength(1);
 });
 
 for (const outcome of ["reconciled", "compensated", "compensated during observation"] as const) {

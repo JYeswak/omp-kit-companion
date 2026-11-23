@@ -203,6 +203,8 @@ export interface UpgradeNoticeDeps {
 	writeFile?: (path: string, content: string) => void;
 	/** Seam for fleet-mode detection: true when the path is a regular file (tests inject fakes). */
 	isFile?: (path: string) => boolean;
+	/** Process-local duplicate suppression (tests can reset this between session events). */
+	sentMemory?: Set<string>;
 }
 
 function defaultIsFile(path: string): boolean {
@@ -239,10 +241,15 @@ function readSentReleases(path: string, deps: UpgradeNoticeDeps): string[] {
 
 
 export default async function kitUpgradeNotice(pi: UpgradeNoticeApi, deps: UpgradeNoticeDeps = {}): Promise<void> {
-	const sentMemory = new Set<string>();
+	const sentMemory = deps.sentMemory ?? new Set<string>();
 	let warned = false;
+	let firstSession: string | undefined;
 	const check = (_event: unknown, ctx: UpgradeNoticeContext) => {
 		try {
+			const session = deps.session ?? ctx.sessionManager?.getSessionId?.();
+			if (session === undefined || session === "unknown-session") return;
+			if (firstSession === undefined) firstSession = session;
+			if (session !== firstSession) return;
 			const loaded = loadedRelease(deps.selfPath ?? import.meta.url);
 			if (loaded === null) return;
 			const home = deps.home ?? homedir();
@@ -258,8 +265,6 @@ export default async function kitUpgradeNotice(pi: UpgradeNoticeApi, deps: Upgra
 			if (gap === null || sentMemory.has(gap.installed)) return;
 			const tty = deps.isTTY ?? process.stdout?.isTTY === true;
 			if (!tty) return; // headless print-mode run: no idle semantics, never notice, never consume the one-notice marker
-			const session = deps.session ?? ctx.sessionManager?.getSessionId?.() ?? "unknown-session";
-			if (session === "unknown-session") return; // no session identity: not a fleet seat, never notice
 			const file = join(home, ".local", "state", "omp-kit", `upgrade-notice-${sessionKey(session)}.json`);
 			const sent = readSentReleases(file, deps);
 			if (sent.includes(gap.installed)) {
@@ -274,7 +279,7 @@ export default async function kitUpgradeNotice(pi: UpgradeNoticeApi, deps: Upgra
 			const stateHome = join(home, ".local", "state");
 			const xdg = deps.home === undefined ? process.env.XDG_STATE_HOME ?? stateHome : stateHome;
 			if (!isAbsolute(xdg) || resolve(xdg) !== xdg) return;
-			// UPGRADEHOLD1: a fleet hold sends no notice and consumes no marker, so the release is noticed once the hold ends.
+			// UPGRADEHOLD1: a fleet hold sends no notice and consumes no marker.
 			if (readUpgradeHold(join(stateHome, "omp-kit")).held || (xdg !== stateHome && readUpgradeHold(join(xdg, "omp-kit")).held)) return;
 			// A scheduled or manual update writes its receipt before switching the link and
 			// clears it only after reconciliation or restoration. Re-read the link after the
