@@ -99,8 +99,10 @@ function landCommitFlockTimeoutSeconds(): number {
  * real path. A compiled binary cannot posix_spawn from its bunfs image
  * (/$bunfs/... is not executable), so prefer an explicit scripts dir, then
  * the release layout, then the source tree (dev `bun src/cli.ts` runs where
- * it exists on disk). Throws a named error instead of a downstream ENOENT. */
-function kitCommitSh(): string {
+ * it exists on disk). Throws a named error instead of a downstream ENOENT.
+ * Exported for the release-layout proof: pass a fake executable path to judge
+ * a release tree outside the source tree. */
+export function kitCommitSh(executablePath: string = process.execPath): string {
 	const override = process.env.OMP_KIT_SCRIPTS_DIR;
 	if (override !== undefined && override !== "") {
 		const candidate = join(resolve(override), "kit-commit.sh");
@@ -108,7 +110,7 @@ function kitCommitSh(): string {
 		throw new Error(`KIT_COMMIT_TRAMPOLINE_UNAVAILABLE: OMP_KIT_SCRIPTS_DIR names no kit-commit.sh: ${override}`);
 	}
 	try {
-		const candidate = join(releaseRoot(process.execPath), "scripts", "kit-commit.sh");
+		const candidate = join(releaseRoot(executablePath), "scripts", "kit-commit.sh");
 		if (existsSync(candidate)) return candidate;
 	} catch { /* not a release layout (dev runs, test binaries) */ }
 	const fallback = join(import.meta.dir, "../scripts/kit-commit.sh");
