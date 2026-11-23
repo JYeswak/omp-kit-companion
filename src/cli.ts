@@ -57,6 +57,7 @@ import { auditMemoryAtRest } from "./memory-audit.ts";
 import { inspectMemoryReadiness } from "./memory-readiness.ts";
 import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, reconcilePendingUpdate, undoKitUpdate, type KitUpdateInput } from "./kit-update.ts";
 import { KIT_UPDATE_REPO_PATTERN, kitUpdateJobOverall, relinkKitPlugin, retainReleases, runKitUpdateJob, runningReleaseVersion } from "./kit-update-job.ts";
+import { runStartProbe } from "./start-probe.ts";
 import { claudeSaveServiceConfig, claudeSaveUserConfigPath, runClaudeSaveJob, runGitleaksScan, type GitleaksScanRequest } from "./claude-save-job.ts";
 import { ensureMutationStateRoot, writePrivate, type PendingInspection } from "./mutations.ts";
 import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
@@ -5145,6 +5146,24 @@ async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 		const outcome = await applyKitUpdate(plan);
 		const envelope = kitUpdateEnvelope(plan, outcome);
 		if (outcome.status !== "UPDATED") return envelope;
+		// TCCPROMPT1: probe omp after installing, before the plugin link moves. Only a
+		// probe that does not finish inside the deadline refuses the update with
+		// UPGRADE_HELD: the plugin link is not moved and no notice goes out. A start
+		// that exits (zero or not) is healthy, and an unspawnable omp is unprobeable,
+		// so both proceed to relinking. The probe sits here, not before the install,
+		// because applyKitUpdate is atomic and omp is deliberately absent from
+		// hermetic updater journeys (PARTIAL there must stay PARTIAL). No hold file is
+		// written (upgrade-hold.ts is a read-only switch with no writer API).
+		const probe = await runStartProbe();
+		if (probe.timedOut) {
+			return { code: 1,
+				data: { overall: "FINDINGS", scope, action: "REFUSED", reason: "UPGRADE_HELD",
+					start_probe: { started: probe.started, timed_out: probe.timedOut, exit: probe.exit, tail: probe.tail } },
+				errors: [{ code: "UPGRADE_HELD",
+					message: `omp did not start inside the deadline; the kit update to ${plan.release.version} was held after installing: plugin link not moved, no notice emitted`,
+					remediation: "Start omp once by hand; when it answers, retry the update or reconcile the pending receipt." }],
+				verification: "UNVERIFIED" };
+		}
 		const prefix = dirname(dirname(release));
 		const binary = join(prefix, "bin", "omp-kit");
 		const store = outcome.activeVersion ? join(prefix, "releases", outcome.activeVersion) : null;

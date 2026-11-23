@@ -10,6 +10,7 @@ import type { FullTestReport } from "./full-test-runner.ts";
 import { refreshFleetHooksLive, type HookRefreshReport } from "./hook-refresh.ts";
 import { acquireKitUpdateLock, inspectPendingKitUpdate, type PendingKitUpdate, type UpdateLockToken } from "./mutations.ts";
 import { readUpgradeHold } from "./upgrade-hold.ts";
+import { runStartProbe, type StartProbeResult } from "./start-probe.ts";
 import { makeDirsWritable } from "./kitlib/tmp.ts";
 
 /** The job installs the kit for the whole machine: it has no project, and its service cwd (HOME) is never watched as one. */
@@ -44,6 +45,8 @@ export type KitUpdateJobDependencies = {
 	refreshHooks?: (store: string, home: string) => Promise<HookRefreshReport>;
 	/** The omp the postcheck judges; production resolves the seat's omp. Tests inject a fixed selection. */
 	omp?: () => UpdateOmpSelection | null;
+	/** TCCPROMPT1 test seam for the omp start probe; production runs the model-free `omp -p ... --model omp-kit-start-probe/none` start probe (src/start-probe.ts) through kitlib. */
+	startProbe?: () => Promise<StartProbeResult>;
 	/**
 	 * KITLIVEDEFER1 test seam for finishing a deferred-live PENDING receipt: re-runs
 	 * the live ladder against the active install. Production runs the candidate
@@ -681,6 +684,21 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 			return record(config.stateRoot, runId, { status: "SKIPPED", receiptId: null, activeVersion: installedVersion(config.prefix),
 				notification: false, reason: "KIT_UPDATE_REPEAT_SUPPRESSED", targetVersion: source.version, ...(repeat.postcheckReason !== undefined ? { postcheckReason: repeat.postcheckReason } : {}),
 				ompResolvedFrom: judgedOmp.resolvedFrom, ompVersion: judgedOmp.version, ompLauncher: judgedOmp.launcher, relink: "NOT_RUN", service: "NOT_RUN" });
+		}
+		// TCCPROMPT1: the omp start probe runs before anything is installed. Only a probe
+		// that does not finish inside the deadline holds the update: the plugin link and
+		// the active release stay untouched and no update notice goes out. A start that
+		// exits (zero or not) is healthy, and an unspawnable omp is unprobeable, so both
+		// let the update proceed. No hold file is written (upgrade-hold.ts is a read-only
+		// switch with no writer API); the UPGRADE_HELD reason is the hold signal.
+		const gated = await (dependencies.startProbe ?? runStartProbe)();
+		if (gated.timedOut) {
+			await dependencies.notify?.(`omp-kit update HELD (UPGRADE_HELD): omp did not start inside the deadline; `
+				+ `plugin link and active release untouched; probe tail: ${gated.tail}`);
+			return record(config.stateRoot, runId, { status: "SKIPPED", receiptId: null, activeVersion: installedVersion(config.prefix),
+				notification: true, reason: "UPGRADE_HELD", targetVersion: source.version,
+				ompResolvedFrom: judgedOmp?.resolvedFrom, ompVersion: judgedOmp?.version ?? null, ompLauncher: judgedOmp?.launcher ?? null,
+				relink: "NOT_RUN", service: "NOT_RUN" });
 		}
 		const runningVersion = runningReleaseVersion(config.prefix);
 		const result = await apply(preview);
