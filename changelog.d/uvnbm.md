@@ -1,0 +1,1 @@
+- Non-blocking reminders now point common shell reads, symbol searches, source rewrites, and polling loops to the native tools. Git commits and `omp-kit land` also suggest `ubs --files` when the active session has no successful UBS scan.

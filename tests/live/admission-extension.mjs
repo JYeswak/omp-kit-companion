@@ -34,6 +34,9 @@ export default function admissionExtension(pi) {
 	});
 	pi.on("agent_end", (_event, context) => record(context, { event: "end" }));
 	pi.on("tool_call", async (event, context) => {
+		// TTSR streams undecoded Bash JSON; its delta records can all contain
+		// empty arguments. Bind the decoded command at actual tool admission.
+		if (event.toolName === "bash") record(context, { event: "call", timestamp: Date.now(), id: event.toolCallId, name: event.toolName, args: event.input });
 		record(context, { event: "execution", id: event.toolCallId });
 		if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
 		if (typeof context?.cwd !== "string") return { block: true, reason: "tool-admission conformance: native caller cwd unavailable" };

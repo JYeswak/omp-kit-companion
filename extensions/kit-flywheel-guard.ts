@@ -96,7 +96,7 @@ export interface FlywheelContext {
 	isIdle?(): boolean;
 	ui?: { notify(message: string, type?: "info" | "warning" | "error"): void };
 	sessionManager?: {
-		getEntries?(): readonly unknown[]; getSessionId?(): string; getSessionFile?(): string | undefined;
+		getEntries?(): readonly unknown[]; getBranch?(): readonly unknown[]; getSessionId?(): string; getSessionFile?(): string | undefined;
 		getLeafId?(): string | null; getEntry?(id: string): unknown;
 	};
 	agent?: NativeContext["agent"];
@@ -328,6 +328,50 @@ function simpleExecutable(words: string[]): { exe: string; raw: string; rest: st
 	const first = words[at];
 	if (first === undefined) return null;
 	return { exe: first.slice(first.lastIndexOf("/") + 1).toLowerCase(), raw: first, rest: words.slice(at + 1) };
+}
+
+const UBS_TOOL_ROUTE = "kit-tool-route-ubs: Run `ubs --files <changed>` before saving; it scans changed files for bugs. Skill: `ubs`.";
+
+function needsUbsReminder(command: string, ctx: FlywheelContext): boolean {
+	if (!command.includes("commit") && !command.includes("land")) return false;
+	const saving = shellCommands(command).some(words => {
+		const parsed = simpleExecutable(words);
+		return parsed !== null && !parsed.rest.some(word => word === "-h" || word === "--help" || word === "--dry-run")
+			&& ((parsed.exe === "git" && firstVerb(parsed.rest, GIT_DIR_FLAGS) === "commit")
+				|| (parsed.exe === "omp-kit" && parsed.rest[0] === "land"));
+	});
+	if (!saving) return false;
+	const branch = ctx.sessionManager?.getBranch?.();
+	if (!branch) return false; // Unknown history is not evidence that the check was omitted.
+	// Read active ancestry only on a save. A quoted mention, detached start, or
+	// successful enclosing shell after a skipped command is not a completed UBS scan.
+	const successful = new Set<string>();
+	for (let at = branch.length - 1; at >= 0; at--) {
+		const entry = branch[at];
+		if (field(entry, "type") !== "message") continue;
+		const message = field(entry, "message"), role = field(message, "role");
+		if (role === "toolResult" && field(message, "toolName") === "bash") {
+			const id = field(message, "toolCallId"), details = field(message, "details");
+			if (typeof id === "string" && field(message, "isError") === false && details !== undefined
+				&& field(details, "async") === undefined && !resultFailed(message)) successful.add(id);
+		} else if (role === "assistant" && successful.size > 0) {
+			const parts = field(message, "content");
+			if (Array.isArray(parts)) for (const part of parts) {
+				const id = field(part, "id");
+				if (field(part, "type") !== "toolCall" || field(part, "name") !== "bash" || typeof id !== "string" || !successful.delete(id)) continue;
+				const invoked = field(field(part, "arguments"), "command");
+				if (typeof invoked !== "string" || /[;&|<>\r\n`$]/.test(invoked)) continue;
+				const [words] = shellCommands(invoked);
+				if (!words) continue;
+				const ubs = simpleExecutable(words);
+				if (ubs?.exe === "ubs" && !["serve", "daemon", "doctor", "explain", "sessions", "robot-docs"].includes(ubs.rest[0] ?? "")
+					&& !ubs.rest.some(word => ["-h", "--help", "--version", "--list-categories", "--update", "--update-modules"].includes(word)
+						|| word === "--schema" || word.startsWith("--schema="))) return false;
+			}
+			successful.clear();
+		}
+	}
+	return true;
 }
 
 /**
@@ -3049,6 +3093,17 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		}
 		if (briefed && verdict?.block !== true) return { ...(verdict ?? {}), input: briefed };
 		const command = typeof event.toolName === "string" && event.toolName.toLowerCase() === "bash" ? field(event.input, "command") : undefined;
+		// Keep this side channel out of the verdict: returning an advisory object
+		// here would prevent the existing commit-autocomplete branch from running.
+		try {
+			if (typeof command === "string" && needsUbsReminder(command, ctx)) {
+				ctx.ui?.notify(UBS_TOOL_ROUTE, "info");
+				pi.sendMessage({ customType: "kit-tool-route-ubs", content: UBS_TOOL_ROUTE, display: false },
+					{ deliverAs: "aside", triggerTurn: false });
+			}
+		} catch (error) {
+			ctx.ui?.notify(`kit-tool-route-ubs: advisory unavailable (${error instanceof Error ? error.message : String(error)}); command admission is unchanged.`, "warning");
+		}
 		const act = typeof command === "string" ? trackerAct(command) : null;
 		// AUTOCOMPLETE1 (ompkit-fp72.135.3.17): on an allowed `git commit`, complete what the kit already knows
 		// (Bead trailer from the live reservation, fragment scaffold, Supersedes from blame) by revising the raw

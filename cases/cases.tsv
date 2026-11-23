@@ -493,3 +493,16 @@ kit-frontend-foundations	fire	tool	write	public/index.html	<main>Overview</main>
 kit-frontend-foundations	quiet	tool	write	docs/README.md	This component changes its responsive breakpoint.	The same keywords in a Markdown write are out of scope.	
 kit-frontend-foundations	quiet	tool	edit	src/config.ts	const component = 'sidebar';	A non-UI file remains quiet even when a condition matches.	
 kit-frontend-foundations	quiet	tool	edit	src/styles/layout.css	.layout { color: var(--text); }	An in-scope payload with no foundation trigger stays quiet.	
+kit-tool-route	fire	tool	bash	-	cat src/sample.ts	TOOLROUTE1: one source file routes to native read.	{"tracked":{}}
+kit-tool-route	fire	tool	bash	-	head -n 12 src/sample.ts	TOOLROUTE1: a head range routes to read.	{"tracked":{}}
+kit-tool-route	fire	tool	bash	-	tail -12 src/sample.ts	TOOLROUTE1: a tail range routes to read.	{"tracked":{}}
+kit-tool-route	fire	tool	bash	-	sed -n '12,18p' src/sample.ts	TOOLROUTE1: a sed line range routes to read.	{"tracked":{}}
+kit-tool-route	quiet	tool	bash	-	cat src/one.ts src/two.ts | wc -c	TOOLROUTE1: concatenation into another program is not one-file reading.	{"tracked":{}}
+kit-tool-route-search	fire	tool	bash	-	grep -rn resolveQueue src	TOOLROUTE1: an identifier across src routes to symbol navigation.	{"tracked":{}}
+kit-tool-route-search	quiet	tool	bash	-	grep -rn 'queue is unavailable' src	TOOLROUTE1: a literal log string is not a symbol lookup.	{"tracked":{}}
+kit-tool-route-edit	fire	tool	bash	-	sed -i.bak 's/old/new/' src/sample.ts	TOOLROUTE1: source mutation routes to anchored edit.	{"tracked":{}}
+kit-tool-route-edit	fire	tool	bash	-	python3 -c 'from pathlib import Path; p=Path("src/sample.ts"); p.write_text(p.read_text().replace("old", "new"))'	TOOLROUTE1: a source text rewrite routes to anchored edit.	{"tracked":{}}
+kit-tool-route-edit	quiet	tool	bash	-	printf old | sed 's/old/new/'	TOOLROUTE1: a stream transformation is not a file edit.	{"tracked":{}}
+kit-tool-route-wait	fire	tool	bash	-	for i in 1 2; do sleep 0; done	TOOLROUTE1: sleeping inside a loop routes to job notifications.	{"tracked":{}}
+kit-tool-route-wait	quiet	tool	bash	-	sleep 0	TOOLROUTE1: a single sleep is not polling.	{"tracked":{}}
+kit-tool-route-wait	quiet	tool	bash	-	printf 'for i in 1 2; do sleep 0; done'	TOOLROUTE1: quoted example is not a running loop.	{"tracked":{}}
