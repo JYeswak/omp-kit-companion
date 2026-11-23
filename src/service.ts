@@ -585,7 +585,7 @@ const LOAD_WATCH_ENV_KEYS = ["OMP_KIT_AM_PROBE_PROJECT", "OMP_KIT_AM_PROBE_AGENT
 const AM_PROBE_AGENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 /** Explicit values from the installing shell replace the installed ones (two empty strings clear them); a re-render from a
  * shell without them keeps what the installed job file carries, so an update never silently drops the probe target. */
-function loadWatchEnvironment(job: ServiceJobDef, installed: Record<string, string> | null): [string, string][] {
+function loadWatchProbeEnvironment(job: ServiceJobDef, installed: Record<string, string> | null): [string, string][] {
 	if (job.name !== "load-watch") return [];
 	const explicit = LOAD_WATCH_ENV_KEYS.some(key => process.env[key] !== undefined);
 	const source: Record<string, string | undefined> = explicit ? process.env : (installed ?? {});
@@ -599,6 +599,28 @@ function loadWatchEnvironment(job: ServiceJobDef, installed: Record<string, stri
 		return [];
 	}
 	return [["OMP_KIT_AM_PROBE_PROJECT", project], ["OMP_KIT_AM_PROBE_AGENT", agent]];
+}
+
+/** AMCEILKEEP1 (ompkit-yf8sg): the Agent Mail RSS ceiling the load-watch am-watch pass reads (src/am-watch.ts). The 0.2.145
+ * install re-rendered load-watch without it, the 6 GiB default applied to a 6.7 GB server and am-watch killed Agent Mail
+ * at 22:27:38Z. An explicit value from the installing shell replaces the installed one (an empty string clears it), and a
+ * re-render from a shell without it keeps the installed value, exactly as the probe target above. */
+export const AM_RSS_CEILING_ENV_KEY = "OMP_KIT_AM_RSS_CEILING_BYTES";
+function loadWatchCeilingEnvironment(job: ServiceJobDef, installed: Record<string, string> | null): [string, string][] {
+	if (job.name !== "load-watch") return [];
+	const explicitRaw = process.env[AM_RSS_CEILING_ENV_KEY];
+	const explicit = explicitRaw !== undefined;
+	const raw = explicit ? explicitRaw : installed?.[AM_RSS_CEILING_ENV_KEY];
+	if (raw === undefined || raw === "") return [];
+	const value = Number(raw);
+	if (/^[0-9]+$/.test(raw) && Number.isSafeInteger(value) && value > 0) return [[AM_RSS_CEILING_ENV_KEY, String(value)]];
+	// An explicit value that is not a positive integer is a caller bug and fails loudly; an unusable installed one persists nothing.
+	if (explicit) throw new Error(`AM_CEILING_INVALID: ${AM_RSS_CEILING_ENV_KEY} must be a positive integer byte count`);
+	return [];
+}
+
+function loadWatchEnvironment(job: ServiceJobDef, installed: Record<string, string> | null): [string, string][] {
+	return [...loadWatchProbeEnvironment(job, installed), ...loadWatchCeilingEnvironment(job, installed)];
 }
 
 const KIT_UPDATE_ENV_KEYS = ["OMP_KIT_UPDATE_ENABLED", "OMP_KIT_UPDATE_POLL", "OMP_KIT_UPDATE_REPO", "OMP_KIT_UPDATE_INDEX", "OMP_KIT_UPDATE_ARCHIVE", "OMP_KIT_UPDATE_VERSION", "OMP_KIT_UPDATE_SOURCE_TAG"] as const;
@@ -747,7 +769,7 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 	if (installedService !== null) {
 		installedUpdate = {};
 		const parsed = systemdEnvironment(installedService);
-		for (const key of [...KIT_UPDATE_ENV_KEYS, ...LOAD_WATCH_ENV_KEYS]) {
+		for (const key of [...KIT_UPDATE_ENV_KEYS, ...LOAD_WATCH_ENV_KEYS, AM_RSS_CEILING_ENV_KEY]) {
 			const raw = parsed[key];
 			// systemdQuote writes $ as $$, but unquoteUnit only decodes $$$$: without this a kept $
 			// doubles on every re-render. Kept-path only; contract checks keep their own decode.
