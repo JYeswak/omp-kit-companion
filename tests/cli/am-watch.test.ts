@@ -20,7 +20,7 @@ const PRINT_OK = [
 ].join("\n");
 const PS_OVER = [
 	"    1      64 /sbin/launchd",
-	"  111 7340032 /Users/fixture/.local/bin/am serve-http --host 127.0.0.1 --port 8765",
+	"  111 27262976 /Users/fixture/.local/bin/am serve-http --host 127.0.0.1 --port 8765",
 	"  222    1024 /usr/bin/python3 census",
 ].join("\n");
 const PS_QUIET = [
@@ -94,11 +94,35 @@ test("AMWATCH1: an over-ceiling RSS restarts exactly once and records a receipt"
 	expect(result.status).toBe("RESTARTED");
 	expect(result.reason).toBe("rss-ceiling");
 	expect(result.pid).toBe(111);
-	expect(result.rssBytes).toBe(7340032 * 1024);
+	expect(result.rssBytes).toBe(27262976 * 1024);
 	expect(world.kickstarts).toEqual([["launchctl", "kickstart", "-k", "gui/501/com.agent-mail"]]);
 	const receipt = JSON.parse(readFileSync(join(root, AM_WATCH_RECEIPT_NAME), "utf8")) as Record<string, unknown>;
-	expect(receipt).toMatchObject({ schema_version: 1, pid: 111, rss_bytes: 7340032 * 1024, reason: "rss-ceiling", kickstart_rc: 0 });
+	expect(receipt).toMatchObject({ schema_version: 1, pid: 111, rss_bytes: 27262976 * 1024, reason: "rss-ceiling", kickstart_rc: 0 });
 	expect(typeof receipt.finished_at).toBe("string");
+});
+
+// AMCEILKEEP1 (ompkit-yf8sg): the 0.2.145 install dropped the hand-set ceiling and the 6 GiB default killed a healthy 6.7 GB server.
+const PS_HEALTHY_LARGE = [
+	"    1      64 /sbin/launchd",
+	"  111 7000000 /Users/fixture/.local/bin/am serve-http --host 127.0.0.1 --port 8765",
+].join("\n");
+
+test("AMCEILKEEP1: a healthy 7 GiB Agent Mail is not restarted under the default ceiling; an explicit 6 GiB ceiling still restarts it", () => {
+	const saved = process.env.OMP_KIT_AM_RSS_CEILING_BYTES;
+	try {
+		delete process.env.OMP_KIT_AM_RSS_CEILING_BYTES;
+		const quiet = makeWorld({ ps: PS_HEALTHY_LARGE, tail: QUIET_LOG });
+		const result = checkAmWatch(fixtureRoot(), depsFor(quiet));
+		expect(result.status).not.toBe("RESTARTED");
+		expect(quiet.kickstarts).toEqual([]);
+		process.env.OMP_KIT_AM_RSS_CEILING_BYTES = String(6 * 1024 * 1024 * 1024);
+		const strict = makeWorld({ ps: PS_HEALTHY_LARGE, tail: QUIET_LOG });
+		const restarted = checkAmWatch(fixtureRoot(), depsFor(strict));
+		expect(restarted.status).toBe("RESTARTED");
+		expect(restarted.reason).toBe("rss-ceiling");
+	} finally {
+		if (saved === undefined) delete process.env.OMP_KIT_AM_RSS_CEILING_BYTES; else process.env.OMP_KIT_AM_RSS_CEILING_BYTES = saved;
+	}
 });
 
 test("AMWATCH1: a fresh fatal line restarts at low RSS", () => {

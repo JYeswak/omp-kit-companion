@@ -34,8 +34,8 @@ import { runSync } from "./kitlib/run.ts";
 
 /** The launchd label of the Agent Mail server (never a kit label). */
 export const AM_WATCH_LABEL = "com.agent-mail";
-/** Default RSS ceiling that triggers a restart: 6 GB. */
-export const AM_WATCH_RSS_CEILING_BYTES = 6 * 1024 * 1024 * 1024;
+/** Default RSS ceiling that triggers a restart: 24 GiB (4.7 percent of the 512 GiB Studio). The old 6 GiB default killed a healthy 6.7 GB Agent Mail at 22:27:38Z on 2026-11-22 once an install dropped the hand-set OMP_KIT_AM_RSS_CEILING_BYTES; a default above the real working set means a dropped variable cannot kill the mail server. */
+export const AM_WATCH_RSS_CEILING_BYTES = 24 * 1024 * 1024 * 1024;
 /** Minimum gap between restarts: 30 min. */
 export const AM_WATCH_COOLDOWN_MS = 30 * 60 * 1000;
 /** Receipt name inside the load-watch state dir (its owned state). */
