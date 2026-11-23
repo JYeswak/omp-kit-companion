@@ -734,7 +734,24 @@ test("SHIPSCRIPTS1: actual archive retains script dependency validation without 
 	expect(extracted.rc, new TextDecoder().decode(extracted.stderr)).toBe(0);
 	console.log(new Date().toISOString(), "SHIPSCRIPTS1 actual archive dependency validation");
 	expect(await checkPackagedScriptDependencies(stage)).toEqual([]);
+	// [a] the gap scanner ships in the archive beside the findings library it sources.
+	expect(existsSync(join(stage, "scripts/check-gap-mention.sh"))).toBe(true);
+	expect(existsSync(join(stage, "scripts/kitlib-findings.sh"))).toBe(true);
 
+	// [b] planted negative: a shipped extension referencing the scanner refuses
+	// when the scanner is dropped from the archive, naming the missing script.
+	const scannerPath = join(stage, "scripts/check-gap-mention.sh");
+	const scannerBytes = readFileSync(scannerPath);
+	writeFileSync(join(stage, "extensions/fixture-scanner-reference.ts"),
+		'export const scanner = new URL("../scripts/check-gap-mention.sh", import.meta.url);\n');
+	rmSync(scannerPath);
+	expect(await checkPackagedScriptDependencies(stage)).toEqual([{
+		file: "extensions/fixture-scanner-reference.ts",
+		error: "MISSING_SCRIPT_DEPENDENCY scripts/check-gap-mention.sh",
+	}]);
+	writeFileSync(scannerPath, scannerBytes);
+	rmSync(join(stage, "extensions/fixture-scanner-reference.ts"));
+	expect(await checkPackagedScriptDependencies(stage)).toEqual([]);
 
 	// An additional extension proves the check derives references, rather than
 	// special-casing the flywheel's scanner name.
@@ -747,7 +764,7 @@ test("SHIPSCRIPTS1: actual archive retains script dependency validation without 
 	}]);
 	writeFileSync(join(stage, "scripts/fixture-helper.sh"), "#!/bin/sh\nexit 0\n");
 	expect(await checkPackagedScriptDependencies(stage)).toEqual([]);
-});
+}, fixtureDeadlineS(30) * 1_000);
 
 test("native archive's br admission reaches its creation, review and claim guard entrypoints", async () => {
 	const decoder = new TextDecoder();
