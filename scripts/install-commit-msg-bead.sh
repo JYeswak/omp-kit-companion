@@ -815,6 +815,14 @@ runner_stale() {
 		{ ! has_line_with "$1" 'replay one buffered copy' || ! has_line_with "$1" "$RUNNER_GENERATION:"; }
 }
 
+# member_mode_ok <path> <want>: a +x member must be executable (the chain
+# runner only runs executable members, so a byte-identical member without the
+# exec bit is silently skipped on every commit and push); a -x helper must
+# stay inert (an executable helper would run arg-less and fail the chain).
+member_mode_ok() {
+	if [ "$2" = "+x" ]; then [ -x "$1" ]; else [ ! -x "$1" ]; fi
+}
+
 # managed_dispatcher_body: the ignored shim a tracked hook chain executes to
 # reach the $GIT_DIR-local mirror. It runs every executable NN-* member in
 # <git-dir>/omp-kit-hooks/hooks.d/<kind> with the hook's arguments, replaying
@@ -939,6 +947,15 @@ ensure_chain() {
 		printf 'tracked chain runner left in place: %s\n' "$entry"
 		return 0
 	fi
+	# A kit runner that lost its exec bit is repaired in place: it carries the
+	# chain-runner marker, so it is ours, not a bespoke entry. Moving it to
+	# the 10- slot would adopt it as bespoke and leave a silent duplicate
+	# behind while the chain stays inactive.
+	if [ -f "$entry" ] && [ ! -x "$entry" ] && has_line_with "$entry" 'chain runner: run every executable'; then
+		write_runner "$entry"
+		printf 'repaired chain runner mode: %s\n' "$entry"
+		return 0
+	fi
 	if [ -x "$entry" ] && grep -q 'hooks\.d' "$entry" 2>/dev/null; then
 		# runner_stale names the generation from runner_body; --check reports the same predicate.
 		if runner_stale "$entry"; then
@@ -1029,9 +1046,10 @@ exec sh "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/check-pushed-beads.sh
 EOF
 }
 
-# --check names installed members that differ from this checkout (a stale
-# installed hook runs old rules after the source moves on). Exit 0 when every
-# member matches, 3 naming each missing or stale member.
+# --check names installed members that differ from this checkout in bytes or
+# exec mode (a byte-identical member without its exec bit is skipped by the
+# chain, so it is drift, not fresh), and names missing or inactive chain
+# runners. Exit 0 when every member matches, 3 naming each missing or stale member.
 if [ "$MODE" = "check" ]; then
 	stale=0
 	while IFS= read -r retired; do
@@ -1059,6 +1077,14 @@ EOF
 			stale=1
 		elif ! cmp -s "$dest" "$src"; then
 			printf 'install-commit-msg-bead: STALE installed member: %s differs from %s; rerun %s\n' "$dest" "$src" "$0" >&2
+			stale=1
+		elif ! member_mode_ok "$dest" "$file_mode"; then
+			if [ "$file_mode" = "+x" ]; then
+				reason="member not executable, the chain would skip it"
+			else
+				reason="helper executable, the chain would run it arg-less"
+			fi
+			printf 'install-commit-msg-bead: STALE installed member: %s differs from %s; rerun %s (%s)\n' "$dest" "$src" "$0" "$reason" >&2
 			stale=1
 		fi
 	done <<EOF
@@ -1090,14 +1116,25 @@ EOF
 		fi
 	fi
 	# Chain runners judged by the installer's own upgrade predicate; bespoke runners are skipped.
-	# In a tracked hooks dir a tracked runner is never rewritten: a stale kit
-	# runner is reported for the owner migration instead.
+	# A missing runner and a runner without its exec bit are drift too: git
+	# would run no member at all. In a tracked hooks dir a tracked runner is
+	# never rewritten: a stale kit runner is reported for the owner migration instead.
 	for runner_type in post-commit pre-commit commit-msg pre-push reference-transaction; do
-		if runner_stale "$HOOKS/$runner_type"; then
+		if [ ! -e "$HOOKS/$runner_type" ]; then
+			printf 'install-commit-msg-bead: MISSING chain runner: %s; rerun %s\n' "$HOOKS/$runner_type" "$0" >&2
+			stale=1
+		elif runner_stale "$HOOKS/$runner_type"; then
 			if [ "$TRACKED_HOOKS" = 1 ] && is_tracked "$HOOKS/$runner_type"; then
 				printf 'install-commit-msg-bead: TRACKED chain runner: %s lacks %s; owner migration required (commit the runner update once)\n' "$HOOKS/$runner_type" "$RUNNER_GENERATION" >&2
 			else
 				printf 'install-commit-msg-bead: STALE chain runner: %s lacks %s; rerun %s\n' "$HOOKS/$runner_type" "$RUNNER_GENERATION" "$0" >&2
+			fi
+			stale=1
+		elif [ ! -x "$HOOKS/$runner_type" ]; then
+			if [ "$TRACKED_HOOKS" = 1 ] && is_tracked "$HOOKS/$runner_type"; then
+				printf 'install-commit-msg-bead: TRACKED chain runner: %s not executable; owner migration required (commit the runner update once)\n' "$HOOKS/$runner_type" >&2
+			else
+				printf 'install-commit-msg-bead: STALE chain runner: %s not executable; rerun %s\n' "$HOOKS/$runner_type" "$0" >&2
 			fi
 			stale=1
 		fi

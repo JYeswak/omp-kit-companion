@@ -138,4 +138,4 @@ ok "$?" "0" "runnercheck-mutant-misses-wrapper"
 }
 
 start_group group_witness
-run_installer_groups group_plain group_sibling group_pathbound group_refusing group_restore group_idless group_stdin group_upgrade group_inert group_runnercheck
+run_installer_groups group_plain group_sibling group_pathbound group_refusing group_restore group_idless group_stdin group_upgrade group_inert group_runnercheck group_modedrift

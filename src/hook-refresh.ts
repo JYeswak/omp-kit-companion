@@ -44,8 +44,13 @@ import { fleetWatchRepos } from "./scratch.ts";
  * installer gains is seen with no change here. Parsed with prefix/suffix
  * string ops, not patterns. Both the commit-msg bead installer and the
  * pre-push gate installer name their members this way (PUSHGATEREFRESH1).
+ * A missing or inactive chain runner is drift too: git would run no member
+ * at all, so the census keeps the installer's rc 3 verdict instead of
+ * reporting FRESH. `STALE chain runner: <dest> lacks <generation>` and
+ * `STALE chain runner: <dest> not executable` parse to a STALE row pinned at
+ * the runner itself (installed and source digests are equal by construction,
+ * which still reads STALE); `MISSING chain runner: <dest>` parses to MISSING.
  */
-export interface CheckMember { dest: string; src: string | null; kind: "MISSING" | "STALE"; }
 const PRE_PUSH_MISSING_PREFIX = "install-pre-push-gate: MISSING installed member: ";
 const MISSING_PREFIXES = [
 	"install-commit-msg-bead: MISSING installed member: ",
@@ -57,6 +62,8 @@ const STALE_PREFIXES = [
 ];
 const STALE_MID = " differs from ";
 const RERUN_SUFFIX = "; rerun ";
+const STALE_RUNNER_PREFIX = "install-commit-msg-bead: STALE chain runner: ";
+const MISSING_RUNNER_PREFIX = "install-commit-msg-bead: MISSING chain runner: ";
 function matchPrefix(line: string, prefixes: string[]): string | null {
 	for (const prefix of prefixes) {
 		if (line.startsWith(prefix)) return line.slice(prefix.length);
@@ -70,6 +77,32 @@ export function parseCheckMembers(output: string): CheckMember[] {
 		const missing = matchPrefix(line, MISSING_PREFIXES);
 		if (missing !== null) {
 			const dest = missing.trim();
+			if (dest.length === 0 || seen.has(`M:${dest}`)) continue;
+			seen.add(`M:${dest}`);
+			found.push({ dest, src: null, kind: "MISSING" });
+			continue;
+		}
+		const staleRunner = matchPrefix(line, [STALE_RUNNER_PREFIX]);
+		if (staleRunner !== null) {
+			const rerunAt = staleRunner.lastIndexOf(RERUN_SUFFIX);
+			const core = rerunAt >= 0 ? staleRunner.slice(0, rerunAt) : staleRunner;
+			// "<dest> lacks <generation>" or "<dest> not executable".
+			let dest = "";
+			for (const mid of [" lacks ", " not executable"]) {
+				const at = core.indexOf(mid);
+				if (at >= 0) { dest = core.slice(0, at).trim(); break; }
+			}
+			if (dest.length === 0 || seen.has(`S:${dest}`)) continue;
+			seen.add(`S:${dest}`);
+			// The runner is the enforcement point, not a content copy: pin
+			// src to dest so equal installed/source digests still read STALE.
+			found.push({ dest, src: dest, kind: "STALE" });
+			continue;
+		}
+		const missingRunner = matchPrefix(line, [MISSING_RUNNER_PREFIX]);
+		if (missingRunner !== null) {
+			const rerunAt = missingRunner.lastIndexOf(RERUN_SUFFIX);
+			const dest = (rerunAt >= 0 ? missingRunner.slice(0, rerunAt) : missingRunner).trim();
 			if (dest.length === 0 || seen.has(`M:${dest}`)) continue;
 			seen.add(`M:${dest}`);
 			found.push({ dest, src: null, kind: "MISSING" });

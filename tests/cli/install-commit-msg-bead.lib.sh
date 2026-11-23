@@ -700,6 +700,106 @@ PY
 ok "$?" "0" "atomic-install-and-copy-negative"
 }
 
+group_modedrift() {
+A=$(installed_repo modedrift) || exit 1
+KITROOT_M=$(CDPATH='' cd -- "$(dirname -- "$INSTALLER")/.." && pwd -P) || exit 1
+
+# 13. MODEDRIFT1: a byte-identical member that lost its exec bit is drift, not
+# fresh. The chain runner only runs executable members, so git would silently
+# skip it on every push; --check names it STALE and a reinstall repairs the
+# mode in place without adopting anything as bespoke.
+GATE="$A/.git/hooks/hooks.d/pre-push/42-omp-kit-affected-gate"
+cmp -s "$GATE" "$KITROOT_M/scripts/pre-push-affected-gate.sh"
+ok "$?" "0" "modedrift-member-bytes-identical"
+chmod 600 "$GATE"
+if [ ! -x "$GATE" ]; then rc=0; else rc=1; fi
+ok "$rc" "0" "modedrift-member-inactive"
+sh "$INSTALLER" --check "$A" > "$TMP/o-modedrift" 2>&1
+ok "$?" "3" "modedrift-member-check-rc"
+grep -q "STALE installed member: $GATE" "$TMP/o-modedrift"
+ok "$?" "0" "modedrift-member-check-named"
+# The chain proves the inactivity: the enforcing member refused this id-less
+# message while active, and the chain accepts it while the member is skipped.
+FIFTYFIVE="$A/.git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate"
+printf '[test] fix widgets ompkit-zzzz-1\n' > "$TMP/msg-modedrift"
+(CDPATH='' cd -- "$A" && BEADS_DB="$EMPTY_DB" sh "$A/.git/hooks/commit-msg" "$TMP/msg-modedrift") > "$TMP/o-md-control" 2>&1
+ok "$?" "1" "modedrift-control-refuses"
+grep -q "commit-msg-bead" "$TMP/o-md-control"
+ok "$?" "0" "modedrift-control-names-enforcer"
+chmod 600 "$FIFTYFIVE"
+(CDPATH='' cd -- "$A" && BEADS_DB="$EMPTY_DB" sh "$A/.git/hooks/commit-msg" "$TMP/msg-modedrift") > "$TMP/o-md-skip" 2>&1
+ok "$?" "0" "modedrift-skipped-member-accepts"
+sh "$INSTALLER" --check "$A" > "$TMP/o-modedrift-55" 2>&1
+ok "$?" "3" "modedrift-55-check-rc"
+grep -q "STALE installed member: $FIFTYFIVE" "$TMP/o-modedrift-55"
+ok "$?" "0" "modedrift-55-check-named"
+# A reinstall repairs both modes in place: no bespoke adoption, no duplicates.
+sh "$INSTALLER" "$A" > /dev/null 2>&1
+ok "$?" "0" "modedrift-reinstall-rc"
+if [ -x "$GATE" ] && [ -x "$FIFTYFIVE" ] && [ ! -e "$A/.git/hooks/hooks.d/pre-push/10-pre-push" ] && [ ! -e "$A/.git/hooks/hooks.d/commit-msg/10-commit-msg" ]; then rc=0; else rc=1; fi
+ok "$rc" "0" "modedrift-repaired-in-place"
+sh "$INSTALLER" --check "$A" > /dev/null 2>&1
+ok "$?" "0" "modedrift-reinstall-fresh"
+# A non-executable chain runner is drift too: git would run no member at all.
+B=$(installed_repo moderunner) || exit 1
+chmod 600 "$B/.git/hooks/pre-push"
+sh "$INSTALLER" --check "$B" > "$TMP/o-moderunner" 2>&1
+ok "$?" "3" "moderunner-check-rc"
+grep -q "STALE chain runner: $B/.git/hooks/pre-push" "$TMP/o-moderunner"
+ok "$?" "0" "moderunner-check-named"
+sh "$INSTALLER" "$B" > "$TMP/o-moderunner-re" 2>&1
+ok "$?" "0" "moderunner-reinstall-rc"
+if [ -x "$B/.git/hooks/pre-push" ] && [ ! -e "$B/.git/hooks/hooks.d/pre-push/10-pre-push" ]; then rc=0; else rc=1; fi
+ok "$rc" "0" "moderunner-repaired-in-place"
+sh "$INSTALLER" --check "$B" > /dev/null 2>&1
+ok "$?" "0" "moderunner-reinstall-fresh"
+# A deleted runner is missing, not fresh: the push chain has no entry point.
+C=$(installed_repo missingrunner) || exit 1
+rm "$C/.git/hooks/pre-commit"
+sh "$INSTALLER" --check "$C" > "$TMP/o-missingrunner" 2>&1
+ok "$?" "3" "missingrunner-check-rc"
+grep -q "MISSING chain runner: $C/.git/hooks/pre-commit" "$TMP/o-missingrunner"
+ok "$?" "0" "missingrunner-check-named"
+sh "$INSTALLER" "$C" > /dev/null 2>&1
+ok "$?" "0" "missingrunner-reinstall-rc"
+sh "$INSTALLER" --check "$C" > /dev/null 2>&1
+ok "$?" "0" "missingrunner-reinstall-fresh"
+# Mutant: the same installer with the mode check removed reads the drifted
+# member as fresh; the real installer still refuses it.
+mkdir -p "$TMP/mutmd/src" && cp -R "$(dirname -- "$INSTALLER")" "$TMP/mutmd/scripts" && cp "$(dirname -- "$INSTALLER")/../src/"*.v1.json "$TMP/mutmd/src/"
+# shellcheck disable=SC2016 # literal $ in the sed pattern, matched in the installer source
+sed 's/elif ! member_mode_ok "\$dest" "\$file_mode"; then/elif false; then/' "$INSTALLER" > "$TMP/mutmd/scripts/install-commit-msg-bead.sh"
+D=$(installed_repo modedriftmut) || exit 1
+chmod 600 "$D/.git/hooks/hooks.d/pre-push/42-omp-kit-affected-gate"
+sh "$TMP/mutmd/scripts/install-commit-msg-bead.sh" --check "$D" > /dev/null 2>&1
+ok "$?" "0" "modedrift-mutant-misses-mode"
+sh "$INSTALLER" --check "$D" > /dev/null 2>&1
+ok "$?" "3" "modedrift-real-still-catches"
+# Mutant: the same installer with the runner exec check removed reads the
+# inactive runner as fresh; the real installer still refuses it.
+# shellcheck disable=SC2016 # literal $ in the sed pattern, matched in the installer source
+sed 's/elif \[ ! -x "\$HOOKS\/\$runner_type" \]; then/elif false; then/' "$INSTALLER" > "$TMP/mutmd/scripts/install-commit-msg-bead.sh"
+E=$(installed_repo moderunnermut) || exit 1
+chmod 600 "$E/.git/hooks/pre-push"
+sh "$TMP/mutmd/scripts/install-commit-msg-bead.sh" --check "$E" > /dev/null 2>&1
+ok "$?" "0" "moderunner-mutant-misses-exec"
+sh "$INSTALLER" --check "$E" > /dev/null 2>&1
+ok "$?" "3" "moderunner-real-still-catches"
+# A tracked runner the owner left non-executable routes to the owner
+# migration, never to a silent rewrite: --check names it TRACKED.
+T=$(new_repo trackedmode) || exit 1
+git -C "$T" config core.hooksPath .githooks
+mkdir -p "$T/.githooks"
+printf '#!/bin/sh\nexit 0\n' > "$T/.githooks/commit-msg"
+chmod 600 "$T/.githooks/commit-msg"
+git -C "$T" add .githooks/commit-msg
+git -C "$T" -c core.hooksPath=/dev/null commit -q -m "[test] track hooks entry"
+sh "$INSTALLER" --check "$T" > "$TMP/o-trackedmode" 2>&1
+ok "$?" "3" "trackedmode-check-rc"
+grep -q "TRACKED chain runner: $T/.githooks/commit-msg not executable" "$TMP/o-trackedmode"
+ok "$?" "0" "trackedmode-check-named"
+}
+
 # Workers own their fixtures, installer probe temp files, messages and outputs.
 # Keep counters in the parent only after joining; a crashed worker cannot pass.
 RESULTS="$TMP/results"

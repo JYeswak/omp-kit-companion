@@ -4,7 +4,7 @@
 // install-commit-msg-bead.sh --check output, so no hand-kept member list
 // exists in src/hook-refresh.ts.
 import { expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import {
@@ -268,17 +268,23 @@ test("planted negative: an installer that leaves stale bytes is FAILED, never re
 	}
 }, fixtureDeadlineS() * 1000);
 
-test("parseCheckMembers reads only the member lines the installer names", () => {
+test("parseCheckMembers reads the member and chain-runner lines the installer names", () => {
 	const dest = "/r/.git/hooks/hooks.d/pre-push/42-omp-kit-affected-gate";
 	const src = "/kit/scripts/pre-push-affected-gate.sh";
+	const runner = "/r/.git/hooks/pre-push";
+	const missingRunner = "/r/.git/hooks/pre-commit";
 	const output = [
-		"install-commit-msg-bead: STALE chain runner: /r/.git/hooks/pre-commit lacks gen9; rerun x",
+		`install-commit-msg-bead: STALE chain runner: ${runner} lacks gen9; rerun x`,
+		`install-commit-msg-bead: STALE chain runner: ${runner} not executable; rerun x`,
+		`install-commit-msg-bead: MISSING chain runner: ${missingRunner}; rerun x`,
 		`install-commit-msg-bead: MISSING installed member: ${dest}`,
 		`install-commit-msg-bead: STALE installed member: ${dest} differs from ${src}; rerun x`,
 		"install-commit-msg-bead: MISSING or STALE pushed-beads member: /r/.git/hooks/hooks.d/pre-push/40-omp-kit-pushed-beads; rerun x",
 		"install-commit-msg-bead: hooks fresh in /r",
 	].join("\n");
 	expect(parseCheckMembers(output)).toEqual([
+		{ dest: runner, src: runner, kind: "STALE" },
+		{ dest: missingRunner, src: null, kind: "MISSING" },
 		{ dest, src: null, kind: "MISSING" },
 		{ dest, src, kind: "STALE" },
 	]);
@@ -433,6 +439,62 @@ test("HOOKCENSUS1: the census reports a missing 42-omp-kit-affected-gate member 
 			expect(row.stale).toContain("hooks.d/pre-push/42-omp-kit-affected-gate");
 			expect(row.members.find((member) => member.member === "hooks.d/pre-push/42-omp-kit-affected-gate")?.status).toBe("MISSING");
 		}
+	} finally {
+		scratch.cleanup();
+	}
+}, fixtureDeadlineS(120) * 1000);
+
+test("MODEDRIFT1: the census keeps an inactive member and runner STALE through the real installer; a blind detector reads FRESH", async () => {
+	const root = resolve(import.meta.dir, "../..");
+	const scratch = ownedTmp("hookrefresh-modedrift", { bead: "ompkit-2w7h.6" });
+	try {
+		const repo = join(scratch.path, "repo");
+		const env = gitEnv(scratch.path);
+		expect(runFixture(["git", "init", "-q", repo], { cwd: scratch.path, env }).rc).toBe(0);
+		const installer = join(root, "scripts/install-commit-msg-bead.sh");
+		expect((await run(["sh", installer, repo], { deadline_s: fixtureDeadlineS(120) })).rc).toBe(0);
+		const rev = runFixture(["git", "-C", repo, "rev-parse", "--git-path", "hooks"], { cwd: scratch.path, env });
+		expect(rev.rc).toBe(0);
+		const hooksDir = resolve(repo, Buffer.from(rev.stdout).toString("utf8").trim());
+		const gate = join(hooksDir, "hooks.d/pre-push/42-omp-kit-affected-gate");
+		const runner = join(hooksDir, "pre-push");
+		const live = liveHookFreshnessIo(scratch.path, root);
+		const io: HookFreshnessIo = { ...live, repos: () => [{ repo, source: "t:modedrift" }] };
+		// A byte-identical member that lost its exec bit is drift, not fresh:
+		// the row stays STALE with equal installed/source digests.
+		chmodSync(gate, 0o600);
+		const drifted = await censusHookFreshness(io);
+		expect(drifted).toHaveLength(1);
+		expect(drifted[0]!.state).toBe("STALE");
+		expect(drifted[0]!.stale).toContain("hooks.d/pre-push/42-omp-kit-affected-gate");
+		const gateRow = drifted[0]!.members.find((member) => member.member === "hooks.d/pre-push/42-omp-kit-affected-gate")!;
+		expect(gateRow.status).toBe("STALE");
+		expect(gateRow.installed_sha256).toBe(gateRow.source_sha256);
+		expect(gateRow.installed_sha256).not.toBeNull();
+		// Repair, then drift the runner itself: the census keeps the inactive chain rc 3.
+		expect((await run(["sh", installer, repo], { deadline_s: fixtureDeadlineS(120) })).rc).toBe(0);
+		chmodSync(runner, 0o600);
+		const runnerDrifted = await censusHookFreshness(io);
+		expect(runnerDrifted[0]!.state).toBe("STALE");
+		expect(runnerDrifted[0]!.stale).toContain("pre-push");
+		const runnerRow = runnerDrifted[0]!.members.find((member) => member.member === "pre-push")!;
+		expect(runnerRow.status).toBe("STALE");
+		expect(runnerRow.installed_sha256).toBe(runnerRow.source_sha256);
+		// Mutant: a detector blind to the runner line reads the same broken
+		// repo FRESH while the runner is still inactive on disk.
+		const blind: HookFreshnessIo = {
+			...live,
+			repos: () => [{ repo, source: "t:modedrift-blind" }],
+			check: async () => ({ rc: 0, output: `install-commit-msg-bead: hooks fresh in ${repo}\n` }),
+		};
+		const blindRows = await censusHookFreshness(blind);
+		expect(blindRows[0]!.state).toBe("FRESH");
+		expect(statSync(runner).mode & 0o100).toBe(0);
+		// Repair restores the valid installed chain: the census reads FRESH.
+		expect((await run(["sh", installer, repo], { deadline_s: fixtureDeadlineS(120) })).rc).toBe(0);
+		const fresh = await censusHookFreshness(io);
+		expect(fresh[0]!.state).toBe("FRESH");
+		expect(fresh[0]!.members).toEqual([]);
 	} finally {
 		scratch.cleanup();
 	}
