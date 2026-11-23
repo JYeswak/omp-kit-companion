@@ -664,21 +664,38 @@ function kitUpdateEnvironment(job: ServiceJobDef, installed: Record<string, stri
 }
 
 const CI_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-/** Persist the explicitly approved CI scope in the native service definition. */
-export function ciPollerEnvironment(job: ServiceJobDef): [string, string][] {
-	const raw = process.env.OMP_KIT_CI_REPOS;
-	if (job.name !== "ci-poller" || raw === undefined) return [];
-	if (raw.length > 4096) throw new Error("CI_REPOS_INVALID: OMP_KIT_CI_REPOS exceeds 4096 characters");
+/** Persist the explicitly approved CI scope in the native service definition. A re-render from a shell without it keeps the
+ * installed scope (the botcn class: a hand-set job variable survives an install), an explicit value replaces it, and an
+ * unusable installed value persists nothing. */
+export function ciPollerEnvironment(job: ServiceJobDef, installed: Record<string, string> | null = null): [string, string][] {
+	if (job.name !== "ci-poller") return [];
+	const explicit = process.env.OMP_KIT_CI_REPOS;
+	const raw = explicit ?? installed?.OMP_KIT_CI_REPOS;
+	if (raw === undefined) return [];
+	const invalid = (message: string): [string, string][] => {
+		if (explicit !== undefined) throw new Error(message);
+		return [];
+	};
+	if (raw.length > 4096) return invalid("CI_REPOS_INVALID: OMP_KIT_CI_REPOS exceeds 4096 characters");
 	const repos = [...new Set(raw.split(",").map(repo => repo.trim()).filter(Boolean))];
 	if (repos.length === 0 || repos.some(repo => !CI_REPO_PATTERN.test(repo))) {
-		throw new Error("CI_REPOS_INVALID: OMP_KIT_CI_REPOS must contain comma-separated owner/repo values");
+		return invalid("CI_REPOS_INVALID: OMP_KIT_CI_REPOS must contain comma-separated owner/repo values");
 	}
 	return [["OMP_KIT_CI_REPOS", repos.join(",")]];
 }
 
-function amRetentionEnvironment(job: ServiceJobDef): [string, string][] {
+/** The Agent Mail storage root the am-retain job prunes. Same keep-installed semantics as the probe target above: without it
+ * in the installing shell the installed root stays; an explicit value replaces it, an empty string clears it. */
+function amRetentionEnvironment(job: ServiceJobDef, installed: Record<string, string> | null): [string, string][] {
 	if (job.name !== "am-retain") return [];
-	const root = agentMailRetentionRoot(process.env.AGENT_MAIL_STORAGE_ROOT);
+	const explicit = process.env.AGENT_MAIL_STORAGE_ROOT;
+	let root: string | null;
+	try {
+		root = agentMailRetentionRoot(explicit ?? installed?.AGENT_MAIL_STORAGE_ROOT);
+	} catch (error) {
+		if (explicit !== undefined) throw error;
+		return [];
+	}
 	return root === null ? [] : [["AGENT_MAIL_STORAGE_ROOT", root]];
 }
 
@@ -717,9 +734,9 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		`\t\t<string>${xml(serviceTmpDir(home))}</string>`,
 		"\t\t<key>PATH</key>",
 		`\t\t<string>${xml(servicePath(home))}</string>`,
-		...ciPollerEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
+		...ciPollerEnvironment(job, installedUpdate).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		...kitUpdateEnvironment(job, installedUpdate).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
-		...amRetentionEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
+		...amRetentionEnvironment(job, installedUpdate).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		...loadWatchEnvironment(job, installedUpdate).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		"\t\t<key>OMP_KIT_JOB</key>",
 		`\t\t<string>${xml(job.name)}</string>`,
@@ -769,7 +786,7 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 	if (installedService !== null) {
 		installedUpdate = {};
 		const parsed = systemdEnvironment(installedService);
-		for (const key of [...KIT_UPDATE_ENV_KEYS, ...LOAD_WATCH_ENV_KEYS, AM_RSS_CEILING_ENV_KEY]) {
+		for (const key of [...KIT_UPDATE_ENV_KEYS, ...LOAD_WATCH_ENV_KEYS, AM_RSS_CEILING_ENV_KEY, "AGENT_MAIL_STORAGE_ROOT", "OMP_KIT_CI_REPOS"]) {
 			const raw = parsed[key];
 			// systemdQuote writes $ as $$, but unquoteUnit only decodes $$$$: without this a kept $
 			// doubles on every re-render. Kept-path only; contract checks keep their own decode.
@@ -781,9 +798,9 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 		`Environment=XDG_STATE_HOME=${systemdQuote(stateHome(home))}`,
 		`Environment=PATH=${systemdQuote(servicePath(home))}`,
 		`Environment=TMPDIR=${systemdQuote(serviceTmpDir(home))}`,
-		...ciPollerEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
+		...ciPollerEnvironment(job, installedUpdate).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		...kitUpdateEnvironment(job, installedUpdate).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
-		...amRetentionEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
+		...amRetentionEnvironment(job, installedUpdate).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		...loadWatchEnvironment(job, installedUpdate).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		`Environment=OMP_KIT_JOB=${systemdQuote(job.name)}`,
 	];
