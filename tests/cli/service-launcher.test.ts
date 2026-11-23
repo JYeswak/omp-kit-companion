@@ -7,7 +7,7 @@ import { renderLaunchdPlist, KNOWN_JOBS } from "../../src/service.ts";
 import { observeServiceLaunchers } from "../../src/service-run.ts";
 import { ensureServiceLauncher, installPrefix, isServiceLauncher, launcherChildPath, launcherExitStatus, serviceLauncherPath } from "../../src/service-launcher.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
-import { fixtureDeadlineS } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 
 // STABLETCC1 (ompkit-ck2av): macOS keys the network-volume consent of a bundle-less tool by its path, so every launchd job
 // runs one copy of the kit binary at one path (the service launcher) that starts the active release as a child.
@@ -138,3 +138,32 @@ test("STABLETCC1: the job-launcher observation skips the launcher row, so one ru
 	const two = observeServiceLaunchers(() => ({ code: 0, stdout: `${ps}\n104 /Users/josh/.local/bin/omp-kit service run cc` }), "cc");
 	expect("launchers" in two ? two.launchers.map(row => row.pid) : []).toEqual([102, 104]);
 });
+
+// The rendered program at the CLI boundary: a host with an active release gets the launcher; a host with none keeps the stable CLI path
+// (an install is never refused for want of a release to copy).
+function plannedProgram(withRelease: boolean): { text: string; home: string } {
+	const home = realpathSync(ownedTmp("service-launcher-cli").path);
+	mkdirSync(join(home, ".local", "bin"), { recursive: true });
+	writeFileSync(join(home, ".local", "bin", "omp-kit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+	if (withRelease) installRelease(join(home, ".local", "opt", "omp-kit"), "1.0.0", "#!/bin/sh\nexit 0\n");
+	const result = runFixture([process.execPath, join(import.meta.dir, "../../src/cli.ts"), "service", "install", "load-watch", "--plan", "--json"], {
+		cwd: home,
+		env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), OMP_KIT_TEST_LABEL_NAMESPACE: `com.omp-kit.test.stcc${Math.random().toString(36).slice(2, 10)}` },
+	});
+	const envelope = JSON.parse(new TextDecoder().decode(result.stdout));
+	expect(envelope.errors ?? [], new TextDecoder().decode(result.stderr)).toEqual([]);
+	return { text: process.platform === "darwin" ? envelope.data.plist : envelope.data.service, home };
+}
+
+test("STABLETCC1: on macOS the planned job program is the launcher when a release is active, and the stable CLI path when none is", () => {
+	const withRelease = plannedProgram(true);
+	const without = plannedProgram(false);
+	if (process.platform === "darwin") {
+		expect(withRelease.text).toContain(`<string>${join(withRelease.home, ".local", "opt", "omp-kit", "service", "omp-kit-svc")}</string>`);
+		expect(without.text).toContain(`<string>${join(without.home, ".local", "bin", "omp-kit")}</string>`);
+		expect(without.text).not.toContain("omp-kit-svc");
+	} else {
+		expect(withRelease.text).toContain(join(withRelease.home, ".local", "bin", "omp-kit"));
+		expect(withRelease.text).not.toContain("omp-kit-svc");
+	}
+}, fixtureDeadlineS() * 1000);

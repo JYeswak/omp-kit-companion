@@ -3146,7 +3146,17 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	};
 	// STABLETCC1: what a rendered job runs. macOS: the service launcher at one path that survives releases (src/service-launcher.ts);
 	// elsewhere the stable CLI path, whose symlink chain is fine because only macOS keys consent by path.
-	const programFor = (): string => linux ? stableLauncher(home) : serviceLauncherPath(installPrefix(home));
+	const programFor = (make = false): string => {
+		const stable = stableLauncher(home);
+		if (linux) return stable;
+		const prefix = installPrefix(home);
+		const service = serviceLauncherPath(prefix);
+		if (make) {
+			try { ensureServiceLauncher(prefix); return service; } catch { return stable; }
+		}
+		if (executableFile(service)) return service;
+		try { realpathSync(join(prefix, "bin", "omp-kit")); return service; } catch { return stable; }
+	};
 	const resolveJob = (name: string) => {
 		const job = scoped[name]!;
 		const launcher = programFor();
@@ -3173,7 +3183,9 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				"Re-run with --apply --yes, or add --dry-run to preview the render without changing anything.");
 		}
 		const [name] = names;
-		const { job, launcher, watch } = resolveJob(name!);
+		const resolved = resolveJob(name!);
+		const { job, watch } = resolved;
+		let launcher = resolved.launcher;
 		// SENTINELLIVE1: an operator-configured job without its command refuses before any
 		// render, backup or bootstrap, so nothing is written.
 		if (operator[job.name] !== undefined) return unconfiguredRefusal(job.name);
@@ -3198,13 +3210,9 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				errors: [{ code: "LAUNCHER_UNAVAILABLE", message: `Stable launcher ${stableLauncher(home)} is missing or not executable`,
 					remediation: "Install the kit at the stable path first; no service was changed." }], verification: "UNVERIFIED" };
 		}
-		if (!linux && !dry && !wantPlan) {
-			try { ensureServiceLauncher(installPrefix(home)); } catch (error) {
-				return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
-					errors: [{ code: "SERVICE_LAUNCHER_UNAVAILABLE", message: `The service launcher ${launcher} could not be made: ${error instanceof Error ? error.message : String(error)}`,
-						remediation: "Install a kit release at the stable path (omp-kit update), then reinstall the job; no service was changed." }], verification: "UNVERIFIED" };
-			}
-		}
+		// An apply makes the launcher copy; a host with no active release to copy from (a hand-placed CLI, a source run) keeps the stable
+		// CLI path, which was the behavior before the launcher and is reported in `program`. An install is never refused for want of it.
+		if (!linux && !dry && !wantPlan) launcher = programFor(true);
 		if (job.kind === "watch" && !watch) {
 			return { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
 				errors: [{ code: "WATCH_TARGET_UNAVAILABLE", message: "OMP package is not resolvable, so there is nothing for the watcher to watch",
@@ -3229,7 +3237,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		const print = parseLaunchctlPrint(defaultRunner(["launchctl", "print", `${domain()}/${job.label}`]).stdout);
 		const result = installService(home, job, launcher, watch, installed, print, defaultRunner, request.flags.has("--replace"));
-		return { code: result.ok ? 0 : 1, data: { overall: result.ok ? (result.changed ? "CHANGED" : "OK") : "FINDINGS", job: job.name, label: job.label, ...result }, verification: "UNVERIFIED",
+		return { code: result.ok ? 0 : 1, data: { overall: result.ok ? (result.changed ? "CHANGED" : "OK") : "FINDINGS", job: job.name, label: job.label, program: launcher, ...result }, verification: "UNVERIFIED",
 			errors: result.ok ? [] : [{ code: result.error ?? "INSTALL_FAILED", message: result.detail, remediation: "Check launchctl output and rerun; a backup was kept when a plist was replaced." }] };
 	}
 	if (sub === "uninstall") {
