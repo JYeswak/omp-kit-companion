@@ -190,6 +190,10 @@ if [ -z "$install_cmd" ]; then
 	omp-kit update --apply --yes --version "$version" --index "$assets/release-index.json" \
 		--archive "$assets/omp-kit-v$version-darwin-arm64-none.tar.gz" --json >"$update_json" 2>"$WORK/update.err" || update_rc=$?
 	cat "$WORK/update.err" >&2
+	# AUTOCUTEVIDENCE1 (ompkit-2uubn): the 0.2.148 install ended exit 1 with an envelope neither accepted branch below recognized, the run died, and the
+	# envelope went with its scratch, so the cause of the refusal could not be read afterwards. Keep both beside the decision log.
+	cp "$update_json" "$git_dir/omp-kit/autocut-update-$version.json" || printf 'autocut: could not keep the update envelope\n' >&2
+	cp "$WORK/update.err" "$git_dir/omp-kit/autocut-update-$version.err" || printf 'autocut: could not keep the update stderr\n' >&2
 	installed=$(omp-kit --version | awk '{print $2}')
 	if [ "$update_rc" != 0 ]; then
 		if [ "$installed" = "$version" ] && jq -e --arg v "$version" \
@@ -215,7 +219,9 @@ if [ -z "$install_cmd" ]; then
 			installed=$(omp-kit --version | awk '{print $2}')
 			decide INSTALLED_RECONCILED "v$version installed; receipt $receipt reconciled after fleet-write postcheck findings" "$source_sha" "$version"
 		else
-			die "omp-kit update --apply refused v$version (exit $update_rc; installed reads '$installed')"
+			refused=$(jq -r '"action=\(.data.action // "?") overall=\(.data.overall // "?") postcheck=\(.data.postcheck // "?") failures=\((.data.postcheck_detail.failures // []) | .[0:3] | join(" | ")) errors=\([.errors[]?.code] | join(","))"' "$update_json" 2>/dev/null) || refused="envelope unreadable"
+			decide FAILED "omp-kit update --apply refused v$version (exit $update_rc; installed reads '$installed'; $refused); envelope kept in autocut-update-$version.json" "$source_sha" "$version" >/dev/null
+			die "omp-kit update --apply refused v$version (exit $update_rc; installed reads '$installed'; $refused)"
 		fi
 	fi
 else

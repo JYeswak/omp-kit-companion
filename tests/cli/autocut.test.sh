@@ -201,10 +201,10 @@ default_install() { # RC VERSION POSTCHECK [BAD_SUMS] -> output; leaves the call
 }
 # an update that exits 1 with the release active and every judge PASS is an installed release with named findings
 out=$(default_install 1 0.1.2 PASS)
-if [ "$(field "$out" action)" = CUT ] && printf '%s' "$out" | grep -q 'INSTALLED_WITH_FINDINGS' && printf '%s' "$out" | grep -q 'FLEET_ADAPTER_ABSENT' && printf '%s' "$out" | grep -q 'RULE_COLLISION'; then ok; else bad "installed with findings: $out"; fi
+if [ "$(field "$out" action)" = CUT ] && printf '%s' "$out" | grep -q 'INSTALLED_WITH_FINDINGS' && printf '%s' "$out" | grep -q 'FLEET_ADAPTER_ABSENT' && printf '%s' "$out" | grep -q 'RULE_COLLISION' && [ "$(jq -r .data.action "$repo/.git/omp-kit/autocut-update-0.1.2.json")" = UPDATED ]; then ok; else bad "installed with findings: $out"; fi
 # the same exit with a failed postcheck, or with another version active, is a refusal
 out=$(default_install 1 0.1.2 FAIL); rc=$?
-if [ "$rc" = 4 ] && ! printf '%s' "$out" | grep -q '"action":"CUT"'; then ok; else bad "failed postcheck must refuse: rc=$rc $out"; fi
+if [ "$rc" = 4 ] && ! printf '%s' "$out" | grep -q '"action":"CUT"' && grep -q 'postcheck=FAIL' "$repo/.git/omp-kit/autocut.log" && [ "$(jq -r .data.postcheck "$repo/.git/omp-kit/autocut-update-0.1.2.json")" = FAIL ]; then ok; else bad "failed postcheck must refuse, log its evidence and keep the envelope: rc=$rc $out"; fi
 out=$(default_install 1 0.0.9 PASS); rc=$?
 if [ "$rc" = 4 ] && ! printf '%s' "$out" | grep -q '"action":"CUT"'; then ok; else bad "other active version must refuse: rc=$rc $out"; fi
 # a clean exit is a plain CUT with no findings decision
