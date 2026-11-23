@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -39,6 +39,24 @@ function sha256File(path: string): string {
 
 export interface EnsuredLauncher { path: string; changed: boolean; source: string }
 
+/** The pid in `.omp-kit-svc.<pid>.tmp` or `omp-kit-svc.source.<pid>.tmp`, or null for any other name. */
+function temporaryPid(name: string): number | null {
+	const stem = [`.${SERVICE_LAUNCHER_NAME}.`, `${SERVICE_LAUNCHER_NAME}.source.`].find(prefix => name.startsWith(prefix));
+	if (stem === undefined || !name.endsWith(".tmp")) return null;
+	const digits = name.slice(stem.length, name.length - ".tmp".length);
+	return digits.length > 0 && digits.length < 10 && [...digits].every(char => char >= "0" && char <= "9") ? Number(digits) : null;
+}
+
+/** A crash between the copy and the rename leaves a full binary copy under a pid-named temporary; remove those whose pid is gone. */
+function removeDeadTemporaries(directory: string): void {
+	for (const name of readdirSync(directory)) {
+		const pid = temporaryPid(name);
+		if (pid === null || pid === process.pid) continue;
+		try { process.kill(pid, 0); continue; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue; }
+		rmSync(join(directory, name), { force: true });
+	}
+}
+
 /**
  * Make `<prefix>/service/omp-kit-svc` a byte-identical copy of the active release binary. Idempotent: a record next to it
  * names the release binary it was copied from, and an unchanged source, size and record leave it alone. The copy goes to a
@@ -64,6 +82,7 @@ export function ensureServiceLauncher(prefix: string): EnsuredLauncher {
 			&& readFileSync(record, "utf8").trim() === source;
 	} catch { current = false; }
 	if (current) return { path: target, changed: false, source };
+	removeDeadTemporaries(directory);
 	const temporary = join(directory, `.${SERVICE_LAUNCHER_NAME}.${process.pid}.tmp`);
 	const temporaryRecord = `${record}.${process.pid}.tmp`;
 	try {

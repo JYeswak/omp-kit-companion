@@ -1,5 +1,6 @@
 // Coverage: src/service-launcher.ts, src/cli.ts (runServiceLauncher), src/service-run.ts (observeServiceLaunchers).
 import { afterAll, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runServiceLauncher } from "../../src/cli.ts";
@@ -7,6 +8,7 @@ import { renderLaunchdPlist, KNOWN_JOBS } from "../../src/service.ts";
 import { observeServiceLaunchers } from "../../src/service-run.ts";
 import { ensureServiceLauncher, installPrefix, isServiceLauncher, launcherChildPath, launcherExitStatus, serviceLauncherPath } from "../../src/service-launcher.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { runSync } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 
 // STABLETCC1 (ompkit-ck2av): macOS keys the network-volume consent of a bundle-less tool by its path, so every launchd job
@@ -78,6 +80,20 @@ test("STABLETCC1 planted: no active release, or an active link that leaves the r
 	expect(existsSync(serviceLauncherPath(prefix))).toBe(false);
 }, fixtureDeadlineS() * 1000);
 
+test("STABLETCC1 planted: a copy a crashed install left under a dead pid is removed; a live pid's temporary and unrelated names stay", () => {
+	const prefix = fixturePrefix("1.0.0", "#!/bin/sh\necho one\n");
+	const directory = join(prefix, "service");
+	mkdirSync(directory, { recursive: true });
+	const dead = Number(new TextDecoder().decode(runSync(["sh", "-c", "echo $$"], { deadline_s: fixtureDeadlineS() }).stdout).trim());
+	expect(Number.isInteger(dead) && dead > 0).toBe(true);
+	const names = { dead: `.omp-kit-svc.${dead}.tmp`, deadRecord: `omp-kit-svc.source.${dead}.tmp`, live: `.omp-kit-svc.${process.ppid}.tmp`, other: ".omp-kit-svc.notapid.tmp", unrelated: "keep.tmp" };
+	for (const name of Object.values(names)) writeFileSync(join(directory, name), "partial\n");
+	ensureServiceLauncher(prefix);
+	expect(existsSync(join(directory, names.dead))).toBe(false);
+	expect(existsSync(join(directory, names.deadRecord))).toBe(false);
+	for (const kept of [names.live, names.other, names.unrelated]) expect(existsSync(join(directory, kept))).toBe(true);
+}, fixtureDeadlineS() * 1000);
+
 test("STABLETCC1: the install prefix honors an absolute OMP_KIT_INSTALL_PREFIX and the launcher is recognized by its name only", () => {
 	expect(installPrefix("/home/x", {})).toBe("/home/x/.local/opt/omp-kit");
 	expect(installPrefix("/home/x", { OMP_KIT_INSTALL_PREFIX: "/opt/kit" })).toBe("/opt/kit");
@@ -116,11 +132,13 @@ test("STABLETCC1 planted: a forwarded SIGTERM ends the child with 143 and a miss
 	const ready = join(realpathSync(ownedTmp("service-launcher-ready").path), "ready");
 	const prefix = fixturePrefix("1.0.0", `#!/bin/sh\n: > "${ready}"\nexec sleep 60\n`);
 	const launcher = ensureServiceLauncher(prefix).path;
-	// runServiceLauncher spawns and installs its signal handlers before its first await, so they exist once it returns its promise.
-	const sleeper = runServiceLauncher(launcher, ["service", "run", "x"], { ...process.env });
+	// The launcher listens on the emitter it is given; emitting SIGTERM on the process would reach every handler an earlier test
+	// file left in a shared `bun test` process (CI shard core-4 died with 143 that way). It installs them before its first await.
+	const signals = new EventEmitter();
+	const sleeper = runServiceLauncher(launcher, ["service", "run", "x"], { ...process.env }, signals);
 	for (let waited = 0; waited < 2000 && !existsSync(ready); waited++) Bun.sleepSync(5);
 	expect(existsSync(ready)).toBe(true);
-	process.emit("SIGTERM");
+	signals.emit("SIGTERM");
 	expect(await sleeper).toBe(143);
 	rmSync(join(prefix, "bin", "omp-kit"), { force: true });
 	expect(await runServiceLauncher(launcher, ["service", "run", "x"], { ...process.env })).toBe(127);

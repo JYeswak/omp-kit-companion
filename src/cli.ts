@@ -6174,9 +6174,12 @@ export async function runCli(args: readonly string[] = process.argv.slice(2)): P
  * STABLETCC1 (ompkit-ck2av): the body of `<prefix>/service/omp-kit-svc`, the stable-path copy of the kit binary every macOS
  * launchd job program points at (src/service-launcher.ts says why). It starts the active release, `<prefix>/bin/omp-kit`, as a
  * child with the same arguments and environment and live stdio, forwards the signals launchd sends, and returns the child's
- * exit status. 127 names a missing active release: the job fails visibly rather than running stale code.
+ * exit status. 127 names a missing active release: the job fails visibly rather than running stale code. `signals` is where the
+ * launcher listens (the process); a test passes its own emitter, because emitting SIGTERM on the process reaches every handler a
+ * neighbouring test file left in a shared `bun test` process.
  */
-export async function runServiceLauncher(executablePath: string, args: readonly string[], env: Record<string, string | undefined>): Promise<number> {
+export async function runServiceLauncher(executablePath: string, args: readonly string[], env: Record<string, string | undefined>,
+	signals: Pick<NodeJS.EventEmitter, "on" | "off"> = process): Promise<number> {
 	const release = launcherChildPath(executablePath);
 	if (!executableFile(release)) {
 		process.stderr.write(`omp-kit-svc: the active release ${release} is missing or not executable; reinstall the kit\n`);
@@ -6192,14 +6195,14 @@ export async function runServiceLauncher(executablePath: string, args: readonly 
 	const started = child;
 	const handlers = (["SIGTERM", "SIGINT", "SIGHUP", "SIGUSR1", "SIGUSR2"] as const).map(signal => {
 		const handler = () => { try { started.kill(signal); } catch { /* the child already exited; the wait below reports it */ } };
-		process.on(signal, handler);
+		signals.on(signal, handler);
 		return [signal, handler] as const;
 	});
 	try {
 		const code = await started.exited;
 		return launcherExitStatus(code, started.signalCode);
 	} finally {
-		for (const [signal, handler] of handlers) process.off(signal, handler);
+		for (const [signal, handler] of handlers) signals.off(signal, handler);
 	}
 }
 
