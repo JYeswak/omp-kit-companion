@@ -836,40 +836,60 @@ if [ "$needs_shell" = 1 ]; then
 	fi
 	if [ -n "$shellcheck_runner" ]; then
 		shell_rc=0
+		shell_files=""
 		for file in $CHANGED; do
 			case "$file" in
 				scripts/*.sh|checkers/*.sh|installer/*.sh|tests/cli/*.sh|tests/e2e/*.sh)
 					if [ -e "$ARCHIVE_DIR/$file" ]; then
-						if [ "$shellcheck_runner" = "pinned" ]; then
-							sc_cid=""
-							if sc_cid="$(docker_bounded 60 create --pull=never --network none "$PINNED_SHELLCHECK_IMAGE" -x -P /archive "/archive/$file")" \
-								&& [ -n "$sc_cid" ] \
-								&& docker_bounded 60 cp "$ARCHIVE_DIR/." "$sc_cid:/archive" \
-								&& docker_bounded 60 start -a "$sc_cid"; then
-								:
-							else
-								shell_rc=1
-							fi
-							if [ -n "$sc_cid" ]; then
-								if docker_bounded 60 rm -f "$sc_cid" >/dev/null; then
-									:
-								else
-									echo "focused shellcheck: could not remove container for $file; it may leak server-side" >&2
-									shell_rc=1
-								fi
-							fi
-						else
-							if shellcheck -x -P "$ARCHIVE_DIR" "$ARCHIVE_DIR/$file"; then
-								:
-							else
-								shell_rc=1
-							fi
-						fi
+						shell_files="$shell_files $file"
 					else
 						echo "focused: $file deleted in range; not shellchecked"
 					fi ;;
 			esac
 		done
+		# GATESPEED1 (ompkit-774u.71, J-2026-11-23): one container per push, not per file. Measured
+		# 2026-11-23 on this host: create + full-tree cp + start + rm per file took 8 s for 5 files;
+		# a single create, one cp and one start running shellcheck over all 5 files takes 1 s. Same
+		# image, flags and files, so the same findings refuse the push.
+		if [ -n "$shell_files" ]; then
+			if [ "$shellcheck_runner" = "pinned" ]; then
+				sc_cid=""
+				set -- -x -P /archive
+				# Intentional word splitting turns the space-separated shell list into argv entries.
+				# shellcheck disable=SC2086
+				for shell_file in $shell_files; do
+					set -- "$@" "/archive/$shell_file"
+				done
+				if sc_cid="$(docker_bounded 60 create --pull=never --network none "$PINNED_SHELLCHECK_IMAGE" "$@")" \
+					&& [ -n "$sc_cid" ] \
+					&& docker_bounded 60 cp "$ARCHIVE_DIR/." "$sc_cid:/archive" \
+					&& docker_bounded 60 start -a "$sc_cid"; then
+					:
+				else
+					shell_rc=1
+				fi
+				if [ -n "$sc_cid" ]; then
+					if docker_bounded 60 rm -f "$sc_cid" >/dev/null; then
+						:
+					else
+						echo "focused shellcheck: could not remove container $sc_cid; it may leak server-side" >&2
+						shell_rc=1
+					fi
+				fi
+			else
+				set --
+				# Intentional word splitting turns the space-separated shell list into argv entries.
+				# shellcheck disable=SC2086
+				for shell_file in $shell_files; do
+					set -- "$@" "$ARCHIVE_DIR/$shell_file"
+				done
+				if shellcheck -x -P "$ARCHIVE_DIR" "$@"; then
+					:
+				else
+					shell_rc=1
+				fi
+			fi
+		fi
 		if [ "$shell_rc" -ne 0 ]; then
 			echo "focused shellcheck: findings refuse the push" >&2
 			return 1
