@@ -5,7 +5,7 @@ import { check as checkGit, commandFromEvent, executedShellCommands } from "../s
 import { check as checkReservations, exportAgentMailStorageRoot } from "../src/fleet-guard/reservations.ts";
 import { runSync } from "../src/kitlib/run.ts";
 import { adoptOwnerlessDir, applyScratchEnv, autoCompletedLine, check as checkScratch, checkSystemTemp, createdScratchTops, hostAgentName, resolveFilesystemWriteTarget, rewriteShellCommand, rewriteToolInput, toolTargetPaths, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent, type RewriteMapping } from "../src/fleet-guard/scratch.ts";
-import { createSeatScratch, endSeat, liveSeatEndDeps, recordSeatOwner, type SeatEndDeps, type SeatScratchOpts } from "../src/fleet-guard/seat-end.ts";
+import { createSeatScratch, endSeat, liveSeatEndDeps, type SeatEndDeps, type SeatEndSeat, type SeatScratchOpts } from "../src/fleet-guard/seat-end.ts";
 import { check as checkDurability, targets as durableTargets } from "../src/fleet-guard/durability.ts";
 import { check as checkWriteOwnership } from "../src/fleet-guard/write-own.ts";
 import { checkPlutilInPlace } from "../src/fleet-guard/plutil.ts";
@@ -39,7 +39,7 @@ function localRootOf(context: ToolCallContext | undefined): string | undefined {
 interface ExtensionApi {
 	setLabel(label: string): void;
 	on(event: "tool_call", handler: (event: FleetGuardEvent, context?: ToolCallContext) => Promise<FleetGuardBlock | GuardRewrite | undefined>): void;
-	on(event: "session_shutdown", handler: (event: unknown, context?: ToolCallContext) => Promise<void>): void;
+	on(event: "session_start" | "session_shutdown", handler: (event: unknown, context?: ToolCallContext) => void | Promise<void>): void;
 }
 /** A completed literal: revised input and/or the AUTO_COMPLETED notice the result carries. */
 export interface GuardRewrite { input?: Record<string, unknown>; additionalContext?: string }
@@ -341,19 +341,23 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 			localRoot: localRootOf(context) }));
 		return;
 	}
-	// The seat dir is owned by the agent and its omp session, never by a bare pid. The session id is only known
-	// once the session manager is in a tool-call context, so the first call records it (once: later calls may
-	// belong to a subagent session). TMPREDIRECT1 (ompkit-1ra0d.178): the dir comes from the kit's scratch
-	// ownership API (createScratch, the same one `omp-kit scratch new` uses), never an invented raw directory.
-	let seat: { dir: string; repo: string; recorded: boolean; agent?: string; session?: string } | null = null;
+	let seat: (SeatEndSeat & { repo: string }) | null = null;
 	if (initial.kind === "on") {
-		const created = createSeatScratch(initial.root, deps?.seatScratch ?? {});
-		if ("refuse" in created) {
-			console.warn(`fleet-guard: seat scratch unavailable (${created.refuse}); session completions disabled, refusals unchanged`);
-		} else {
-			seat = { dir: created.dir, repo: initial.root, recorded: false };
+		// The session manager is available here, before a tool or subagent can
+		// create a competing ownership record. Charge the seat at allocation.
+		pi.on("session_start", (_event, context) => {
+			if (seat !== null) return;
+			const agent = hostAgentName(deps?.env);
+			const session = context?.sessionManager?.getSessionId?.();
+			const identity = agent && session ? { agent, session } : undefined;
+			const created = createSeatScratch(initial.root, deps?.seatScratch, identity);
+			if ("refuse" in created) {
+				console.warn(`fleet-guard: seat scratch unavailable (${created.refuse}); session completions disabled, refusals unchanged`);
+				return;
+			}
+			seat = { dir: created.dir, repo: initial.root, agent: identity?.agent, session: identity?.session };
 			applyScratchEnv(created.dir);
-		}
+		});
 		try { await exportAgentMailStorageRoot(); }
 		catch {
 			console.warn("fleet-guard: Agent Mail storage-root discovery unavailable; reservation admission reports storage failures separately");
@@ -363,14 +367,6 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 	const state: SessionRewriteState = { dir: "", aliases: new Map(), createdDirs: new Set(), adopted: [] };
 	let unavailableWarned = false;
 	pi.on("tool_call", async (event, context) => {
-		const agent = seat !== null && !seat.recorded ? hostAgentName(deps?.env) : undefined;
-		const session = agent !== undefined ? context?.sessionManager?.getSessionId?.() : undefined;
-		if (seat !== null && agent !== undefined && session) {
-			seat.recorded = true;
-			seat.agent = agent;
-			seat.session = session;
-			recordSeatOwner(seat.dir, agent, session);
-		}
 		if (seat !== null) state.dir = seat.dir;
 		const contention = checkContention(event);
 		if (contention) return contention;

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 import { join } from "node:path";
 import fleetGuard, { type GuardDeps } from "../../extensions/fleet-guard.ts";
 import { parseOwnerFile } from "../../src/scratch.ts";
-import { createSeatScratch, recordSeatOwner } from "../../src/fleet-guard/seat-end.ts";
+import { createSeatScratch } from "../../src/fleet-guard/seat-end.ts";
 import type { FleetGuardEvent } from "../../src/fleet-guard/scratch.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { runSync } from "../../src/kitlib/run.ts";
@@ -52,6 +52,7 @@ function fixture(): string {
 
 interface FakePi {
 	handlers: ((event: FleetGuardEvent, context?: { cwd: string; sessionManager?: { getSessionId?: () => string | undefined } }) => Promise<unknown>)[];
+	startups: ((event: unknown, context: { cwd: string; sessionManager: { getSessionId: () => string } }) => void | Promise<void>)[];
 	shutdowns: unknown[];
 	setLabel(label: string): void;
 	on(event: string, handler: (...args: never[]) => unknown): void;
@@ -60,10 +61,12 @@ interface FakePi {
 function fakePi(): FakePi {
 	return {
 		handlers: [],
+		startups: [],
 		shutdowns: [],
 		setLabel(_label: string): void {},
 		on(event: string, handler: (...args: never[]) => unknown): void {
 			if (event === "session_shutdown") this.shutdowns.push(handler);
+			else if (event === "session_start") this.startups.push(handler as FakePi["startups"][number]);
 			else this.handlers.push(handler as FakePi["handlers"][number]);
 		},
 	};
@@ -77,6 +80,7 @@ async function seated(cwd: string, extra: GuardDeps = {}): Promise<FakePi> {
 	process.env.OMP_KIT_SCRATCH_ROOTS = spellings.join(":");
 	try {
 		await fleetGuard(pi, { cwd, pid: process.pid, env: {}, seatScratch: { ledgerPath: join(cwd, "budgets.json") }, ...extra });
+		for (const start of pi.startups) await start({}, { cwd, sessionManager: { getSessionId: () => SESSION } });
 	} finally {
 		if (savedEnv.ROOTS === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
 		else process.env.OMP_KIT_SCRATCH_ROOTS = savedEnv.ROOTS;
@@ -131,24 +135,21 @@ test("TMPREDIRECT1: the seat dir comes from the scratch ownership API, recorded 
 	process.env.OMP_KIT_SCRATCH_ROOTS = join(cwd, "var", "agent-tmp");
 	try {
 		const ledger = join(cwd, "budgets.json");
-		const first = createSeatScratch(cwd, { ledgerPath: ledger });
+		const identity = { agent: "TurquoiseSummit", session: SESSION };
+		const first = createSeatScratch(cwd, { ledgerPath: ledger }, identity);
 		expect("dir" in first).toBe(true);
 		if (!("dir" in first)) return;
 		expect(first.dir).toBe(join(cwd, "var", "agent-tmp", `omp.${process.pid}`));
 		const text = readFileSync(join(first.dir, ".owner"), "utf8");
 		const owner = parseOwnerFile(text);
-		expect(owner).toMatchObject({ pid: process.pid, label: "omp", bin: "throwaway", agent: null, session: null });
+		expect(owner).toMatchObject({ pid: process.pid, label: "omp", bin: "throwaway", ...identity });
 		expect(owner?.capabilitySha256).toMatch(/^[0-9a-f]{64}$/);
 		expect(owner?.processStart).toBeTruthy();
-		// same-process re-init reuses the dir instead of inventing another.
-		expect(createSeatScratch(cwd, { ledgerPath: ledger })).toEqual({ dir: first.dir });
-		// the first tool call records the seat; a later session never replaces it.
-		expect(recordSeatOwner(first.dir, "TurquoiseSummit", SESSION)).toBe(true);
-		expect(recordSeatOwner(first.dir, "TurquoiseSummit", "01a1502a-5647-76ba-89c5-949087f3e283")).toBe(false);
-		expect(parseOwnerFile(readFileSync(join(first.dir, ".owner"), "utf8"))).toMatchObject({ agent: "TurquoiseSummit", session: SESSION });
-		// an ill-formed pair and a missing dir refuse, leaving the owner valid.
-		expect(recordSeatOwner(first.dir, "../evil", SESSION)).toBe(false);
-		expect(recordSeatOwner(join(cwd, "var", "agent-tmp", "missing.1"), "TurquoiseSummit", SESSION)).toBe(false);
+		// Only the same process and seat can reattach to the existing allocation.
+		expect(createSeatScratch(cwd, { ledgerPath: ledger }, identity)).toEqual({ dir: first.dir });
+		expect(createSeatScratch(cwd, { ledgerPath: ledger }, { ...identity, session: "01a1502a-5647-76ba-89c5-949087f3e283" })).toHaveProperty("refuse");
+		expect(createSeatScratch(cwd, { ledgerPath: ledger }, { ...identity, agent: "../evil" })).toHaveProperty("refuse");
+		expect(readFileSync(join(first.dir, ".owner"), "utf8")).toBe(text);
 	} finally {
 		if (savedEnv.ROOTS === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
 		else process.env.OMP_KIT_SCRATCH_ROOTS = savedEnv.ROOTS;
@@ -161,6 +162,7 @@ test("TMPREDIRECT1: an unavailable seat fails closed to today's refusal", async 
 	process.env.OMP_KIT_SCRATCH_ROOTS = join(cwd, "no-such-root");
 	try {
 		await fleetGuard(pi, { cwd, pid: process.pid, env: {}, seatScratch: { ledgerPath: join(cwd, "budgets.json") } });
+		for (const start of pi.startups) await start({}, { cwd, sessionManager: { getSessionId: () => SESSION } });
 	} finally {
 		if (savedEnv.ROOTS === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
 		else process.env.OMP_KIT_SCRATCH_ROOTS = savedEnv.ROOTS;

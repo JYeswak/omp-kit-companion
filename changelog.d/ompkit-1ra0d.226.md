@@ -1,0 +1,1 @@
+- Bind the session’s owned `TMPDIR` and scratch budget to its seat at startup, before the first tool call. Disabled projects keep their inherited temporary directory.

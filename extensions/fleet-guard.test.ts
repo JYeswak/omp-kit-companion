@@ -41,12 +41,13 @@ afterEach(() => {
  * and a fixture-local budget ledger, so the seat dir comes from the ownership API without touching
  * live roots or the live ledger. The roots override lives only for the synchronous creation.
  */
-async function seated(pi: FakePi, deps: GuardDeps): Promise<void> {
+async function seated(pi: FakePi, deps: GuardDeps, session: string | null = SESSION): Promise<void> {
 	const cwd = deps.cwd ?? "";
 	const previous = process.env.OMP_KIT_SCRATCH_ROOTS;
 	process.env.OMP_KIT_SCRATCH_ROOTS = join(cwd, "var", "agent-tmp");
 	try {
-		await fleetGuard(pi, { seatScratch: { ledgerPath: join(cwd, "budgets.json") }, ...deps });
+		await fleetGuard(pi, { env: {}, seatScratch: { ledgerPath: join(cwd, "budgets.json") }, ...deps });
+		for (const start of pi.startups) await start({}, { cwd, sessionManager: { getSessionId: () => session ?? undefined } });
 	} finally {
 		if (previous === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
 		else process.env.OMP_KIT_SCRATCH_ROOTS = previous;
@@ -54,11 +55,13 @@ async function seated(pi: FakePi, deps: GuardDeps): Promise<void> {
 }
 
 type ToolCallHandler = (event: FleetGuardEvent, context?: { cwd: string; localProtocolOptions?: { getArtifactsDir?: () => string | null }; sessionManager?: { getSessionId?: () => string | undefined } }) => Promise<FleetGuardBlock | undefined>;
+type StartupHandler = (event: unknown, context: { cwd: string; sessionManager: { getSessionId: () => string | undefined } }) => void | Promise<void>;
 type ShutdownHandler = (event: unknown, context?: { sessionManager?: { getSessionId?: () => string | undefined } }) => Promise<void>;
 
 interface FakePi {
 	labels: string[];
 	handlers: ToolCallHandler[];
+	startups: StartupHandler[];
 	shutdowns: ShutdownHandler[];
 	setLabel(label: string): void;
 	on(event: string, handler: (...args: never[]) => unknown): void;
@@ -68,12 +71,14 @@ function fakePi(): FakePi {
 	return {
 		labels: [],
 		handlers: [],
+		startups: [],
 		shutdowns: [],
 		setLabel(label: string): void {
 			this.labels.push(label);
 		},
 		on(event: string, handler: (...args: never[]) => unknown): void {
 			if (event === "session_shutdown") this.shutdowns.push(handler as ShutdownHandler);
+			else if (event === "session_start") this.startups.push(handler as StartupHandler);
 			else this.handlers.push(handler as ToolCallHandler);
 		},
 	};
@@ -150,14 +155,11 @@ test("TMPREWRITE1-adopt: an admitted mkdir lets the session adopt the ownerless 
 const SESSION = "01a15012-af9e-7628-bee6-496084668412";
 const ownerOf = (cwd: string, pid: number): string => readFileSync(join(cwd, "var", "agent-tmp", `omp.${pid}`, ".owner"), "utf8");
 
-test("OWNERKEY1: the first tool call records the agent and its omp session in the seat owner, once", async () => {
+test("OWNERKEY1: startup binds the agent and omp session; a subagent cannot take over", async () => {
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
 	await seated(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" } });
-	// Before any call the session is unknown: the owner is the pid-only record it always was.
-	expect(ownerOf(cwd, pid)).not.toContain("session=");
 	const handler = pi.handlers[0]!;
-	await handler({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => SESSION } });
 	const first = ownerOf(cwd, pid);
 	expect(first).toContain(`pid=${pid}\n`);
 	expect(first).toContain("label=omp\n");
@@ -171,18 +173,16 @@ test("OWNERKEY1: without a host agent name, or without a session id, the seat ow
 	for (const [env, session] of [[{}, SESSION], [{ AGENT_NAME: "TurquoiseSummit" }, undefined], [{ AGENT_NAME: "../evil" }, SESSION]] as const) {
 		const pi = fakePi();
 		const { cwd, pid } = fixture();
-		await seated(pi, { cwd, pid, env });
+		await seated(pi, { cwd, pid, env }, session ?? null);
 		await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => session } });
 		expect(ownerOf(cwd, pid).trim().split("\n").map((line) => line.split("=")[0])).toEqual(["pid", "process_start", "label", "repo", "created_at", "argv0", "bin", "capability_sha256"]);
 	}
 });
 
-test("SCRATCHBIN1: a session's own dir names its bin at creation and keeps it when the session is recorded", async () => {
+test("SCRATCHBIN1: a session's own dir names its bin and seat at creation", async () => {
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
 	await seated(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" } });
-	expect(ownerOf(cwd, pid)).toContain("bin=throwaway\n");
-	await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => SESSION } });
 	const recorded = ownerOf(cwd, pid);
 	expect(recorded).toContain(`agent=TurquoiseSummit\nsession=${SESSION}\n`);
 	expect(recorded).toContain("bin=throwaway\n");
@@ -195,13 +195,15 @@ const seatEndDeps = (released: string[], env: Record<string, string | undefined>
 
 test("SCRATCHBIN1: the session that recorded the seat releases its dir when it ends; a subagent's end and an unrecorded seat release nothing", async () => {
 	const released: string[] = [];
+	const unseated = fakePi();
+	const unseatedRepo = fixture();
+	await seated(unseated, { ...unseatedRepo, seatEnd: seatEndDeps(released) }, null);
+	await unseated.shutdowns[0]!({}, { sessionManager: { getSessionId: () => SESSION } });
+	expect(released).toEqual([]);
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
 	await seated(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" }, seatEnd: seatEndDeps(released) });
 	expect(pi.shutdowns).toHaveLength(1);
-	await pi.shutdowns[0]!({}, { sessionManager: { getSessionId: () => SESSION } });
-	expect(released).toEqual([]);
-	await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => SESSION } });
 	await pi.shutdowns[0]!({}, { sessionManager: { getSessionId: () => "01a1502a-5647-76ba-89c5-949087f3e283" } });
 	expect(released).toEqual([]);
 	await pi.shutdowns[0]!({}, { sessionManager: { getSessionId: () => SESSION } });
