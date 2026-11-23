@@ -81,7 +81,7 @@ test("LOST_FALSE_FIRE: relocated CLI reduces and replays named G2/G3 fires while
 	const rule = "public-synthetic-false-fire";
 	const ruleFile = join(rules, `${rule}.md`);
 	const ruleMarkdown = [
-		"---", "condition:", "  - 'PUBLIC DANGER'", "scope:", "  - text", "interruptMode: never", "---",
+		"---", "condition:", "  - 'PUBLIC DANGER'", "scope:", "  - text", "interruptMode: always", "---",
 		"Synthetic-only regression rule.", "",
 	].join("\n");
 	writeFileSync(ruleFile, ruleMarkdown);
