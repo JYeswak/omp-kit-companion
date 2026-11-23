@@ -970,13 +970,27 @@ fi
 			# shellcheck disable=SC2086
 			full_files=$(printf '%s\n' $affected | awk 'NF { n++ } END { print n+0 }')
 			echo "FRESH-GATE: PLAN FULL trigger=$full_triggers files=$full_files: a shared runtime changed, so every suite is affected; a FULL plan is not budgeted or deferred"
+			# LANDJUDGE1 (ompkit-xewv5): JUDGEIDENT1 only records a main verdict judged by the
+			# candidate's own closure, so when the candidate archive's closure identity differs
+			# from this run's (parent) judge identity the record is keyed by the candidate, not
+			# the parent. Read back under the candidate as judge root then; the reading code
+			# still runs from this gate's scripts, only the looked-up identity changes. Equal
+			# identities, or an identity that cannot be computed, keep the parent judge.
+			read_judge_root="$SCRIPT_DIR/.."
+			judge_differs=0
+			parent_checks=$(PYTHONPATH="$SCRIPT_DIR" python3 -B -m suite-metrics identity --root "$SCRIPT_DIR/.." --scope full 2>/dev/null) || parent_checks=
+			candidate_checks=$(PYTHONPATH="$SCRIPT_DIR" python3 -B -m suite-metrics identity --root "$ARCHIVE_DIR" --scope full 2>/dev/null) || candidate_checks=
+			if [ -n "$parent_checks" ] && [ -n "$candidate_checks" ] && [ "$candidate_checks" != "$parent_checks" ]; then
+				read_judge_root="$ARCHIVE_DIR"
+				judge_differs=1
+			fi
 			full_repo=${FRESH_GATE_REPO:-$ROOT}
 			full_verdict=MISS
 			# FULLREUSE1: f4a62980f1 skipped pre-push's archive even when its candidate repo was supplied.
 			# A caller-owned archive without that repo must not consult the operator's verdict store.
 			if { [ "${ARCHIVE_SUPPLIED:-0}" = 0 ] || [ -n "${FRESH_GATE_REPO:-}" ]; } && full_tree=$(git -C "$full_repo" rev-parse --verify -q "$COMMIT^{tree}"); then
 				if full_verdict=$(cd "$SCRIPT_DIR" && python3 full-suite-verdict-store.py require-pass --repo "$full_repo" --tree "$full_tree" \
-					--role main --judge-root "$SCRIPT_DIR/.." --suite-root "$ARCHIVE_DIR" 2>&1); then
+					--role main --judge-root "$read_judge_root" --suite-root "$ARCHIVE_DIR" 2>&1); then
 					# FULLHANDOFF1: the exact-tree PASS is this run's evidence; the ledger row
 					# must say so, or a DONE handoff for a FULL-plan commit can never be admitted.
 					printf '%s\n' "$full_tree" >"$WORK/full-suite-tree" || return 1
@@ -985,28 +999,29 @@ fi
 					return 0
 				fi
 			fi
-		record_run 0 0 1
-		# FULLJUDGE1 (ompkit-1ra0d.72): teach the exact recording command this run
-		# accepts. The verdict is keyed by this run's judge ($SCRIPT_DIR/..), so a
-		# relative `sh scripts/...` from a checkout whose judging files differ
-		# records under another judge and stays MISS here.
-		judge_root=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P) || judge_root="$SCRIPT_DIR/.."
-		if [ -e "$judge_root/.git" ]; then
-			full_remedy="sh $judge_root/scripts/full-suite-verdict.sh --repo $full_repo --commit $COMMIT --judge-role main"
-		else
-			# Ephemeral archive judge (a pre-push/commit-gate extract removed
-			# after the run): recreate it from the commit it judges. The archive
-			# always holds the candidate, so scripts identical to it mean the
-			# candidate's own judge (recreate from the commit); anything else
-			# is the base judge (recreate from the base).
-			if [ -d "$ARCHIVE_DIR/scripts" ] && diff -r -q "$judge_root/scripts" "$ARCHIVE_DIR/scripts" >/dev/null 2>&1; then
-				judge_ref=$COMMIT
+			record_run 0 0 1
+			# FULLJUDGE1 (ompkit-1ra0d.72): teach the exact recording command this run
+			# accepts. When the candidate's closure differs from this run's judge the verdict
+			# is keyed by the candidate, so the command recreates the candidate's own judge
+			# from the commit; otherwise it recreates this run's (base) judge from the base.
+			# LANDJUDGE1 uses the compared identities above, never the other way round.
+			judge_root=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P) || judge_root="$SCRIPT_DIR/.."
+			if [ -e "$judge_root/.git" ]; then
+				full_remedy="sh $judge_root/scripts/full-suite-verdict.sh --repo $full_repo --commit $COMMIT --judge-role main"
 			else
-				judge_ref=${BASE:-$COMMIT}
+				# Ephemeral archive judge (a pre-push/commit-gate extract removed
+				# after the run): recreate it from the commit it judges. The archive
+				# always holds the candidate, so a differing candidate closure means the
+				# candidate's own judge (recreate from the commit); anything else
+				# is the base judge (recreate from the base).
+				if [ "$judge_differs" = 1 ]; then
+					judge_ref=$COMMIT
+				else
+					judge_ref=${BASE:-$COMMIT}
+				fi
+				# Refusal text only: the operator's shell runs it, allocating owned scratch.
+				full_remedy="judge_tmp=\$(cd $full_repo && omp-kit scratch new --label full-judge --print-dir) && git -C $full_repo archive $judge_ref | tar -xf - -C \"\$judge_tmp\" && sh \"\$judge_tmp/scripts/full-suite-verdict.sh\" --repo $full_repo --commit $COMMIT --judge-role main"
 			fi
-			# Refusal text only: the operator's shell runs it, allocating owned scratch.
-			full_remedy="judge_tmp=\$(cd $full_repo && omp-kit scratch new --label full-judge --print-dir) && git -C $full_repo archive $judge_ref | tar -xf - -C \"\$judge_tmp\" && sh \"\$judge_tmp/scripts/full-suite-verdict.sh\" --repo $full_repo --commit $COMMIT --judge-role main"
-		fi
 		echo "FRESH-GATE: REFUSED reason=FULL_SUITE_REQUIRED trigger=$full_triggers files=$full_files verdict=$(printf '%s\n' "$full_verdict" | head -n 1): run $full_remedy, then retry" >&2
 		return 1 ;;
 	esac
