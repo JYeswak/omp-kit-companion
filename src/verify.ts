@@ -52,6 +52,14 @@ const LETTER = /^[a-z]$/;
 const CHECKLIST_ITEM = /^- \[([ xX])\] +(.+)$/;
 /** CLOSEPASS1: the label on a LIVEREADBACK child, and the placeholder for its id in acts before br creates it. */
 export const LIVE_READBACK_LABEL = "live-readback";
+/** PRIORART1 (ompkit-dpbsq): the readback child verify files is a bead like any other, and the guard refuses a create without the five lines. */
+const LIVE_READBACK_PRIOR_ART = [
+	"GOAL: prove on the installed kit the live boxes verify could not run at close, so the verified bead's behavior is read back after install (CLOSEPASS1 ompkit-774u.52); measured by this bead closing through `omp-kit verify --live-readback`.",
+	"NATIVE: none applies: this bead is filed by `omp-kit verify` from the verified bead's unticked live boxes; the box commands are the checks.",
+	"EXISTING: `omp-kit verify <this bead> --live-readback` already replays and closes it; no other tool does.",
+	"DECISION: EXTEND that verb; no new tool.",
+	"BEST: run live boxes at close on a disposable installed copy instead of deferring them; not chosen: a close would then need a second install per bead, and the deferral keeps the debt visible.",
+].join("\n");
 /** Optional legacy kit lane: used only when it is active in the selected tracker. */
 export const LANE_PARENT = "ompkit-kup44";
 /** Active in the fleet DAG sense: an edge to it counts (two call sites plus the readback lookup keep it in lockstep). */
@@ -1178,7 +1186,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		const moved = new Set(deferred.map(b => b.item));
 		let item = 0;
 		const remaining = acceptance.split("\n").filter(raw => !CHECKLIST_ITEM.test(raw.trim()) || !moved.has(++item)).join("\n");
-		const childDescription = `WHAT: read back, on the installed kit, the boxes omp-kit verify deferred when it closed ${row.id} on export ${exportCommit}: \`omp-kit verify <this bead> --live-readback\`. A pass ticks them and closes this bead; a failure reopens ${row.id} with REWORK naming the box.\n\nWHY: ${row.id}'s executed boxes passed, and br closes a bead only with every box ticked (CLOSEPASS1 ompkit-774u.52, J-2026-10-29-20), so these boxes stay open, visible debt until they are read back.\n\nVerified bead: ${row.id} (related link)\nVerified title: ${title}`;
+		const childDescription = `WHAT: read back, on the installed kit, the boxes omp-kit verify deferred when it closed ${row.id} on export ${exportCommit}: \`omp-kit verify <this bead> --live-readback\`. A pass ticks them and closes this bead; a failure reopens ${row.id} with REWORK naming the box.\n\nWHY: ${row.id}'s executed boxes passed, and br closes a bead only with every box ticked (CLOSEPASS1 ompkit-774u.52, J-2026-10-29-20), so these boxes stay open, visible debt until they are read back.\n\nVerified bead: ${row.id} (related link)\nVerified title: ${title}\n\n${LIVE_READBACK_PRIOR_ART}`;
 		if (reuse === undefined) acts.push(["br", "create", `LIVEREADBACK: ${readbackKey}`, "-t", "task", "-l", LIVE_READBACK_LABEL,
 			...(home ? ["--parent", home] : []), "--deps", `related:${row.id}`, "--external-ref", readbackRef,
 			"--description", childDescription, "--acceptance-criteria", deferredAcceptance, "--json", "--actor", input.actor]);

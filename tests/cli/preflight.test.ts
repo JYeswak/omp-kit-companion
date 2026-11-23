@@ -335,6 +335,14 @@ function fixtureBootstrapBr(harness: { brBinDir: string } | null): string {
 	if (harness) return harness.brBinDir ? join(harness.brBinDir, "br") : "br";
 	return nativeBr();
 }
+// PRIORART1 (ompkit-dpbsq): a claim through the shim needs the five prior-art lines, so the fixture beads carry them.
+const PRIOR_ART_FIXTURE = [
+	"GOAL: fixture bead for a claim test; measured by this test.",
+	"NATIVE: none needed for a fixture.",
+	"EXISTING: none, a fixture.",
+	"DECISION: EXTEND the claim path under test; no new tool.",
+	"BEST: none, a fixture.",
+].join("\n");
 async function claimFixture(name: string, actor: string, root: string, brBin: string): Promise<{ repo: string; gated: string; eligible: string }> {
 	const repo = join(root, name);
 	mkdirSync(repo, { recursive: true });
@@ -345,8 +353,8 @@ async function claimFixture(name: string, actor: string, root: string, brBin: st
 	mkdirSync(join(repo, ".beads"), { recursive: true });
 	await brun(["init", "--db", join(repo, ".beads", "beads.db"), "--actor", actor], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
 	const ac = "- [ ] [a] [build] probe passes `true` -> rc 0";
-	const gatedOut = await brun(["create", "gated bead [test]", "-l", "needs-director", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
-	const eligibleOut = await brun(["create", "eligible bead [test]", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
+	const gatedOut = await brun(["create", "gated bead [test]", "-l", "needs-director", "--description", PRIOR_ART_FIXTURE, "--acceptance-criteria", ac, "--silent", "--actor", actor], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
+	const eligibleOut = await brun(["create", "eligible bead [test]", "--description", PRIOR_ART_FIXTURE, "--acceptance-criteria", ac, "--silent", "--actor", actor], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
 	const gated = gatedOut.trim().split("\n").filter(l => l.length > 0).at(-1)!;
 	const eligible = eligibleOut.trim().split("\n").filter(l => l.length > 0).at(-1)!;
 	return { repo, gated, eligible };

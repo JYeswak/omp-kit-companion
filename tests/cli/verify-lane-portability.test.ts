@@ -26,6 +26,15 @@ const CLOSE_POLICY = [
 	"    \"open -> closed\":", "      require_all:", "        - min_reviewers: 1", "",
 ].join("\n");
 
+// PRIORART1 (ompkit-dpbsq): a create through the guard needs the five prior-art lines, so a fixture that expects another refusal carries them.
+const PRIOR_ART = [
+	"GOAL: fixture bead for a readback test; measured by this test.",
+	"NATIVE: none needed for a fixture.",
+	"EXISTING: none, a fixture.",
+	"DECISION: EXTEND the verify path under test; no new tool.",
+	"BEST: none, a fixture.",
+].join("\n");
+
 test("VERIFYLANEPORT1: a foreign parentless bead retains related readback debt and executes its live phase", async () => {
 	const marker = join(base, "parentless-live-observation");
 	const code = await repo("parentless-readback", {
@@ -103,7 +112,7 @@ test("READBACKKEY1: distinct parentless obligations survive real duplicate admis
 	const firstChild = await row(t, firstResult.child!);
 	const old = await brun([
 		"create", `LIVEREADBACK: ${secondTitle}`, "-t", "task", "-l", LIVE_READBACK_LABEL,
-		"--deps", `related:${second}`, "--description", "WHAT: read back on install.\nWHY: retained fixture obligation.",
+		"--deps", `related:${second}`, "--description", `WHAT: read back on install.\nWHY: retained fixture obligation.\n${PRIOR_ART}`,
 		"--acceptance-criteria", live2, "--json", "--actor", "Peer",
 	], t.dir, env);
 	expect(old.rc, old.out).toBe(4);
