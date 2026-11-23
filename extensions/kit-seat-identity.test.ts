@@ -55,3 +55,25 @@ test("SEATNAME1 planted: ambiguity, malformed names, a missing or foreign pane l
 	}
 	expect(paneSeatName({ TERN_PANE: "929" }, join(home({}), "missing")).kind).toBe("none");
 });
+// BRAUTHOR1 (ompkit-poiha): br names the author of a comment from --author, --actor, BD_ACTOR, BEADS_ACTOR and then the OS user, and
+// never from AGENT_NAME, so a seat's unflagged `br comments add` read as the OS user. The seat names itself for br at plugin load.
+test("BRAUTHOR1: a seat with a name exports it as BD_ACTOR and BEADS_ACTOR, whether AGENT_NAME was set or recovered from its pane", async () => {
+	const h = home({ "aaa/tern-929": '{"name":"OrangeRiver"}' });
+	const kept = await load({ AGENT_NAME: "FuchsiaGoose" }, h);
+	expect([kept.BD_ACTOR, kept.BEADS_ACTOR]).toEqual(["FuchsiaGoose", "FuchsiaGoose"]);
+	const recovered = await load({ TERN_PANE: "929" }, h);
+	expect([recovered.AGENT_NAME, recovered.BD_ACTOR, recovered.BEADS_ACTOR]).toEqual(["OrangeRiver", "OrangeRiver", "OrangeRiver"]);
+});
+
+test("BRAUTHOR1 planted: a BD_ACTOR or BEADS_ACTOR the seat set is kept, a blank one is replaced, and no valid name sets nothing", async () => {
+	const h = home({});
+	const set = await load({ AGENT_NAME: "FuchsiaGoose", BD_ACTOR: "SomeoneElse", BEADS_ACTOR: "   " }, h);
+	expect([set.BD_ACTOR, set.BEADS_ACTOR]).toEqual(["SomeoneElse", "FuchsiaGoose"]);
+	for (const env of [{}, { AGENT_NAME: "" }, { AGENT_NAME: "Orange River" }, { AGENT_NAME: "../evil" }] as Array<Record<string, string | undefined>>) {
+		const loaded = await load({ ...env }, h);
+		expect([loaded.BD_ACTOR, loaded.BEADS_ACTOR], JSON.stringify(env)).toEqual([undefined, undefined]);
+	}
+	const human: Record<string, string | undefined> = { BD_ACTOR: "josh" };
+	await kitSeatIdentity({}, { env: human, home: h });
+	expect(human.BD_ACTOR).toBe("josh");
+});

@@ -59,8 +59,23 @@ export function paneSeatName(env: Record<string, string | undefined>, home: stri
 
 export interface SeatIdentityDeps { env?: Record<string, string | undefined>; home?: string }
 
+/**
+ * BRAUTHOR1 (ompkit-poiha): br records the author of a comment as --author, else --actor, else BD_ACTOR, else BEADS_ACTOR, else the OS
+ * user; AGENT_NAME is not read. A seat that wrote `br comments add` without a flag was stored as the OS user (41 of about 290 comments
+ * since 2026-11-23T00:00Z in the skill-library-growth tracker read as Joshua's, 10 confirmed another seat's), and the verify path and
+ * chief ticks read comment authors. With the seat's name known, name it for br too, in the process every tool call inherits. A
+ * BD_ACTOR or BEADS_ACTOR the seat already set is never replaced; with no valid AGENT_NAME nothing is set, so a human shell keeps
+ * br's own default.
+ */
+export function exportBrAuthor(env: Record<string, string | undefined>): void {
+	const name = env.AGENT_NAME?.trim();
+	if (name === undefined || !NAME.test(name)) return;
+	for (const key of ["BD_ACTOR", "BEADS_ACTOR"]) if (!env[key]?.trim()) env[key] = name;
+}
+
 export default async function kitSeatIdentity(_pi: unknown, deps: SeatIdentityDeps = {}): Promise<void> {
 	const env = deps.env ?? process.env;
 	const seat = paneSeatName(env, deps.home ?? homedir());
 	if (seat.kind === "set") env.AGENT_NAME = seat.name;
+	exportBrAuthor(env);
 }
