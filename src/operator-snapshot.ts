@@ -60,11 +60,19 @@ const VOLATILE_CACHE_DIR_NAMES: Record<string, true> = {
  * None are kit install writes, and the post-run concurrent-writer probe cannot catch writes minutes apart,
  * so the snapshot does not judge them. Matched by exact top-level name, literal top-level prefix, whole
  * subdirectory, or anchored file prefix inside one named subdirectory (never a broad pattern).
+ * UPDPOST1 again (0.2.147 install, receipt 95d0b12e ended PARTIAL on `pregrade/skill-library-growth-fy7c.json`): eight more
+ * state-root directories written by fleet processes on their own clock, measured by newest mtime under the state root on
+ * 2026-11-23 (all within 4 h): pregrade/ (SkillGrowth's pre-close gate evidence), verify-evidence/ and verify-ledger-control/
+ * (omp-kit verify, src/verify-ledger.ts), tracker-snapshot/ and reopen-rate/ (src/cache-retain.ts), suite-lease/ (the
+ * full-suite lease, scripts/suite-lease.sh), checkout-archive/ (src/checkout-reap.ts) and scratch-quarantine/ (src/scratch.ts).
  * Everything else under the state root stays watched.
  */
 const LIVE_FLEET_TOP_FILES: Record<string, true> = { "gate-events.jsonl": true, "mail-wake.jsonl": true, "native-tool-attempts.json": true, "scratch-budgets.json": true };
 const LIVE_FLEET_TOP_PREFIXES: readonly string[] = ["kit-update-job-", "git-lock-rate.", "upgrade-notice-"];
-const LIVE_FLEET_SUBDIRS: Record<string, true> = { "chief": true, "goal-state": true, "inbox-wake": true, "model-evidence": true, "scratch-users": true, "send-drop": true, "send-locks": true, "tern-pending": true, "write-ledger": true };
+const LIVE_FLEET_SUBDIRS: Record<string, true> = {
+	"chief": true, "goal-state": true, "inbox-wake": true, "model-evidence": true, "scratch-users": true, "send-drop": true, "send-locks": true, "tern-pending": true, "write-ledger": true,
+	"pregrade": true, "verify-evidence": true, "verify-ledger-control": true, "tracker-snapshot": true, "reopen-rate": true, "suite-lease": true, "checkout-archive": true, "scratch-quarantine": true,
+};
 /** Anchored file prefixes inside one named subdirectory: the rest of that subdirectory stays watched. */
 const LIVE_FLEET_SUBDIR_PREFIXES: Record<string, readonly string[]> = { "jobs": ["imessage-bridge."] };
 

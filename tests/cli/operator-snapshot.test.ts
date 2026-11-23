@@ -252,6 +252,9 @@ test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, ot
 	writeFileSync(join(state, "chief", "tick-watchdog.log"), "tick\n");
 	writeFileSync(join(state, "model-evidence", "current.jsonl"), "{}\n");
 	writeFileSync(join(state, "native-tool-attempts.json"), "{}\n");
+	// UPDPOST1 (0.2.147 install, receipt 95d0b12e): the namespaces fleet processes wrote during that install's postcheck window.
+	const NAMESPACES_20261123 = ["pregrade", "verify-evidence", "verify-ledger-control", "tracker-snapshot", "reopen-rate", "suite-lease", "checkout-archive", "scratch-quarantine"];
+	for (const name of NAMESPACES_20261123) { mkdirSync(join(state, name, "nested"), { recursive: true }); writeFileSync(join(state, name, "nested", "seed.json"), "{}\n"); }
 	const before = snapshotWatched(paths);
 	// The fleet's own clock during the isolated run: appends, a new wake file, a new job record, a rate tmp.
 	appendFileSync(join(state, "gate-events.jsonl"), "{\"tick\":2}\n");
@@ -269,6 +272,7 @@ test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, ot
 	appendFileSync(join(state, "model-evidence", "current.jsonl"), "{\"tick\":2}\n");
 	writeFileSync(join(state, "model-evidence", "2026-11-21.jsonl"), "{}\n");
 	writeFileSync(join(state, "native-tool-attempts.json"), "{\"n\":2}\n");
+	for (const name of NAMESPACES_20261123) writeFileSync(join(state, name, "nested", "window.json"), "{\"tick\":2}\n");
 	const quiet = compareWatched(before, snapshotWatched(paths), home);
 	expect(quiet, JSON.stringify(quiet)).toMatchObject({ unchanged: true, complete: true, changed_paths: [], incomplete_paths: [] });
 	expect(quiet.live_state_paths).toEqual([
@@ -287,7 +291,8 @@ test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, ot
 		"~/.local/state/omp-kit/send-drop",
 		"~/.local/state/omp-kit/upgrade-notice-4cfb58040454d8b4.json",
 		"~/.local/state/omp-kit/write-ledger",
-	]);
+		...NAMESPACES_20261123.map(name => `~/.local/state/omp-kit/${name}`),
+	].sort());
 	// Planted: a kit receipt the fleet never writes is still reported beside the live state, and so are look-alike
 	// names that are not the declared namespaces (a different top-level file, not the chief/ or model-evidence/ directory).
 	writeFileSync(join(state, "receipts", "x.json"), "{}\n");
@@ -298,6 +303,13 @@ test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, ot
 		"~/.local/state/omp-kit/model-evidence.json",
 		"~/.local/state/omp-kit/receipts/x.json",
 	]);
+	// The same namespaces written for the first time inside the window are live state too, and a look-alike file is not.
+	const later = snapshotWatched(paths);
+	for (const name of NAMESPACES_20261123) writeFileSync(join(state, name, "nested", "record.json"), "{}\n");
+	writeFileSync(join(state, "pregrade.json"), "{}\n");
+	const lateComparison = compareWatched(later, snapshotWatched(paths), home);
+	expect(lateComparison.changed_paths).toEqual(["~/.local/state/omp-kit/pregrade.json"]);
+	for (const name of NAMESPACES_20261123) expect(lateComparison.live_state_paths).toContain(`~/.local/state/omp-kit/${name}`);
 }, fixtureDeadlineS() * 1000);
 
 /** A real concurrent process writing the cc store, cursors and spools the way the live cc service and kit CLIs do. */
