@@ -28,7 +28,7 @@
  * injectable through AmWatchDeps so tests never touch the live server.
  */
 import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import process from "node:process";
 import { runSync } from "./kitlib/run.ts";
 
@@ -386,4 +386,98 @@ function checkAmWatchInner(stateRoot: string, deps: AmWatchDeps): AmWatchResult 
 	return baseResult({ status: "RESTARTED", reason, pid: target.pid, rssBytes: target.rssBytes, stderrPath, fatalAt,
 		restartedAt: finishedAt, kickstartRc: kicked.code, probeStreak,
 		detail: `restarted ${domainLabel} for ${reason}: pid=${target.pid} rss=${target.rssBytes} B` });
+}
+
+/**
+ * AMREPLAY1 (ompkit-wy0ka): the load-watch tick's UNSENT-artifact replay step.
+ * Runs scripts/am_replay.py tick when Agent Mail health answered, so replayed
+ * LAND requests and verify assignments stop dying silently in pending_sends.
+ * Like the health step it never throws and never fails the census: anything
+ * unreadable is UNKNOWN with the detail naming it.
+ */
+export const AM_REPLAY_SCRIPT_REL = "scripts/am_replay.py";
+// product-deadline: the step must finish inside the load-watch cap; the script
+// bounds itself (--max-actions 5, 20 s per am call), so 180 s is the outer wall.
+export const AM_REPLAY_DEADLINE_S = 180;
+export const AM_REPLAY_MAX_ACTIONS = 5;
+export const AM_REPLAY_MAX_AGE_H = 72;
+export const AM_REPLAY_FIRST_RUN_MAX_AGE_H = 24;
+
+export interface AmReplayDeps {
+	run?: AmWatchRunner;
+	scriptPath?: string;
+	pendingDir?: string;
+	archiveDir?: string;
+	maxActions?: number;
+	replayMaxAgeH?: number;
+}
+
+export type AmReplayStatus = "REPLAYED" | "CLEAN" | "SKIPPED-UNHEALTHY" | "UNKNOWN";
+
+export interface AmReplayDiscard { artifact: string; reason: string }
+export interface AmReplayError { artifact: string; op: string; detail: string }
+export interface AmReplayResult {
+	status: AmReplayStatus;
+	unsentCount: number;
+	oldestAgeHours: number;
+	replayed: string[];
+	discarded: AmReplayDiscard[];
+	held: string[];
+	errors: AmReplayError[];
+	p1: boolean;
+	detail: string;
+}
+
+function amReplayBase(status: AmReplayStatus, detail: string): AmReplayResult {
+	return { status, unsentCount: -1, oldestAgeHours: -1, replayed: [], discarded: [],
+		held: [], errors: [], p1: false, detail };
+}
+
+function defaultAmReplayRun(argv: readonly string[]): AmWatchRunResult {
+	try {
+		const child = runSync(argv, { deadline_s: AM_REPLAY_DEADLINE_S, max_output_bytes: 1 << 20,
+			env: { ...process.env, LC_ALL: "C" } });
+		const decoder = new TextDecoder();
+		return { code: child.rc ?? 127, stdout: decoder.decode(child.stdout), stderr: decoder.decode(child.stderr) };
+	} catch {
+		return { code: 127, stdout: "", stderr: "spawn failed" };
+	}
+}
+
+export function checkAmReplay(stateRoot: string, amOk: boolean, deps: AmReplayDeps = {}): AmReplayResult {
+	try {
+		if (!amOk) return amReplayBase("SKIPPED-UNHEALTHY", "Agent Mail health did not answer; replay waits for a healthy tick");
+		const run = deps.run ?? defaultAmReplayRun;
+		const script = deps.scriptPath ?? resolve(import.meta.dir, "..", AM_REPLAY_SCRIPT_REL);
+		const argv = ["python3", "-B", script, "tick",
+			"--max-actions", String(deps.maxActions ?? AM_REPLAY_MAX_ACTIONS),
+			"--replay-max-age-h", String(deps.replayMaxAgeH ?? AM_REPLAY_MAX_AGE_H)];
+		if (deps.pendingDir !== undefined) argv.push("--pending", deps.pendingDir);
+		if (deps.archiveDir !== undefined) argv.push("--archive", deps.archiveDir);
+		const child = run(argv);
+		if (child.code !== 0) return amReplayBase("UNKNOWN", `am_replay.py exited ${child.code}: ${child.stderr.slice(0, 300)}`);
+		let report: Record<string, unknown>;
+		try {
+			report = JSON.parse(child.stdout) as Record<string, unknown>;
+		} catch {
+			return amReplayBase("UNKNOWN", "am_replay.py printed no parseable report");
+		}
+		if (report["schema_version"] !== "am-replay-report.v1" || typeof report["unsent_count"] !== "number") {
+			return amReplayBase("UNKNOWN", "am_replay.py report has the wrong schema");
+		}
+		const replayed = Array.isArray(report["replayed"]) ? (report["replayed"] as string[]) : [];
+		const discarded = Array.isArray(report["discarded"]) ? (report["discarded"] as AmReplayDiscard[]) : [];
+		const held = Array.isArray(report["held"]) ? (report["held"] as string[]) : [];
+		const errors = Array.isArray(report["errors"]) ? (report["errors"] as AmReplayError[]) : [];
+		const unsent = report["unsent_count"] as number;
+		const oldest = report["oldest_age_hours"] as number;
+		const acted = replayed.length > 0 || discarded.length > 0;
+		const status: AmReplayStatus = acted ? "REPLAYED" : errors.length > 0 ? "UNKNOWN" : "CLEAN";
+		void stateRoot;
+		return { status, unsentCount: unsent, oldestAgeHours: oldest, replayed, discarded, held, errors,
+			p1: report["p1"] === true,
+			detail: `unsent=${unsent} oldest=${oldest}h replayed=${replayed.length} discarded=${discarded.length} held=${held.length} errors=${errors.length}` };
+	} catch (error) {
+		return amReplayBase("UNKNOWN", `replay step threw: ${error instanceof Error ? error.message : String(error)}`.slice(0, 300));
+	}
 }
