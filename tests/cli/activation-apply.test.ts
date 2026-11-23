@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpat
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { applyActivationManifest, recordOptOut, updatePostApplyEnvelope } from "../../src/activation.ts";
+import { plistPath, serviceLabel } from "../../src/service.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import type { HookRefreshIo } from "../../src/hook-refresh.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
@@ -175,6 +176,56 @@ test("planted: exit 0 with ok:false, exit 1 with ok:true and unparsable output e
 	const real = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit", exec: okService(), hookIo: hookIo([]) });
 	expect(real.failed.some((f) => f.item.startsWith("service:"))).toBe(false);
 	expect(real.servicesApplied).toContain("kit-update");
+});
+
+const refusedService = (code: string) => async (_argv: readonly string[]) => ({ exit: 1, stdout: serviceEnvelope(false, [{ code, message: `${code} synthetic` }]), stderr: "" });
+// SERVICESKIP1: the clean-home update used to fail 23 jobs the host never set up and exit 1 with ok:false although the release was installed.
+test("a job this host never set up and cannot set up is skipped, not failed, and the envelope stays UPDATED", async () => {
+	for (const code of ["LAUNCHER_UNAVAILABLE", "FLEET_ADAPTER_ABSENT", "AUTOCUT_UNCONFIGURED", "LOOP_CLOSE_UNCONFIGURED"]) {
+		const { root, home, stateRoot } = fixtureDirs(`never-set-up-${code}`);
+		const result = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit", exec: refusedService(code), hookIo: hookIo([]) });
+		expect(result.failed, code).toEqual([]);
+		expect(result.ok, code).toBe(true);
+		const kept = result.skipped.find((s) => s.item === "service:kit-update");
+		expect(kept?.reason, code).toContain(code);
+		expect(kept?.reason, code).toContain("not installed on this host");
+		const out = updatePostApplyEnvelope(envelopeBase, { ok: true, detail: "linked" }, result, root);
+		expect(out.code, code).toBe(0);
+		expect(out.data["overall"], code).toBe("UPDATED");
+	}
+});
+test("planted: the same refusal for a job that IS installed, and any other refusal for a job that is not, stays a failed service", async () => {
+	const { root, home, stateRoot } = fixtureDirs("installed-refusal");
+	const definition = process.platform === "darwin" ? plistPath(home, serviceLabel("kit-update")) : join(home, ".config", "systemd", "user", "omp-kit-kit-update.service");
+	mkdirSync(dirname(definition), { recursive: true });
+	writeFileSync(definition, "installed\n");
+	const installed = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit", exec: refusedService("LAUNCHER_UNAVAILABLE"), hookIo: hookIo([]) });
+	expect(installed.failed.map((f) => f.item)).toEqual(["service:kit-update"]);
+	expect(installed.failed[0]?.detail).toContain("LAUNCHER_UNAVAILABLE");
+	expect(installed.ok).toBe(false);
+	for (const code of ["BOOTSTRAP_FAILED", "AUTOCUT_CONFIG_INVALID"]) {
+		const fresh = fixtureDirs(`other-refusal-${code}`);
+		const other = await applyActivationManifest({ root: fresh.root, home: fresh.home, stateRoot: fresh.stateRoot, binary: "/nonexistent/omp-kit", exec: refusedService(code), hookIo: hookIo([]) });
+		expect(other.failed.some((f) => f.item === "service:kit-update"), code).toBe(true);
+		expect(other.ok, code).toBe(false);
+	}
+});
+// RULESKEEP1: an edited managed rule is kept; the update that installed the release reports it as skipped, not as a failure.
+test("a locally edited managed rule is kept untouched and named under skipped; the update is not failed", async () => {
+	const { root, home, stateRoot } = fixtureDirs("rules-kept");
+	mkdirSync(join(home, ".agents", "rules"), { recursive: true });
+	writeFileSync(join(home, ".agents", "rules", "foo.md"), "operator edited foo\n");
+	const result = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit", exec: okService(), hookIo: hookIo([]) });
+	expect(result.failed).toEqual([]);
+	expect(result.ok).toBe(true);
+	const kept = result.skipped.find((s) => s.item === "rules:rules");
+	expect(kept?.reason).toContain("foo");
+	expect(kept?.reason).toContain("migrate --plan");
+	expect(readFileSync(join(home, ".agents", "rules", "foo.md"), "utf8")).toBe("operator edited foo\n");
+	expect(readFileSync(join(home, ".agents", "rules", "bar.md"), "utf8")).toContain("Bar fleet rule");
+	const out = updatePostApplyEnvelope(envelopeBase, { ok: true, detail: "linked" }, result, root);
+	expect(out.code).toBe(0);
+	expect(out.data["overall"]).toBe("UPDATED");
 });
 test("planted: a failed relink reports FINDINGS, never UPDATED", async () => {
 	const out = updatePostApplyEnvelope(envelopeBase,

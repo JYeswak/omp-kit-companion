@@ -30,7 +30,7 @@ import { applyExtensions, planExtensions } from "./apply-extensions.ts";
 import { profilePluginRuleStatus, readManifest } from "./diagnostics.ts";
 import { extractImportSpecifiers } from "./extensions.ts";
 import { censusHookFreshness, liveHookFreshnessIo, liveHookRefreshIo, refreshFleetHooks, type HookRefreshIo, type HookRefreshReport, type HookRepoRefresh, type HookRepoRow } from "./hook-refresh.ts";
-import { KNOWN_JOBS } from "./service.ts";
+import { installedJobs, KNOWN_JOBS } from "./service.ts";
 import { livePluginReleaseIo, type PluginLink } from "./plugin-release.ts";
 import { defaultInventoryDeps, inventoryServices, type ServiceRow } from "./services.ts";
 
@@ -426,6 +426,8 @@ async function manifestExec(argv: readonly string[]): Promise<{ exit: number; st
 	const ran = await run(argv, { deadline_s: 120 });
 	return { exit: ran.rc ?? 1, stdout: Buffer.from(ran.stdout).toString("utf8"), stderr: Buffer.from(ran.stderr).toString("utf8") };
 }
+/** Install refusals that say this host never set the job up: no stable launcher, no operator config for the job, no fleet checkout. */
+const NEVER_SET_UP_CODE = /^(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_UNCONFIGURED|LAUNCHER_UNAVAILABLE|FLEET_ADAPTER_ABSENT)$/;
 function manifestErrorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -453,6 +455,13 @@ export async function applyActivationManifest(input: { root: string; home: strin
 				optedOut.has(`rule:${packId}/${entry.name}`) && MANIFEST_TOUCH_ACTIONS[entry.action] === true);
 			if (touch.length > 0) {
 				skipped.push({ item: `rules:${packId}`, reason: `opted-out items would change: ${touch.map((entry) => `${entry.name}(${entry.action})`).join(", ")}` });
+				continue;
+			}
+			// RULESKEEP1: an edited managed rule is kept, never overwritten (the README: on RULE_COLLISION nothing changed). The update
+			// that installed the release reports the kept rules under manifest.skipped; it is not a failed update.
+			if (plan.blocked) {
+				const names = plan.entries.filter(entry => entry.action === "collision").map(entry => entry.name);
+				skipped.push({ item: `rules:${packId}`, reason: `locally edited rules block the refresh and were left untouched (${names.join(", ")}); run omp-kit migrate --plan to move edits to the overlay` });
 				continue;
 			}
 			rulesApplied += applyRulePlan(plan, { confirmed: true }).files;
@@ -519,6 +528,11 @@ export async function applyActivationManifest(input: { root: string; home: strin
 	} catch (error) {
 		failed.push({ item: "hooks", detail: manifestErrorText(error) });
 	}
+	// SERVICESKIP1: a job whose install refuses because this host never set it up (no stable launcher, no fleet config for it, no fleet
+	// checkout) and that has no plist or unit here is not part of this host, so the update leaves it alone. Every update on a clean home
+	// used to fail 23 of these and exit 1 with ok:false even though the release was installed and judged PASS. An installed job that
+	// fails, and any other refusal, stays a failure.
+	const installedNames = new Set(installedJobs(home).map(job => job.name));
 	for (const name of Object.keys(KNOWN_JOBS)) {
 		const item = `service:${name}`;
 		if (optedOut.has(item)) {
@@ -538,7 +552,12 @@ export async function applyActivationManifest(input: { root: string; home: strin
 				}
 			} catch { detail = (ran.stdout + ran.stderr).slice(-300).trim(); }
 			if (ran.exit !== 0 || !applied) {
-				failed.push({ item, detail: detail || `exit ${ran.exit}: ${(ran.stdout + ran.stderr).slice(-300).trim()}` });
+				const reason = detail || `exit ${ran.exit}: ${(ran.stdout + ran.stderr).slice(-300).trim()}`;
+				if (!installedNames.has(name) && NEVER_SET_UP_CODE.test(reason.split(":", 1)[0] ?? "")) {
+					skipped.push({ item, reason: `not installed on this host and not installable here, so the update leaves it alone (${reason.slice(0, 200)})` });
+				} else {
+					failed.push({ item, detail: reason });
+				}
 			} else {
 				servicesApplied.push(name);
 			}
