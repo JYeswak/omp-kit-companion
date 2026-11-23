@@ -25,9 +25,17 @@ cat > "$repo/scripts/full-suite-verdict-store.py" <<'PY'
 import os, sys
 tree = sys.argv[sys.argv.index("--tree") + 1]
 listed = open(os.environ["PASS_TREES"]).read().split() if os.path.exists(os.environ.get("PASS_TREES", "")) else []
+pinned = os.environ.get("PINNED_DIR")
+# AUTOCUTENV1: like the real store, a verdict is readable only by the interpreter order it was judged under.
+if pinned and not os.environ.get("PATH", "").startswith(pinned + ":"):
+    print("MISS")
+    sys.exit(1)
 print("PASS" if tree in listed else "MISS")
 sys.exit(0 if tree in listed else 1)
 PY
+# The fixture's pinned tool order (the real one is scripts/fixed-env.sh): a no-op unless the test sets PINNED_DIR.
+# shellcheck disable=SC2016 # the fixture's fixed-env.sh expands PINNED_DIR when sourced, not this shell
+printf 'PATH="${PINNED_DIR:+$PINNED_DIR:}$PATH"\nexport PATH\n' > "$repo/scripts/fixed-env.sh"
 # The verdict readback runs under the candidate's own scripts/pysafe.py, as in the real repo.
 cp "$REPO/scripts/pysafe.py" "$repo/scripts/pysafe.py"
 commit() { # VERSION MESSAGE -> prints the new sha
@@ -59,6 +67,14 @@ field() { printf '%s' "$1" | tail -n 1 | jq -r ".$2"; }
 tree "$c2" > "$PASS_TREES"
 out=$(sh "$AUTOCUT" plan --repo "$repo" 2>&1)
 if [ "$(field "$out" action)" = CUT ] && [ "$(field "$out" source)" = "$c2" ] && [ "$(field "$out" version)" = 0.1.1 ]; then ok; else bad "plan picks newest PASS: $out"; fi
+
+# 1b. AUTOCUTENV1 (ompkit-2uubn): the verdict reader runs under the PATH the candidate's scripts/fixed-env.sh pins, not the caller's.
+# The launchd job's PATH put Homebrew python 3.15 before /usr/bin 3.9.6, so every PASS judged under the pinned order read back MISS.
+mkdir -p "$TMP/pinned"
+ln -sf "$(command -v python3)" "$TMP/pinned/python3"
+tree "$c2" > "$PASS_TREES"
+out=$(PINNED_DIR="$TMP/pinned" sh "$AUTOCUT" plan --repo "$repo" 2>&1)
+if [ "$(field "$out" action)" = CUT ] && [ "$(field "$out" source)" = "$c2" ]; then ok; else bad "pinned-order read finds the PASS: $out"; fi
 
 # 2. No PASS anywhere: WAIT, naming each skipped commit.
 : > "$PASS_TREES"

@@ -80,8 +80,16 @@ for sha in $(git -C "$ROOT" rev-list --first-parent --max-count="$max_candidates
 	mkdir -p "$export_dir"
 	git -C "$ROOT" archive "$sha" | tar -xf - -C "$export_dir" || { skipped="$skipped ${sha%"${sha#??????????}"}:no-export"; continue; }
 	tree=$(git -C "$ROOT" rev-parse "$sha^{tree}")
-	verdict=$(cd "$export_dir" && python3 -B scripts/pysafe.py run --timeout 30 -- python3 -B scripts/full-suite-verdict-store.py require-pass \
-		--repo "$ROOT" --tree "$tree" --role main --judge-root "$export_dir" --suite-root "$export_dir" 2>/dev/null) || verdict=''
+	# AUTOCUTENV1 (ompkit-2uubn): read the store under the pinned tool order the verdict was judged under (scripts/fixed-env.sh).
+	# The store validates a record's local rows against the READING interpreter's version; the launchd job's PATH puts Homebrew
+	# python 3.15 first where the verdict ran under /usr/bin python 3.9.6, so every PASS read back MISS ("local file evidence is
+	# incomplete or mixes producers") although the same read from a seat shell said PASS (2026-11-23 16:53Z, 09085f2671).
+	pinned_path=$PATH
+	if [ -f "$export_dir/scripts/fixed-env.sh" ]; then
+		pinned_path=$(HOME="$HOME" sh -c '. "$1" && printf %s "$PATH"' autocut "$export_dir/scripts/fixed-env.sh") || pinned_path=$PATH
+	fi
+	verdict=$(cd "$export_dir" && env PATH="$pinned_path" python3 -B scripts/pysafe.py run --timeout 30 -- python3 -B scripts/full-suite-verdict-store.py require-pass \
+		--repo "$ROOT" --tree "$tree" --role main --judge-root "$export_dir" --suite-root "$export_dir" 2>"$WORK/verdict.err") || verdict=''
 	if [ "$verdict" = PASS ]; then source_sha=$sha version=$candidate_version; break; fi
 	skipped="$skipped ${sha%"${sha#??????????}"}:no-pass"
 done
