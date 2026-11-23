@@ -565,6 +565,29 @@ function ancestorPids(callerPid: number, run: ScratchRunner): number[] | null {
 	return chain;
 }
 
+function scratchShellProcess(pid: number, run: ScratchRunner): { parent: number; command: string; args: string } | null {
+	if (pid <= 1) return null;
+	const observed = run(["ps", "-ww", "-p", String(pid), "-o", "ppid=,comm=,args="]);
+	if (observed.code !== 0) return null;
+	const row = /^(\d+)[ \t]+(\S+)[ \t]([\s\S]*)$/.exec(observed.stdout.trim());
+	return row ? { parent: Number(row[1]), command: row[2]!, args: row[3]! } : null;
+}
+
+/** Bash can leave a fork of the invoking shell waiting for the CLI. Skip
+ * exactly that matching fork; never skip dissimilar shells or wrappers. */
+function printDirOwnerPid(run: ScratchRunner): number {
+	const pid = process.ppid;
+	const caller = scratchShellProcess(pid, run);
+	if (caller === null) return process.pid;
+	const shell = basename(caller.command);
+	if (!["bash", "sh", "dash", "zsh", "ksh", "fish"].includes(shell)) return process.pid;
+	if (shell === "bash" || (process.platform === "darwin" && shell === "sh")) {
+		const outer = scratchShellProcess(caller.parent, run);
+		if (outer && outer.command === caller.command && outer.args === caller.args) return caller.parent;
+	}
+	return pid;
+}
+
 export interface SeatIdentity {
 	agent: string | null;
 	/** Every omp session lease held by the caller's ancestors (the main session, advisors, subagents). */
@@ -3027,7 +3050,8 @@ export function releaseBudgetEntry(ledgerPath: string, dir: string): boolean {
 	return writeBudgetLedger(ledgerPath, ledger);
 }
 
-export function createScratch(label: string, repoDir: string, deps: InspectDeps, bins: ScratchCreateBin = {}, jsonOwner = false, ledgerPath?: string): ScratchCreateResult {
+export function createScratch(label: string, repoDir: string, deps: InspectDeps, bins: ScratchCreateBin = {}, jsonOwner = false,
+	ledgerPath?: string, printDir = false): ScratchCreateResult {
 	if (!/^[A-Za-z0-9][A-Za-z0-9._%-]*$/.test(label)) return { ok: false, dir: "", exportLine: "", reason: "label-invalid" };
 	let repo: string;
 	try {
@@ -3048,18 +3072,20 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	} catch {
 		return { ok: false, dir: "", exportLine: "", reason: "cwd-unavailable" };
 	}
-	const start = deps.liveness.processStart(process.pid);
+	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
+	const pid = printDir && seat.agent === null ? printDirOwnerPid(deps.run) : process.pid;
+	const start = deps.liveness.processStart(pid);
 	if (start === null) return { ok: false, dir: "", exportLine: "", reason: "process-identity-unavailable" };
 	const root = join(repo, "var", "agent-tmp");
-	const dir = join(root, `${label}.${process.pid}`);
+	let dir = join(root, `${label}.${pid}`);
 	const createdAt = new Date(deps.now ?? Date.now()).toISOString();
 	const argv = process.argv[1] ?? process.argv[0] ?? "unknown";
 	// No injected seat on the programmatic path: fall back to the live lookup
 	// (as release and owned-scratch do) so every dir a seated caller makes
-	// names its seat (SCRATCHOWN1 ompkit-1dnwk). Every dir, seated or not, also gets a release capability (PIDIDENT1
-	// ompkit-a0vy1): an unseated caller's pid is liveness evidence only, so the capability is how it releases later.
-	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
-	const fields: Record<string, string | number> = { pid: process.pid, process_start: normalizeStart(start), label, repo, created_at: createdAt, argv0: argv };
+	// names its seat (SCRATCHOWN1 ompkit-1dnwk). Every dir also gets a release capability.
+	// --print-dir cannot hand out that capability, so its unseated shell owns
+	// the directory for its actual lifetime, using the existing pid/start rule.
+	const fields: Record<string, string | number> = { pid, process_start: normalizeStart(start), label, repo, created_at: createdAt, argv0: argv };
 	if (seat?.agent && seat.main) {
 		if (!AGENT_PATTERN.test(seat.agent) || !SESSION_PATTERN.test(seat.main)) return { ok: false, dir: "", exportLine: "", reason: "seat-identity-invalid" };
 		fields.agent = seat.agent;
@@ -3080,7 +3106,7 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	fields.capability_sha256 = capability.sha256;
 	const ownerText = jsonOwner ? JSON.stringify(fields) : Object.entries(fields).map(([key, value]) => `${key}=${value}\n`).join("");
 	if (parseOwnerFile(ownerText) === null) return { ok: false, dir: "", exportLine: "", reason: "bin-invalid" };
-	const seatKey = seat?.agent && seat.main ? seat.agent : `pid:${process.pid}`;
+	const seatKey = seat?.agent && seat.main ? seat.agent : `pid:${pid}`;
 	const reservation = bins.budgetBytes ?? DEFAULT_DIR_BUDGET_BYTES;
 	const ledgerFile = ledgerPath ?? defaultBudgetLedgerPath();
 	const ledger = readBudgetLedger(ledgerFile);
@@ -3133,8 +3159,17 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	}
 	try {
 		mkdirSync(dir, { mode: 0o700 });
-	} catch {
-		return { ok: false, dir: "", exportLine: "", reason: "directory-create-failed" };
+	} catch (error) {
+		// One shell may request multiple independent directories with the same
+		// label. Keep the owner PID in the name, and distinguish each CLI call.
+		if (pid === process.pid || (error as NodeJS.ErrnoException).code !== "EEXIST")
+			return { ok: false, dir: "", exportLine: "", reason: "directory-create-failed" };
+		dir = `${dir}.${process.pid}`;
+		try {
+			mkdirSync(dir, { mode: 0o700 });
+		} catch {
+			return { ok: false, dir: "", exportLine: "", reason: "directory-create-failed" };
+		}
 	}
 	try {
 		writeFileSync(join(dir, ".owner"), ownerText, { encoding: "utf8", flag: "wx", mode: 0o600 });
@@ -3142,7 +3177,7 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 		return { ok: false, dir: "", exportLine: "", reason: "owner-write-failed" };
 	}
 	const parsed = parseOwnerFile(ownerText);
-	if (!parsed || parsed.pid !== process.pid) return { ok: false, dir, exportLine: "", reason: "owner-unreadable-after-create" };
+	if (!parsed || parsed.pid !== pid) return { ok: false, dir, exportLine: "", reason: "owner-unreadable-after-create" };
 	ledger.dirs[dir] = { budget: reservation, agent: seatKey, bead: bins.bead ?? null, released: false };
 	if (!writeBudgetLedger(ledgerFile, ledger)) {
 		try {

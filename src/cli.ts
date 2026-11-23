@@ -4726,8 +4726,8 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		const labelFlag = request.flags.get("--label"), beadFlag = request.flags.get("--bead"), exportFlag = request.flags.get("--export");
 		// SCRATCHNULL1 (ompkit-fp72.120.16.194): mktemp's contract. --print-dir prints only the absolute dir and exits 0, or
 		// prints nothing on stdout and exits nonzero, so `$(...)` can never turn a refusal into a path such as ./null.
-		// PRINTDIRCAP1 (ompkit-fp72.120.16.240): it prints no capability, so the taught form is --json kept in a variable,
-		// read with `jq -e` (a refusal fails the assignment); release authority stays the seat or the capability.
+		// Keep using --json and its release capability for callers that need
+		// to transfer authority to another process outside their shell.
 		const printDir = request.flags.has("--print-dir");
 		if (printDir && request.json)
 			return refusal("SCRATCH_NEW_FLAG_INVALID", "--print-dir and --json are exclusive",
@@ -4746,7 +4746,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 				"Run from the repo that will own the scratch; nothing was created.");
 		}
 		const created = createScratch(labelFlag, repo, { ...deps, callerSeat: () => callerSeat(deps.run) },
-			{ ...(typeof beadFlag === "string" ? { bead: beadFlag } : {}) }, true);
+			{ ...(typeof beadFlag === "string" ? { bead: beadFlag } : {}) }, true, undefined, printDir);
 		if (!created.ok) {
 			const detail = created.detail ?? "Use a fresh label; run from the repo that will own the scratch.";
 			return refusal("SCRATCH_NEW_REFUSED",

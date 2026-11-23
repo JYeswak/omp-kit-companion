@@ -10,7 +10,7 @@ import { acquireRunLock } from "../../src/service-run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 import { runSync } from "../../src/kitlib/run.ts";
-import { fixtureDeadlineS } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 
 const roots: string[] = [];
 const fixtureRepo = resolve(import.meta.dir, "../..");
@@ -671,6 +671,82 @@ Bun.spawnSync = ((command, options) => {
 `);
   return { home, state };
 }
+
+test("SCRATCHCAP1 a live unseated print-dir caller can release its own scratch, but an unrelated caller cannot", async () => {
+  const { home, state } = cliHome();
+  mkdirSync(join(home, ".git"));
+  const root = join(home, "var", "agent-tmp");
+  const kit = join(home, "candidate-kit");
+  writeFileSync(kit, '#!/bin/sh\nexec "$KIT_BUN" "$KIT_SOURCE" "$@"\n', { mode: 0o755 });
+  const signal = join(home, "scratchcap-ready");
+  const proceed = join(home, "scratchcap-proceed");
+  const shellEnv = {
+    ...process.env, HOME: home, XDG_STATE_HOME: state, OMP_KIT_SCRATCH_ROOTS: root,
+    AGENT_NAME: "", BR_ACTOR: "", BR_AGENT_NAME: "", PI_SESSION_ID: "", PI_SESSION_FILE: "",
+    OMP_KIT_SCRATCH_CAPABILITY: "", KIT: kit, KIT_BUN: process.execPath, KIT_SOURCE: join(fixtureRepo, "src", "cli.ts"),
+    SCRATCHCAP_SIGNAL: signal, SCRATCHCAP_PROCEED: proceed,
+  };
+  const probeEnv: Record<string, string> = {
+    HOME: home, XDG_STATE_HOME: state, OMP_KIT_SCRATCH_ROOTS: root,
+    AGENT_NAME: "", BR_ACTOR: "", BR_AGENT_NAME: "", PI_SESSION_ID: "", PI_SESSION_FILE: "",
+    OMP_KIT_SCRATCH_CAPABILITY: "",
+  };
+  // Owned transport only (kitlib-range): the owner shell publishes its dir to
+  // a signal file and waits on a proceed file instead of stdin, so no raw
+  // spawn is needed; the shell stays live across the mid-life checks, and its
+  // exit orders the release read.
+  const owner = runFixtureAsync(["/bin/bash", "-eu", "-c", [
+    'if TMPDIR=$("$KIT" scratch new --label scratchcap --print-dir); then',
+    '  export TMPDIR',
+    '  printf "%s" "$TMPDIR" >"$SCRATCHCAP_SIGNAL"',
+    'else',
+    '  printf "%s" "FAILED" >"$SCRATCHCAP_SIGNAL"',
+    '  exit 1',
+    'fi',
+    'while [ ! -e "$SCRATCHCAP_PROCEED" ]; do sleep 0.2; done',
+    '"$KIT" scratch release "$TMPDIR" --bin throwaway --now --json',
+  ].join("\n")], { cwd: home, env: shellEnv, floor_s: 90, label: "scratchcap print-dir owner" });
+  let dir = "";
+  const pollMs = fixtureDeadlineS(60) * 1000;
+  const pollStart = Date.now();
+  for (;;) {
+    try {
+      const published = readFileSync(signal, "utf8").trim();
+      if (published !== "") { dir = published; break; }
+    } catch { /* the owner shell has not published yet */ }
+    if (Date.now() - pollStart > pollMs) break;
+    // Integration wait on a real live child process: fake timers cannot
+    // advance the owner shell, so poll its signal file on the platform clock.
+    // Correctness rides on the file condition and the load-scaled bound above,
+    // not on this granularity interval.
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setTimeout(resolve, 200);
+    await promise;
+  }
+  try {
+    if (dir === "FAILED" || dir === "") {
+      const finished = await owner;
+      expect(finished.rc, `owner shell never published a dir: ${new TextDecoder().decode(finished.stderr)}`).toBe(0);
+    }
+    const liveness = { ...probeEnv, OMP_KIT_SCRATCH_FREE_PCT: "40" };
+    const plan = cli(["scratch", "plan"], home, liveness);
+    expect(plan.code, plan.stderr).toBe(0);
+    const verdict = plan.envelope.data.sessions.find((entry: ScratchVerdict) => entry.dir === dir);
+    const refusal = cli(["scratch", "release", dir, "--bin", "throwaway", "--now"], home, probeEnv).envelope.errors?.[0];
+    expect(dir.startsWith(join(root, "scratchcap."))).toBe(true);
+    expect(refusal).toMatchObject({
+      code: "SCRATCH_RELEASE_REFUSED", message: expect.stringContaining("caller-not-owner"),
+    });
+    expect(verdict?.action, verdict?.reason ?? "missing plan row").toBe("LIVE");
+  } finally {
+    writeFileSync(proceed, "go\n");
+  }
+  const finished = await owner;
+  expect(finished.timed_out, new TextDecoder().decode(finished.stderr)).toBe(false);
+  expect(finished.rc, new TextDecoder().decode(finished.stderr)).toBe(0);
+  expect(JSON.parse(new TextDecoder().decode(finished.stdout)).data).toMatchObject({ dir, deleted: true });
+  expect(existsSync(dir)).toBe(false);
+}, fixtureDeadlineS(90) * 1000);
 
 function fakeLsof(options: { openPath?: string; unknown?: boolean } = {}): { dir: string } {
   const dir = agentTmp("fakebin");
