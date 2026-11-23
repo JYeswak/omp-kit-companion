@@ -155,43 +155,11 @@ esac
 # OMP_KIT_RELEASE_VERDICT=0 opts out. release-local reuses the exact-tree qualification.
 start_release_verdict() {
 	if [ "${OMP_KIT_RELEASE_VERDICT:-1}" != 0 ] && [ "${remote_ref:-}" = refs/heads/main ] \
-		&& [ -n "$log_git" ] && [ -n "${local_sha:-}" ] && [ -f "$ROOT/scripts/release-verdict.sh" ]; then
-		python3 -c 'import os, sys, time
-root, sha = sys.argv[1:]
-QUIET_S = 600  # J-2026-11-10-03: one suite per settled batch, not one per commit.
-quiet = int(os.environ.get("OMP_KIT_RELEASE_VERDICT_QUIET_S", str(QUIET_S)))
-if not 0 <= quiet <= 86400:
-    raise SystemExit("release-verdict: quiet interval must be 0..86400 seconds")
-if os.fork(): os._exit(0)
-os.setsid()
-priority = os.getpriority(os.PRIO_PROCESS, 0)
-if priority < 10:
-    os.nice(10 - priority)
-sys.path.insert(0, os.path.join(root, "scripts"))
-from kitlib_run import run
-print(f"release-verdict: quiet interval {quiet}s for {sha}", flush=True)
-time.sleep(quiet)
-fetch = run(["git", "-C", root, "fetch", "-q", "origin",
-             "refs/heads/main:refs/remotes/origin/main"], deadline_s=120)
-head = run(["git", "-C", root, "rev-parse", "--verify", "refs/remotes/origin/main"], deadline_s=15)
-if fetch.rc != 0 or fetch.timed_out or head.rc != 0 or head.timed_out:
-    sys.stderr.buffer.write(fetch.stderr + head.stderr)
-    raise SystemExit("release-verdict: cannot fetch published main; qualification not started")
-newer = head.stdout.decode().strip()
-if newer != sha:
-    print(f"release-verdict: {sha} superseded by {newer}", flush=True)
-    raise SystemExit(0)
-result = run(["sh", os.path.join(root, "scripts/release-verdict.sh"), "--commit", sha, "--no-fetch"],
-             cwd=root, deadline_s=7200, max_output_bytes=16 << 20)
-sys.stdout.buffer.write(result.stdout)
-sys.stderr.buffer.write(result.stderr)
-ready = run(["bun", os.path.join(root, "src/release-ready.ts"), "--repo", root],
-            cwd=root, deadline_s=120)
-sys.stdout.buffer.write(ready.stdout)
-sys.stderr.buffer.write(ready.stderr)
-print(f"release-verdict: qualification finished for {sha} rc={result.rc}", flush=True)
-raise SystemExit(result.rc if result.rc is not None and result.rc >= 0 else 1)
-' "$ROOT" "$local_sha" </dev/null >>"$log_git/omp-kit/release-verdict.log" 2>&1
+		&& [ -n "$log_git" ] && [ -n "${local_sha:-}" ] && [ -f "$ROOT/scripts/release-verdict.sh" ] \
+		&& [ -f "$ROOT/scripts/release-verdict-start.py" ]; then
+		# AUTOCUTVERDICT1 (ompkit-hbt6q): the child lives in scripts/release-verdict-start.py so omp-kit land, whose
+		# exact-parent push runs from a private checkout that has no hooks, schedules the same qualification.
+		"$ROOT/scripts/release-verdict-start.py" "$ROOT" "$local_sha" </dev/null >>"$log_git/omp-kit/release-verdict.log" 2>&1
 		printf 'release verdict: scheduled for %s after the main quiet interval (log %s)\n' "$local_sha" "$log_git/omp-kit/release-verdict.log"
 	fi
 }

@@ -627,6 +627,30 @@ async function runFullSuiteVerdict(repo: string, base: string, candidate: string
 	return verdict;
 }
 
+export type ReleaseQualificationStart = "SCHEDULED" | "OPTED_OUT" | "UNAVAILABLE";
+
+/**
+ * AUTOCUTVERDICT1 (ompkit-hbt6q): the exact-parent publication pushes from a private checkout, and a private checkout has
+ * no hook chain, so the pre-push member that schedules the release qualification (a detached child that waits the quiet
+ * interval and then runs scripts/release-verdict.sh for the settled head) never ran for a land push after 2026-11-21:
+ * release-verdict.log stayed at 2026-11-19 and no main head had a main-role PASS for autocut to read. A land that
+ * published schedules the same child from the canonical repository. A missing script or log directory never fails a
+ * landing that already published; OMP_KIT_RELEASE_VERDICT=0 opts out exactly as it does for the hook.
+ */
+export function scheduleReleaseQualification(repo: string, sha: string, env: NodeJS.ProcessEnv = process.env): ReleaseQualificationStart {
+	if (env.OMP_KIT_RELEASE_VERDICT === "0") return "OPTED_OUT";
+	const starter = join(repo, "scripts", "release-verdict-start.py");
+	if (!existsSync(starter) || !existsSync(join(repo, "scripts", "release-verdict.sh"))) return "UNAVAILABLE";
+	const gitDir = git(repo, ["rev-parse", "--absolute-git-dir"]);
+	if (gitDir.code !== 0) return "UNAVAILABLE";
+	const log = join(gitDir.out.trim(), "omp-kit", "release-verdict.log");
+	try { mkdirSync(dirname(log), { recursive: true }); } catch { return "UNAVAILABLE"; }
+	// The starter (a Python script with its own shebang, executable) forks a session-owning child and exits at once; its output
+	// goes to the log, so no pipe stays open.
+	const run = kitlibRunSync(["sh", "-c", '"$1" "$2" "$3" </dev/null >>"$4" 2>&1', "sh", starter, repo, sha, log], { cwd: repo, env: gitEnvironment(), deadline_s: 30 });
+	return run.rc === 0 ? "SCHEDULED" : "UNAVAILABLE";
+}
+
 function fullSuiteError(verdict: Exclude<FullSuiteVerdict, "PASS">): { code: string; message: string; remediation: string } {
 	return verdict === "FAIL"
 		? { code: "LAND_FULL_SUITE_FAILED", message: "The complete declared suite failed against the exact candidate archive", remediation: "Repair the candidate and retry; the failed tree is cached RED and was not published." }
@@ -1628,9 +1652,14 @@ async function publishQualifiedCandidate(
 				checkoutFields = { ovnfs: "unavailable", checkoutScan: "UNAVAILABLE", checkoutsRemoved: [], checkoutsKept: [], checkoutsMatching: [], checkout_text: "Checkout scan unavailable; land published, nothing removed.", text: "Checkout scan unavailable; land published, nothing removed." };
 			}
 		}
+		// AUTOCUTVERDICT1 (ompkit-hbt6q): a private-checkout publication never reaches the repository's pre-push hook chain.
+		let releaseQualification: ReleaseQualificationStart | null = null;
+		if (published && pushedSha !== null && input.pushRepo !== undefined && input.pushRepo !== repo) {
+			try { releaseQualification = scheduleReleaseQualification(repo, pushedSha); } catch { releaseQualification = "UNAVAILABLE"; }
+		}
 		return {
 			code: published ? 0 : overall === "UNRUN" ? 77 : 1,
-			data: { overall, commit: candidate, candidate_sha: candidateSha, pushed_sha: pushedSha, owner, paths, base, localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence: convergenceData, check: checkResult, phases, ...(scratchNotice !== null ? { scratch_disposal_notice: scratchNotice } : {}), ...checkoutFields },
+			data: { overall, commit: candidate, candidate_sha: candidateSha, pushed_sha: pushedSha, owner, paths, base, localMain: git(repo, ["rev-parse", "refs/heads/main"]).out.trim(), convergence: convergenceData, check: checkResult, phases, ...(scratchNotice !== null ? { scratch_disposal_notice: scratchNotice } : {}), ...(releaseQualification !== null ? { release_qualification: releaseQualification } : {}), ...checkoutFields },
 			...(failure ? { errors: [failure] } : {}),
 			verification: overall === "UNRUN" ? "UNVERIFIED" : "PERFORMED",
 		};

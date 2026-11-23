@@ -20,7 +20,7 @@ async function fixture(name: string) {
 		expect(r.rc, text(r.stdout) + text(r.stderr)).toBe(0);
 		return text(r.stdout).trim();
 	}
-	for (const file of ["pre-push-gate.sh", "kitlib_run.py", "pysafe.py"]) copyFileSync(join(root, "scripts", file), join(repo, "scripts", file));
+	for (const file of ["pre-push-gate.sh", "release-verdict-start.py", "kitlib_run.py", "pysafe.py"]) copyFileSync(join(root, "scripts", file), join(repo, "scripts", file));
 	writeFileSync(join(repo, "scripts/release-verdict.sh"), '#!/bin/sh\nprintf "%s\\n" "$*" >>"$(git rev-parse --absolute-git-dir)/started"\n');
 	await git("init", "-q", "--template=", "-b", "main");
 	await git("config", "user.email", "fixture@example.invalid");
