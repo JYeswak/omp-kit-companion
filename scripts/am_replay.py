@@ -187,8 +187,18 @@ def tick(pending: Path, archive_root: Path, now: datetime, args: argparse.Namesp
     held: list[str] = [row["artifact"] for row, _, kind in planned if kind == "hold"]
     errors: list[dict] = []
     acting = 0
+    # Replays first: the point of the tick is delivering mail; discards are
+    # hygiene. Stable sort keeps oldest-first within each kind. Holds were
+    # already collected above and are skipped again below.
+    planned.sort(key=lambda item: 0 if item[2] == "replay" else 1)
     for row, age_h, kind in planned:
-        if kind == "hold" or args.list_only:
+        if args.list_only:
+            if kind == "replay":
+                replayed.append(row["artifact"])
+            elif kind != "hold":
+                discarded.append({"artifact": row["artifact"], "reason": kind.split("-")[1]})
+            continue
+        if kind == "hold":
             continue
         if acting >= args.max_actions:
             held.append(row["artifact"])

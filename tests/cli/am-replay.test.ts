@@ -112,8 +112,10 @@ test("AMREPLAY1-report: counts, oldest age, P1 old, no P1 fresh", () => {
 	expect(listed.oldest_age_hours).toBeGreaterThan(0.5);
 	expect(listed.oldest_age_hours).toBeLessThan(1);
 	expect(listed.p1).toBe(false);
-	expect(listed.replayed).toEqual([]);
-
+	expect(listed.replayed).toEqual(["fresh-a.json", "fresh-b.json"]);
+	expect(listed.discarded).toEqual([]);
+	expect(existsSync(join(pending, "fresh-a.sent.json"))).toBe(false);
+	expect(existsSync(join(pending, "fresh-b.sent.json"))).toBe(false);
 	writeFileSync(join(pending, "old.json"), artifact(isoAgoMs(2 * 3_600_000), "Old waiting"));
 	const withOld = runTick(pending, archive, stub, ["--list-only"]);
 	expect(withOld.unsent_count).toBe(3);
