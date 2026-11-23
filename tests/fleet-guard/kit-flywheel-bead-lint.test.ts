@@ -16,7 +16,8 @@ const base = ownedTmp("kit-flywheel-bead-lint").path;
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 
 const PLANTED = `br create "x" -t task --acceptance "- [ ] AC1: x"`;
-const CLEAN_DESCRIPTION = "WHAT: refuse an unlinted create.\n\nWHY: ungradeable beads were created unchecked.";
+const PRIOR_ART = "GOAL: fixture bead for a lint test; measured by this test.\nNATIVE: none needed for a fixture.\nEXISTING: none, a fixture.\nDECISION: EXTEND the lint under test; no new tool.\nBEST: none, a fixture.";
+const CLEAN_DESCRIPTION = `WHAT: refuse an unlinted create.\n\nWHY: ungradeable beads were created unchecked.\n${PRIOR_ART}`;
 /** Phase-tagged (ACPHASE1) and replayable by `omp-kit verify` (REPLAYABLE1): a backticked command and its expected outcome. */
 const CLEAN_ACCEPTANCE = "- [ ] [build] AC1: planted negative: an unlinted create is refused `true` -> rc 0";
 /** Backticks expand in a shell word, so acceptance travels in the quoted heredoc the guard reads literally. */
@@ -157,7 +158,7 @@ test("LINTEVERY1: a lint-read value the shell expands at run time is refused UNE
 	expect(lintExecs(h.execs)).toEqual([]);
 	const literalElsewhere = await toolCall(h, t.project, `${clean("Gate admits literal content")} --actor "$AGENT_NAME"`);
 	expect(literalElsewhere?.block).not.toBe(true);
-	const dollarDigits = await toolCall(h, t.project, `br create "Fee gate" -t task -l a --description 'WHAT: charge $5. WHY: cost.' ${ACCEPTANCE_ARG}`);
+	const dollarDigits = await toolCall(h, t.project, `br create "Fee gate" -t task -l a --description 'WHAT: charge $5. WHY: cost.\nGOAL: fixture bead for a lint test; measured by this test.\nNATIVE: none needed for a fixture.\nEXISTING: none, a fixture.\nDECISION: EXTEND the lint under test; no new tool.\nBEST: none, a fixture.' ${ACCEPTANCE_ARG}`);
 	expect(dollarDigits?.block).not.toBe(true);
 	expect(t.count()).toBe(0);
 });

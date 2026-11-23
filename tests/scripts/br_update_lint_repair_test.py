@@ -40,9 +40,10 @@ CODE_ACC = (
 # An open time item beside code items: elapsed-time-mix, which a description
 # edit cannot repair (its fix is a split or a checker change).
 MIXED_ACC = CODE_ACC + "\n- [ ] [b] [after 7d] measured over 7 days; planted negative: a one-day sample is rejected"
-BAD_DESC = "no sections here"
-GOOD_DESC = "WHAT: (a) gate parser tags; (b) measure the gate. WHY: early submissions bounce."
-CLEAN_DESC = "WHAT: (a) gate parser tags. WHY: early submissions bounce."
+PRIORART_SUFFIX = "\nGOAL: fixture bead for a lint test; measured by this test.\nNATIVE: none needed for a fixture.\nEXISTING: none, a fixture.\nDECISION: EXTEND the lint under test; no new tool.\nBEST: none, a fixture."
+BAD_DESC = "no sections here" + PRIORART_SUFFIX
+GOOD_DESC = "WHAT: (a) gate parser tags; (b) measure the gate. WHY: early submissions bounce." + PRIORART_SUFFIX
+CLEAN_DESC = "WHAT: (a) gate parser tags. WHY: early submissions bounce." + PRIORART_SUFFIX
 FAKE_BR = """#!/usr/bin/env python3
 import json, os, sys
 bead = json.load(open(os.environ["FAKE_BR_BEAD"], encoding="utf-8"))

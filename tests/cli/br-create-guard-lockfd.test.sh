@@ -65,7 +65,7 @@ fail=0
 # probe must be a bead that passes bead-lint; same shape as br-shim.test.sh br_create_valid.
 BACKTICK=$(printf '\140')
 python3 -B "$GUARD" create "lock fd probe" -t task -l gate \
-	--description 'WHAT: (a) a lock fd probe. WHY: needed.' \
+	--description "$(printf 'WHAT: (a) a lock fd probe. WHY: needed.\nGOAL: fixture bead for a lock test; measured by this test.\nNATIVE: none needed for a fixture.\nEXISTING: none, a fixture.\nDECISION: EXTEND the guard under test; no new tool.\nBEST: none, a fixture.')" \
 	--acceptance "- [ ] [a] [build] the probe holds the lock; planted negative: bad input is refused ${BACKTICK}true${BACKTICK} -> rc 0" \
 	> "$TMP/guard.out" 2>&1 &
 guard_pid=$!

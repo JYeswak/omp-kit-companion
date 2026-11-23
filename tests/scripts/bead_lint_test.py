@@ -209,7 +209,8 @@ class PitfallLintTests(unittest.TestCase):
         self.assertEqual(create(PITFALL_DESC, self.CUT - timedelta(seconds=1)), [])
 
 
-LP_DESC = "WHAT: refuse a widget. WHY: the widget leaks.\n## Pitfalls\n- never weaken the gate\n"
+PRIORART_SUFFIX = "\nGOAL: fixture bead for a lint test; measured by this test.\nNATIVE: none needed for a fixture.\nEXISTING: none, a fixture.\nDECISION: EXTEND the lint under test; no new tool.\nBEST: none, a fixture.\n"
+LP_DESC = "WHAT: refuse a widget. WHY: the widget leaks.\n## Pitfalls\n- never weaken the gate\n" + PRIORART_SUFFIX
 LP_PEER = "ompkit-fp72.9.9"
 LP_MENTION_DESC = LP_DESC.replace("leaks.", f"leaks, as {LP_PEER} showed.")
 LP_CLEAN_ACC = "- [ ] [a] [build] planted bad widget is refused `true` -> rc 0"

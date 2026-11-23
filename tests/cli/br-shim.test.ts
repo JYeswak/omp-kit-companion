@@ -1129,9 +1129,10 @@ test("SHIMHERMETIC1 actual DB selection preserves explicit, ambient and local fi
 	} finally { a.cleanup(); b.cleanup(); }
 }, CASE_BUDGET_MS);
 
+const LEASE_PRIOR_ART = "GOAL: fixture bead for a lint test; measured by this test.\nNATIVE: none needed for a fixture.\nEXISTING: none, a fixture.\nDECISION: EXTEND the lint under test; no new tool.\nBEST: none, a fixture.";
 function leaseCreate(title: string, extra: string[] = []): string[] {
 	return ["create", "--title", title, "-t", "task", "-l", "kind:intake",
-		"--description", "WHAT: (a) native lease fixture. WHY: prove deferred export safety.",
+		"--description", `WHAT: (a) native lease fixture. WHY: prove deferred export safety.\n${LEASE_PRIOR_ART}`,
 		"--acceptance-criteria", "- [ ] [a] [build] native mutation persists; planted negative: a leased export cannot be written `true` -> rc 0",
 		"--actor", "LeasePeer", ...extra, "--json"];
 }

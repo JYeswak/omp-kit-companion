@@ -1,0 +1,1 @@
+- `br create` and `br update --claim` / `--status in_progress` now refuse a non-epic bead whose description lacks the five prior-art lines `GOAL:`, `NATIVE:`, `EXISTING:`, `DECISION:` and `BEST:` (a field mentioned mid-line does not count), naming the missing fields and the template; the loop-close job's generated beads carry them.

@@ -36,6 +36,7 @@ UPDATE_LINT = str(SCRIPTS / "br-update-lint.py")
 ENFORCED_AT = "2026-10-24T00:00:00.000001Z"
 LEGACY_AT = "2026-10-23T23:59:59.999999Z"
 AUTHOR = "AuthorAgent"
+PRIORART_SUFFIX = "\nGOAL: fixture bead for a lint test; measured by this test.\nNATIVE: none needed for a fixture.\nEXISTING: none, a fixture.\nDECISION: EXTEND the lint under test; no new tool.\nBEST: none, a fixture."
 GOOD_ACC = (
     "- [x] [a] [build] parser handles tags `true` -> rc 0; planted negative: an untagged line is refused\n"
     "- [x] [a] [landed] on origin/main `true` -> rc 0\n"
@@ -67,7 +68,7 @@ def base_bead(**overrides) -> dict:
         "priority": 2,
         "issue_type": "task",
         "labels": ["gate"],
-        "description": "WHAT: (a) gate in_review on phases. WHY: early submissions bounce.",
+        "description": "WHAT: (a) gate in_review on phases. WHY: early submissions bounce." + PRIORART_SUFFIX,
         "acceptance_criteria": GOOD_ACC,
         "created_at": ENFORCED_AT,
         "assignee": AUTHOR,
@@ -233,7 +234,7 @@ class CreateAdmission(unittest.TestCase):
     def lint(self, acceptance: str, now: datetime) -> list[str]:
         parsed = br_create_guard_core.parse_create_args([
             "create", "Phase gate create", "-t", "task", "-l", "gate",
-            "--description", "WHAT: (a) a widget. WHY: needed.",
+            "--description", "WHAT: (a) a widget. WHY: needed." + PRIORART_SUFFIX,
             "--acceptance", acceptance,
         ])
         return br_create_guard_core.lint_prospective(parsed, [], str(ROOT), now=now)

@@ -128,7 +128,10 @@ export BR_CREATE_FIXTURE="$TMP/create-fixture.json"
 export BR_CREATE_LOG="$TMP/create.log"
 export BR_CREATE_ID="new-p0"
 export BR_CREATE_TITLE="new issue"
-CREATE_DESCRIPTION='WHAT: (a) a widget. WHY: needed.'
+CREATE_DESCRIPTION=$(printf 'WHAT: (a) a widget. WHY: needed.\nGOAL: fixture bead for a shim test; measured by this test.\nNATIVE: none needed for a fixture.\nEXISTING: none, a fixture.\nDECISION: EXTEND the shim under test; no new tool.\nBEST: none, a fixture.')
+CREATE_DESCRIPTION_FLAT=$(printf '%s' "$CREATE_DESCRIPTION" | tr '\n' ' ')
+# The same five prior-art lines as JSON text for stored-bead fixtures (a claim needs them: PRIORART1).
+PRIORART_JSON='GOAL: fixture bead for a shim test; measured by this test.\nNATIVE: none needed for a fixture.\nEXISTING: none, a fixture.\nDECISION: EXTEND the shim under test; no new tool.\nBEST: none, a fixture.'
 BACKTICK=$(printf '\140')
 CREATE_ACCEPTANCE="- [ ] [a] [build] the widget builds; planted negative: bad input is refused ${BACKTICK}true${BACKTICK} -> rc 0"
 br_create_valid() {
@@ -189,7 +192,7 @@ done
 : > "$TMP/argv"
 br_create_valid --title "Actor fixture" > "$TMP/out" 2>&1
 got_rc=$?
-want="create --title Actor fixture -t task -l gate --description $CREATE_DESCRIPTION --acceptance $CREATE_ACCEPTANCE --actor TestShim"
+want="create --title Actor fixture -t task -l gate --description $CREATE_DESCRIPTION_FLAT --acceptance $CREATE_ACCEPTANCE --actor TestShim"
 check "inject [create]" 0 "$want"
 
 # 2. own name passes through unchanged (both spellings)
@@ -538,7 +541,7 @@ printf '{"issues":[],"total":0,"offset":0,"has_more":false}\n' > "$BR_CREATE_FIX
  		printf 'FAIL needs-director-claim-refused: rc=%s out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/out")"
  	fi
 	# shellcheck disable=SC2016 # literal backticks: fixture acceptance text, not a substitution
-	printf '{"id":"X","status":"open","assignee":null,"labels":[],"acceptance_criteria":"- [ ] [a] [build] claimable `true` -> rc 0"}' > "$TMP/bead.json"
+	printf '{"id":"X","status":"open","assignee":null,"labels":[],"description":"%s","acceptance_criteria":"- [ ] [a] [build] claimable `true` -> rc 0"}' "$PRIORART_JSON" > "$TMP/bead.json"
 	: > "$TMP/argv"
 	br update X --claim > "$TMP/out" 2>&1
 	got_rc=$?
@@ -574,7 +577,7 @@ EOF
 			printf 'FAIL replayable-claim-refused [%s]: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$move" "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
 		fi
 		if [ "$move" = "--claim" ]; then
-			printf '{"id":"X","status":"open","assignee":null,"labels":[],"acceptance_criteria":"- [ ] [a] [build] the widget works \u0060true\u0060 -> rc 0; planted negative refused"}' > "$TMP/bead.json"
+			printf '{"id":"X","status":"open","assignee":null,"labels":[],"description":"%s","acceptance_criteria":"- [ ] [a] [build] the widget works \u0060true\u0060 -> rc 0; planted negative refused"}' "$PRIORART_JSON" > "$TMP/bead.json"
 			export BR_GUARD_JSON_FILE="$TMP/bead.json"
 			: > "$TMP/argv"
 			br --db "$REVIEW_DB" update X --claim > "$TMP/out" 2>&1

@@ -1048,6 +1048,39 @@ def pitfalls_legacy(bead: dict) -> list[str]:
     return [line.replace(f"{PITFALLS_CHECK}:PITFALLS_MISSING", "PITFALLS_LEGACY", 1)
             for line in pitfalls_finding(bead)]
 
+# PRIORART1 (ompkit-dpbsq, J-2026-11-23-12/-13): before building, a bead names the goal it moves and what it adopts. Same line-start
+# parser as the chief tick (~/.claude omp-kit-chief chief_tick.py prior_art_missing), so a bead the guard admits is a bead the tick counts.
+PRIORART_CHECK = "p-prior-art"
+PRIORART_FIELDS = ("goal", "native", "existing", "decision", "best")
+PRIORART_TEMPLATE = (
+    "GOAL: <project goal it moves + the number that shows it> | NATIVE: <OS or platform tools checked first, command + result> | "
+    "EXISTING: <installed CLIs, skills, upstream projects checked> | DECISION: ADOPT <tool> or EXTEND <tool> or BUILD <gap> because "
+    "<measured shortfall> | BEST: <the option the best person in the role would pick even if bigger, and why it was or was not chosen>"
+)
+
+
+def priorart_missing(desc: str | None) -> list[str]:
+    """Prior-art fields (upper case) the description lacks: a line starting `GOAL:` etc., case-insensitive, a leading bullet/quote allowed."""
+    have = set()
+    for line in str(desc or "")[:20000].splitlines():
+        text = line.strip().lstrip("-*> ").lower()
+        for field in PRIORART_FIELDS:
+            if text.startswith(field + ":"):
+                have.add(field)
+    return [field.upper() for field in PRIORART_FIELDS if field not in have]
+
+
+def priorart_failure(bead: dict) -> list[str]:
+    """p-prior-art refusal for a bead being created or claimed: any non-epic bead whose description lacks a prior-art line."""
+    if bead.get("issue_type") == "epic" or (bead.get("status") or "") in ("closed", "tombstone"):
+        return []
+    missing = priorart_missing(bead.get("description"))
+    if not missing:
+        return []
+    bid = bead.get("id") or "<new>"
+    return [f"{PRIORART_CHECK}:PRIORART_MISSING {bid} lacks {', '.join(missing)}, so nobody can see what it adopts before it builds; "
+            f"fix: add to the description one line starting with each field, as `{PRIORART_TEMPLATE}` (how-we-work section 3)"]
+
 
 def lint_bead(bead: dict, byid: set[str] | None = None) -> dict[str, list[str]]:
     """Per-bead LINTGATE1 verdict over GATE_CHECKS.

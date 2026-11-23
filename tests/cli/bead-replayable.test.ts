@@ -16,9 +16,9 @@ const harness = process.env.GRADE_WAVE_SCRATCH || undefined;
 const base = ownedTmp("bead-replayable", harness === undefined ? {} : { root: harness }).path;
 const scripts = join(import.meta.dir, "..", "..", "scripts");
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
-const DESCRIPTION = "WHAT: (a) a widget. WHY: needed.";
+const PRIOR_ART = "GOAL: fixture bead for a lint test; measured by this test.\nNATIVE: none needed for a fixture.\nEXISTING: none, a fixture.\nDECISION: EXTEND the lint under test; no new tool.\nBEST: none, a fixture.";
+const DESCRIPTION = `WHAT: (a) a widget. WHY: needed.\n${PRIOR_ART}`;
 let serial = 0;
-
 // Reuse one executable inode: cold launches of many new scripts can consume
 // the real reader's deadline before the fixture runs. Each alias still reads
 // its own immutable rows; no tracker result or grammar verdict is shared.

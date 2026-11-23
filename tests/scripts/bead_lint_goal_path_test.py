@@ -24,7 +24,8 @@ from pysafe import run_bounded
 
 REAL_BR = shutil.which("br")
 POST = "2026-10-31T00:00:00Z"
-DESC = "WHAT: implement the widget. WHY: preserve requested behavior."
+PRIORART_SUFFIX = "\nGOAL: fixture bead for a lint test; measured by this test.\nNATIVE: none needed for a fixture.\nEXISTING: none, a fixture.\nDECISION: EXTEND the lint under test; no new tool.\nBEST: none, a fixture."
+DESC = "WHAT: implement the widget. WHY: preserve requested behavior." + PRIORART_SUFFIX
 ACC = "- [ ] [a] [build] widget builds `true` -> rc 0; planted negative: bad input refused"
 
 

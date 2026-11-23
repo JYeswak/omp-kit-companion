@@ -896,9 +896,11 @@ def main(argv: list[str]) -> int:
     # needs acceptance `omp-kit verify` can replay. br-shim.sh uses replay-only
     # mode for --claim and full admission for --status in_review.
     claim_gate = args.claim or args.status == "in_review"
+    # PRIORART1 (ompkit-dpbsq): a claim, including `--status in_progress`, needs the five prior-art lines.
+    prior_gate = args.claim or args.status == "in_progress"
     replay_only = os.environ.get("BR_UPDATE_REPLAYABLE_ONLY") == "1"
     full = not replay_only and has_content_flags(args)
-    if not (full or claim_gate):
+    if not (full or claim_gate or prior_gate):
         return 0
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
@@ -906,14 +908,17 @@ def main(argv: list[str]) -> int:
     failures: list[str] = []
     replay_notices: list[str] = []
     claim_refusal: list[str] = []
+    prior_refusal: list[str] = []
     repair_base = None
     admission = None
     try:
-        from bead_lint import (BoxGrammarUnavailable, lint_bead_failures,
-                               pitfalls_legacy, replayable_claim_refusal, replayable_findings)
+        from bead_lint import (BoxGrammarUnavailable, lint_bead_failures, pitfalls_legacy,
+                               priorart_failure, replayable_claim_refusal, replayable_findings)
         import ac_phase
         live = show_bead(real, project, db, args.bead_id)
         bead = prospective(live, args, project)
+        if prior_gate:
+            prior_refusal = priorart_failure(bead)
         if claim_gate:
             try:
                 claim_refusal = replayable_claim_refusal(bead)
@@ -959,6 +964,9 @@ def main(argv: list[str]) -> int:
             f"bead's acceptance, so it cannot be {move} until each box below is rewritten in the "
             f"verify grammar (keep every obligation word for word; J-2026-10-29-22), then retry")
         details.extend(f"br-shim: REFUSED_NOT_REPLAYABLE {line}" for line in claim_refusal)
+    if prior_refusal:
+        failures.insert(0, "REFUSED_NO_PRIOR_ART")
+        details.extend(f"br-shim: REFUSED_NO_PRIOR_ART {line}" for line in prior_refusal)
     if admission is not None:
         if admission["notice"]:
             print(f"br-shim: {admission['notice']}", file=sys.stderr)

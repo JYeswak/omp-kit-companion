@@ -451,13 +451,23 @@ async function defaultRunLiveReadback(bead: string, deps: LoopCloseDeps): Promis
 	return { ok: result.ok };
 }
 
+// PRIORART1 (ompkit-dpbsq): every bead the loop-close job files names the goal it moves and what it adopts, so the claimant (whose own
+// claim is refused without the five lines) starts from true text; the claimant refines NATIVE, EXISTING and DECISION for the work it takes.
+const LOOP_CLOSE_PRIOR_ART = [
+	"GOAL: give a measured signal an automatic consumer so it stops reporting to nobody (lifecycle map LOOPCLOSE1 ompkit-1ra0d.211); measured by this bead closing with its replayed evidence.",
+	"NATIVE: none applies: the loop-close job files this bead from a measurement, not from a build; the acceptance boxes name the commands that check it.",
+	"EXISTING: the loop-close job (src/loop-close.ts) already files and refreshes this bead; the fix uses existing kit commands and the tools the boxes name.",
+	"DECISION: EXTEND the consumer the boxes name; no new tool unless the claimant's own check shows a measured shortfall.",
+	"BEST: remove or fix the signal at its source rather than add another reader; the acceptance box says which outcome closes it.",
+].join("\n");
+
 function retireDescription(code: string, lastFire: number, nowMs: number): string {
 	const days = Math.floor((nowMs - lastFire) / DAY_MS);
-	return `WHAT: refusal code \`${code}\` last fired ${new Date(lastFire).toISOString()} (${days} d ago): 0 fires in the last ${LOOP_CLOSE_RETIRE_DAYS} d. Per the policy/gates.jsonl 30-day-zero retirement rule this code is a retire candidate.\n\nWHY: every measured signal gets an automatic consumer (lifecycle map 2026-11-12, LOOPCLOSE1 ompkit-1ra0d.211); a silent code nobody examines is measurement theatre.`;
+	return `WHAT: refusal code \`${code}\` last fired ${new Date(lastFire).toISOString()} (${days} d ago): 0 fires in the last ${LOOP_CLOSE_RETIRE_DAYS} d. Per the policy/gates.jsonl 30-day-zero retirement rule this code is a retire candidate.\n\nWHY: every measured signal gets an automatic consumer (lifecycle map 2026-11-12, LOOPCLOSE1 ompkit-1ra0d.211); a silent code nobody examines is measurement theatre.\n\n${LOOP_CLOSE_PRIOR_ART}`;
 }
 
 function redDescription(name: string, redSinceMs: number): string {
-	return `WHAT: service \`${name}\` has been red since ${new Date(redSinceMs).toISOString()} (over ${LOOP_CLOSE_RED_HOURS} h): its last receipt failed.\n\nWHY: a red service with no consumer stays red (lifecycle map 2026-11-12, LOOPCLOSE1 ompkit-1ra0d.211); 6 of 16 services were red and silent.`;
+	return `WHAT: service \`${name}\` has been red since ${new Date(redSinceMs).toISOString()} (over ${LOOP_CLOSE_RED_HOURS} h): its last receipt failed.\n\nWHY: a red service with no consumer stays red (lifecycle map 2026-11-12, LOOPCLOSE1 ompkit-1ra0d.211); 6 of 16 services were red and silent.\n\n${LOOP_CLOSE_PRIOR_ART}`;
 }
 
 /** One red incident: the service plus the UTC date its current red streak started. */
@@ -473,7 +483,7 @@ function lifecycleGapTitle(gap: LifecycleGap): string {
 function lifecycleGapDescription(gap: LifecycleGap, manifest: LifecycleManifest): string {
 	const row = manifest.rows.find(candidate => candidate.phase === gap.phase);
 	const exit = row !== undefined ? row.exit_criterion : "unknown";
-	return `WHAT: lifecycle phase \`${gap.phase}\` is missing its ${gap.facet} (exit criterion: ${exit}).\n\nWHY: the lifecycle manifest (docs/lifecycle.json) is the checked phase map (LIFECYCLEMANIFEST1 ompkit-1ra0d.217); every gap gets an automatic consumer, never a human reader.`;
+	return `WHAT: lifecycle phase \`${gap.phase}\` is missing its ${gap.facet} (exit criterion: ${exit}).\n\nWHY: the lifecycle manifest (docs/lifecycle.json) is the checked phase map (LIFECYCLEMANIFEST1 ompkit-1ra0d.217); every gap gets an automatic consumer, never a human reader.\n\n${LOOP_CLOSE_PRIOR_ART}`;
 }
 
 function lifecycleGapAcceptance(gap: LifecycleGap): string {
