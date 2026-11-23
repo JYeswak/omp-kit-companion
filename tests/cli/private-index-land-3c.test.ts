@@ -77,7 +77,10 @@ test("compiled public land patch publishes only selected bytes through the canon
 		const hold = [{ agent: "DarkFern", path: "service.txt", exclusive: true, remaining_seconds: 3600 }];
 		const env: Record<string, string> = {};
 		for (const [key, value] of Object.entries(commandEnvironment(work, hold, {
-			amDir: fakeBin, gitEnv: { STALE_HOOK_TRACE: hookTrace },
+			// GITLOCK1FIX: the scratch-compiled binary cannot posix_spawn its bunfs
+			// image, so point it at the working source's scripts (same "working
+			// source under test" rule as the hook members above).
+			amDir: fakeBin, gitEnv: { STALE_HOOK_TRACE: hookTrace, OMP_KIT_SCRIPTS_DIR: join(repoRoot, "scripts") },
 		}))) {
 			if (value !== undefined) env[key] = value;
 		}

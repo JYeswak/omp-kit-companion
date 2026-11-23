@@ -19,7 +19,7 @@ import { parseReservationRead } from "./fleet-guard/git.ts";
 import { reapLandedCheckouts, listOvnfsCheckouts, diffOvnfsCheckout } from "./ovnfs-checkouts.ts";
 import { commandOf, expectedOf, judge, parseBoxes, unreplayableReason } from "./verify.ts";
 import { previewText, scrubText } from "../extensions/secret-output-guard.ts";
-import { appendReapReceipt, defaultGitLockLedgerPath, reapStaleAfterMs, reapStaleIndexLock } from "./index-lock.ts";
+import { releaseRoot } from "./paths.ts";
 
 
 type GitResult = { code: number; out: string; err: string; interrupted: boolean; timedOut: boolean };
@@ -94,6 +94,27 @@ function landCommitFlockTimeoutSeconds(): number {
 	return Number.isSafeInteger(value) ? Math.min(1200, Math.max(1, value)) : 120;
 }
 
+/** GITLOCK1FIX (ompkit-fp72.19.1.9): resolve the serializer trampoline to a
+ * real path. A compiled binary cannot posix_spawn from its bunfs image
+ * (/$bunfs/... is not executable), so prefer an explicit scripts dir, then
+ * the release layout, then the source tree (dev `bun src/cli.ts` runs where
+ * it exists on disk). Throws a named error instead of a downstream ENOENT. */
+function kitCommitSh(): string {
+	const override = process.env.OMP_KIT_SCRIPTS_DIR;
+	if (override !== undefined && override !== "") {
+		const candidate = join(resolve(override), "kit-commit.sh");
+		if (existsSync(candidate)) return candidate;
+		throw new Error(`KIT_COMMIT_TRAMPOLINE_UNAVAILABLE: OMP_KIT_SCRIPTS_DIR names no kit-commit.sh: ${override}`);
+	}
+	try {
+		const candidate = join(releaseRoot(process.execPath), "scripts", "kit-commit.sh");
+		if (existsSync(candidate)) return candidate;
+	} catch { /* not a release layout (dev runs, test binaries) */ }
+	const fallback = join(import.meta.dir, "../scripts/kit-commit.sh");
+	if (existsSync(fallback)) return fallback;
+	throw new Error("KIT_COMMIT_TRAMPOLINE_UNAVAILABLE: no kit-commit.sh in OMP_KIT_SCRIPTS_DIR, the release layout, or the source tree");
+}
+
 /** GITLOCK1 (ompkit-fp72.19.1.9): run the candidate commit through the per-checkout
  * serializer scripts/kit-commit.py instead of a bare `git commit`, so concurrent
  * lands queue on <gitdir>/omp-kit-commit.lock instead of colliding on index.lock.
@@ -108,7 +129,7 @@ function commitSerialized(repo: string, commitArgs: string[], reflogAction: stri
 	env.GIT_CONFIG_COUNT = "1";
 	env.GIT_CONFIG_KEY_0 = "core.logAllRefUpdates";
 	env.GIT_CONFIG_VALUE_0 = "true";
-	const run = kitlibRunSync([join(import.meta.dir, "../scripts/kit-commit.sh"), "--flock-timeout", String(landCommitFlockTimeoutSeconds()), "--repo", resolve(repo), "--", ...commitArgs],
+	const run = kitlibRunSync([kitCommitSh(), "--flock-timeout", String(landCommitFlockTimeoutSeconds()), "--repo", resolve(repo), "--", ...commitArgs],
 		{ cwd: repo, env, deadline_s: commitDeadlineS, max_output_bytes: 8 * 1024 * 1024 });
 	return { code: run.rc, out: new TextDecoder().decode(run.stdout), err: new TextDecoder().decode(run.stderr), interrupted: run.timed_out || run.killed, timedOut: run.timed_out };
 }
