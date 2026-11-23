@@ -203,12 +203,16 @@ test("parallel live cases retain ordered reports, private models and read-only n
 		expect(rows.at(-1)).toMatchObject({ event: "end", cases: names.length + 2 });
 		const nativeRoot = join(tree, homes[1]!, ".omp/natives");
 		if (existsSync(nativeRoot)) {
-			const versions = readdirSync(nativeRoot);
-			const binding = readdirSync(join(nativeRoot, versions[0]!)).find(name => name.endsWith(".node"))!;
-			const first = statSync(join(nativeRoot, versions[0]!, binding));
-			const next = statSync(join(tree, homes[2]!, ".omp/natives", versions[0]!, binding));
-			expect(first.ino).toBe(next.ino);
-			expect(first.mode & 0o222).toBe(0);
+			// omp 19.1.1 keeps the native addon embedded: its version directory under natives/ is empty, so there is no binding
+			// to compare. The retained-bytes check applies to every version directory that does hold one.
+			for (const version of readdirSync(nativeRoot)) {
+				const binding = readdirSync(join(nativeRoot, version)).find(name => name.endsWith(".node"));
+				if (binding === undefined) continue;
+				const first = statSync(join(nativeRoot, version, binding));
+				const next = statSync(join(tree, homes[2]!, ".omp/natives", version, binding));
+				expect(first.ino).toBe(next.ino);
+				expect(first.mode & 0o222).toBe(0);
+			}
 		}
 		const firstCache = join(tree, homes[1]!, ".cache/bun");
 		if (existsSync(firstCache)) {
