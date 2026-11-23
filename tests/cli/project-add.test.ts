@@ -142,6 +142,56 @@ test("PROJECTADD1 fixture apply writes stores, delivers the goal with proof, and
 		f.mail.server.stop(true);
 	}
 }, fixtureDeadlineS(300) * 1000);
+test("SEATMODEL1 a seat answering on another model fails; the requested model passes", async () => {
+	const seed = (f: Fixture) => {
+		writeFileSync(f.rosterPath, `{\n  "chiefs": { "lead": "PeachLeopard" },\n  "sessions": {\n    "other": { "director": "D", "workers": [] }\n  }\n}\n`);
+		writeFileSync(f.fleetWatchPath, JSON.stringify({ enabled: true, intervalSeconds: 120, noDecisionChecks: 5,
+			sessions: [{ session: "other", coordinatorPane: "tern:9", coordinatorSession: "other", repo: "/other", workerPanes: [] }] }, null, 2) + "\n");
+	};
+	const addArgs = [ "project", "add", "", "--session", "skillgrowth", "--workers", "1", "--profile", "codex", "--model", "model-x", "--apply", "--yes", "--json" ];
+	// Mismatch: the seat answers on model-y while model-x was requested.
+	{
+		const f = await fixture();
+		try {
+			seed(f);
+			f.env.SEAT_MODEL = "model-y";
+			const refused = await cli(f, [...addArgs.slice(0, 2), f.repo, ...addArgs.slice(3)]);
+			expect(refused.code, refused.out + refused.err).not.toBe(0);
+			const body = JSON.parse(refused.out);
+			expect(body.errors[0].code).toBe("SEAT_MODEL_MISMATCH");
+			expect(String(body.errors[0].message)).toContain("model-y");
+			expect(typeof body.data.receipt_id).toBe("string");
+			// The pin is written before the failure so a retry or audit sees the approved model.
+			expect(JSON.parse(readFileSync(f.rosterPath, "utf8")).sessions.skillgrowth).toEqual({
+				director: "TurquoisePuma", workers: ["FoggyValley"], seats: { profile: "codex", model: "model-x" },
+			});
+		} finally {
+			f.killDecoys();
+			f.mail.server.stop(true);
+		}
+	}
+	// Planted negative: seats answering on the requested model pass.
+	{
+		const f = await fixture();
+		try {
+			seed(f);
+			f.env.SEAT_MODEL = "model-x";
+			const applied = await cli(f, [...addArgs.slice(0, 2), f.repo, ...addArgs.slice(3)]);
+			expect(applied.code, applied.out + applied.err).toBe(0);
+			expect(JSON.parse(applied.out).data.action).toBe("APPLIED");
+			expect(JSON.parse(readFileSync(f.rosterPath, "utf8")).sessions.skillgrowth).toEqual({
+				director: "TurquoisePuma", workers: ["FoggyValley"], seats: { profile: "codex", model: "model-x" },
+			});
+			expect(f.mail.calls.filter((call) => call.tool === "create_agent_identity")).toEqual([
+				{ tool: "create_agent_identity", args: { project_key: f.repo, program: "omp", model: "model-x" } },
+				{ tool: "create_agent_identity", args: { project_key: f.repo, program: "omp", model: "model-x" } },
+			]);
+		} finally {
+			f.killDecoys();
+			f.mail.server.stop(true);
+		}
+	}
+}, fixtureDeadlineS(300) * 1000);
 
 test.each(["adopted", "never", "wrong-goal", "unreadable-restored", "hidden-restored", "resumed-old-goal"])("GOALPROOFWAIT1 %s at the existing 20-second bound", async scenario => {
 	const f = await fixture();

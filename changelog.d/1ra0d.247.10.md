@@ -1,0 +1,2 @@
+### Fixed
+- `project add --model` now pins the requested model on every seat instead of only recording it (SEATMODEL1). The roster session entry carries the pin (`seats: { profile, model }`), each live seat gets `/switch <model>` after its first goal, and the apply proves the seat's next journal `model_usage` row carries the requested model. A seat answering on another model fails the apply with `SEAT_MODEL_MISMATCH`; a seat that never journals a model fails with `SEAT_MODEL_UNPROVEN` rather than running the wrong model silently. Adds without `--model` are unchanged.

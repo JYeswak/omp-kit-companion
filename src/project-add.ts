@@ -432,6 +432,118 @@ function refuseManagedRepo(fleetWatchPath: string, session: string, repo: string
 	return null;
 }
 
+/**
+ * SEATMODEL1 (ompkit-1ra0d.247.10): latest model_usage model from rows
+ * appended after a /switch dispatch. Older rows show the pre-switch profile
+ * fallback, so only the suffix past the pre-switch byte length counts; a
+ * pre-switch text that ends mid-line loses that line's tail by construction.
+ */
+function modelUsageAfter(text: string, beforeLength: number): string | null {
+	let added = text.length >= beforeLength ? text.slice(beforeLength) : text;
+	if (beforeLength > 0 && !text.slice(0, beforeLength).endsWith("\n")) {
+		const cut = added.indexOf("\n");
+		added = cut === -1 ? "" : added.slice(cut + 1);
+	}
+	let latest: string | null = null;
+	for (const line of added.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed === "") continue;
+		let record: unknown;
+		try {
+			record = JSON.parse(trimmed);
+		} catch {
+			continue;
+		}
+		if (!("type" in record) || record.type !== "model_usage") continue;
+		const model = "model" in record ? record.model : null;
+		if (typeof model === "string" && model !== "") latest = model;
+	}
+	return latest;
+}
+
+/**
+ * SEATMODEL1 (ompkit-1ra0d.247.10): apply the requested model pin on every
+ * live seat with /switch, then prove each seat's next model_usage row carries
+ * the requested model. A seat answering on another model fails the apply; a
+ * seat that never journals a model never passes silently. Dispatch uses the
+ * same paste plus Enter path as first delivery; proof reads the same journal
+ * the goal proof reads, through the same io and observe seams.
+ */
+async function applySeatModelPin(input: {
+	session: string;
+	repo: string;
+	panes: string[];
+	model: string;
+	deps?: ProjectAddDeps;
+	pollMs: number;
+	deadlineMs: number;
+	wait?: (ms: number) => Promise<void>;
+}): Promise<{ ok: true } | { ok: false; code: string; detail: string; remediation: string }> {
+	const fail = (code: string, detail: string, remediation: string) => ({ ok: false as const, code, detail, remediation });
+	const io = input.deps?.io ?? defaultTernIo();
+	const observe = input.deps?.observe ?? defaultObserve;
+	const wait = input.wait ?? (async (ms: number) => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); });
+	const payload = `/switch ${input.model}`;
+	for (const block of input.panes) {
+		const seat = { session: input.session, pane: `tern:${block}`, cwd: input.repo };
+		let path: string | null = null;
+		try {
+			path = (await observe(seat, io)).sessionFile;
+		} catch {
+			path = null;
+		}
+		if (path === null) {
+			return fail("SEAT_MODEL_UNPROVEN", `seat tern:${block} has no observable session file, so the requested model ${input.model} stays unproven`, "Inspect the seat, then /switch it by hand; the session entry carries the created panes.");
+		}
+		let before: string | null = null;
+		try {
+			before = io.readSessionFile(path);
+		} catch {
+			before = null;
+		}
+		if (before === null) {
+			return fail("SEAT_MODEL_UNPROVEN", `seat tern:${block} journal is unreadable, so the requested model ${input.model} stays unproven`, "Inspect the seat journal, then /switch it by hand; the session entry carries the created panes.");
+		}
+		try {
+			const pasted = io.run([ternCtlBin(), "send", block, "paste", payload]);
+			if (pasted.code !== 0) {
+				return fail("SEAT_SWITCH_UNDISPATCHED", `seat tern:${block} refused the /switch paste (exit ${pasted.code}); the requested model ${input.model} was not applied`, "Inspect the seat host and paste /switch by hand; the session entry carries the created panes.");
+			}
+			const entered = io.run([ternCtlBin(), "send", block, "keys", "Enter"]);
+			if (entered.code !== 0) {
+				return fail("SEAT_SWITCH_UNDISPATCHED", `seat tern:${block} refused the /switch submit (exit ${entered.code}); the requested model ${input.model} was not applied`, "Inspect the seat host and submit /switch by hand; the session entry carries the created panes.");
+			}
+		} catch (error) {
+			return fail("SEAT_SWITCH_UNDISPATCHED", `seat tern:${block} /switch dispatch threw (${error instanceof Error ? error.message : String(error)}); the requested model was not applied`, "Inspect the seat host and /switch by hand; the session entry carries the created panes.");
+		}
+		const polls = Math.max(1, Math.ceil(input.deadlineMs / input.pollMs));
+		let proven = false;
+		for (let poll = 0; poll < polls; poll++) {
+			let current: string | null = null;
+			try {
+				current = io.readSessionFile(path);
+			} catch {
+				current = null;
+			}
+			if (current !== null) {
+				const latest = modelUsageAfter(current, before.length);
+				if (latest !== null) {
+					if (latest === input.model) {
+						proven = true;
+						break;
+					}
+					return fail("SEAT_MODEL_MISMATCH", `seat tern:${block} answers on ${latest}, not the requested ${input.model}`, `Inspect the seat profile fallback, /switch ${input.model} by hand, and retry; the session entry carries the created panes.`);
+				}
+			}
+			if (poll + 1 >= polls) break;
+			await wait(input.pollMs);
+		}
+		if (!proven) {
+			return fail("SEAT_MODEL_UNPROVEN", `seat tern:${block} never journaled a model after the /switch, so the requested model ${input.model} stays unproven`, "Inspect the seat answer, then /switch it by hand; the session entry carries the created panes.");
+		}
+	}
+	return { ok: true };
+}
 
 export interface ProjectApplyResult {
 	status: "APPLIED";
@@ -510,15 +622,19 @@ export async function applyProjectAdd(input: ProjectAddInput): Promise<{ ok: tru
 		}
 	}
 
-	// 1. Mint seat names in the repo's Agent Mail project (skipped when the roster already names them).
-	let agents: string[];
-	if (rosterNames !== null) {
-		agents = rosterNames;
-	} else {
-		agents = [];
-		try {
-			// MINTFIELDS1 (ompkit-1ra0d.249): Agent Mail 0.3.39 requires program and model on every identity.
-			const seatModel = input.model?.trim() || `omp-profile:${input.profile.trim()}`;
+// 1. Mint seat names in the repo's Agent Mail project (skipped when the roster already names them).
+// SEATMODEL1 (ompkit-1ra0d.247.10): a requested --model is a per-seat pin,
+// not a receipt note. The pin is minted onto the identities, written to the
+// roster seats entry, and applied on every live seat with /switch below.
+const requestedModel = input.model?.trim() || null;
+let agents: string[];
+if (rosterNames !== null) {
+	agents = rosterNames;
+} else {
+	agents = [];
+	try {
+		// MINTFIELDS1 (ompkit-1ra0d.249): Agent Mail 0.3.39 requires program and model on every identity.
+		const seatModel = requestedModel ?? `omp-profile:${input.profile.trim()}`;
 			for (let index = 0; index < 1 + input.workers; index++) {
 				const minted = await mail.call("create_agent_identity", { project_key: repo, program: "omp", model: seatModel });
 				const name = agentNameOf(minted);
@@ -540,7 +656,9 @@ export async function applyProjectAdd(input: ProjectAddInput): Promise<{ ok: tru
 		writeBytes(optInPath, Buffer.from('{"enabled": true}\n', "utf8").toString("base64"));
 	}
 	files.push({ path: optInPath, before: optInBefore, after: readBytes(optInPath) });
-	const rosterEntry = JSON.stringify({ director, workers });
+	const rosterEntry = requestedModel === null
+		? JSON.stringify({ director, workers })
+		: JSON.stringify({ director, workers, seats: { profile: input.profile.trim(), model: requestedModel } });
 	let nextRoster: string;
 	if (rosterText === null) {
 		nextRoster = `{\n  "sessions": {\n    "${session}": ${rosterEntry}\n  }\n}\n`;
@@ -663,6 +781,16 @@ export async function applyProjectAdd(input: ProjectAddInput): Promise<{ ok: tru
 		if (oriented.status !== "OK") {
 			return failed("PROJECT_ORIENTATION_UNPROVEN", `worker ${index} orientation has no consumption proof: ${oriented.detail}`, "Inspect the seat, then deliver by hand; the session entry carries the created panes.", receiptId);
 		}
+	}
+	// SEATMODEL1: apply the requested model pin on every live seat with /switch
+	// and prove it from each seat's next model_usage row; a seat answering on
+	// another model fails the apply instead of running the wrong model.
+	if (requestedModel !== null) {
+		const pinned = await applySeatModelPin({
+			session, repo, panes: [panes.coordinatorPane, ...panes.workerPanes],
+			model: requestedModel, deps: input.deps, pollMs, deadlineMs, ...(wait === undefined ? {} : { wait }),
+		});
+		if (!pinned.ok) return failed(pinned.code, pinned.detail, pinned.remediation, receiptId);
 	}
 
 	receipt.state = "APPLIED";

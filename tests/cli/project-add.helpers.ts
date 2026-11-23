@@ -152,6 +152,26 @@ if (args[0] === "send") {
 	const file = dir + "/session-" + block + ".jsonl";
 	if (args[2] === "paste") {
 		const payload = args.slice(3).join(" ");
+		// SEATMODEL1: a /switch lands on the seat's real model, which project
+		// add then proves from the journal. SEAT_MODEL sets the seat's real
+		// model; the default replays the codex-profile fallback to Muse.
+		if (payload.startsWith("/switch ")) {
+			const prev = (() => { try { return fs.readFileSync(file, "utf8"); } catch { return null; } })();
+			const lines = prev === null ? [] : prev.split("\\n").filter((line) => line.trim() !== "");
+			const rawTip = lines.length === 0 ? null : (() => { try { return JSON.parse(lines[lines.length - 1]).id; } catch { return null; } })();
+			const tip = typeof rawTip === "string" ? rawTip : null;
+			const stamp = "s" + String(lines.length + 1);
+			const asked = JSON.stringify({ type: "message", id: stamp, parentId: tip, message: { role: "user", content: [{ type: "text", text: payload }] } }) + "\\n";
+			if (prev === null) {
+				const switchHeader = JSON.stringify({ type: "session", version: 3, id: "s1-" + block, cwd: repo }) + "\\n";
+				fs.writeFileSync(file, switchHeader + asked);
+			} else {
+				fs.appendFileSync(file, asked);
+			}
+			const real = process.env.SEAT_MODEL ?? "muse-spark-1.3";
+			fs.appendFileSync(file, JSON.stringify({ type: "model_usage", id: "mu-" + stamp, parentId: stamp, model: real, activeLeafId: stamp }) + "\\n");
+			process.exit(0);
+		}
 		const header = JSON.stringify({ type: "session", version: 3, id: "s1-" + block, cwd: repo }) + "\\n";
 		const init = JSON.stringify({ type: "message", id: "m1", parentId: null, message: { role: "assistant", content: [{ type: "text", text: "ready" }], stopReason: "stop" } }) + "\\n";
 		fs.writeFileSync(file, header + init);
