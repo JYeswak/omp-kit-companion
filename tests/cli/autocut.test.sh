@@ -97,7 +97,7 @@ git -C "$repo" add mid.txt && git -C "$repo" commit -q -m "landed mid-cut" --no-
 EOF
 out=$(AUTOCUT_RELEASE_LOCAL="sh $TMP/release-pushes" AUTOCUT_INSTALL="echo" sh "$AUTOCUT" run --repo "$repo" 2>&1)
 if [ "$(field "$out" action)" = CUT ] && [ "$(field "$out" source)" = "$c3" ] \
-	&& [ "$(cat "$TMP/release-args")" = "--version 0.1.1 --source $c3" ] \
+	&& [ "$(cat "$TMP/release-args")" = "--version 0.1.1 --source $c3 --no-install" ] \
 	&& [ "$(git -C "$origin" rev-parse main)" != "$c3" ]; then ok; else bad "mid-cut push: $out"; fi
 
 # 7. An install that reads back another version fails the run (exit 4), never reports CUT.
@@ -109,6 +109,50 @@ if [ "$rc" = 4 ] && [ "$(field "$out" action)" = FAILED ]; then ok; else bad "wr
 out=$(AUTOCUT_RELEASE_LOCAL="false" AUTOCUT_INSTALL="echo 0.1.1 #" sh "$AUTOCUT" run --repo "$repo" 2>&1)
 rc=$?
 if [ "$rc" = 4 ] && [ "$(field "$out" action)" = FAILED ]; then ok; else bad "refused release: rc=$rc $out"; fi
+
+# 8b. The production cut (no test seam) runs release-local from an owned clone of origin at the source commit, never from the
+# shared tree: the clone's HEAD is the source, its path is not the repo's, and release-local is told --no-install.
+cat > "$repo/scripts/release-local.sh" <<EOF
+#!/bin/sh
+here=\$(CDPATH='' cd -- "\$(dirname -- "\$0")/.." && pwd -P)
+printf '%s\n%s\n%s\n' "\$*" "\$here" "\$(git -C "\$here" rev-parse HEAD)" > "$TMP/clone-args"
+EOF
+c5=$(commit 0.1.2 "release stub in tree")
+git -C "$repo" push -q origin main 2>/dev/null
+git -C "$repo" fetch -q origin
+tree "$c5" > "$PASS_TREES"
+out=$(AUTOCUT_INSTALL="echo" sh "$AUTOCUT" run --repo "$repo" 2>&1)
+clone_args=$(sed -n 1p "$TMP/clone-args" 2>/dev/null); clone_here=$(sed -n 2p "$TMP/clone-args" 2>/dev/null); clone_head=$(sed -n 3p "$TMP/clone-args" 2>/dev/null)
+if [ "$(field "$out" action)" = CUT ] && [ "$(field "$out" source)" = "$c5" ] \
+	&& [ "$clone_args" = "--version 0.1.2 --source $c5 --no-install" ] && [ "$clone_head" = "$c5" ] \
+	&& [ -n "$clone_here" ] && [ "$clone_here" != "$repo" ]; then ok; else bad "clone cut: $out / $clone_args / $clone_here / $clone_head"; fi
+
+# 8c. A transient failure that left a draft (release-local says so) is resumed once, with --resume-from-draft and no source.
+cat > "$TMP/release-flaky" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TMP/flaky-args"
+if [ "\$(wc -l < "$TMP/flaky-args" | tr -d ' ')" = 1 ]; then
+	printf 'release-local: refused: attest-local run 1 ended: completed failure (draft v0.1.2 kept; fix and redispatch, never re-tag)\n' >&2
+	exit 4
+fi
+EOF
+rm -f "$TMP/flaky-args"
+out=$(AUTOCUT_RELEASE_LOCAL="sh $TMP/release-flaky" AUTOCUT_INSTALL="echo" sh "$AUTOCUT" run --repo "$repo" 2>&1)
+if [ "$(field "$out" action)" = CUT ] && [ "$(wc -l < "$TMP/flaky-args" | tr -d ' ')" = 2 ] \
+	&& [ "$(sed -n 1p "$TMP/flaky-args")" = "--version 0.1.2 --source $c5 --no-install" ] \
+	&& [ "$(sed -n 2p "$TMP/flaky-args")" = "--resume-from-draft --version 0.1.2 --no-install" ]; then ok; else bad "resume once: $out / $(cat "$TMP/flaky-args" 2>/dev/null)"; fi
+
+# 8d. Planted: a failure that kept no draft is never retried, and a second failure after a resume is FAILED, not a loop.
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/plain-args"\nprintf "release-local: refused: dirty tree\\n" >&2\nexit 4\n' "$TMP" > "$TMP/release-plain"
+rm -f "$TMP/plain-args"
+out=$(AUTOCUT_RELEASE_LOCAL="sh $TMP/release-plain" AUTOCUT_INSTALL="echo" sh "$AUTOCUT" run --repo "$repo" 2>&1)
+rc=$?
+if [ "$rc" = 4 ] && [ "$(field "$out" action)" = FAILED ] && [ "$(wc -l < "$TMP/plain-args" | tr -d ' ')" = 1 ]; then ok; else bad "no retry without a kept draft: rc=$rc $out / $(cat "$TMP/plain-args" 2>/dev/null)"; fi
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/twice-args"\nprintf "release-local: refused: attest ended (draft v0.1.2 kept; fix and redispatch)\\n" >&2\nexit 4\n' "$TMP" > "$TMP/release-twice"
+rm -f "$TMP/twice-args"
+out=$(AUTOCUT_RELEASE_LOCAL="sh $TMP/release-twice" AUTOCUT_INSTALL="echo" sh "$AUTOCUT" run --repo "$repo" 2>&1)
+rc=$?
+if [ "$rc" = 4 ] && [ "$(field "$out" action)" = FAILED ] && [ "$(wc -l < "$TMP/twice-args" | tr -d ' ')" = 2 ]; then ok; else bad "one resume only: rc=$rc $out / $(cat "$TMP/twice-args" 2>/dev/null)"; fi
 
 # 9. Every decision is logged.
 if [ "$(wc -l < "$repo/.git/omp-kit/autocut.log" | tr -d ' ')" -ge 9 ]; then ok; else bad "autocut.log has $(wc -l < "$repo/.git/omp-kit/autocut.log") lines"; fi

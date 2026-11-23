@@ -101,11 +101,35 @@ if [ "$mode" = plan ]; then
 fi
 
 decide CUTTING "release-local.sh --version $version --source $source_sha" "$source_sha" "$version" >/dev/null
-release_cmd=${AUTOCUT_RELEASE_LOCAL:-"bash $ROOT/scripts/release-local.sh"}
+# AUTOCUTCLONE1 (ompkit-hbt6q): the cut runs from an owned clone of origin switched to the source commit, never from $ROOT. The
+# shared working tree lags main (2026-11-23: its local main shared no history with origin/main), and release-local's
+# next-version advance needs HEAD to contain the cut source, so a cut from that tree could never land its own next-version
+# commit. The clone also runs the release scripts of the very commit being released. A test seam command keeps its own path.
+release_cmd=${AUTOCUT_RELEASE_LOCAL:-}
+if [ -z "$release_cmd" ]; then
+	cut_root="$WORK/cut"
+	origin_url=$(git -C "$ROOT" config --get remote.origin.url) || die "no remote.origin.url in $ROOT"
+	git clone -q --no-hardlinks "$origin_url" "$cut_root" || die "cannot clone $origin_url for the cut"
+	git -C "$cut_root" fetch -q --tags origin || die "cannot fetch tags into the cut clone"
+	git -C "$cut_root" switch -q -C main "$source_sha" || die "cannot check out $source_sha in the cut clone"
+	release_cmd="bash $cut_root/scripts/release-local.sh"
+fi
 set -- --version "$version" --source "$source_sha"
-[ "$dry_run" = 1 ] && set -- "$@" --dry-run
+# release-local installs by default; autocut installs below from the public assets exactly as an operator does.
+if [ "$dry_run" = 1 ]; then set -- "$@" --dry-run; else set -- "$@" --no-install; fi
+# The stderr of the cut is kept: a transient attest failure leaves the tag and the draft, which is resumable.
+release_err="$WORK/release.err"
 # shellcheck disable=SC2086  # the release command may carry its interpreter
-if ! TMPDIR="$WORK" $release_cmd "$@" >&2; then
+if TMPDIR="$WORK" $release_cmd "$@" >&2 2>"$release_err"; then cut_ok=1; else cut_ok=0; fi
+cat "$release_err" >&2
+if [ "$cut_ok" = 0 ] && [ "$dry_run" = 0 ] && grep -q "draft v$version kept" "$release_err"; then
+	# RELRESUME1: adopt the kept tag and draft, re-dispatch attest, verify. Once; a second failure is a real refusal.
+	decide RESUMING "release-local kept draft v$version; resuming it once" "$source_sha" "$version" >/dev/null
+	# shellcheck disable=SC2086
+	if TMPDIR="$WORK" $release_cmd --resume-from-draft --version "$version" --no-install >&2 2>"$release_err"; then cut_ok=1; fi
+	cat "$release_err" >&2
+fi
+if [ "$cut_ok" = 0 ]; then
 	decide FAILED "release-local refused or failed for $version at $source_sha (its stderr above)" "$source_sha" "$version"
 	exit 4
 fi
