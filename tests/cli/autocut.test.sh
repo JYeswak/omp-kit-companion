@@ -214,6 +214,64 @@ if [ "$(field "$out" action)" = CUT ] && ! printf '%s' "$out" | grep -q 'INSTALL
 out=$(default_install 0 0.1.2 PASS 1); rc=$?
 if [ "$rc" = 4 ] && [ ! -e "$TMP/update-calls" ]; then ok; else bad "bad checksums must stop before update: rc=$rc $(cat "$TMP/update-calls" 2>/dev/null) $out"; fi
 
+# 8f. AUTOCUTADVANCE1: a cut whose next-version commit did not land (release-local names `--advance-only` as the retry) is advanced
+# from a fresh clone, never left published-but-uninstalled; the retry is bounded and only that hint triggers it.
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/adv-release-args"\nprintf "release-local: refused: next-version commit abc is on local main and origin moved; NEXT_VERSION_CONVERGE_FAILED (see above); retry: release-local --advance-only --version 0.1.2\\n" >&2\nexit 4\n' "$TMP" > "$TMP/release-adv"
+# shellcheck disable=SC2016 # the generated stub expands $* and $n when it runs, not this shell
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/adv-args"\nn=$(wc -l < "%s/adv-args" | tr -d " ")\n[ "$n" -ge "${ADV_SUCCEED_AT:-2}" ] || { printf "advance: conflict\\n" >&2; exit 4; }\n' "$TMP" "$TMP" > "$TMP/advance-stub"
+rm -f "$TMP/adv-args" "$TMP/adv-release-args"
+out=$(AUTOCUT_ADVANCE_PAUSE_S=0 ADV_SUCCEED_AT=2 AUTOCUT_RELEASE_LOCAL="sh $TMP/release-adv" AUTOCUT_ADVANCE="sh $TMP/advance-stub" AUTOCUT_INSTALL="echo" sh "$AUTOCUT" run --repo "$repo" 2>&1)
+if [ "$(field "$out" action)" = CUT ] && [ "$(wc -l < "$TMP/adv-args" | tr -d ' ')" = 2 ] && [ "$(sed -n 1p "$TMP/adv-args")" = "--advance-only --version 0.1.2" ] \
+	&& [ "$(wc -l < "$TMP/adv-release-args" | tr -d ' ')" = 1 ] && grep -q '"action":"ADVANCING"' "$repo/.git/omp-kit/autocut.log"; then ok; else bad "advance heals the next-version failure: $out / $(cat "$TMP/adv-args" 2>/dev/null)"; fi
+# planted: an advance that fails three times is FAILED after exactly three attempts, and the install never runs
+rm -f "$TMP/adv-args"
+out=$(AUTOCUT_ADVANCE_PAUSE_S=0 ADV_SUCCEED_AT=99 AUTOCUT_RELEASE_LOCAL="sh $TMP/release-adv" AUTOCUT_ADVANCE="sh $TMP/advance-stub" AUTOCUT_INSTALL="echo" sh "$AUTOCUT" run --repo "$repo" 2>&1)
+rc=$?
+if [ "$rc" = 4 ] && [ "$(field "$out" action)" = FAILED ] && [ "$(wc -l < "$TMP/adv-args" | tr -d ' ')" = 3 ]; then ok; else bad "advance is bounded at three: rc=$rc $out / $(wc -l < "$TMP/adv-args" 2>/dev/null)"; fi
+# planted: a refusal without the advance-only hint (dirty tree) never triggers an advance
+rm -f "$TMP/adv-args"
+out=$(AUTOCUT_ADVANCE_PAUSE_S=0 AUTOCUT_RELEASE_LOCAL="sh $TMP/release-plain" AUTOCUT_ADVANCE="sh $TMP/advance-stub" AUTOCUT_INSTALL="echo" sh "$AUTOCUT" run --repo "$repo" 2>&1)
+rc=$?
+if [ "$rc" = 4 ] && [ "$(field "$out" action)" = FAILED ] && [ ! -e "$TMP/adv-args" ]; then ok; else bad "no advance without the hint: rc=$rc $out"; fi
+
+# 8g. AUTOCUTRECONCILE1: an update left PARTIAL by fleet writes under the kit state root (and nothing else) is reconciled by the run;
+# a failed stage, a failure outside the state root, or a missing receipt id is never reconciled.
+cat > "$TMP/fakebin/omp-kit" <<'EOF'
+#!/bin/sh
+if [ "$1" = --version ]; then printf 'omp-kit %s\n' "$FAKE_VERSION"; exit 0; fi
+case "$*" in
+	*--reconcile*) printf 'reconcile %s\n' "$*" >> "$FAKE_CALLS"; printf '{"ok":true,"data":{"action":"RECONCILED"}}\n'; exit "${FAKE_RECONCILE_RC:-0}" ;;
+esac
+printf 'update called\n' >> "$FAKE_CALLS"
+cat "$FAKE_ENVELOPE"
+exit "${FAKE_RC:-0}"
+EOF
+chmod +x "$TMP/fakebin/omp-kit"
+partial_envelope() { # FAILURE_JSON_ARRAY FAILED_STAGES_JSON_ARRAY RECEIPT -> a PARTIAL envelope for 0.1.2
+	printf '{"ok":false,"data":{"action":"PARTIAL","overall":"FAIL","active_version":"0.1.2","matcher":"PASS","live":"PASS","postcheck":"FAIL","receipt_id":"%s","postcheck_detail":{"failed_stages":%s,"failures":%s}},"errors":[{"code":"KIT_POSTCHECK_FAILED","message":"x"}]}\n' "$3" "$2" "$1" > "$TMP/envelope.json"
+}
+partial_install() { # -> output; uses $TMP/envelope.json
+	rm -f "$TMP/update-calls"
+	HOME="$TMP/fakehome" PATH="$TMP/fakebin:$PATH" FAKE_ENVELOPE="$TMP/envelope.json" FAKE_CALLS="$TMP/update-calls" FAKE_RC=1 FAKE_VERSION=0.1.2 \
+		AUTOCUT_RELEASE_LOCAL="sh $TMP/release-stub" sh "$AUTOCUT" run --repo "$repo" 2>&1
+}
+RCPT=95d0b12e-0fed-4076-a194-67256f795829
+partial_envelope '["Operator file changed during isolated test: ~/.local/state/omp-kit/pregrade/evidence/x","Operator file changed during isolated test: ~/.local/state/omp-kit/pregrade/x.json"]' '[]' "$RCPT"
+out=$(partial_install)
+if [ "$(field "$out" action)" = CUT ] && printf '%s' "$out" | grep -q INSTALLED_RECONCILED && grep -q "reconcile update --reconcile $RCPT --yes --json" "$TMP/update-calls"; then ok; else bad "fleet-write PARTIAL is reconciled: $out / $(cat "$TMP/update-calls" 2>/dev/null)"; fi
+partial_envelope '["Operator file changed during isolated test: ~/.agents/rules/mine.md"]' '[]' "$RCPT"
+out=$(partial_install); rc=$?
+if [ "$rc" = 4 ] && ! grep -q reconcile "$TMP/update-calls"; then ok; else bad "a failure outside the state root must not be reconciled: rc=$rc $out"; fi
+partial_envelope '["Operator file changed during isolated test: ~/.local/state/omp-kit/pregrade/x.json"]' '["cli-crosscheck"]' "$RCPT"
+out=$(partial_install); rc=$?
+if [ "$rc" = 4 ] && ! grep -q reconcile "$TMP/update-calls"; then ok; else bad "a failed stage must not be reconciled: rc=$rc $out"; fi
+partial_envelope '["Operator file changed during isolated test: ~/.local/state/omp-kit/pregrade/x.json","Planted negative control was not named RED"]' '[]' "$RCPT"
+out=$(partial_install); rc=$?
+if [ "$rc" = 4 ] && ! grep -q reconcile "$TMP/update-calls"; then ok; else bad "one non-fleet failure among fleet ones must not be reconciled: rc=$rc $out"; fi
+partial_envelope '["Operator file changed during isolated test: ~/.local/state/omp-kit/pregrade/x.json"]' '[]' "not-a-receipt"
+out=$(partial_install); rc=$?
+if [ "$rc" = 4 ] && ! grep -q reconcile "$TMP/update-calls"; then ok; else bad "no valid receipt id must not be reconciled: rc=$rc $out"; fi
+
 # 9. Every decision is logged.
 if [ "$(wc -l < "$repo/.git/omp-kit/autocut.log" | tr -d ' ')" -ge 9 ]; then ok; else bad "autocut.log has $(wc -l < "$repo/.git/omp-kit/autocut.log") lines"; fi
 

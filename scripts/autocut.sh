@@ -15,7 +15,8 @@
 #
 # Usage: autocut.sh plan|run [--repo DIR] [--dry-run] [--now] [--floor-hours N] [--max-candidates N]
 # Test seams: AUTOCUT_RELEASES_JSON (file with `gh api .../releases` output), AUTOCUT_RELEASE_LOCAL (release
-# command), AUTOCUT_INSTALL (install command, called as: INSTALL VERSION), AUTOCUT_NO_FETCH=1.
+# command), AUTOCUT_INSTALL (install command, called as: INSTALL VERSION), AUTOCUT_NO_FETCH=1, AUTOCUT_ADVANCE (the advance-only
+# command, default release-local.sh from a fresh clone of origin) and AUTOCUT_ADVANCE_PAUSE_S (seconds between advance attempts, default 5).
 # Exit: 0 decided (CUT done, WAIT, or dry-run done), 2 usage, 4 refused or failed (named on stderr).
 set -u
 
@@ -137,6 +138,34 @@ if [ "$cut_ok" = 0 ] && [ "$dry_run" = 0 ] && grep -q "draft v$version kept" "$r
 	if TMPDIR="$WORK" $release_cmd --resume-from-draft --version "$version" --no-install >&2 2>"$release_err"; then cut_ok=1; fi
 	cat "$release_err" >&2
 fi
+# AUTOCUTADVANCE1 (ompkit-2uubn): v$version is public when release-local says its next-version commit did not land and names
+# `release-local --advance-only` as the retry (2026-11-23: a landing after the source touched a shipped changelog fragment, the
+# cut clone's next-version commit conflicted with origin, and the job stopped with the release published and nothing installed).
+# The advance reads published state only, so it runs from a fresh clone of origin/main, which already holds the landing.
+# Up to three attempts: another landing can move origin between the clone and the push.
+if [ "$cut_ok" = 0 ] && [ "$dry_run" = 0 ] && grep -q -F "release-local --advance-only --version $version" "$release_err"; then
+	attempt=0
+	while [ "$cut_ok" = 0 ] && [ "$attempt" -lt 3 ]; do
+		attempt=$((attempt + 1))
+		decide ADVANCING "v$version is published but its next-version commit did not land; advance-only from a fresh clone of origin/main (attempt $attempt of 3)" "$source_sha" "$version" >/dev/null
+		advance_cmd=${AUTOCUT_ADVANCE:-}
+		if [ -z "$advance_cmd" ]; then
+			advance_root="$WORK/advance.$attempt"
+			advance_origin=$(git -C "$ROOT" config --get remote.origin.url) || die "no remote.origin.url in $ROOT"
+			if git clone -q --no-hardlinks "$advance_origin" "$advance_root" && git -C "$advance_root" fetch -q --tags origin; then
+				advance_cmd="bash $advance_root/scripts/release-local.sh"
+			else
+				printf 'autocut: cannot clone %s for the advance (attempt %s)\n' "$advance_origin" "$attempt" >&2
+				sleep "${AUTOCUT_ADVANCE_PAUSE_S:-5}"
+				continue
+			fi
+		fi
+		# shellcheck disable=SC2086
+		if TMPDIR="$WORK" $advance_cmd --advance-only --version "$version" >&2 2>"$release_err"; then cut_ok=1; fi
+		cat "$release_err" >&2
+		[ "$cut_ok" = 1 ] || sleep "${AUTOCUT_ADVANCE_PAUSE_S:-5}"
+	done
+fi
 if [ "$cut_ok" = 0 ]; then
 	decide FAILED "release-local refused or failed for $version at $source_sha (its stderr above)" "$source_sha" "$version"
 	exit 4
@@ -167,6 +196,24 @@ if [ -z "$install_cmd" ]; then
 			'.data.action == "UPDATED" and .data.active_version == $v and .data.matcher == "PASS" and .data.live == "PASS" and .data.postcheck == "PASS"' "$update_json" >/dev/null 2>&1; then
 			findings=$(jq -r '[.errors[]? | (.code + " " + (.message | .[0:90]))] | .[0:6] | join("; ")' "$update_json" 2>/dev/null) || findings=
 			decide INSTALLED_WITH_FINDINGS "omp-kit update exited $update_rc with v$version active and matcher, live and postcheck PASS; manifest findings: ${findings:-unreadable}" "$source_sha" "$version"
+		elif [ "$installed" = "$version" ] && jq -e --arg v "$version" '
+			.data.action == "PARTIAL" and .data.active_version == $v and .data.matcher == "PASS" and .data.live == "PASS"
+			and ((.data.receipt_id // "") | test("^[0-9a-f-]{36}$"))
+			and ((.data.postcheck_detail.failed_stages // []) | length) == 0
+			and ((.data.postcheck_detail.failures // []) | length) > 0
+			and all(.data.postcheck_detail.failures[]; (type == "string") and startswith("Operator file changed during isolated test: ~/.local/state/omp-kit/"))' "$update_json" >/dev/null 2>&1; then
+			# AUTOCUTRECONCILE1 (ompkit-2uubn, ompkit-3isy): the 0.2.147 install ended PARTIAL with matcher and live PASS, no failed stage,
+			# and three failures that were all fleet processes writing their own state under the kit state root during the 217 s
+			# postcheck. The files installed are the release's; reconcile verifies the postimages, links the plugin and marks the
+			# receipt RECONCILED. Any other failure (a failed stage, a path outside the state root, a missing receipt) still dies.
+			receipt=$(jq -r '.data.receipt_id' "$update_json")
+			decide RECONCILING "omp-kit update left receipt $receipt PARTIAL: every postcheck failure is a fleet write under the kit state root; reconciling it" "$source_sha" "$version" >/dev/null
+			reconcile_rc=0
+			omp-kit update --reconcile "$receipt" --yes --json >"$WORK/reconcile.json" 2>"$WORK/reconcile.err" || reconcile_rc=$?
+			cat "$WORK/reconcile.err" >&2
+			[ "$reconcile_rc" = 0 ] || die "omp-kit update --reconcile $receipt refused (exit $reconcile_rc)"
+			installed=$(omp-kit --version | awk '{print $2}')
+			decide INSTALLED_RECONCILED "v$version installed; receipt $receipt reconciled after fleet-write postcheck findings" "$source_sha" "$version"
 		else
 			die "omp-kit update --apply refused v$version (exit $update_rc; installed reads '$installed')"
 		fi
