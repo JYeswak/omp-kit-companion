@@ -1,10 +1,11 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { applyActivationManifest, recordOptOut, updatePostApplyEnvelope } from "../../src/activation.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import type { HookRefreshIo } from "../../src/hook-refresh.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 
 const base = resolve(ownedTmp("activation-apply").path);
 afterAll(() => rmSync(base, { recursive: true, force: true }));
@@ -196,3 +197,206 @@ test("corrupt opt-out record fails the loop without applying", async () => {
 	expect(execCalls).toBe(0);
 	expect(result.rulesApplied).toBe(0);
 });
+
+const MANIFEST_MEMBER = "40-omp-kit-manifest-evidence";
+const MANIFEST_OLD = "# manifest evidence old\n";
+const MANIFEST_NEW = "# manifest evidence new\n";
+const MANIFEST_OWNER = "# owner modified hook\n";
+const MANIFEST_ASSERTION = "HOOKMANIFESTEVIDENCE1 retained member evidence";
+type ManifestRepoKind = "managed" | "owner" | "never";
+type ManifestRepo = { repo: string; dest: string; tracked: boolean; kind: ManifestRepoKind; source: string };
+
+function manifestChildEnv(root: string): Record<string, string> {
+	return { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root, TMPDIR: root, TMP: root, TEMP: root, KITLIB_TMP_ROOT: root,
+		GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CEILING_DIRECTORIES: root, NO_COLOR: "1" };
+}
+
+async function manifestGit(cwd: string, repo: string, args: string[], env: Record<string, string>): Promise<string> {
+	const result = await runFixtureAsync(["git", "-C", repo, ...args], { cwd, env, floor_s: 30 });
+	const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
+	expect(result.rc, output).toBe(0);
+	return new TextDecoder().decode(result.stdout).trim();
+}
+
+async function prepareManifestRepos(tag: string, env: Record<string, string>, rows: { name: string; tracked: boolean; kind: ManifestRepoKind }[]): Promise<{ repos: ManifestRepo[]; sourceFile: string; before: Map<string, { bytes: string | null; head: string }> }> {
+	const dir = join(base, tag);
+	mkdirSync(dir, { recursive: true });
+	const sourceFile = join(dir, "release-source.sh");
+	writeFileSync(sourceFile, MANIFEST_NEW);
+	const repos: ManifestRepo[] = [];
+	const before = new Map<string, { bytes: string | null; head: string }>();
+	for (const row of rows) {
+		const repo = join(dir, row.name);
+		mkdirSync(repo, { recursive: true });
+		await manifestGit(dir, repo, ["init", "-q"], env);
+		if (row.tracked) await manifestGit(dir, repo, ["config", "core.hooksPath", ".githooks"], env);
+		const hooks = row.tracked ? join(repo, ".githooks") : join(repo, ".git", "hooks");
+		const dest = join(hooks, MANIFEST_MEMBER);
+		const bytes = row.kind === "never" ? null : row.kind === "owner" ? MANIFEST_OWNER : MANIFEST_OLD;
+		if (bytes !== null) {
+			mkdirSync(dirname(dest), { recursive: true });
+			writeFileSync(dest, bytes);
+		}
+		if (row.tracked) await manifestGit(dir, repo, ["add", "--", ".githooks"], env);
+		await manifestGit(dir, repo, ["-c", "user.name=ManifestFixture", "-c", "user.email=manifest@example.invalid",
+			"commit", "-q", "--allow-empty", "-m", "owned manifest hook fixture"], env);
+		before.set(repo, { bytes, head: await manifestGit(dir, repo, ["rev-parse", "HEAD"], env) });
+		repos.push({ repo, dest, tracked: row.tracked, kind: row.kind, source: `owned:${tag}` });
+	}
+	return { repos, sourceFile, before };
+}
+
+/** Real owned-filesystem HookRefreshIo: the existing refreshFleetHooks producer reads real git dirs, real digests and real file copies. */
+function manifestHookIo(repos: ManifestRepo[], sourceFile: string): HookRefreshIo {
+	const byRepo = new Map(repos.map((row) => [resolve(row.repo), row]));
+	const selected = (repo: string): ManifestRepo => {
+		const row = byRepo.get(resolve(repo));
+		if (!row) throw new Error("manifest fixture rejects a foreign repository");
+		return row;
+	};
+	const digest = (path: string): string | null => existsSync(path) ? sha(readFileSync(path)) : null;
+	const hasKitMembers = (dir: string): boolean => {
+		const stack = [dir];
+		while (stack.length > 0) {
+			const current = stack.pop()!;
+			for (const entry of readdirSync(current, { withFileTypes: true })) {
+				if (entry.isDirectory()) stack.push(join(current, entry.name));
+				else if (entry.name.startsWith("40-omp-kit-") || entry.name.startsWith("41-omp-kit-")) return true;
+			}
+		}
+		return false;
+	};
+	return {
+		repos: () => [],
+		kitRoot: () => "/nonexistent-kit",
+		digest,
+		hooksDir: (repo: string) => {
+			const row = selected(repo);
+			return { dir: row.tracked ? join(row.repo, ".githooks") : join(row.repo, ".git", "hooks"), config: null, tracked: row.tracked };
+		},
+		check: async (repo: string) => {
+			const { dest } = selected(repo);
+			return existsSync(dest) && readFileSync(dest).equals(readFileSync(sourceFile))
+				? { rc: 0, output: "" }
+				: { rc: 3, output: `install-commit-msg-bead: STALE installed member: ${dest} differs from ${sourceFile}; rerun install-commit-msg-bead.sh\n` };
+		},
+		hasKitMembers,
+		pullRepos: () => repos.map((row) => ({ repo: row.repo, source: row.source })),
+		runInstaller: (repo: string) => {
+			const { dest } = selected(repo);
+			if (!existsSync(dest) || readFileSync(dest, "utf8") !== MANIFEST_OLD)
+				return { ok: false, detail: "owned installer refuses an owner-modified postimage" };
+			copyFileSync(sourceFile, dest);
+			return { ok: true, detail: "owned filesystem member copied" };
+		},
+	};
+}
+
+test("HOOKMANIFESTEVIDENCE1: refreshed and never-enrolled member outcomes survive the manifest and update envelopes", async () => {
+	const env = manifestChildEnv(base);
+	const { repos, sourceFile, before } = await prepareManifestRepos("manifest-untracked", env, [
+		{ name: "enrolled repo", tracked: false, kind: "managed" },
+		{ name: "never enrolled", tracked: false, kind: "never" },
+	]);
+	const { root, home, stateRoot } = fixtureDirs("manifest-untracked-activation");
+	const result = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit",
+		exec: okService(), hookIo: manifestHookIo(repos, sourceFile) });
+	expect(result.ok, JSON.stringify(result)).toBe(true);
+	expect([result.hooksRefreshed, result.hooksRepos, result.hooksFailed]).toEqual([1, 2, 0]);
+	expect(result.hooksResults.map((row) => row.repo).sort()).toEqual(repos.map((row) => resolve(row.repo)).sort());
+	const managed = result.hooksResults.find((row) => row.repo === resolve(repos[0]!.repo))!;
+	expect(managed, MANIFEST_ASSERTION).toMatchObject({ source: repos[0]!.source, status: "REFRESHED",
+		members: [{ member: MANIFEST_MEMBER, before_sha256: sha(MANIFEST_OLD), after_sha256: sha(MANIFEST_NEW), refreshed: true }],
+		paths: [repos[0]!.dest] });
+	const never = result.hooksResults.find((row) => row.repo === resolve(repos[1]!.repo))!;
+	expect(never, MANIFEST_ASSERTION).toMatchObject({ source: repos[1]!.source, status: "FRESH", members: [], paths: [] });
+	const out = updatePostApplyEnvelope(envelopeBase, { ok: true, receiptId: "r-manifest", detail: "linked" }, result, root);
+	expect(out.code).toBe(0);
+	expect(out.data["overall"]).toBe("UPDATED");
+	const section = out.data["manifest"] as { status: string; hooks_refreshed: number; hooks_repos: number; hooks_failed: number; hooks_results: unknown };
+	expect(section.status).toBe("APPLIED");
+	expect([section.hooks_refreshed, section.hooks_repos, section.hooks_failed]).toEqual([1, 2, 0]);
+	expect(section.hooks_results, MANIFEST_ASSERTION).toEqual(result.hooksResults);
+	expect(JSON.parse(JSON.stringify(section.hooks_results)), MANIFEST_ASSERTION).toEqual(result.hooksResults);
+	expect(readFileSync(repos[0]!.dest, "utf8")).toBe(MANIFEST_NEW);
+	expect(existsSync(repos[1]!.dest)).toBe(false);
+	for (const row of repos)
+		expect(await manifestGit(join(base, "manifest-untracked"), row.repo, ["rev-parse", "HEAD"], env)).toBe(before.get(row.repo)!.head);
+}, fixtureDeadlineS(60) * 1000);
+
+test("HOOKMANIFESTEVIDENCE1: tracked pending-commit and failed owner outcomes survive the manifest and update envelopes", async () => {
+	const env = manifestChildEnv(base);
+	const { repos, sourceFile, before } = await prepareManifestRepos("manifest-tracked", env, [
+		{ name: "tracked repo", tracked: true, kind: "managed" },
+		{ name: "owner modified", tracked: false, kind: "owner" },
+		{ name: "never enrolled", tracked: false, kind: "never" },
+	]);
+	const { root, home, stateRoot } = fixtureDirs("manifest-tracked-activation");
+	const result = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit",
+		exec: okService(), hookIo: manifestHookIo(repos, sourceFile) });
+	expect(result.ok, JSON.stringify(result)).toBe(false);
+	expect([result.hooksRefreshed, result.hooksRepos, result.hooksFailed]).toEqual([0, 3, 1]);
+	expect(result.failed.map((entry) => entry.item)).toContain("hooks");
+	const tracked = result.hooksResults.find((row) => row.repo === resolve(repos[0]!.repo))!;
+	expect(tracked, MANIFEST_ASSERTION).toMatchObject({ source: repos[0]!.source, status: "PENDING_COMMIT", tracked: true,
+		members: [{ member: MANIFEST_MEMBER, before_sha256: sha(MANIFEST_OLD), after_sha256: sha(MANIFEST_NEW), refreshed: true }],
+		paths: [repos[0]!.dest] });
+	const owner = result.hooksResults.find((row) => row.repo === resolve(repos[1]!.repo))!;
+	expect(owner, MANIFEST_ASSERTION).toMatchObject({ source: repos[1]!.source, status: "FAILED", members: [] });
+	expect(owner.detail).toContain("refuses");
+	expect(readFileSync(repos[1]!.dest, "utf8")).toBe(MANIFEST_OWNER);
+	const out = updatePostApplyEnvelope(envelopeBase, { ok: true, detail: "linked" }, result, root);
+	expect(out.code).toBe(1);
+	expect(out.data["overall"]).toBe("FINDINGS");
+	const section = out.data["manifest"] as { status: string; hooks_refreshed: number; hooks_repos: number; hooks_failed: number; hooks_results: unknown };
+	expect(section.status).toBe("FINDINGS");
+	expect([section.hooks_refreshed, section.hooks_repos, section.hooks_failed]).toEqual([0, 3, 1]);
+	expect(section.hooks_results, MANIFEST_ASSERTION).toEqual(result.hooksResults);
+	expect(JSON.parse(JSON.stringify(section.hooks_results)), MANIFEST_ASSERTION).toEqual(result.hooksResults);
+	expect(readFileSync(repos[0]!.dest, "utf8")).toBe(MANIFEST_NEW);
+	for (const row of repos)
+		expect(await manifestGit(join(base, "manifest-tracked"), row.repo, ["rev-parse", "HEAD"], env)).toBe(before.get(row.repo)!.head);
+}, fixtureDeadlineS(60) * 1000);
+
+test("HOOKMANIFESTEVIDENCE1_MUTANT: losing only member retention fails the unchanged envelope consumers", async () => {
+	const scratch = ownedTmp("hook-manifest-retention-mutant");
+	try {
+		const target = realpathSync(join(import.meta.dir, "../../src/activation.ts"));
+		const preload = join(scratch.path, "drop-member-results.ts");
+		const loaded = join(scratch.path, "mutant-loaded");
+		writeFileSync(preload, `
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+const target = ${JSON.stringify(target)};
+const loaded = ${JSON.stringify(loaded)};
+Bun.plugin({ name: "hook-manifest-member-retention-only", setup(builder) {
+	builder.onLoad({ filter: /activation\\.ts$/ }, args => {
+		if (realpathSync(args.path) !== target) return;
+		const source = readFileSync(target, "utf8");
+		const needle = "hooksReport = report;";
+		if (source.split(needle).length !== 3) throw new Error("hook retention mutant site is not unique");
+		writeFileSync(loaded, "member-results-removed");
+		return { contents: source.split(needle).join(""), loader: "ts", resolveDir: dirname(target) };
+	});
+}});
+`);
+		const argv = [process.execPath, "--no-env-file", "test", join(import.meta.dir, "activation-apply.test.ts"), "-t", "^HOOKMANIFESTEVIDENCE1:"];
+		const env = manifestChildEnv(scratch.path);
+		const healthy = await runFixtureAsync(argv, { cwd: scratch.path, env, floor_s: 180 });
+		const healthyOutput = new TextDecoder().decode(healthy.stdout) + new TextDecoder().decode(healthy.stderr);
+		expect(healthy.rc, healthyOutput).toBe(0);
+		expect(healthyOutput).toContain("2 pass");
+		const mutant = await runFixtureAsync([...argv.slice(0, 3), "--preload", preload, ...argv.slice(3)], { cwd: scratch.path, env, floor_s: 180 });
+		const mutantOutput = new TextDecoder().decode(mutant.stdout) + new TextDecoder().decode(mutant.stderr);
+		expect(mutant.rc, mutantOutput).toBe(1);
+		expect(existsSync(loaded), mutantOutput).toBe(true);
+		expect(readFileSync(loaded, "utf8")).toBe("member-results-removed");
+		expect(mutantOutput).toContain(MANIFEST_ASSERTION);
+		expect(mutantOutput).toContain("2 fail");
+		console.log("HOOKMANIFESTEVIDENCE1_MUTANT_WITNESS " + JSON.stringify({
+			healthy_rc: healthy.rc, mutant_rc: mutant.rc,
+			retained_member_assertion_failed: mutantOutput.includes(MANIFEST_ASSERTION),
+			two_original_consumers_failed: mutantOutput.includes("2 fail"),
+		}));
+	} finally { scratch.cleanup(); }
+}, fixtureDeadlineS(600) * 1000);

@@ -29,7 +29,7 @@ import { applyRulePlan, planRules } from "./apply-rules.ts";
 import { applyExtensions, planExtensions } from "./apply-extensions.ts";
 import { profilePluginRuleStatus, readManifest } from "./diagnostics.ts";
 import { extractImportSpecifiers } from "./extensions.ts";
-import { censusHookFreshness, liveHookFreshnessIo, liveHookRefreshIo, refreshFleetHooks, type HookRefreshIo, type HookRepoRow } from "./hook-refresh.ts";
+import { censusHookFreshness, liveHookFreshnessIo, liveHookRefreshIo, refreshFleetHooks, type HookRefreshIo, type HookRefreshReport, type HookRepoRefresh, type HookRepoRow } from "./hook-refresh.ts";
 import { KNOWN_JOBS } from "./service.ts";
 import { livePluginReleaseIo, type PluginLink } from "./plugin-release.ts";
 import { defaultInventoryDeps, inventoryServices, type ServiceRow } from "./services.ts";
@@ -411,6 +411,8 @@ export interface ManifestApplyResult {
 	hooksRepos: number;
 	hooksFailed: number;
 	hooksSkippedRepos: string[];
+	/** Actual per-repository/member hook outcomes with before/after digests; the counters above are unchanged. */
+	hooksResults: HookRepoRefresh[];
 	servicesApplied: string[];
 	skipped: ManifestApplySkip[];
 	failed: ManifestApplyFailure[];
@@ -434,8 +436,9 @@ export async function applyActivationManifest(input: { root: string; home: strin
 	const failed: ManifestApplyFailure[] = [];
 	let rulesApplied = 0, extensionsApplied = 0, hooksRefreshed = 0, hooksRepos = 0, hooksFailed = 0;
 	const hooksSkippedRepos: string[] = [];
+	let hooksReport: HookRefreshReport | null = null;
 	const servicesApplied: string[] = [];
-	const done = (ok: boolean): ManifestApplyResult => ({ ok, rulesApplied, extensionsApplied, hooksRefreshed, hooksRepos, hooksFailed, hooksSkippedRepos, servicesApplied, skipped, failed });
+	const done = (ok: boolean): ManifestApplyResult => ({ ok, rulesApplied, extensionsApplied, hooksRefreshed, hooksRepos, hooksFailed, hooksSkippedRepos, hooksResults: hooksReport?.results ?? [], servicesApplied, skipped, failed });
 	const optoutRead = readOptOutFile(home);
 	if (optoutRead.issue !== null) {
 		failed.push({ item: "opt-outs", detail: optoutRead.issue });
@@ -480,6 +483,7 @@ export async function applyActivationManifest(input: { root: string; home: strin
 		const hookOptOuts = [...optedOut].filter((item) => item.startsWith("hook:"));
 		if (hookOptOuts.length === 0) {
 			const report = await refreshFleetHooks(input.hookIo ?? liveHookRefreshIo(home, root));
+			hooksReport = report;
 			hooksRefreshed = report.refreshed; hooksRepos = report.repos; hooksFailed = report.failed;
 			if (report.failed > 0) failed.push({ item: "hooks", detail: `${report.failed} repo(s) failed` });
 		} else {
@@ -508,6 +512,7 @@ export async function applyActivationManifest(input: { root: string; home: strin
 					return true;
 				}) };
 			const report = await refreshFleetHooks(filtered);
+			hooksReport = report;
 			hooksRefreshed = report.refreshed; hooksRepos = report.repos; hooksFailed = report.failed;
 			if (report.failed > 0) failed.push({ item: "hooks", detail: `${report.failed} repo(s) failed` });
 		}
@@ -580,6 +585,7 @@ export function updatePostApplyEnvelope(
 		hooks_repos: manifest.hooksRepos,
 		hooks_failed: manifest.hooksFailed,
 		hooks_skipped_repos: manifest.hooksSkippedRepos,
+		hooks_results: manifest.hooksResults,
 		services_applied: manifest.servicesApplied,
 		skipped: manifest.skipped,
 		failed: manifest.failed,
