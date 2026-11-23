@@ -1,0 +1,1 @@
+- The runtime test fixture owns a throwaway git repo root when the source tree has no `.git` (git-archive exports), so box [b] replays green outside a checkout.

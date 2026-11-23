@@ -10,7 +10,7 @@ import { createScratch } from "../../src/scratch.ts";
 import type { LivenessDeps } from "../../src/scratch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { installReadonlyBr, resolveRealBr } from "../../src/kitlib/readonly-br.ts";
-import { run } from "../../src/kitlib/run.ts";
+import { run, runSync } from "../../src/kitlib/run.ts";
 import { verifyBead } from "../../src/verify.ts";
 import { identifyExactSource } from "../../scripts/exact-source.ts";
 import { createParentTracker, runUnpinnedInitControl } from "./tracker-init-parent.ts";
@@ -121,12 +121,24 @@ function ownedRuntimeFixture(): { base: string; admission: Record<"OMP_KIT_TEST_
 	let caller = process.env.OMP_KIT_CASE_CWD ?? REPO_ROOT;
 	if (!root) {
 		// The adapter admits this root only when its .owner repo is exactly the caller workspace.
-		root = canonicalScratch(REPO_ROOT);
-		caller = REPO_ROOT;
+		const repo = fixtureRepoRoot();
+		root = canonicalScratch(repo);
+		caller = repo;
 	}
 	// A kitlib name, omp-kit-runtime.<pid>.<6>, is the sandbox shape runtime-adapter.sh admits.
 	const base = ownedTmp("omp-kit-runtime", { root }).path;
 	return { base, admission: { OMP_KIT_TEST_WORK_ROOT: root, OMP_KIT_CASE_CWD: caller } };
+}
+
+/** Git-archive exports carry source but no `.git`: own a throwaway repo root
+ * there so repo-bound fixture writers keep working. In a real repo this
+ * returns REPO_ROOT unchanged. */
+function fixtureRepoRoot(): string {
+	if (existsSync(join(REPO_ROOT, ".git"))) return REPO_ROOT;
+	const root = realpathSync(ownedTmp("runtime-fixture-repo", { autoCleanup: false }).path);
+	const init = runSync(["git", "init", "-q", root], { cwd: root, deadline_s: fixtureDeadlineS(60), max_output_bytes: 65536 });
+	if (init.rc !== 0 || init.timed_out || init.killed) throw new Error(`fixture repo root init failed: rc=${init.rc}`);
+	return root;
 }
 
 async function validateWorkRoot(root: string, caller: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
