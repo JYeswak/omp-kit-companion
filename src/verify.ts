@@ -694,10 +694,16 @@ export async function ensureBoxDeps(command: string, exportDir: string, env: Rec
 	return { ok: false, detail: `DEPENDENCIES_NOT_LOCKED: no lockfile (bun.lock/bun.lockb, package-lock.json, pnpm-lock.yaml, yarn.lock, deno.lock) covers ${cwd}; commit one, never resolve outside it` };
 }
 
-/** `laneParent` overrides LANE_PARENT (a tracker without the omp-kit lane, such as a fixture). */
+/** `laneParent` overrides LANE_PARENT (a tracker without the omp-kit lane, such as a fixture).
+ * VERIFYXREPO1 (ompkit-haadl): `trackerRepo` decouples bead resolution from the export repo.
+ * A chief bead lives in one tracker's repo while its fix lands as an export commit in another
+ * (e.g. the omp-kit tracker names a ~/.claude export). Every `br` read/act and the attempt-ledger
+ * tracker path use the tracker repo; every git/export operation (publication check, rev-parse,
+ * archive, path mapping, scratch default, failure evidence) uses `repo`, the export repo.
+ * Absent, the tracker resolves from `repo` exactly as before (byte-identical default). */
 /** VERIFYBG1 (ompkit-1ra0d.258): a background task that authored neither the change nor its fixture verifies under its own label. `verifier` carries the background identity (label + parent seat + session id); the recorder stays `actor` (a registered seat, never the author). Absent means an ordinary seat verification. */
 export interface BackgroundVerifier { label: string; parent: string; session: string }
-export interface VerifyInput { bead: string; exportSha: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; /** SELFREPLAY1: the assignee replays their own boxes on the exact published export before handover; never closes, ticks or records an attempt. */ selfReplay?: boolean; family?: string; laneParent?: string; lesson?: string; verifier?: BackgroundVerifier }
+export interface VerifyInput { bead: string; exportSha: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; /** SELFREPLAY1: the assignee replays their own boxes on the exact published export before handover; never closes, ticks or records an attempt. */ selfReplay?: boolean; family?: string; laneParent?: string; lesson?: string; trackerRepo?: string; verifier?: BackgroundVerifier }
 
 function commentLesson(body: string): string | null {
 	for (const raw of body.split("\n")) {
@@ -785,7 +791,10 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	// The recorder is the registered seat that owns the tracker writes; the prover is the
 	// background label that ran the replay. Without a background identity they are the same seat.
 	const prover = bg === undefined ? input.actor : bg.label;
-	const blocking = selfReplay ? [] : (await preflightBead("close", input.repo, input.bead, { actor: input.actor, env })).findings.filter(f => f.blocking);
+	// VERIFYXREPO1: the tracker cwd names where the bead resolves; the export repo (input.repo)
+	// names where the fix commit resolves. Absent, both are the export repo, exactly as before.
+	const trackerCwd = input.trackerRepo ?? input.repo;
+	const blocking = selfReplay ? [] : (await preflightBead("close", trackerCwd, input.bead, { actor: input.actor, env })).findings.filter(f => f.blocking);
 	if (blocking.some(f => f.code === "SELF_CLOSE")) return { ok: false, code: "NON_AUTHOR_REQUIRED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`refused: ${input.actor} is the assignee`).join("\n"), acts };
 	// VERIFYOPEN1 keeps open beads eligible for a non-author replay. Active work must
 	// complete its author's in_review handoff first; replay cannot bypass that transition.
@@ -800,7 +809,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		log.push(`${code}: export ${publication.sha || input.exportSha} ${publication.detail}; publish with git_converge.py --push`);
 		return { ok: false, code, bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts };
 	}
-	const row = await showBead(input.bead, input.repo, env);
+	const row = await showBead(input.bead, trackerCwd, env);
 	const acceptance = row?.acceptance ?? "";
 	const title = row?.title || input.bead;
 	const description = row?.description ?? "";
@@ -819,12 +828,12 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		if (!authorCheck.ok) return { ok: false, code: authorCheck.code, bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`refused: ${authorCheck.detail}; no replay or tracker act ran`).join("\n"), acts };
 		log.push(`background verifier ${bg.label} of parent seat ${bg.parent} session ${bg.session} records under its label; tracker writes stay with ${input.actor}`);
 	}
-	const lesson = selfReplay ? "Lesson: self-replay closes nothing" : await closeLesson(input.lesson, row, input.repo, env);
+	const lesson = selfReplay ? "Lesson: self-replay closes nothing" : await closeLesson(input.lesson, row, trackerCwd, env);
 	if (lesson === null) return { ok: false, code: "LESSON_MISSING", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment; no replay or tracker act ran").join("\n"), acts };
 	// VERIFYGATE1-identity: the tracker guard refuses a verifier the target project's Agent Mail does not
 	// know at the first act, after a full replay. Prove the verifier up front, before replaying anything.
-	const identity = selfReplay ? { known: true, detail: "self-replay writes nothing to the tracker" } : await verifierKnownToTargetMail(input.repo, input.actor, env);
-	if (!identity.known) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`UNJUDGED: Agent Mail cannot verify ${input.actor} in ${input.repo} (${identity.detail}); register the verifier in the target project (am agents create --project ${input.repo} --program <program> --model <model>) then retry; no replay or tracker act ran`).join("\n"), acts };
+	const identity = selfReplay ? { known: true, detail: "self-replay writes nothing to the tracker" } : await verifierKnownToTargetMail(trackerCwd, input.actor, env);
+	if (!identity.known) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`UNJUDGED: Agent Mail cannot verify ${input.actor} in ${trackerCwd} (${identity.detail}); register the verifier in the target project (am agents create --project ${trackerCwd} --program <program> --model <model>) then retry; no replay or tracker act ran`).join("\n"), acts };
 	const isFullCommit = (value: string) => {
 		if (value.length !== 40 && value.length !== 64) return false;
 		for (const character of value.toLowerCase()) {
@@ -837,7 +846,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const candidate = text(resolvedExport.stdout).trim().toLowerCase();
 	const exportCommit = resolvedExport.rc === 0 && !resolvedExport.timed_out && !resolvedExport.killed
 		&& !resolvedExport.truncated && !resolvedExport.total_truncated && isFullCommit(candidate) ? candidate : null;
-	const tracker = resolve(input.repo, env.BEADS_DB || join(".beads", "beads.db"));
+	const tracker = resolve(trackerCwd, env.BEADS_DB || join(".beads", "beads.db"));
 	const stateRoot = resolveVerifyStateRoot(env);
 	let attempt: VerifyAttemptRef | null = null;
 	let replays: BoxReplay[] = [];
@@ -1088,7 +1097,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	if (failed.length > 0) {
 		const comment = `REWORK ${input.bead}: ${failed.map(f => `${tag(f)} ${f.detail}`).join("; ")}\n${log.join("\n")}`;
 		acts.push(["br", "update", input.bead, "--status", "rework", "--transition-comment", comment, "--actor", input.actor]);
-		if (!dry) for (const a of acts) await run(a, { cwd: input.repo, deadline_s: 60, env });
+		if (!dry) for (const a of acts) await run(a, { cwd: trackerCwd, deadline_s: 60, env });
 		return await finishAttempt({ ok: false, code: selfReplay ? "SELF_REPLAY" : input.dryRun ? "DRY_RUN" : "REWORK", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: selfReplay ? [] : acts });
 	}
 	if (environmentFailures.length > 0) {
@@ -1119,11 +1128,11 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	let home = "";
 	let homeNote = "";
 	if (deferred.length > 0) {
-		const up = row?.parent ? await showBead(row.parent, input.repo, env) : null;
+		const up = row?.parent ? await showBead(row.parent, trackerCwd, env) : null;
 		if (up !== null && activeStatus(up.status)) home = up.id;
 		else {
 			const lane = input.laneParent ?? LANE_PARENT;
-			const laneRow = await showBead(lane, input.repo, env);
+			const laneRow = await showBead(lane, trackerCwd, env);
 			if (laneRow !== null && activeStatus(laneRow.status)) {
 				home = lane;
 				homeNote = `lane parent ${lane}, because ${input.bead} has no active parent`;
@@ -1151,7 +1160,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		readbackRef = `urn:omp-kit:live-readback:sha256:${readbackKey}`;
 		reuse = row.readbacks[0];
 		if (reuse !== undefined) {
-			const child = await showBead(reuse, input.repo, env);
+			const child = await showBead(reuse, trackerCwd, env);
 			const legacy = child?.externalRef === null && child.title === `LIVEREADBACK: ${title}`
 				&& child.description.includes(`when it closed ${row.id} on export ${exportCommit}:`);
 			if (child === null || child.acceptance !== deferredAcceptance || !child.labels.includes(LIVE_READBACK_LABEL)
@@ -1159,7 +1168,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 				return await finishAttempt({ ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays,
 					log: log.concat(`pending: linked readback ${reuse} is unreadable or does not match this exact export and obligation; no tracker act ran`).join("\n"), acts });
 			}
-			if (child.status === "deferred") resume = await readbackResume(row.id, child, deferredAcceptance, input.repo, env);
+			if (child.status === "deferred") resume = await readbackResume(row.id, child, deferredAcceptance, trackerCwd, env);
 			if (resume !== null && "reason" in resume) return await finishAttempt({ ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${resume.reason}; no tracker act ran`).join("\n"), acts });
 		}
 	}
@@ -1182,17 +1191,17 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	// VERIFYGATE1: when the target workflow requires no min_reviewers gate for this closing transition,
 	// the report is refused rc 4 after the ticks are written. Ask first and skip the report, saying so;
 	// an unreadable answer keeps the act and the fallback below still lands the close.
-	const gateRequired = await minReviewersRequired(input.repo, input.bead, row.status, env);
+	const gateRequired = await minReviewersRequired(trackerCwd, input.bead, row.status, env);
 	if (gateRequired === false) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${row.status} -> closed'; skipping gate report`);
 	else acts.push(["br", "gate", "report", input.bead, "--gate", MIN_REVIEWERS_GATE, "--provider", `reviewer:${prover}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
 	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${prover} (family: ${family})${bg === undefined ? "" : ` background verifier ${bg.label} of ${bg.parent} session ${bg.session}`}\n${lesson}\n${log.join("\n")}`, "--actor", input.actor]);
 	if (homeNote) log.push(`LIVEREADBACK child placed under ${homeNote}`);
 	const child = deferred.length > 0 ? childRef : undefined;
 	if (dry) return await finishAttempt({ ok: true, code: selfReplay ? "SELF_REPLAY" : "DRY_RUN", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: selfReplay ? [] : acts, child: selfReplay ? undefined : child });
-	const done = await executeActs(acts, input.repo, env, { bead: row, actor: input.actor, ...(resume !== null && "revision" in resume ? { resumedChild: resume.child } : {}) });
+	const done = await executeActs(acts, trackerCwd, env, { bead: row, actor: input.actor, ...(resume !== null && "revision" in resume ? { resumedChild: resume.child } : {}) });
 	if (done.failure !== null) return await finishAttempt({ ok: false, code: "ACT_FAILED", bead: input.bead, export: input.exportSha, replays, log: log.concat(done.failure).join("\n"), acts: done.acts, child: done.child ?? reuse, rollback: done.rollback });
 	if (done.skippedGate !== null) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${done.skippedGate}'; skipping gate report`);
-	recordCloseLesson(input.repo, input.bead, lesson, input.exportSha, log);
+	recordCloseLesson(trackerCwd, input.bead, lesson, input.exportSha, log);
 	return await finishAttempt({ ok: true, code: "CLOSED", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: done.acts, child: done.child ?? reuse });
 	} catch (error) {
 		try { cleanupScratch(); }
