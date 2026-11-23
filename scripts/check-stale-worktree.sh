@@ -17,11 +17,12 @@
 #       a peer only added, is exempt only by provenance, not by bytes. A
 #       blamed commit already contained in the message's single
 #       `Authored-On: <sha>` base (ancestor of or equal to it, with the base
-#       itself an ancestor of or equal to HEAD) passes; one that landed
-#       after the base, or any candidate with no (or no valid) Authored-On
-#       trailer, refuses exactly as before. An unparseable, unknown, or
-#       off-history sha, or several different Authored-On values, grant no
-#       exemption.
+#       itself an ancestor of or equal to HEAD) passes. In a non-linked tree
+#       with no Authored-On claim, HEAD is the default R2 base; the hook
+#       records that trailer only after the whole commit passes. Linked
+#       sources still need an explicit base. A base before the blamed commit,
+#       an unparseable, unknown, or off-history sha, or several different
+#       Authored-On values, grant no exemption.
 # Same-bead rework passes silently. Pure additions pass. Unborn HEAD passes.
 # Not judged: lines re-added byte-identically in the same commit at least as
 # often as removed (moves, count-aware; rule (b) only — rule (a) still fires
@@ -152,6 +153,7 @@ fi
 # Review has no rewrite authority and no base to prove: attribute every
 # foreign-bead removal with the SAME move/export/mtime predicates as commit
 # admission below, and never exempt by provenance.
+authored_claimed=0
 if [ "$review" -eq 1 ]; then
 	bead=brief-review
 	reverts=""
@@ -160,12 +162,12 @@ else
 	bead=$(grep -E -m1 '^[[:space:]]*[Bb]ead:[[:space:]]*[A-Za-z0-9._-]+' "$msg" 2>/dev/null | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//')
 	reverts=$(grep -E -o '^[[:space:]]*[Rr]evert:[[:space:]]*[0-9a-fA-F]{7,64}|^[[:space:]]*[Ss]upersedes:[[:space:]]*[0-9a-fA-F]{7,64}' "$msg" 2>/dev/null | sed -e 's/^[^:]*:[[:space:]]*//')
 	# R2 (STALEEXACT1 rework, ompkit-1ra0d.132): at most ONE distinct
-	# Authored-On base, and only from the message's trailer block: a
-	# subject line or a mid-body line that merely contains the words is
-	# not a trailer. Several different values (or none) mean no
-	# provenance exemption; the rules below refuse as usual.
+	# Authored-On base, and only from the message's trailer block. Any
+	# mention counts as a claim: malformed, body-only or conflicting
+	# claims grant no exemption and must not be replaced with HEAD.
 	authored_on=""
 	if grep -qi 'authored-on' "$msg" 2>/dev/null; then
+		authored_claimed=1
 		authored_on=$(git interpret-trailers --parse < "$msg" 2>/dev/null | grep -E -o '^[Aa]uthored-[Oo]n:[[:space:]]*[0-9a-fA-F]{7,64}[[:space:]]*$' | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//' | sort -u)
 		authored_first=$(printf '%s\n' "$authored_on" | sed -n '1p')
 		[ "$authored_first" = "$authored_on" ] || authored_on=""
@@ -178,6 +180,7 @@ fi
 # foreign candidates pays for it) and cached for the invocation.
 authored_base=""
 authored_state="unproven"
+authored_auto=0
 
 # Check the producer before using empty output as "nothing committed".
 # Actual path data is materialized NUL-separated below; --only stays judged.
@@ -442,13 +445,29 @@ pre_lines() {
 }
 
 prove_authored_base() {
-	# Lazily resolves $authored_on to a commit that is an ancestor of (or
-	# equal to) HEAD, caching the verdict for the invocation. Redefines
-	# nothing on failure: no base, no exemption. Only paths with foreign
-	# candidates pay for it.
+	# Lazily proves an explicit base or the non-linked canonical default.
+	# Cache the verdict; only paths with foreign candidates pay for it.
 	[ "$authored_state" = "unproven" ] || return 0
 	authored_state="proven"
-	[ -n "$authored_on" ] || return 0
+	if [ -z "$authored_on" ]; then
+		[ "$review" -eq 0 ] && [ "$authored_claimed" -eq 0 ] || return 0
+		# Automated release messages declare their metadata scope with
+		# specific Supersedes entries, not blanket authority over HEAD.
+		if grep -Fqx 'Gap-Bead: none (release metadata)' "$msg"; then return 0; fi
+		# Native land can reconstruct a patch onto main. Its Git action
+		# identifies that commit, not the checkout the patch came from.
+		case "${GIT_REFLOG_ACTION:-}" in omp-kit-land-*) return 0 ;; esac
+		authored_dirs=$(git rev-parse --path-format=absolute --git-dir --git-common-dir) || return 1
+		authored_git_dir=${authored_dirs%%"$nl"*}
+		authored_common_dir=${authored_dirs#*"$nl"}
+		[ "$authored_git_dir" != "$authored_dirs" ] || return 1
+		[ -n "$authored_git_dir" ] && [ "$authored_git_dir" = "$authored_common_dir" ] || return 0
+		# HEAD was already verified; keep all per-commit membership and
+		# restoration checks below, without re-resolving the same commit.
+		authored_base="$HEAD"
+		authored_auto=1
+		return 0
+	fi
 	if resolved=$(git rev-parse --verify --quiet "$authored_on^{commit}" 2>/dev/null) && [ -n "$resolved" ]; then
 		if git merge-base --is-ancestor "$resolved" "$HEAD" > /dev/null 2>&1; then
 			authored_base="$resolved"
@@ -457,10 +476,9 @@ prove_authored_base() {
 }
 
 base_contains() {
-	# $1 = blamed foreign sha. True when the proven Authored-On base already
-	# contained it (ancestor of or equal to the base): removing those lines
-	# was a choice made with them in view. Anything else — including any
-	# unreadable history — is not an exemption and refuses as usual.
+	# $1 = blamed foreign sha. True when the explicit or canonical R2 base
+	# contains it. This membership never overrides stale mtimes or the
+	# restoration checks; unreadable history grants no exemption.
 	[ -n "$authored_base" ] || return 1
 	[ -f "$metadata_dir/anc.$1" ] || {
 		if git merge-base --is-ancestor "$1" "$authored_base" > /dev/null 2>&1; then
@@ -812,4 +830,11 @@ while IFS= read -r path; do
 	fi
  	exit 1
  fi
+if [ "$authored_auto" -eq 1 ]; then
+	git interpret-trailers --in-place --no-divider --where start --if-exists doNothing --if-missing add --trailer "Authored-On: $authored_base" "$msg" || {
+		printf 'stale-worktree: cannot record automatic Authored-On base\n' >&2
+		exit 1
+	}
+	printf 'stale-worktree: AUTO_COMPLETED Authored-On: %s\n' "$authored_base" >&2
+fi
  exit 0

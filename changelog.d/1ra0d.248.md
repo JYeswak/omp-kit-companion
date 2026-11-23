@@ -1,0 +1,3 @@
+- The stale-worktree hook records a missing `Authored-On` trailer from `HEAD` for ordinary edits in the current non-linked tree, only after the whole commit passes. Linked sources still need proven provenance; explicit stale or malformed claims, stale file timestamps, and restoration checks remain fail-closed.
+- Release metadata commits retain their explicit supersession scope; a reused release message cannot claim implicit authorship of peer metadata.
+- Reconstructed land patches still need an explicit authoring base for peer-line edits; the target checkout does not prove where the patch was written.

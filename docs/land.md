@@ -94,9 +94,17 @@ are covered by the caller's current exclusive reservations. New files work;
 optional `--base SHA`: the commit the patch was produced from. Land checks
 the patch out on that tree and requires it to apply cleanly there — proof
 the patch was authored on it — then records `Authored-On: SHA` in the
-commit message itself, so the stale-worktree hook judges provenance
-instead of bytes. `--base` must be an ancestor of (or equal to) fresh `origin/main`, or land refuses as `LAND_BASE_NOT_ANCESTOR` before creating any commit. A patch that does not apply to the base, or an unknown
- base, lands nothing; path mode writes no trailer.
+commit message itself, so ordinary edits carry an explicit proven base.
+`--base` must be an ancestor of (or equal to) fresh `origin/main`, or land refuses as `LAND_BASE_NOT_ANCESTOR` before creating any commit. A patch that does not apply to the base, or an unknown
+base, lands nothing; path mode does not supply source-checkout provenance.
+
+For a current non-linked checkout, the stale-worktree hook records a missing
+`Authored-On` trailer from `HEAD` only after the whole commit passes. It never
+replaces an explicit claim or infers a base for linked source checkouts.
+Release metadata messages keep their explicit `Supersedes` scope instead.
+When `omp-kit land` reconstructs a patch, the target checkout's `HEAD` is not
+an authoring base. Land still needs explicit provenance for peer-line edits.
+Stale file timestamps and restoration checks still refuse regardless.
 
 The patch is limited to 4 MiB. The bytes read and parsed are the bytes applied:
 replacing the file during fetch cannot introduce an unselected hunk.

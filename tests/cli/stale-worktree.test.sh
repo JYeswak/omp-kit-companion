@@ -9,7 +9,8 @@ set -u
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 
 INSTALLER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/install-commit-msg-bead.sh
-REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
+# kitlib_tmp creates this root when needed; a fresh export need not have var/.
+REPO_TMP="${INSTALLER%/scripts/install-commit-msg-bead.sh}/var/agent-tmp"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
@@ -66,11 +67,68 @@ new_repo() {
 	printf '%s' "$dir"
 }
 
+# Missing-provenance R2 negatives use an actual source checkout, not the
+# canonical-tree default. Link export fixtures only after their seed commit.
+linked_repo() {
+	linked="$1-linked"
+	git -C "$1" worktree add --quiet --detach "$linked" HEAD || return 1
+	printf '%s' "$linked"
+}
+
 
 backdate() {
 	# Portable old mtime (predates every test commit).
 	touch -t 202001010000 "$1"
 }
+
+# STALEOWNHEAD1: actual commits in the current non-linked tree may recover
+# missing R2 provenance, never an explicit claim or an older linked source.
+staleownhead_cases() {
+	current248=$(new_repo "staleownhead canonical") || return 1
+	base248=$(git -C "$current248" rev-parse HEAD) || return 1
+	printf 'base line\npeer wording\n' > "$current248/pkg/f.txt"
+	git -C "$current248" add pkg/f.txt || return 1
+	git -C "$current248" commit -q --message "[test] peer wording 248" --message "Bead: t-peer248" --message "Supersedes: $base248" || return 1
+	peer248=$(git -C "$current248" rev-parse HEAD) || return 1
+	printf 'base line\nbrand new\n' > "$current248/pkg/f.txt"
+	out=$(git -C "$current248" commit --only --message "[test] current edit 248" --message "Bead: t-other248" --message "Authored-On: not-a-sha" -- pkg/f.txt 2>&1)
+	check "$?" "1" "STALEOWNHEAD1-malformed-claim-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $peer248"
+	check "$(git -C "$current248" rev-parse HEAD)" "$peer248" "STALEOWNHEAD1-malformed-head-kept" "$out" ""
+	out=$(git -C "$current248" commit --only --message "[test] current edit 248" --message "Bead: t-other248" --message "Authored-On: $base248" -- pkg/f.txt 2>&1)
+	check "$?" "1" "STALEOWNHEAD1-explicit-old-base-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $peer248"
+	check "$(git -C "$current248" rev-parse HEAD)" "$peer248" "STALEOWNHEAD1-explicit-old-head-kept" "$out" ""
+	out=$(git -C "$current248" commit --only --message "[test] current edit 248" --message "Bead: t-other248" -- pkg/f.txt 2>&1)
+	check "$?" "0" "STALEOWNHEAD1-current-commit-passes" "$out" "AUTO_COMPLETED Authored-On: $peer248"
+	check "$(git -C "$current248" show HEAD:pkg/f.txt)" "$(printf 'base line\nbrand new\n')" "STALEOWNHEAD1-current-bytes-committed" "$out" ""
+	check "$(git -C "$current248" log -1 --format='%(trailers)')" "$(printf 'Authored-On: %s\nBead: t-other248\n' "$peer248")" "STALEOWNHEAD1-provenance-persisted-bead-last" "$out" ""
+	check "$(git -C "$current248" log -1 --format=%s)" "[test] current edit 248" "STALEOWNHEAD1-subject-preserved" "$out" ""
+
+	origin248=$(new_repo staleownhead-stale-origin) || return 1
+	base248=$(git -C "$origin248" rev-parse HEAD) || return 1
+	stale248="$TMP/staleownhead-old-base"
+	git -C "$origin248" worktree add --quiet --detach "$stale248" "$base248" || return 1
+	printf 'base line\npeer wording\n' > "$origin248/pkg/f.txt"
+	git -C "$origin248" add pkg/f.txt || return 1
+	git -C "$origin248" commit -q --message "[test] peer after linked base" --message "Bead: t-peer248" --message "Supersedes: $base248" || return 1
+	peer248=$(git -C "$origin248" rev-parse HEAD) || return 1
+	# Advance only the detached fixture ref; its working bytes/index remain
+	# based before the peer landing, as in a stale source applied later.
+	git -C "$stale248" update-ref HEAD "$peer248" "$base248" || return 1
+	printf 'base line\nbrand new\n' > "$stale248/pkg/f.txt"
+	out=$(git -C "$stale248" commit --only --message "[test] stale linked edit 248" --message "Bead: t-other248" -- pkg/f.txt 2>&1)
+	check "$?" "1" "STALEOWNHEAD1-old-linked-source-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $peer248"
+	check "$(git -C "$stale248" rev-parse HEAD)" "$peer248" "STALEOWNHEAD1-old-linked-head-kept" "$out" ""
+	check "$(cat "$stale248/pkg/f.txt")" "$(printf 'base line\nbrand new\n')" "STALEOWNHEAD1-old-linked-work-kept" "$out" ""
+}
+
+if [ "${1:-}" != -t ] || [ "${2:-}" = STALEOWNHEAD1 ]; then
+	staleownhead_cases || exit 1
+	if [ "${1:-}" = -t ]; then
+		printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
+		[ "$fail" -eq 0 ]
+		exit $?
+	fi
+fi
 
 # STALELOCK1 (ompkit-fp72.120.16.229): the member reaps its own commit's
 # orphan index.lock only when that git is dead, no process holds the lock,
@@ -196,6 +254,7 @@ check "$?" "0" "same-bead-pass" "$out" ""
 
 # 5. mixed: fresh own hunk plus a foreign removal: refused, hunk survives
 R=$(new_repo mixed)
+R=$(linked_repo "$R") || exit 1
 printf 'base line\nown fresh hunk\n' > "$R/pkg/f.txt"
 git -C "$R" add pkg/f.txt
 out=$(git -C "$R" commit --message "[test] mixed" --message "Bead: t-other" 2>&1)
@@ -266,6 +325,7 @@ printf '%s\n' '{"id":"t-owner","title":"one"}' '{"id":"t-current","title":"two"}
 git -C "$R" add .beads/issues.jsonl
 git -C "$R" commit -q --message "[test] serializer export" --message "Bead: t-exporter"
 S=$(git -C "$R" rev-parse HEAD)
+R=$(linked_repo "$R") || exit 1
 printf '%s\n' '{"id":"t-current","title":"two"}' > "$R/.beads/issues.jsonl"
 git -C "$R" add .beads/issues.jsonl
 out=$(git -C "$R" commit --message "[test] export drops t-owner" --message "Bead: t-other" 2>&1)
@@ -298,6 +358,7 @@ check "$?" "0" "xmove-passes" "$out" ""
 # 11. removing a text twice while re-adding it once (cross-file) is judged:
 # one removal stays uncancelled and still refuses
 R=$(new_repo overremove)
+R=$(linked_repo "$R") || exit 1
 printf 'same\nsame\n' > "$R/pkg/f.txt"
 git -C "$R" add pkg/f.txt
 git -C "$R" commit -q --message "[test] land dup" --message "Bead: t-land"
@@ -311,6 +372,7 @@ check "$(git -C "$R" rev-list --count HEAD)" "2" "overremove-unmoved" "$out" "ST
 # 11b. cross-file multiplicity (native 60092): the same line removed in two
 # files but re-added once still refuses; consumption is global, not per-path
 R=$(new_repo xmulti)
+R=$(linked_repo "$R") || exit 1
 printf 'base line\nlanded line L\n' > "$R/pkg/f.txt"
 printf 'other\nlanded line L\n' > "$R/pkg/g.txt"
 git -C "$R" add pkg/f.txt pkg/g.txt
@@ -338,6 +400,7 @@ check "$(git -C "$R" log -1 --format=%B HEAD | grep -c "Supersedes: $A")" "1" "s
 # 12b. GATEDIAG1: two foreign landings refused in one run print one ready Supersedes block naming both, and that
 # block alone admits the rewrite (one edit, never a round per sha).
 R=$(new_repo supersede-block)
+R=$(linked_repo "$R") || exit 1
 A1=$(git -C "$R" rev-parse HEAD)
 printf 'base line\nlanded line L\nsecond landing M\n' > "$R/pkg/f.txt"
 git -C "$R" add pkg/f.txt
@@ -373,6 +436,7 @@ check "$(git -C "$R" rev-list --count HEAD)" "1" "badcontrol-unmoved" "$out" "ST
 # the own-bead line passes, both foreign lines refuse naming their commit, and
 # git blame runs exactly once for the path.
 R=$(new_repo blame-once)
+R=$(linked_repo "$R") || exit 1
 A=$(git -C "$R" rev-parse HEAD)
 printf 'base line\nlanded line L\nkeep\nother one\nother two\n' > "$R/pkg/f.txt"
 git -C "$R" add pkg/f.txt
@@ -431,6 +495,7 @@ check "$?" "1" "beadless-stale-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts
 # 19. equal subjects are not metadata identity: facts belong to the full SHA.
 # The first path's own-bead facts must not admit the second path's foreign removal.
 R=$(new_repo facts-sha-identity)
+R=$(linked_repo "$R") || exit 1
 A=$(git -C "$R" rev-parse HEAD)
 printf 'peer one\npeer two\n' > "$R/pkg/g.txt"
 git -C "$R" add pkg/g.txt
@@ -612,13 +677,13 @@ out=$(git -C "$W" commit --only --message "[test] linked move" --message "Bead: 
 check "$?" "0" "linked-move-passes" "$out" ""
 check "$(git -C "$W" show HEAD:pkg/g.txt)" "landed line L" "linked-move-retains-line" "$out" ""
 
-# 25. STALEEXACT1 R2: an ordinary edit of a peer's line is exempt only by
-# provenance. No trailer refuses exactly as before (naming the peer, with
-# both ways out printed); a base that already contains the peer commit
-# admits it with no Supersedes; a base from before the peer commit, an
-# unknown or unparseable sha, a base off HEAD's history, or two different
-# bases refuse.
+# 25. STALEEXACT1 R2: an ordinary edit from a linked source is exempt only
+# by provenance. No trailer refuses (naming the peer, with both ways out);
+# a base that already contains the peer commit admits it with no Supersedes;
+# a base from before the peer commit, an unknown or unparseable sha, a base
+# off HEAD's history, or two different bases refuse.
 R=$(new_repo stalexact-r2)
+R=$(linked_repo "$R") || exit 1
 cp "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh" "$TMP/kitlib-tmp.sh"
 S0=$(git -C "$R" rev-parse HEAD)
 printf 'base line\npeer wording\n' > "$R/pkg/f.txt"
@@ -697,7 +762,10 @@ printf 'base line\nlanded line L \n' > "$R/pkg/f.txt"
 git -C "$R" add pkg/f.txt
 out=$(git -C "$R" commit --message "[test] whitespace drift" --message "Bead: t-other" --message "Authored-On: $P" 2>&1)
 check "$?" "1" "STALEEXACT1-r1-trimmed-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P"
+# Without a proven base, attribution names only HEAD. Keep that context
+# explicit: the canonical default below also enables the multi-hop walk.
 R=$(new_repo stalexact-r1-twohop)
+R=$(linked_repo "$R") || exit 1
 S0=$(git -C "$R" rev-parse HEAD)
 printf 'base line\nC line\n' > "$R/pkg/f.txt"
 git -C "$R" add pkg/f.txt
@@ -713,10 +781,11 @@ out=$(git -C "$R" commit --message "[test] restore L two hops back" --message "B
 check "$?" "1" "STALEEXACT1-r1-twohop-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $P2"
 check "$(printf '%s\n' "$out" | grep -c "reverts $P1")" "0" "STALEEXACT1-r1-twohop-blames-head" "$out" ""
 
-# 27. STALEEXACT1 R2 deletion: deleting lines a peer only added refuses
-# without a trailer or a declared revert, and passes with an Authored-On
-# base that already contains the peer commit — no Supersedes needed.
+# 27. STALEEXACT1 R2 deletion from a linked source refuses without a trailer
+# or a declared revert, and passes with an Authored-On base that already
+# contains the peer commit — no Supersedes needed.
 R=$(new_repo stalexact-r2-delete)
+R=$(linked_repo "$R") || exit 1
 printf 'peer line\n' > "$R/pkg/g.txt"
 git -C "$R" add pkg/g.txt
 git -C "$R" commit -q --message "[test] peer adds g" --message "Bead: t-peer2"
