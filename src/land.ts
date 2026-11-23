@@ -651,9 +651,11 @@ export function scheduleReleaseQualification(repo: string, sha: string, env: Nod
 	if (gitDir.code !== 0) return "UNAVAILABLE";
 	const log = join(gitDir.out.trim(), "omp-kit", "release-verdict.log");
 	try { mkdirSync(dirname(log), { recursive: true }); } catch { return "UNAVAILABLE"; }
-	// The starter (a Python script with its own shebang, executable) forks a session-owning child and exits at once; its output
-	// goes to the log, so no pipe stays open.
-	const run = kitlibRunSync(["sh", "-c", '"$1" "$2" "$3" </dev/null >>"$4" 2>&1', "sh", starter, repo, sha, log], { cwd: repo, env: gitEnvironment(), deadline_s: 30 });
+	// The starter (a Python script) forks a session-owning child and exits at once; its output goes to the log, so no pipe stays
+	// open. It runs through python3, never by its own mode: the kit release packages .py files 0644 (2026-11-23: 0.2.147's
+	// releases/0.2.147/scripts/release-verdict-start.py was -rw-r--r--), so executing it directly returned 126 and every land
+	// read release_qualification UNAVAILABLE.
+	const run = kitlibRunSync(["sh", "-c", '"$1" "$2" "$3" "$4" </dev/null >>"$5" 2>&1', "sh", "python3", starter, repo, sha, log], { cwd: repo, env: gitEnvironment(), deadline_s: 30 });
 	return run.rc === 0 ? "SCHEDULED" : "UNAVAILABLE";
 }
 
