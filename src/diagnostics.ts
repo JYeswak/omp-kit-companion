@@ -839,6 +839,45 @@ export function inspectRegexTools(pathValue = process.env.PATH ?? ""): Finding {
 		{ tools, missing: missing.map((tool) => tool.bin), proof: "EXECUTABLE_ON_PATH" });
 }
 
+/** BOARDLIVE1-S2: Agent Mail -> Board cutover. FLEET_MAIL_BACKEND unset or am leaves mail untouched; board makes the seat's own Board identity checkable. */
+export interface MailBackendDeps {
+	env: Readonly<Record<string, string | undefined>>;
+	/** Board CLI `whoami --json`, bounded; spawn failure is reported as rc null. */
+	whoami(): { rc: number | null; timedOut: boolean; stdout: string };
+}
+export function inspectMailBackend(deps: MailBackendDeps): Finding {
+	const backend = deps.env.FLEET_MAIL_BACKEND ?? "";
+	if (backend === "" || backend === "am")
+		return finding("mail_backend", "OK", "Mail backend is Agent Mail; the Board is not in use", "No action required.", { backend: "am", proof: "ENV_ONLY" });
+	const fail = (code: string, reason: string, action: string, evidence: Record<string, unknown> = {}) =>
+		finding("mail_backend", "FAIL", `${code}: ${reason}`, action, { backend, reason_code: code, ...evidence });
+	if (backend !== "board") return fail("MAIL_BACKEND_UNKNOWN", `FLEET_MAIL_BACKEND is ${JSON.stringify(backend)}; expected am or board`, "Unset FLEET_MAIL_BACKEND or set it to am or board.");
+	const profile = deps.env.BOARD_PROFILE ?? "";
+	if (!profile) return fail("BOARD_PROFILE_MISSING", "BOARD_PROFILE is not set, so the seat cannot post as itself", "Respawn the seat through scripts/agent-spawn-env.sh with FLEET_MAIL_BACKEND=board.");
+	if (!(deps.env.BOARD_URL ?? "")) return fail("BOARD_URL_MISSING", "BOARD_URL is not set", "Respawn the seat through scripts/agent-spawn-env.sh with FLEET_MAIL_BACKEND=board.", { profile });
+	const result = deps.whoami();
+	if (result.timedOut) return fail("BOARD_WHOAMI_TIMEOUT", "board whoami did not answer in time", "Check the Board server answers at BOARD_URL.", { profile });
+	if (result.rc === null) return fail("BOARD_CLI_UNAVAILABLE", "the Board CLI could not be started", "Install it (npm i -g @vercel/board, or set OMP_KIT_BOARD_CLI to its path).", { profile });
+	if (result.rc !== 0) return fail("BOARD_WHOAMI_FAILED", `board whoami exited ${result.rc}`, "Check the Board server answers at BOARD_URL and the seat has a token.", { profile, exit_code: result.rc });
+	let answered: unknown;
+	try { answered = (JSON.parse(result.stdout) as { profile?: unknown }).profile; }
+	catch { return fail("BOARD_WHOAMI_UNPARSEABLE", "board whoami --json did not print JSON", "Check the Board CLI version.", { profile }); }
+	if (typeof answered !== "string" || answered.toLowerCase() !== profile.toLowerCase())
+		return fail("BOARD_PROFILE_MISMATCH", `board whoami answered as ${JSON.stringify(answered ?? null)}, not ${JSON.stringify(profile)}`, "Respawn the seat so BOARD_PROFILE equals its Agent Mail name.", { profile, answered: answered ?? null });
+	return finding("mail_backend", "OK", `Board answers as ${answered}`, "No action required.", { backend, profile: answered, proof: "BOARD_WHOAMI" });
+}
+export function defaultMailBackend(env: NodeJS.ProcessEnv = process.env): MailBackendDeps {
+	return {
+		env,
+		whoami() {
+			try {
+				const result = runSync([env.OMP_KIT_BOARD_CLI || "vb", "whoami", "--json"], { deadline_s: 10, env: { ...env } as Record<string, string> });
+				return { rc: result.rc, timedOut: result.timed_out, stdout: Buffer.from(result.stdout).toString("utf8") };
+			} catch { return { rc: null, timedOut: false, stdout: "" }; }
+		},
+	};
+}
+
 export interface PaneIdentity { session: string; window: string; index: string; id: string }
 export interface PaneIdentityAgent { name: string; lastActiveMs: number | null }
 /** How strongly a pane->agent binding is evidenced. Only qualified live-pane runtime evidence is verified. */
@@ -2375,6 +2414,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (input.scope === "derived" && input.project) rows.push(...inspectDerivedScope(resolve(input.project)));
 	if (input.scope === "layout" && input.project) rows.push(...inspectLayoutScope(resolve(input.project), root));
 	if (input.scope === "public-files" && input.project) rows.push(...inspectPublicFilesScope(resolve(input.project), root));
+	if (input.scope === "mail_backend" || (!input.scope && process.env.FLEET_MAIL_BACKEND === "board")) rows.push(inspectMailBackend(defaultMailBackend()));
 	if (input.scope === "test-scope") rows.push(inspectTestScope());
 	if (input.scope === "access") rows.push(inspectAccess({ home, run: defaultRunner }));
 	if (input.scope === "gates") rows.push(await inspectGatePlane({ root, home }));

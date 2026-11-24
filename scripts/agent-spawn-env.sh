@@ -3,6 +3,11 @@
 # Registration belongs to the native owner; this helper never registers,
 # adopts aliases, rewrites identities or changes leases.
 #   projection=$(scripts/agent-spawn-env.sh --agent NAME) && eval "$projection"
+# With FLEET_MAIL_BACKEND=board the projection also exports BOARD_URL (config
+# key [board] url in the fleet overlay, default http://127.0.0.1:4178/api/board)
+# and BOARD_PROFILE (the seat's Agent Mail name) for the Board CLI; unset or am
+# leaves the projection unchanged. --board-env prints only those exports, with
+# no pane proof: the seat's own name is still required.
 # Only the supported AM v1 canonical verified-live binding qualifies. Native
 # resolution runs in macOS's built-in read-only sandbox: AM 0.3.36's nominally
 # read-only CLI otherwise adopts dead aliases. Without this boundary, refuse.
@@ -18,6 +23,7 @@ fail() {
 KIT_ROOT=""
 AGENT=""
 PROJECT=""
+BOARD_ONLY=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--agent|--kit-root|--project)
@@ -28,8 +34,9 @@ while [ $# -gt 0 ]; do
 				--project) PROJECT=$2 ;;
 			esac
 			shift 2 ;;
+		--board-env) BOARD_ONLY=1; shift ;;
 		--) shift; break ;;
-		*) fail "usage: agent-spawn-env.sh --agent NAME [--project REPO] [--kit-root DIR]" ;;
+		*) fail "usage: agent-spawn-env.sh --agent NAME [--project REPO] [--kit-root DIR] [--board-env]" ;;
 	esac
 done
 if [ -z "$AGENT" ]; then
@@ -40,6 +47,62 @@ nl='
 case "$AGENT" in
 	*"$nl"*) fail "AGENT_NAME must be one line" ;;
 esac
+board_projection() {
+	case "${FLEET_MAIL_BACKEND:-}" in
+		""|am) return 0 ;;
+		board) ;;
+		*) fail "FLEET_MAIL_BACKEND must be am or board" ;;
+	esac
+	command -v python3 >/dev/null 2>&1 || fail "ACTOR_SOURCE_UNAVAILABLE python3 is required"
+	python3 - "$AGENT" <<'PY'
+from __future__ import annotations
+
+import os
+import re
+import shlex
+import sys
+
+DEFAULT_URL = "http://127.0.0.1:4178/api/board"
+agent = sys.argv[1]
+# Board profile names: a letter, then up to 31 letters, digits or hyphens.
+if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,31}", agent):
+    print("agent-spawn-env: BOARD_PROFILE_INVALID: the Agent Mail name is not a valid Board profile", file=sys.stderr)
+    sys.exit(4)
+url = DEFAULT_URL
+home = os.environ.get("HOME", "")
+override = os.environ.get("OMP_KIT_FLEET_CONFIG", "")
+xdg = os.environ.get("XDG_CONFIG_HOME", "")
+config = override or os.path.join(xdg if xdg.startswith("/") else os.path.join(home, ".config"), "omp-kit", "fleet.toml")
+try:
+    with open(config, encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+except FileNotFoundError:
+    lines = []
+except (OSError, UnicodeError):
+    print("agent-spawn-env: BOARD_URL_CONFIG_UNREADABLE: fleet overlay is unreadable", file=sys.stderr)
+    sys.exit(4)
+# Only the one key is read: python3 here may predate tomllib.
+in_board = False
+for line in lines:
+    text = line.strip()
+    if text.startswith("["):
+        in_board = text == "[board]"
+    elif in_board:
+        match = re.fullmatch(r'url\s*=\s*"([^"\\]*)"\s*(?:#.*)?', text)
+        if match:
+            url = match.group(1)
+if not isinstance(url, str) or not re.fullmatch(r"https?://[^\s'\"]+", url):
+    print("agent-spawn-env: BOARD_URL_INVALID: [board] url must be an http(s) URL", file=sys.stderr)
+    sys.exit(4)
+print(f"export BOARD_URL={shlex.quote(url)}")
+print(f"export BOARD_PROFILE={shlex.quote(agent)}")
+PY
+}
+if [ "$BOARD_ONLY" = 1 ]; then
+	board_projection || exit 4
+	exit 0
+fi
+BOARD_EXPORTS=$(board_projection) || exit 4
 if [ -z "$KIT_ROOT" ]; then
 	KIT_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P) || fail "cannot resolve kit root"
 fi
@@ -203,3 +266,4 @@ if [ -z "$REAL_BIN" ]; then
 	fail "no real br beyond the pane shim on PATH"
 fi
 printf '%s\n' "$projection"
+[ -z "$BOARD_EXPORTS" ] || printf '%s\n' "$BOARD_EXPORTS"

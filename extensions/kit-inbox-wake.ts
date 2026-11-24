@@ -4,6 +4,11 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fleetPolicyState } from "./fleet-policy";
 import { run } from "../src/kitlib/run.ts";
+import { type BoardClient, type BoardEvent, boardActor, boardClientFromEnv, boardEventsAfter, boardHead } from "../src/board-events.ts";
+
+const BOARD_WAIT_S = 25;
+const BOARD_RETRY_MS = 10_000;
+const BOARD_MIN_CYCLE_MS = 1_000;
 
 /**
  * kit-inbox-wake (MAILWAKE1.2, ompkit-uk9wn.2): a seat wakes itself on its own Agent Mail.
@@ -73,6 +78,13 @@ export interface InboxWakeDeps {
 	read?: (agent: string, project: string, after: number | null) => Promise<InboxRead | null>;
 	policyOn?: (project: string) => Promise<boolean>;
 	fleetWatchPath?: string;
+	/** FLEET_MAIL_BACKEND override: "board" reads the Board feed, anything else is Agent Mail. */
+	backend?: string;
+	/** Board credentials; defaults to BOARD_URL/BOARD_TOKEN or the local board's credentials file. */
+	boardClient?: BoardClient;
+	/** Hold the long-poll open for the session (default true); false polls on the 30 s interval instead. */
+	boardLoop?: boolean;
+	boardWaitS?: number;
 }
 
 /** The repo a registered Tern seat belongs to (the CC seat registry), else null. */
@@ -157,6 +169,36 @@ export function wakeText(agent: string, events: InboxEvent[]): string {
 		"Read them with fetch_inbox (include_bodies true) and act; acknowledge each one after acting on it.";
 }
 
+export function boardCursorPath(home: string, agent: string): string {
+	return join(home, ".local", "state", "omp-kit", "inbox-wake", `${agent}.board.json`);
+}
+
+interface BoardState { agent: string; actor: string; cursor: string; delivered: string[] }
+
+function readBoardState(path: string): BoardState | null {
+	try {
+		const r = JSON.parse(readFileSync(path, "utf8"));
+		if (r?.schema !== 1 || typeof r.cursor !== "string" || r.cursor === "" || typeof r.actor !== "string") return null;
+		const delivered = Array.isArray(r.delivered) ? r.delivered.filter((id: unknown): id is string => typeof id === "string") : [];
+		return { agent: String(r.agent), actor: r.actor, cursor: r.cursor, delivered: delivered.slice(-MAX_DELIVERED) };
+	} catch {
+		return null;
+	}
+}
+
+function writeBoardState(path: string, state: BoardState, at: Date): void {
+	mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
+	const tmp = `${path}.${process.pid}.tmp`;
+	writeFileSync(tmp, JSON.stringify({ schema: 1, ...state, delivered: state.delivered.slice(-MAX_DELIVERED), at: at.toISOString() }));
+	renameSync(tmp, path);
+}
+
+export function boardWakeText(agent: string, events: BoardEvent[]): string {
+	const lines = events.map(e => `#${e.messageId} in ${e.channel} from ${e.byHandle || e.by}: ${e.text.split("\n", 1)[0].slice(0, 120)}`);
+	return `BOARD WAKE for ${agent}: ${events.length} new Board mention(s).\n${lines.join("\n")}\n` +
+		"Read the thread on the Board and act; acknowledge each directive after acting on it.";
+}
+
 async function amRead(agent: string, project: string, after: number | null): Promise<InboxRead | null> {
 	const argv = ["am", "inbox-events", "--agent", agent, "--project", project, "--json", "--limit", String(MAX_EVENTS)];
 	argv.push(...(after === null ? ["--position-now"] : ["--after", String(after)]));
@@ -195,6 +237,13 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 		globals[loaded] = true;
 	}
 	let timer: unknown = null;
+	const backend = deps.backend ?? env.FLEET_MAIL_BACKEND ?? "am";
+	const boardLoop = deps.boardLoop ?? true;
+	const boardWaitS = deps.boardWaitS ?? BOARD_WAIT_S;
+	const boardPath = boardCursorPath(home, agent);
+	const abort = new AbortController();
+	let stopped = false;
+	let looping = false;
 	let busy = false;
 	let project = "";
 	let path = "";
@@ -213,7 +262,77 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 		await poll();
 	}
 
+	/**
+	 * BOARDLIVE1-S3: the Board source. One long-poll `GET /events?mentions=<actor>&after=<cursor>` per call; a mention
+	 * at or before the cursor never wakes, and the cursor file is written after every wake, so a restart replays nothing.
+	 * The first start ever takes the feed's current end (no backlog flood). Returns false when the board was unreadable.
+	 */
+	async function pollBoard(waitS: number): Promise<boolean> {
+		if (busy) return true;
+		busy = true;
+		try {
+			const client = deps.boardClient ?? boardClientFromEnv(home, env);
+			if (client === null) return false;
+			const state = readBoardState(boardPath);
+			const actor = state?.actor ?? await boardActor(client, agent!, abort.signal);
+			if (actor === null) return false;
+			if (state === null) {
+				const head = await boardHead(client, agent!, actor, abort.signal);
+				if (head === null) return false;
+				writeBoardState(boardPath, { agent: agent!, actor, cursor: head, delivered: [] }, now());
+				return true;
+			}
+			const got = await boardEventsAfter(client, agent!, actor, state.cursor, waitS, abort.signal);
+			if (got === null) return false;
+			// Position AND prior delivery: a server that re-emits events at or below the cursor never wakes twice.
+			const delivered = new Set(state.delivered);
+			const fresh = got.events.filter(e => e.type === "message.posted" && e.by !== actor && e.messageId !== ""
+				&& !delivered.has(e.messageId));
+			if (fresh.length > 0) {
+				pi.sendMessage({ customType: "kit-inbox-wake", content: boardWakeText(agent!, fresh), display: true },
+					{ deliverAs: "followUp", triggerTurn: true });
+				const ledger = join(home, ".local", "state", "omp-kit", "mail-wake.jsonl");
+				mkdirSync(join(ledger, ".."), { recursive: true });
+				const ts = now().toISOString();
+				for (const e of fresh) {
+					appendFileSync(ledger, JSON.stringify({
+						ts, message_id: e.messageId, project_key: project, sender: e.byHandle, recipient: agent,
+						subject: e.text.split("\n", 1)[0].slice(0, 120), status: "WOKEN_INPROCESS",
+						detail: "kit-inbox-wake board followUp", cursor: e.cursor, backend: "board",
+					}) + "\n");
+					delivered.add(e.messageId);
+				}
+			}
+			if (got.cursor !== state.cursor || fresh.length > 0) {
+				writeBoardState(boardPath, { agent: agent!, actor, cursor: got.cursor, delivered: [...delivered] }, now());
+			}
+			return true;
+		} catch {
+			return false; // a failed poll keeps the cursor, so the same mentions are delivered on the next one
+		} finally {
+			busy = false;
+		}
+	}
+
+	/** Holds the long-poll open for the life of the session; backs off when the board is unreadable. */
+	async function runBoardLoop(): Promise<void> {
+		while (!stopped) {
+			const started = Date.now();
+			if (path === "") await tick();
+			const ok = path !== "" && (await pollBoard(boardWaitS));
+			if (stopped) return;
+			// An unreadable board or a hold that returned at once must not spin: wait out the rest of a second, or 10 s.
+			const pause = ok ? Math.max(0, BOARD_MIN_CYCLE_MS - (Date.now() - started)) : BOARD_RETRY_MS;
+			if (pause > 0) {
+				const { promise, resolve: wake } = Promise.withResolvers<void>();
+				setTimeout(wake, pause);
+				await promise;
+			}
+		}
+	}
+
 	async function poll(): Promise<void> {
+		if (backend === "board") { await pollBoard(0); return; }
 		if (busy) return;
 		busy = true;
 		try {
@@ -267,9 +386,12 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 		if (ctx.mode === "tui" && (ctx.hasUI !== true || typeof ctx.ui?.getEditorText !== "function")) return;
 		cwd = ctx.cwd;
 		await tick();
+		if (backend === "board" && boardLoop && !looping) { looping = true; void runBoardLoop(); return; }
 		if (timer === null && typeof ctx.setInterval === "function") timer = ctx.setInterval(() => tick(), INBOX_POLL_MS);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
+		stopped = true;
+		abort.abort();
 		if (timer !== null) {
 			try { ctx.clearTimer?.(timer); } catch { /* cleared on shutdown anyway */ }
 			timer = null;

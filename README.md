@@ -263,8 +263,8 @@ a normal save, the rows and local commit remain available for convergence.
 never `PASS`. A fresh HOME reports `UNVERIFIED` until rules are applied; an
 unreachable vault makes the secrets scan `UNVERIFIED`; a stale CI cache is
 `UNAVAILABLE`. Exit codes are fixed: 0 success, 1 finding, 2 usage or blocked,
-3 unavailable, 4 retryable, 77 when a check could not run (and for `heavy`: 75 when a job is deferred, 69 when
-no disk observer is available — strict `sbh` missing, or OS `statfs` unreadable).
+3 unavailable, 4 retryable, 77 when a check could not run (`heavy`: 75 deferred, 69 no disk observer: `sbh` or `statfs`
+unavailable).
 
 **Native OMP first.** Rule tests run through OMP's matcher, settings go through
 `omp config get/set`, and rules load through OMP's plugin loader. The
@@ -543,6 +543,7 @@ target tracker unchanged; actual assertion failures still become `REWORK`.
 | `--scope browsers` | Browser processes and leftover automation clones | |
 | `--scope services` | launchd jobs: running, idle, failing, path mismatch; `--services FILE` checks a required-jobs list | |
 | `--scope regex-tools` | Regex engineering tools on PATH | |
+| `--scope mail_backend` | Board answers as `BOARD_PROFILE` | |
 | `--scope test-scope` | Runner scratch exclusions; `OMP_KIT_FLEET_WATCH_CONFIG` selects input | `omp-kit doctor --scope test-scope --json` |
 | `--scope gates` | Python `br` admission on owned fixtures; no live writes | |
 | `--scope dicklesworthstone` | Installed agent tools (`ntm`, `am`, `caam`, ...) behind their latest release | |
