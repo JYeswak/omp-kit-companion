@@ -440,6 +440,10 @@ const scratchReleaseData: DataSchema = { type: "object", required: ["overall", "
 	overall: { enum: ["OK", "CHANGED"] }, action: { enum: ["RELEASED"] }, dir: { type: "string" }, changed: { type: "boolean" },
 	bin: { enum: ["throwaway", "evidence", "promote", null] }, ref: { type: ["string", "null"] },
 } };
+const reservationData: DataSchema = { type: "object", required: ["overall"], properties: {
+	overall: { enum: ["OK", "CHANGED", "REFUSED", "UNVERIFIED"] }, channel: { type: "string" },
+	granted: { type: "array" }, conflicts: { type: "array" }, released: { type: "number" }, holds: { type: "array" }, refused: { type: "array" }, snapshot_age_s: { type: ["number", "null"] },
+} };
 const scratchUseData: DataSchema = { type: "object", required: ["overall", "action", "dir", "users"], properties: {
 	overall: { enum: ["CHANGED"] }, action: { enum: ["USER_REGISTERED", "USER_REMOVED"] }, dir: { type: "string" },
 	user: { type: ["object", "null"] }, users: { type: "array" }, pruned: { type: "array" },
@@ -1133,6 +1137,19 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--yes", description: "Confirm the restore in noninteractive mode" },
 		], example: "omp-kit infra undo --receipt PATH --apply --yes --json", runnable: false, mutation: true, dataSchema: infraData },
 	], example: "omp-kit infra pin --json", runnable: false, dataSchema: infraData },
+	{ name: "reserve", description: "Reserve path globs for this seat on the Board: one task per glob in res/<project>, claimed with a lease; refused when another holder's glob overlaps", usage: "reserve GLOB... --reason BEAD [--ttl SECONDS] [--project PATH]", argument: "GLOB...", maxArguments: 129, flags: [
+		{ name: "--reason", value: "BEAD", description: "Bead the hold is for (required)" },
+		{ name: "--ttl", value: "SECONDS", description: "Lease in seconds, 30-3600 (default 3600)" },
+		{ name: "--project", value: "PATH", description: "Project checkout (default: the current git root)" },
+	], example: "omp-kit reserve 'src/mod/**' --reason ompkit-tnqyr.3 --json", runnable: false, mutation: true, dataSchema: reservationData },
+	{ name: "release", description: "Release this seat's Board reservations: the named globs, or every one with --all", usage: "release GLOB...|--all [--project PATH]", argument: "GLOB...", maxArguments: 129, flags: [
+		{ name: "--all", description: "Release every reservation this seat holds (in place of globs)" },
+		{ name: "--project", value: "PATH", description: "Project checkout (default: the current git root)" },
+	], example: "omp-kit release --all --json", runnable: false, mutation: true, dataSchema: reservationData },
+	{ name: "reservations", description: "List open Board reservations for a project; --check-staged refuses (exit 1) staged paths another holder reserved, for the pre-commit member", usage: "reservations [--project PATH] [--check-staged] [--json]", flags: [
+		{ name: "--project", value: "PATH", description: "Project checkout (default: the current git root)" },
+		{ name: "--check-staged", description: "Judge staged paths against other holders' reservations; fail-closed last-good cache when the Board is down" },
+	], example: "omp-kit reservations --json", runnable: false, dataSchema: reservationData },
 	{ name: "scratch",
 		description: `Release finished owned task scratch; reap dead owned sessions, quarantine released or idle unowned entries, delete expired quarantine. Unowned-active rule: ${UNOWNED_ACTIVE_RULE}. Plan and apply JSON include per-row sizes, per-root/per-verdict totals, malformed-owner counts and the exact policy; apply also includes a reaper receipt.`,
 		usage: "scratch plan|release DIR|use DIR|unuse DIR|mine|new|apply|gate --at POINT [--apply --yes]", flags: [], subcommands: [

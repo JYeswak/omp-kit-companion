@@ -4,7 +4,6 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { delimiter, join } from "node:path";
 import { fixtureDeadlineS, runFixture, runFixtureAsync } from "./fixture-process.ts";
 import { EXPECTED_SERVICE, LAND_DEFAULT_TIMEOUT_MS, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, patchHold, registerPushCheck, remoteHead, repoRoot, responseCode, scratch, stringEnvironment, type HunkSetup } from "./private-index-land.helpers.ts";
-
 import { disposalGate, type InspectDeps, type LivenessDeps, type OwnedScratchRow, type SeatIdentity } from "../../src/scratch.ts";
 import { scratchOwedUnderRepo } from "../../src/land.ts";
 import { createHash } from "node:crypto";
@@ -213,93 +212,6 @@ test("LANDPATCH1 a mid-materialization failure restores every patch path byte-id
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
 	expect(git(work, ["for-each-ref", "refs/heads"])).toBe(refsBefore);
 });
-
-// LANDPANETIMEOUT1 (ompkit-fp72.120.16.280): resolve-pane runs under a base deadline (30 s in production) scaled by
-// load (src/land.ts), and a timeout is OWNER_RESOLVE_TIMEOUT instead of OWNER_UNKNOWN. The cases run scaled down
-// together, keeping old fixed bound < planted delay < new base: 2 < 4 < 6 s by default. The release card's
-// preregistered endpoint (12 s stub, old fixed 10 s bound, production 30 s base) is the same cases re-tuned:
-// OMP_KIT_LAND_RESOLVE_BASE_S=30 OMP_KIT_LAND_STUB_DELAY_S=12 OMP_KIT_LAND_MUTANT_BOUND_S=10 bun test tests/cli/land.test.ts -t 'LANDPANETIMEOUT1 (planted|mutant)'
-function tunedSeconds(name: string, fallback: number): number {
-	const raw = process.env[name];
-	const value = raw === undefined || raw.trim() === "" ? fallback : Number(raw);
-	if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${name} must be a positive integer number of seconds, got ${raw}`);
-	return value;
-}
-const RESOLVE_BASE_S = tunedSeconds("OMP_KIT_LAND_RESOLVE_BASE_S", 6);
-const PLANTED_RESOLVE_SLEEP_S = tunedSeconds("OMP_KIT_LAND_STUB_DELAY_S", 4);
-const OLD_FIXED_RESOLVE_TIMEOUT_S = tunedSeconds("OMP_KIT_LAND_MUTANT_BOUND_S", 2);
-
-function expectBoundOrder(): void {
-	expect(OLD_FIXED_RESOLVE_TIMEOUT_S).toBeLessThan(PLANTED_RESOLVE_SLEEP_S);
-	expect(PLANTED_RESOLVE_SLEEP_S).toBeLessThan(RESOLVE_BASE_S);
-}
-
-/** An `am` whose resolve-pane answers DarkFern after `resolve` (a shell fragment) and reads no reservations. */
-function stubAm(label: string, resolve: string): string {
-	const dir = join(scratch, `${label}-${globalThis.fixtureNumber++}`);
-	mkdirSync(dir);
-	writeFileSync(join(dir, "am"), `#!/bin/sh
-case "$1 $2" in
-  "agents resolve-pane") ${resolve}; printf '{"agent_name":"DarkFern"}\\n' ;;
-  "robot reservations") printf '{"my_reservations":[],"reservation_read_attestation":{"state":"current","database_matches_server":true,"storage_root_matches_server":true}}\\n' ;;
-  *) exit 2 ;;
-esac
-`);
-	chmodSync(join(dir, "am"), 0o755);
-	return dir;
-}
-
-/** One land run; the fixture's load-scaled floor_s deadline bounds it and throws TIMEOUT_UNDER_LOAD past it.
- * Async so the three LANDPANETIMEOUT1 cases overlap their waits (test.concurrent) inside the file budget. */
-async function landWithAm(amDir: string, floorS: number, loadOverride?: string) {
-	const { work } = fixture();
-	const env = commandEnvironment(work, [], { amDir, gitEnv: { OMP_KIT_LAND_RESOLVE_BASE_S: String(RESOLVE_BASE_S), OMP_KIT_LOAD_OVERRIDE: loadOverride } });
-	const run = await runFixtureAsync(["bun", cliPath, "land", ...landArgs("owned.txt"), "--json"], { cwd: work, env, floor_s: floorS });
-	const body = JSON.parse(new TextDecoder().decode(run.stdout)) as Record<string, unknown>;
-	return { body, code: responseCode(body), elapsedS: run.elapsed_s };
-}
-
-test.concurrent(`LANDPANETIMEOUT1 planted: a resolve-pane answering after ${PLANTED_RESOLVE_SLEEP_S} s resolves the owner under the ${RESOLVE_BASE_S} s scaled bound`, async () => {
-	expectBoundOrder();
-	const result = await landWithAm(stubAm("am-planted", `sleep ${PLANTED_RESOLVE_SLEEP_S}`), RESOLVE_BASE_S + 60);
-	// Owner resolved: the next gate (no reservation held) refuses, not the owner gate.
-	expect(result.code, JSON.stringify(result.body)).toBe("RESERVATION_REQUIRED");
-	expect(result.elapsedS).toBeGreaterThanOrEqual(PLANTED_RESOLVE_SLEEP_S);
-}, Math.round(fixtureDeadlineS(RESOLVE_BASE_S + 90) * 1000));
-
-test.concurrent(`LANDPANETIMEOUT1 control: a resolve-pane that never answers is refused OWNER_RESOLVE_TIMEOUT at the ${RESOLVE_BASE_S} s bound`, async () => {
-	expectBoundOrder();
-	// Load pinned to factor 1, so the bound is the base; exec keeps the stub a single leader the deadline kills.
-	// Bounded: the run must finish inside a fixture deadline of the base plus 30 s land overhead.
-	const result = await landWithAm(stubAm("am-hung", "exec sleep 600"), RESOLVE_BASE_S + 30, "0/1");
-	expect(result.code, JSON.stringify(result.body)).toBe("OWNER_RESOLVE_TIMEOUT");
-	const message = String((result.body.errors as { message?: string }[])[0]?.message);
-	expect(message).toContain(`within ${RESOLVE_BASE_S} s`);
-	expect(result.elapsedS).toBeGreaterThanOrEqual(RESOLVE_BASE_S);
-}, Math.round(fixtureDeadlineS(RESOLVE_BASE_S + 90) * 1000));
-
-test.concurrent(`LANDPANETIMEOUT1 mutant: a fixed ${OLD_FIXED_RESOLVE_TIMEOUT_S} s timeout reads the planted ${PLANTED_RESOLVE_SLEEP_S} s answer as OWNER_UNKNOWN`, async () => {
-	expectBoundOrder();
-	const source = readFileSync(join(repoRoot, "src", "land.ts"), "utf8");
-	const bound = "const deadlineS = Math.ceil(baseS * landLoadFactor());";
-	const distinct = "if (identity.timed_out)\n";
-	expect(source).toContain(bound);
-	expect(source).toContain(distinct);
-	// The pre-fix behaviour: a fixed bound whose timeout falls through to the rc check (OWNER_UNKNOWN).
-	const mutant = source.replace(bound, `const deadlineS = ${OLD_FIXED_RESOLVE_TIMEOUT_S};`).replace(distinct, "if (false)\n")
-		.replaceAll('from "./', `from "${join(repoRoot, "src")}/`).replaceAll('from "../', `from "${repoRoot}/`);
-	const mutantPath = join(scratch, `land-resolve-mutant-${globalThis.fixtureNumber++}.ts`);
-	writeFileSync(mutantPath, mutant);
-	const { work } = fixture();
-	const amDir = stubAm("am-mutant", `sleep ${PLANTED_RESOLVE_SLEEP_S}`);
-	// The mutant module is generated at runtime, so the probe imports it dynamically.
-	const probe = `const { resolvePaneOwner } = await import(${JSON.stringify(mutantPath)}); const r = resolvePaneOwner(process.cwd(), "%60"); console.log(JSON.stringify("error" in r ? r.error.errors[0].code : r.owner));`;
-	const env = commandEnvironment(work, [], { amDir });
-	const run = await runFixtureAsync(["bun", "-e", probe], { cwd: work, env, floor_s: PLANTED_RESOLVE_SLEEP_S + 30 });
-	expect(run.rc, new TextDecoder().decode(run.stderr)).toBe(0);
-	expect(JSON.parse(new TextDecoder().decode(run.stdout))).toBe("OWNER_UNKNOWN");
-	expect(run.elapsed_s).toBeGreaterThanOrEqual(OLD_FIXED_RESOLVE_TIMEOUT_S);
-}, Math.round(fixtureDeadlineS(PLANTED_RESOLVE_SLEEP_S + 60) * 1000));
 
 test("HANDOFFPUSHCHECK1 land with a GREEN push-check appends the ledger row for the landed commit; SKIP land appends none", () => {
 	const checkBody = "#!/bin/bash\nset -eu\nexit 0\n";
@@ -1336,8 +1248,10 @@ function gitlockTwoLandSetup(): { work: string; fakeBin: string; seed: string; b
 	return { work, fakeBin, seed, barrier };
 }
 
-function gitlockEnv(work: string, fakeBin: string, path: string, extra?: Record<string, string>): Record<string, string> {
-	const holds = [{ agent: "DarkFern", path, exclusive: true, remaining_seconds: 3600 }];
+// Both lands share one Board seed per project, so each call seeds the holds of both paths: seeding only its own path would
+// replace the other land's hold and that land would refuse RESERVATION_REQUIRED.
+function gitlockEnv(work: string, fakeBin: string, extra?: Record<string, string>): Record<string, string> {
+	const holds = ["owned.txt", "peer.txt"].map((path) => ({ agent: "DarkFern", path, exclusive: true, remaining_seconds: 3600 }));
 	return stringEnvironment(commandEnvironment(work, holds, { amDir: fakeBin, gitEnv: extra }));
 }
 
@@ -1375,8 +1289,8 @@ test("GITLOCK1 two concurrent lands serialize on the commit lock without index-l
 	const ownedMessage = "feat(land): gitlock owned [test]\n\nBead: gitlock-fixture";
 	const peerMessage = "feat(land): gitlock peer [test]\n\nBead: gitlock-fixture";
 	const queueTimeout = String(200 + (process.pid % 700));
-	const ownedP = runFixtureAsync(gitlockArgv("owned.txt", ownedMessage), { cwd: work, env: gitlockEnv(work, fakeBin, "owned.txt", { OMP_KIT_LAND_COMMIT_FLOCK_TIMEOUT_S: queueTimeout }), floor_s: 300 });
-	const peerP = runFixtureAsync(gitlockArgv("peer.txt", peerMessage), { cwd: work, env: gitlockEnv(work, fakeBin, "peer.txt", { OMP_KIT_LAND_COMMIT_FLOCK_TIMEOUT_S: queueTimeout }), floor_s: 300 });
+	const ownedP = runFixtureAsync(gitlockArgv("owned.txt", ownedMessage), { cwd: work, env: gitlockEnv(work, fakeBin, { OMP_KIT_LAND_COMMIT_FLOCK_TIMEOUT_S: queueTimeout }), floor_s: 300 });
+	const peerP = runFixtureAsync(gitlockArgv("peer.txt", peerMessage), { cwd: work, env: gitlockEnv(work, fakeBin, { OMP_KIT_LAND_COMMIT_FLOCK_TIMEOUT_S: queueTimeout }), floor_s: 300 });
 	expect(await gitlockPoll(() => existsSync(join(barrier, "arrived")), Math.round(fixtureDeadlineS(60) * 1000))).toBe(true);
 	// Both wrappers are alive while the holder still waits for release:
 	// the second land reached the serializer and necessarily queued.
@@ -1425,7 +1339,7 @@ test("GITLOCK1 two concurrent lands serialize on the commit lock without index-l
 test("GITLOCK1 a queued land past its flock timeout refuses naming the wait and commits nothing", async () => {
 	const { work, fakeBin, seed, barrier } = gitlockTwoLandSetup();
 	const holderP = runFixtureAsync(gitlockArgv("owned.txt", "feat(land): gitlock owned [test]"),
-		{ cwd: work, env: gitlockEnv(work, fakeBin, "owned.txt"), floor_s: 300 });
+		{ cwd: work, env: gitlockEnv(work, fakeBin), floor_s: 300 });
 	holderP.then(() => {}, () => {});
 	expect(await gitlockPoll(() => existsSync(join(barrier, "arrived")), Math.round(fixtureDeadlineS(60) * 1000))).toBe(true);
 	// The holder is inside its commit, so this land cannot reach its own:
@@ -1433,7 +1347,7 @@ test("GITLOCK1 a queued land past its flock timeout refuses naming the wait and 
 	// publishing around the serializer. The refusal proves the attempt
 	// landed inside the hold, so no process poll is needed before releasing.
 	const refusedRun = await runFixtureAsync(gitlockArgv("peer.txt", "feat(land): gitlock peer [test]"),
-		{ cwd: work, env: gitlockEnv(work, fakeBin, "peer.txt", { OMP_KIT_LAND_COMMIT_FLOCK_TIMEOUT_S: "8" }), floor_s: 180 });
+		{ cwd: work, env: gitlockEnv(work, fakeBin, { OMP_KIT_LAND_COMMIT_FLOCK_TIMEOUT_S: "8" }), floor_s: 180 });
 	expect(refusedRun.timed_out).toBe(false);
 	const refused = parseLandResponse(refusedRun);
 	expect(refused.status, JSON.stringify(refused.body)).toBe(1);

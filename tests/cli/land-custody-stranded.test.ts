@@ -1,11 +1,9 @@
  // Affected-test source dependencies: src/land.ts, src/converge.ts
 import { expect, setDefaultTimeout, test } from "bun:test";
- import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fixtureDeadlineS } from "./fixture-process.ts";
- import {
- 	LAND_DEFAULT_TIMEOUT_MS, command, expectLandSchema, fixture, git, registerPushCheck, remoteHead, responseCode, scratch,
- } from "./private-index-land.helpers.ts";
+import { LAND_DEFAULT_TIMEOUT_MS, command, expectLandSchema, fixture, git, registerPushCheck, remoteHead, responseCode, scratch } from "./private-index-land.helpers.ts";
 
 setDefaultTimeout(LAND_DEFAULT_TIMEOUT_MS);
 
@@ -22,33 +20,15 @@ function strandedArgs(): string[] {
 
 const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 
-/** An `am` whose first two `robot reservations` reads report the held paths and
- * whose later reads report none: custody lapses between land's pre-commit
+/** The seat's Board hold is listed for the first two reads only: custody lapses between land's pre-commit
  * checks and its post-commit qualification, stranding the local commit. */
-function lapsingAm(): { amDir: string; env: NodeJS.ProcessEnv } {
-	const dir = join(scratch, `lapsing-am-${globalThis.fixtureNumber++}`);
-	mkdirSync(dir);
-	const countFile = join(dir, "count");
-	const holdsBody = JSON.stringify({ my_reservations: hold, reservation_read_attestation: { state: "current", database_matches_server: true, storage_root_matches_server: true } });
-	writeFileSync(join(dir, "am"), `#!/bin/sh
-case "$1 $2" in
-  "agents resolve-pane") printf '{"agent_name":"DarkFern"}\\n' ;;
-  "robot reservations")
-    n=$(cat "$COUNT_FILE" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" > "$COUNT_FILE"
-    if [ "$n" -le 2 ]; then printf '%s\\n' "$HOLDS_BODY"; else printf '{"my_reservations":[],"reservation_read_attestation":{"state":"current","database_matches_server":true,"storage_root_matches_server":true}}\\n'; fi ;;
-  *) exit 2 ;;
-esac
-`);
-	chmodSync(join(dir, "am"), 0o755);
-	return { amDir: dir, env: { COUNT_FILE: countFile, HOLDS_BODY: holdsBody } };
-}
+const lapsing = [{ ...hold[0], reads: 2 }];
 
 test("LANDSTRANDED1 custody lapse after commit reports the stranded commit and the retry publishes it", () => {
 	const { work, fakeBin } = fixture();
 	const base = remoteHead(work);
 	writeFileSync(join(work, "owned.txt"), "base owned\nstranded change\n");
-	const lapsing = lapsingAm();
-	const first = command(work, strandedArgs(), [], { amDir: lapsing.amDir, gitEnv: lapsing.env });
+	const first = command(work, strandedArgs(), lapsing, { amDir: fakeBin });
 	expect(first.status, JSON.stringify(first.body)).toBe(1);
 	expect(responseCode(first.body)).toBe("LAND_CUSTODY_EXPIRED");
 	const firstData = first.body.data as Record<string, unknown>;

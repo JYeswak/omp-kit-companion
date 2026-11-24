@@ -73,17 +73,18 @@ for (const [reason, hold, agent, claimed] of reservationRefusalCases) {
 		expect(readFileSync(join(work, ".git", "index"))).toEqual(index);
 	});
 }
-test("refuses unreadable reservation sources and uncovered paths", () => {
+test("refuses an unreachable Board and uncovered paths", () => {
 	const { work, fakeBin } = fixture();
 	writeFileSync(join(work, "owned.txt"), "unpublished change\n");
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 	const head = git(work, ["rev-parse", "HEAD"]).trim();
 	const remote = git(work, ["ls-remote", "origin", "refs/heads/main"]).trim();
 	const index = readFileSync(join(work, ".git", "index"));
-	for (const reservationMode of ["unavailable", "unreadable", "stale", "database-mismatch", "storage-mismatch"]) {
+	// The Board is the only reservation source: an unreachable Board is the one unreadable state left.
+	for (const reservationMode of ["unavailable"]) {
 		const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin, reservationMode });
 		expect(run.status).not.toBe(0);
-		expect(responseCode(run.body)).toBe(reservationMode === "unavailable" ? "RESERVATION_UNAVAILABLE" : "RESERVATION_UNREADABLE");
+		expect(responseCode(run.body)).toBe("BOARD_UNREACHABLE");
 		expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
 		expect(git(work, ["ls-remote", "origin", "refs/heads/main"]).trim()).toBe(remote);
 		expect(readFileSync(join(work, ".git", "index"))).toEqual(index);

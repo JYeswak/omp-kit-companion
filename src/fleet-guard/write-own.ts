@@ -1,3 +1,4 @@
+import { reserveBoardSync } from "./board-read.ts";
 import { statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { runSync } from "../kitlib/run.ts";
@@ -8,7 +9,7 @@ import { resolveFilesystemWriteTarget, type FleetGuardBlock, type FleetGuardCont
 /**
  * WRITEOWN1 (ompkit-vf33j): ownership is checked at the write, not at commit. In the canonical checkout of a
  * fleet-enabled repository (the nearest Git root of the target, with `.omp/fleet.json` enabled), every write outside
- * `var/agent-tmp/` needs a live exclusive Agent Mail reservation held by the caller's AGENT_NAME, read through the
+ * `var/agent-tmp/` needs a live exclusive Board reservation held by the caller's AGENT_NAME, read through the
  * same lookup `git commit --only` uses (git.ts reservationGaps). Covered acts: write/edit tool targets, and in bash
  * output redirections, cp/mv/install destinations (mv sources too), tee and `sed -i` files, and `git add`/`git stage`
  * pathspecs; staging without a pathspec is refused outright (staging happens inside `git commit --only -- <paths>`).
@@ -296,7 +297,7 @@ interface Judged { candidate: Candidate; rel: string; probe: string }
 /** WRITEOWNCHILD1 (a): custody belongs to the parent seat. The seat's name is the caller's AGENT_NAME
  * (context.agentName, else the given environment); a native child's spawn-minted name never is, so a
  * caller that passes only the child's name falls back to the seat. MAILGUARDSLIM1 reuses this for a
- * child's Agent Mail reservation rewrite: no second seat resolution. */
+ * child's Board reservation rewrite: no second seat resolution. */
 export function seatIdentity(context: { agentName?: string; childAgentName?: string }, env: Record<string, string | undefined> = process.env): string | undefined {
 	if (context.agentName !== undefined && context.agentName !== context.childAgentName) return context.agentName;
 	const seat = env.AGENT_NAME;
@@ -311,8 +312,7 @@ function say(context: WriteOwnContext, message: string): void {
 const RUN_OUTPUT_CAP = 64 * 1024;
 const RESERVE_DEADLINE_S = 30;
 const REASON_DEADLINE_S = 10;
-/** Lease length of an automatic reserve: the kit's existing reservation TTL convention (the `am
- * file_reservations reserve` CLI default and the `custody check --reserve` default, both 3600 s). */
+/** Lease length of an automatic reserve: the kit's existing reservation TTL convention (3600 s, also the Board verb default). */
 const RESERVE_TTL_S = 3600;
 
 /** The live process environment as strings: runSync resolves its binary through the passed env. */
@@ -352,25 +352,16 @@ function heldBead(root: string, seat: string): string | undefined {
 
 /** Refusal naming the live foreign holder: two writers on one file is the one hazard that keeps a write refused. */
 function heldRefusal(root: string, agent: string, entry: Judged, holder: string, shown: (entry: Judged) => string): FleetGuardBlock {
-	return refuse("WRITE_OWN_UNRESERVED", `${entry.candidate.spelled} is ${shown(entry)} in the canonical checkout ${root}, which ${holder} holds under a live exclusive Agent Mail reservation; ask ${holder} to release or hand it over. ${agent} holds no live exclusive reservation covering it, so the write is refused; no files were changed. ${EXPORT_ROUTE}`);
+	return refuse("WRITE_OWN_UNRESERVED", `${entry.candidate.spelled} is ${shown(entry)} in the canonical checkout ${root}, which ${holder} holds under a live exclusive Board reservation; ask ${holder} to release or hand it over. ${agent} holds no live exclusive reservation covering it, so the write is refused; no files were changed. ${EXPORT_ROUTE}`);
 }
 
 /** WRITEOWNCHILD1 (b): reserve the free paths for the seat itself, exclusive, at the kit's reservation TTL. The
  * granted answer's body comes back too, so a conflict the exit code hides still fails the write. */
 function reserveForSeat(root: string, seat: string, paths: readonly string[], reason: string): { ok: true; body: string } | { ok: false; why: string } {
-	let result;
-	try {
-		result = runSync(["am", "file_reservations", "reserve", root, seat, ...paths, "--exclusive", "--ttl", String(RESERVE_TTL_S), "--reason", reason],
-			{ deadline_s: RESERVE_DEADLINE_S, max_output_bytes: RUN_OUTPUT_CAP, env: currentEnv() });
-	} catch (error) {
-		return { ok: false, why: `am file_reservations reserve could not run (${error instanceof Error ? error.message : String(error)})` };
-	}
-	if (result.timed_out) return { ok: false, why: "am file_reservations reserve did not answer within 30 s" };
-	if (result.rc !== 0) {
-		const detail = new TextDecoder().decode(result.stderr).trim().split("\n")[0]?.trim() ?? "";
-		return { ok: false, why: `am file_reservations reserve exited ${result.rc}${detail !== "" ? `: ${detail.slice(0, 200)}` : ""}` };
-	}
-	return { ok: true, body: new TextDecoder().decode(result.stdout) };
+	const grant = reserveBoardSync(root, seat, paths, reason, RESERVE_DEADLINE_S);
+	if (grant.conflicts.length > 0) return { ok: true, body: JSON.stringify({ granted: [], conflicts: grant.conflicts.map((hold) => `${hold.path} held by ${hold.holder}`) }) };
+	if (!grant.ok) return { ok: false, why: `the Board reserve failed: ${grant.why}` };
+	return { ok: true, body: JSON.stringify({ granted: paths, conflicts: [] }) };
 }
 
 /** The granted reserve answer, read for real: the real success body is JSON with `granted` rows and a `conflicts`
@@ -470,7 +461,7 @@ async function judge(candidates: readonly Candidate[], context: WriteOwnContext)
 			return refuse("WRITE_OWN_NO_IDENTITY", `writing ${first.candidate.spelled} (${shown(first)} in the canonical checkout ${root}) needs an identified caller holding an exclusive reservation; set AGENT_NAME to your Agent Mail identity and reserve it: \`am file_reservations reserve ${quote(root)} <AGENT_NAME> ${quote(shown(first))} --exclusive --reason <bead>\`, ${EXPORT_ROUTE}`);
 		}
 		if (gaps.kind === "unavailable") {
-			return refuse("WRITE_OWN_LOOKUP_UNAVAILABLE", `the reservation lookup \`am robot reservations --project ${quote(root)} --agent ${quote(gaps.agent)} --json\` failed: ${gaps.why}; so ${shown(first)} in the canonical checkout ${root} cannot be proven reserved; restore Agent Mail reservation reads before writing`);
+			return refuse("WRITE_OWN_LOOKUP_UNAVAILABLE", `the reservation lookup \`omp-kit reservations --project ${quote(root)} --json\` (the Board read for ${quote(gaps.agent)}) failed: ${gaps.why}; so ${shown(first)} in the canonical checkout ${root} cannot be proven reserved; restore the Board (BOARD_URL answers GET /me) before writing`);
 		}
 		if (seat !== undefined && context.childAgentName !== undefined && gaps.kind === "checked" && gaps.uncovered.length > 0) {
 			// The child's own exclusive holds add cover without renaming the owner: custody stays the seat's.
@@ -480,13 +471,15 @@ async function judge(candidates: readonly Candidate[], context: WriteOwnContext)
 			const own = reservationGaps(root, gaps.uncovered, context.childAgentName);
 			if (own.kind === "checked") {
 				const holders = new Map<string, string>();
-				for (const entry of [...gaps.foreign, ...own.foreign])
+				// The child's own hold is cover, never a foreign hold, though the seat's read lists it among everyone's.
+				const others = (entry: { holder: string }): boolean => entry.holder !== context.childAgentName;
+				for (const entry of [...gaps.foreign, ...own.foreign].filter(others))
 					if (gaps.uncovered.includes(entry.path) && !holders.has(entry.path)) holders.set(entry.path, entry.holder);
 				const stopped = judged.find((entry) => holders.has(entry.probe));
 				if (stopped !== undefined) return heldRefusal(root, gaps.agent, stopped, holders.get(stopped.probe) ?? "another agent", shown);
 				const still = new Set(own.uncovered);
 				gaps = { kind: "checked", agent: gaps.agent, uncovered: own.uncovered,
-					foreign: [...gaps.foreign, ...own.foreign].filter((entry) => still.has(entry.path)) };
+					foreign: [...gaps.foreign, ...own.foreign].filter(others).filter((entry) => still.has(entry.path)) };
 			}
 		}
 		// Before reserving anything: any uncovered probe with a live foreign holder refuses, whichever
@@ -513,17 +506,17 @@ async function judge(candidates: readonly Candidate[], context: WriteOwnContext)
 		const reserved = reserveForSeat(root, gaps.agent, free.length > 0 ? free : [shown(missing)], reason);
 		if (!reserved.ok) {
 			const path = quote(shown(missing));
-			return refuse("WRITE_OWN_UNRESERVED", `${missing.candidate.spelled} is ${shown(missing)} in the canonical checkout ${root}, and ${gaps.agent} holds no live exclusive Agent Mail reservation covering it. The guard's automatic reserve failed (${reserved.why}); reserve it first: \`am file_reservations reserve ${quote(root)} ${quote(gaps.agent)} ${path} --exclusive --reason <bead>\` (MCP file_reservation_paths project_key=${JSON.stringify(root)} agent_name=${JSON.stringify(gaps.agent)} paths=[${JSON.stringify(shown(missing))}] exclusive=true), ${EXPORT_ROUTE}`);
+			return refuse("WRITE_OWN_UNRESERVED", `${missing.candidate.spelled} is ${shown(missing)} in the canonical checkout ${root}, and ${gaps.agent} holds no live exclusive Board reservation covering it. The guard's automatic reserve failed (${reserved.why}); reserve it first: \`am file_reservations reserve ${quote(root)} ${quote(gaps.agent)} ${path} --exclusive --reason <bead>\` (MCP file_reservation_paths project_key=${JSON.stringify(root)} agent_name=${JSON.stringify(gaps.agent)} paths=[${JSON.stringify(shown(missing))}] exclusive=true), ${EXPORT_ROUTE}`);
 		}
 		const grant = checkReserveGrant(reserved.body, free.length > 0 ? free : [shown(missing)]);
 		if (grant.status === "conflict") {
-			return refuse("WRITE_OWN_UNRESERVED", `${missing.candidate.spelled} is ${shown(missing)} in the canonical checkout ${root}, and ${gaps.agent} holds no live exclusive Agent Mail reservation covering it. The guard's automatic reserve reported a conflict (${grant.why}); ask the holder to release or hand it over, no files were changed. ${EXPORT_ROUTE}`);
+			return refuse("WRITE_OWN_UNRESERVED", `${missing.candidate.spelled} is ${shown(missing)} in the canonical checkout ${root}, and ${gaps.agent} holds no live exclusive Board reservation covering it. The guard's automatic reserve reported a conflict (${grant.why}); ask the holder to release or hand it over, no files were changed. ${EXPORT_ROUTE}`);
 		}
 		// The reserve answered without an explicit conflict, but only the attested re-read proves the grant stuck:
 		// a lost race or a partial grant still refuses instead of admitting.
 		const verify = reservationGaps(root, freeProbes.length > 0 ? freeProbes : [missing.probe], gaps.agent);
 		if (verify.kind === "unavailable") {
-			return refuse("WRITE_OWN_LOOKUP_UNAVAILABLE", `the post-reserve reservation re-read \`am robot reservations --project ${quote(root)} --agent ${quote(gaps.agent)} --json\` failed: ${verify.why}; so ${shown(missing)} in the canonical checkout ${root} cannot be proven reserved; restore Agent Mail reservation reads before writing`);
+			return refuse("WRITE_OWN_LOOKUP_UNAVAILABLE", `the post-reserve reservation re-read \`omp-kit reservations --project ${quote(root)} --json\` (the Board read for ${quote(gaps.agent)}) failed: ${verify.why}; so ${shown(missing)} in the canonical checkout ${root} cannot be proven reserved; restore the Board (BOARD_URL answers GET /me) before writing`);
 		}
 		const stillOpen = verify.kind === "checked" ? verify.uncovered : freeProbes;
 		if (stillOpen.length > 0) {
@@ -531,7 +524,7 @@ async function judge(candidates: readonly Candidate[], context: WriteOwnContext)
 			const holder = verify.kind === "checked" ? verify.foreign.find((other) => other.path === entry.probe)?.holder : undefined;
 			if (holder !== undefined) return heldRefusal(root, gaps.agent, entry, holder, shown);
 			const short = grant.status === "short" ? ` the grant covered [${free.filter((path) => !grant.missing.includes(path)).join(", ")}] but not ${grant.missing.join(",")}` : "";
-			return refuse("WRITE_OWN_UNRESERVED", `${entry.candidate.spelled} is ${shown(entry)} in the canonical checkout ${root}, and ${gaps.agent} holds no live exclusive Agent Mail reservation covering it. The guard's automatic reserve did not take${short}; reserve it first: \`am file_reservations reserve ${quote(root)} ${quote(gaps.agent)} ${quote(shown(entry))} --exclusive --reason <bead>\`, ${EXPORT_ROUTE}`);
+			return refuse("WRITE_OWN_UNRESERVED", `${entry.candidate.spelled} is ${shown(entry)} in the canonical checkout ${root}, and ${gaps.agent} holds no live exclusive Board reservation covering it. The guard's automatic reserve did not take${short}; reserve it first: \`am file_reservations reserve ${quote(root)} ${quote(gaps.agent)} ${quote(shown(entry))} --exclusive --reason <bead>\`, ${EXPORT_ROUTE}`);
 		}
 		say(context, `fleet-guard write-ownership: auto-reserved ${free.length > 0 ? free.join(", ") : shown(missing)} in ${root} for ${gaps.agent} (exclusive, ttl ${RESERVE_TTL_S}s, reason ${reason}); the write is admitted.`);
 	}

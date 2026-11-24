@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { type ActiveHold, readActiveHolds } from "../reservation-age.ts";
 import { checkHotCap, HOT_CAP_MINUTES, isHotPath, isReservationTool, readHotPaths, renewScope, reservationArgs } from "./hot-cap.ts";
+import { boardLookup } from "./board-reservations.ts";
 import { shellTokens } from "./scratch.ts";
 
 export interface ReservationEvent {
@@ -245,7 +246,7 @@ function normalizeReservationPath(value: string): string {
 	return value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
 }
 
-function reservationPatternCovers(pattern: string, requestedPath: string): boolean {
+export function reservationPatternCovers(pattern: string, requestedPath: string): boolean {
 	const normalizedPattern = normalizeReservationPath(pattern);
 	const normalizedPath = normalizeReservationPath(requestedPath);
 	if (normalizedPattern === normalizedPath) return true;
@@ -285,12 +286,7 @@ export function reservationLookupFromResponse(response: unknown, requestedPath: 
 
 async function lookupReservations(input: ReservationLookupInput, context: ReservationCheckContext): Promise<ReservationLookupResult> {
 	if (context.lookupReservations) return context.lookupReservations(input);
-	const response = await callAgentMail("check_file_reservation_conflicts", {
-		project_key: input.projectKey,
-		agent_name: input.agentName,
-		paths: [input.path],
-	});
-	return reservationLookupFromResponse(response, input.path);
+	return boardLookup(input);
 }
 function cachedLookup(key: string, now: number): ReservationLookupResult | undefined {
 	const entry = cache.get(key);

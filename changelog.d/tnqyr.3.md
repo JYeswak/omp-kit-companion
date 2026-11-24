@@ -1,0 +1,3 @@
+### Added
+- File reservations run on the Board: one task per path glob in `res/<project>`, claimed with a lease; reserve, renew and release use task claim, renew and complete, and overlapping globs are refused in Kit code. A 2-way race on overlapping paths grants exactly one holder, and the edit hook falls back to a last-good snapshot, refusing when it has none.
+- `omp-kit reserve`, `release` and `reservations` run file reservations on the Board (`release` takes globs or `--all`). `reservations --check-staged` and the `scripts/check-staged-board-reservations.sh` pre-commit member refuse a staged path another seat holds.

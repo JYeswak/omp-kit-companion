@@ -9,6 +9,7 @@ import { parseOwnerFile } from "../src/scratch.ts";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { check as checkDurability } from "../src/fleet-guard/durability.ts";
 import { runFixture } from "../tests/cli/fixture-process.ts";
+import { boardLog, boardScenario, startBoard, type BoardRow } from "../tests/fleet-guard/board-fixture.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -296,103 +297,38 @@ test("registered handler uses the actual calling context's local mapping", async
 	expect(await handler({ toolName: "write", input: { path: "proc://owned-job/kill" } }, { cwd: callingCwd })).toBeUndefined();
 });
 
-// WRITEOWN1 (ompkit-vf33j) + WRITEOWNCHILD1 (ompkit-1ra0d.126): the decision is the caller's attested
-// `am robot reservations` read; a failed read refuses, while a free path auto-reserves for the seat and admits.
-// `am` is a PATH test seam; the guard's spawn runs unchanged.
+// WRITEOWN1 (ompkit-vf33j) + WRITEOWNCHILD1 (ompkit-1ra0d.126): the decision is the caller's attested Board
+// read; a failed read refuses, while a free path auto-reserves for the seat and admits. The Board is a fake
+// out-of-process server (tests/fleet-guard/board-fixture.ts); the guard's child spawn runs unchanged.
 test("canonical edits follow the caller's attested reservation read; a free path auto-reserves, a failed read refuses", async () => {
 	const { cwd: dir } = fixture();
 	const target = join(dir, "tracked.md");
 	writeFileSync(target, "x\n");
-	const bin = join(dir, "bin");
-	mkdirSync(bin);
-	writeFileSync(join(bin, "am"), "#!" + process.execPath + "\n" + [
-"import { appendFileSync, existsSync, readFileSync } from 'node:fs';",
-"const calls = process.env.AM_FIXTURE_CALLS || '';",
-"const journalPath = process.env.AM_FIXTURE_JOURNAL || '';",
-"const args = process.argv.slice(2);",
-"if (calls !== '') appendFileSync(calls, args.join(' ') + '\\n');",
-"if (process.env.AM_FIXTURE_MODE === 'fail') { console.error('database is locked'); process.exit(1); }",
-"function journaled(base) {",
-"  let response;",
-"  try { response = JSON.parse(base); } catch (e) { return base; }",
-"  if (journalPath === '' || !existsSync(journalPath)) return JSON.stringify(response);",
-"  const project = (function() { const i = args.indexOf('--project'); return i >= 0 ? args[i + 1] : undefined; })() || '';",
-"  const agent = (function() { const i = args.indexOf('--agent'); return i >= 0 ? args[i + 1] : undefined; })() || '';",
-"  const mine = Array.isArray(response.my_reservations) ? response.my_reservations.slice() : [];",
-"  const all = Array.isArray(response.all_active) ? response.all_active.slice() : [];",
-"  const lines = readFileSync(journalPath, 'utf8').split('\\n');",
-"  for (const line of lines) {",
-"    const parts = line.split('|');",
-"    if (parts.length < 3 || parts[0] === '' || parts[0] !== project) continue;",
-"    const row = { agent: parts[1], path: parts[2], exclusive: true, remaining_seconds: 600 };",
-"    if (parts[1] === agent) mine.push(row);",
-"    all.push(row);",
-"  }",
-"  response.my_reservations = mine;",
-"  response.all_active = all;",
-"  return JSON.stringify(response);",
-"}",
-"if (args[0] === 'file_reservations' && args[1] === 'reserve') {",
-"  const agent = args[3] || '';",
-"  const paths = []; let reason = ''; let exclusive = true;",
-"  for (let i = 4; i < args.length; i++) {",
-"    const a = args[i] || '';",
-"    if (a === '--ttl') { i++; continue; }",
-"    if (a === '--reason') { reason = args[i + 1] || ''; i++; continue; }",
-"    if (a === '--shared') { exclusive = false; continue; }",
-"    if (a.indexOf('--') === 0) continue;",
-"    paths.push(a);",
-"  }",
-"  if (journalPath !== '') for (const p of paths) appendFileSync(journalPath, (args[2] || '') + '|' + agent + '|' + p + '\\n');",
-"  const granted = paths.map((p, n) => ({ id: n + 1, path_pattern: p, exclusive, reason, expires_ts: '2030-01-01T00:00:00.000Z' }));",
-"  process.stdout.write(JSON.stringify({ granted, conflicts: [] }));",
-"  process.exit(0);",
-"}",
-"process.stdout.write(journaled(process.env.AM_FIXTURE_RESPONSE || ''));",
-].join('\n') + '\n', { mode: 0o755 });
-	const journal = join(dir, "am-journal.log");
-	writeFileSync(journal, "");
-	process.env.AM_FIXTURE_JOURNAL = journal;
-	const saved = { PATH: process.env.PATH, AGENT_NAME: process.env.AGENT_NAME, AM_FIXTURE_MODE: process.env.AM_FIXTURE_MODE, AM_FIXTURE_RESPONSE: process.env.AM_FIXTURE_RESPONSE, AM_FIXTURE_JOURNAL: process.env.AM_FIXTURE_JOURNAL };
-	const answer = (mode: "ok" | "fail", ...paths: string[]): void => {
-		process.env.AM_FIXTURE_MODE = mode;
-		process.env.AM_FIXTURE_RESPONSE = JSON.stringify({
-			reservation_read_attestation: { state: "current", database_matches_server: true, storage_root_matches_server: true },
-			my_reservations: paths.map(path => ({ agent: "tester", path, exclusive: true, remaining_seconds: 600 })) });
-	};
-	const current = { state: "current", database_matches_server: true, storage_root_matches_server: true };
-	const raw = (response: Record<string, unknown>): void => {
-		process.env.AM_FIXTURE_MODE = "ok";
-		process.env.AM_FIXTURE_RESPONSE = JSON.stringify(response);
-	};
-	process.env.PATH = `${bin}:${saved.PATH ?? ""}`;
+	await startBoard(dir);
+	const saved = { AGENT_NAME: process.env.AGENT_NAME, BOARD_URL: process.env.BOARD_URL };
 	process.env.AGENT_NAME = "tester";
+	const row = (path: string, extra: Partial<BoardRow> = {}): BoardRow => ({ agent: "tester", path, exclusive: true, remaining_seconds: 600, ...extra });
 	try {
 		const event = { toolName: "edit", input: { path: target } };
 		// The later HTTP reservation layer is held neutral (covered) so each verdict below is the write-ownership read's.
 		const context = { cwd: dir, warn: () => {}, lookupReservations: async () => ({ covered: true, conflicts: [] as readonly unknown[] }) };
-		answer("ok", "tracked.md");
+		await boardScenario({ rows: [row("tracked.md")] });
 		expect(await handleToolCall(event, context)).toBeUndefined();
-		answer("ok");
+		await boardScenario({ rows: [] });
 		expect(await handleToolCall(event, context)).toBeUndefined();
-		answer("fail", "tracked.md");
+		expect(boardLog([dir]).some((line) => line.startsWith(`file_reservations reserve ${dir} tester tracked.md`)), "a free path auto-reserved").toBe(true);
+		await boardScenario({ rows: [row("tracked.md")], down: true });
 		const failed = (await handleToolCall(event, context))?.reason ?? "";
 		expect(failed).toContain("WRITE_OWN_LOOKUP_UNAVAILABLE");
-		expect(failed).toContain("am exited 1: database is locked");
-		// ompkit-rz5.158: am omits my_reservations when the agent holds nothing in the project. A current read without
-		// the key is zero holds (reserve it first), never a failed lookup (2026-10-22: RusticPine sent to repair a healthy Agent Mail).
-		raw({ reservation_read_attestation: current, all_active: [] });
-		expect(await handleToolCall(event, context)).toBeUndefined();
+		expect(failed).toContain("the Board could not be read");
 		// A shared or expired own row covers nothing: the free path auto-reserves instead of refusing.
-		raw({ reservation_read_attestation: current, my_reservations: [
-			{ agent: "tester", path: "tracked.md", exclusive: false, remaining_seconds: 600 },
-			{ agent: "tester", path: "tracked.md", exclusive: true, remaining_seconds: 0 }] });
+		await boardScenario({ rows: [row("tracked.md", { exclusive: false }), row("tracked.md", { remaining_seconds: 0 })] });
 		expect(await handleToolCall(event, context)).toBeUndefined();
-		// Planted: a stale read still fails closed, and the refusal names the attestation it saw.
-		raw({ reservation_read_attestation: { ...current, state: "stale" }, my_reservations: [{ agent: "tester", path: "tracked.md", exclusive: true, remaining_seconds: 600 }] });
-		const stale = (await handleToolCall(event, context))?.reason ?? "";
-		expect(stale).toContain("WRITE_OWN_LOOKUP_UNAVAILABLE");
-		expect(stale).toContain("state=stale");
+		// Planted: another seat's exclusive hold on the path refuses, naming the holder.
+		await boardScenario({ rows: [row("tracked.md", { agent: "PeerHolder" })] });
+		const held = (await handleToolCall(event, context))?.reason ?? "";
+		expect(held).toContain("WRITE_OWN_UNRESERVED");
+		expect(held).toContain("PeerHolder");
 	} finally {
 		for (const [key, value] of Object.entries(saved)) {
 			if (value === undefined) delete process.env[key];

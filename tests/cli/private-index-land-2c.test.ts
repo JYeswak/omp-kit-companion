@@ -68,68 +68,10 @@ test("refuses ambiguous Herdr and outer-pane identity markers before mutation", 
 	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("unpublished Herdr change\n");
 });
 
-test("refuses stale and cross-project Herdr bindings before mutation", () => {
-	for (const binding of [
-		{ registeredHerdrPane: "w1:p1", expectedAmProject: undefined },
-		{ registeredHerdrPane: "w2:p3", expectedAmProject: "/other/project" },
-	]) {
-		const { work, fakeBin } = fixture();
-		writeFileSync(join(work, "owned.txt"), "unpublished Herdr change\n");
-		const head = git(work, ["rev-parse", "HEAD"]).trim();
-		const remote = remoteHead(work);
-		const index = readFileSync(join(work, ".git", "index"));
-		const run = command(work, landArgs("owned.txt"), [{ agent: "HerdrAgent", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }], {
-			amDir: fakeBin, claimed: "HerdrAgent", tmuxPane: null,
-			herdrEnv: "1", herdrPaneId: "w2:p3", herdrAgent: "HerdrAgent", ...binding,
-		});
-		expect(run.status).not.toBe(0);
-		expect(responseCode(run.body)).toBe("OWNER_UNKNOWN");
-		expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
-		expect(remoteHead(work)).toBe(remote);
-		expect(readFileSync(join(work, ".git", "index"))).toEqual(index);
-		expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("unpublished Herdr change\n");
-	}
-});
-
-test("refuses ambiguous Herdr resolver output before mutation", () => {
-	const { work, fakeBin } = fixture();
-	writeFileSync(join(work, "owned.txt"), "unpublished Herdr change\n");
-	const head = git(work, ["rev-parse", "HEAD"]).trim();
-	const remote = remoteHead(work);
-	const index = readFileSync(join(work, ".git", "index"));
-	const run = command(work, landArgs("owned.txt"), [{ agent: "HerdrAgent", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }], {
-		amDir: fakeBin, claimed: "HerdrAgent", tmuxPane: null, reservationMode: "ambiguous",
-		herdrEnv: "1", herdrPaneId: "w2:p3", registeredHerdrPane: "w2:p3", herdrAgent: "HerdrAgent",
-	});
-	expect(run.status).not.toBe(0);
-	expect(responseCode(run.body)).toBe("OWNER_UNKNOWN");
-	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
-	expect(remoteHead(work)).toBe(remote);
-	expect(readFileSync(join(work, ".git", "index"))).toEqual(index);
-	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("unpublished Herdr change\n");
-});
-
-test("refuses a Herdr pane whose claimed agent name differs", () => {
-	const { work, fakeBin } = fixture();
-	writeFileSync(join(work, "owned.txt"), "unpublished Herdr change\n");
-	const head = git(work, ["rev-parse", "HEAD"]).trim();
-	const remote = remoteHead(work);
-	const index = readFileSync(join(work, ".git", "index"));
-	const run = command(work, landArgs("owned.txt"), [{ agent: "HerdrAgent", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }], {
-		amDir: fakeBin, claimed: "DifferentAgent", tmuxPane: null,
-		herdrEnv: "1", herdrPaneId: "w2:p3", registeredHerdrPane: "w2:p3", herdrAgent: "HerdrAgent",
-	});
-	expect(run.status).not.toBe(0);
-	expect(responseCode(run.body)).toBe("OWNER_MISMATCH");
-	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
-	expect(remoteHead(work)).toBe(remote);
-	expect(readFileSync(join(work, ".git", "index"))).toEqual(index);
-	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("unpublished Herdr change\n");
-});
 test("refuses a Tern caller without a covering lease", () => {
 	const { work, fakeBin } = fixture();
 	writeFileSync(join(work, "owned.txt"), "unpublished change\n");
-	const hold = [{ agent: "OtherAgent", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const hold = [{ agent: "OtherAgent", path: "elsewhere.txt", exclusive: true, remaining_seconds: 3600 }];
 	const head = git(work, ["rev-parse", "HEAD"]).trim();
 	const index = readFileSync(join(work, ".git", "index"));
 	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin, tmuxPane: null, ternPane: "1756641624115", ternAgent: "TernAgent", claimed: "TernAgent" });

@@ -1,11 +1,12 @@
 /** Shared fixture and command helpers for the private-index-land test files (split for the per-file test budget). */
 import { expect } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixture, runFixtureAsync } from "./fixture-process.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { COMMANDS } from "../../src/commands.ts";
+import { boardChannel } from "../../src/fleet-guard/board-reservations.ts";
 
 export type SchemaNode = { type?: string | string[]; required?: string[]; properties?: Record<string, SchemaNode>; items?: SchemaNode; enum?: unknown[];
 	const?: unknown; allOf?: { if: SchemaNode; then?: SchemaNode; else?: SchemaNode }[] };
@@ -60,6 +61,37 @@ globalThis.fixtureNumber ??= 0;
 // No per-file afterAll or shared cleanup registry: other suites call cleanupAllOwnedTmp(),
 // while this module's cached template must remain valid until the shared Bun process exits.
 
+// land reads reservations from the Board (ompkit-tnqyr.3). The fake Board runs out of process (these tests block in
+// spawnSync, which would starve an in-process server); every fixture checkout has its own res/<project> channel and
+// seed file, so seeds never cross. The server exits within 1 s of this process going away.
+const landBoardHome = join(scratch, "board-home");
+const landBoardSeeds = join(landBoardHome, "seeds");
+mkdirSync(join(landBoardHome, "xdg", "board", "local"), { recursive: true });
+mkdirSync(landBoardSeeds, { recursive: true });
+writeFileSync(join(landBoardHome, "xdg", "board", "local", "t.json"), JSON.stringify({ token: "t" }));
+const landBoardPortFile = join(landBoardHome, "port");
+const BOARD_LIFETIME_S = 3000;
+void runFixtureAsync(["bun", join(repoRoot, "tests", "cli", "lib", "fake-board-server.ts"), landBoardPortFile, landBoardSeeds, String(BOARD_LIFETIME_S)],
+	{ cwd: repoRoot, floor_s: BOARD_LIFETIME_S + 600 }).catch(() => undefined);
+for (let waited = 0; !(existsSync(landBoardPortFile) && readFileSync(landBoardPortFile, "utf8").startsWith("http")) && waited < 200; waited++) await Bun.sleep(100);
+export const landBoardUrl = readFileSync(landBoardPortFile, "utf8");
+
+/** The env a land run needs to reach the fake Board (BOARD_URL, its credential dir, a snapshot dir). */
+export function landBoardEnv(stateName: string): Record<string, string> {
+	return { BOARD_URL: landBoardUrl, XDG_CONFIG_HOME: join(landBoardHome, "xdg"), FLEET_BOARD_RES_STATE: join(landBoardHome, "state", stateName) };
+}
+
+let seedId = 1000;
+/** Replace the project's open Board holds with `holds` ({agent, path, exclusive, remaining_seconds}). */
+export function seedBoardHolds(cwd: string, holds: unknown): void {
+	const channel = boardChannel(realpathSync(cwd));
+	const rows = (Array.isArray(holds) ? holds : []).map((raw) => {
+		const hold = raw as { agent: string; path: string; exclusive?: boolean; remaining_seconds?: number; reads?: number };
+		return { id: seedId++, reads: hold.reads, path: hold.path, holder: hold.agent, exclusive: hold.exclusive !== false, until: Date.now() + (hold.remaining_seconds ?? 3600) * 1000 };
+	});
+	writeFileSync(join(landBoardSeeds, channel.replace(/\//g, "_") + ".json"), JSON.stringify(rows));
+}
+
 export type Fixture = { work: string; fakeBin: string };
 
 
@@ -108,6 +140,10 @@ export function commandEnvironment(cwd: string, holds: unknown, options: Command
 	env.FAKE_HERDR_AGENT = options.herdrAgent ?? options.agent ?? "DarkFern";
 	env.FAKE_HOLDS_JSON = JSON.stringify(holds);
 	env.FAKE_AM_MODE = options.reservationMode ?? "ok";
+	seedBoardHolds(cwd, holds);
+	env.BOARD_URL = options.reservationMode === "unavailable" ? "http://127.0.0.1:1/api/board" : landBoardUrl;
+	env.XDG_CONFIG_HOME = join(landBoardHome, "xdg");
+	env.FLEET_BOARD_RES_STATE = join(landBoardHome, "state", String(globalThis.fixtureNumber));
 	return env;
 }
 

@@ -512,6 +512,8 @@ test("hooks doctor runs both installer checks: fresh, stale, missing and restore
 		// Same member-copy operation as install-pre-push-gate.sh; do not ask
 		// native am to register a disposable project in the real mail archive.
 		copyFileSync(join(root, "scripts/pre-push-gate.sh"), push);
+		mkdirSync(join(repo, ".git/hooks/hooks.d/pre-commit"), { recursive: true });
+		copyFileSync(join(root, "scripts/check-staged-board-reservations.sh"), join(repo, ".git/hooks/hooks.d/pre-commit/50-omp-kit-board-reservations"));
 		const inspect = () => diagnose({ root, home: repo, project: repo, scope: "hooks" });
 		const fresh = await inspect();
 		expect(fresh.filter(row => row.evidence?.installer).map(row => row.status)).toEqual(["OK", "OK"]);

@@ -4,7 +4,6 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveOmpIdentity } from "./paths.ts";
 import { inspectStateRoot, repairStateRootMode } from "./state-root.ts";
 import { censusLoad, writeCensus } from "./load-doctor.ts";
-import { checkAmReplay, checkAmWatch, type AmReplayDeps, type AmWatchDeps } from "./am-watch.ts";
 import { checkPlistContract, checkSystemdContract, plistEnvironment, systemdEnvironment, unquoteUnit } from "./service-contract.ts";
 import { KIT_UPDATE_REPO_PATTERN } from "./kit-update-job.ts";
 import { classifyScratchPressure, fleetWatchRepos, quarantineDir, reapLogPath, type ScratchPressure } from "./scratch.ts";
@@ -286,18 +285,10 @@ function servicePath(home: string): string {
 }
 
 const LOG_THRESHOLD_BYTES = 50 * 1024 * 1024;
-/**
- * AMWATCH1 (ompkit-1ra0d.190): the load-watch tick ends with the Agent Mail
- * health step. The am check never throws and never fails the census: on any
- * unreadable input it reports UNKNOWN and the census still records.
- * AMREPLAY1 (ompkit-wy0ka): then the UNSENT-artifact replay step runs when
- * health answered, under the same never-throw contract.
- */
-export function runLoadWatch(stateRoot: string, amDeps?: AmWatchDeps, amReplayDeps?: AmReplayDeps) {
+export function runLoadWatch(stateRoot: string) {
 	const census = censusLoad({ stateRoot });
 	writeCensus(stateRoot, census);
-	const amWatch = checkAmWatch(stateRoot, amDeps);
-	return { ...census, amWatch, amReplay: checkAmReplay(stateRoot, amWatch.status === "OK", amReplayDeps) };
+	return census;
 }
 
 export function validateLabel(label: string): boolean {

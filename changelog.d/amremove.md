@@ -1,0 +1,6 @@
+### Changed
+- `omp-kit land` reads reservations from the Board only: the read is attested when the Board answers `GET /me` and lists `res/<project>`, no Agent Mail server is consulted, and the seat is `AGENT_NAME` (or its Tern seat file). Another seat holding the staged path, or a glob covering it, refuses `RESERVATION_HELD_BY_OTHER`; holding nothing refuses `RESERVATION_REQUIRED`.
+- A Board that cannot be reached refuses `BOARD_UNREACHABLE` and reports how old the last-good snapshot is; a snapshot never admits a land.
+- Fleet-guard reservation checks, the git commit-only check, write-own's automatic reserve and the land review pipeline's reserve/release all run on the Board. Board is the only reservation backend: `FLEET_MAIL_BACKEND` is gone and there is no Agent Mail fallback.
+- `scripts/install-pre-push-gate.sh` no longer runs `am guard install`. It installs `50-omp-kit-board-reservations` as a pre-commit member and moves any `50-agent-mail.py` (and the storage-root bootstrap members that only served it) into `var/agent-tmp/hook-backups`, never deleting them. `--check` also reports a missing or stale Board member.
+- Removed the load-watch Agent Mail restart (`src/am-watch.ts`): nothing the kit ships restarts `com.agent-mail` any more.

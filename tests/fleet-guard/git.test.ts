@@ -1,11 +1,12 @@
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { check, executedShellCommands } from "../../src/fleet-guard/git.ts";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
 import { runFixture } from "../cli/fixture-process.ts";
+import { boardScenarioSync, rowsOf, startBoard, type BoardRow } from "./board-fixture.ts";
 
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
 const scratch = ownedTmp("fleet-guard-git", { root: scratchRoot }).path;
@@ -44,39 +45,31 @@ function snapshotTree(root: string): string[] {
 }
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
-const fixtureBin = join(scratch, "bin");
-mkdirSync(fixtureBin, { recursive: true });
-// AM_FIXTURE_PROJECT: answer holds only for that --project; any other project gets a current read with no
-// my_reservations key, which is how am answers for an agent holding nothing there (am 0.3.36).
-writeFileSync(join(fixtureBin, "am"), "#!/bin/sh\nif [ \"$AM_FIXTURE_MODE\" = \"fail\" ]; then exit 1; fi\nif [ -n \"$AM_FIXTURE_PROJECT\" ] && [ \"$4\" != \"$AM_FIXTURE_PROJECT\" ]; then printf '%s' '{\"reservation_read_attestation\":{\"state\":\"current\",\"database_matches_server\":true,\"storage_root_matches_server\":true},\"all_active\":[]}'; exit 0; fi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n");
-chmodSync(join(fixtureBin, "am"), 0o755);
+// The Board is the only reservation source: seed holds on a fake Board (tests/fleet-guard/board-fixture.ts).
+await startBoard(scratch);
+let currentRows: BoardRow[] = [];
+/** Answer holds only for `project`; any other project reads a Board with no holds. */
+function holdsOnlyIn(project: string): void {
+	boardScenarioSync({ rows: [], route: { project, rows: currentRows } });
+}
 function withOnlyFixture(response: unknown, mode: string, agent: string | undefined, run: () => void): void {
-	const savedPath = process.env.PATH;
 	const savedAgent = process.env.AGENT_NAME;
-	const savedResponse = process.env.AM_FIXTURE_RESPONSE;
-	const savedMode = process.env.AM_FIXTURE_MODE;
-	process.env.PATH = `${fixtureBin}:${savedPath ?? ""}`;
+	const savedBoard = process.env.BOARD_URL;
 	if (agent === undefined) delete process.env.AGENT_NAME;
 	else process.env.AGENT_NAME = agent;
-	process.env.AM_FIXTURE_RESPONSE = JSON.stringify(response);
-	process.env.AM_FIXTURE_MODE = mode;
+	currentRows = rowsOf(response as Parameters<typeof rowsOf>[0]);
+	boardScenarioSync({ rows: currentRows, down: mode === "fail" });
 	try {
 		run();
 	} finally {
-		if (savedPath === undefined) delete process.env.PATH;
-		else process.env.PATH = savedPath;
 		if (savedAgent === undefined) delete process.env.AGENT_NAME;
 		else process.env.AGENT_NAME = savedAgent;
-		if (savedResponse === undefined) delete process.env.AM_FIXTURE_RESPONSE;
-		else process.env.AM_FIXTURE_RESPONSE = savedResponse;
-		if (savedMode === undefined) delete process.env.AM_FIXTURE_MODE;
-		else process.env.AM_FIXTURE_MODE = savedMode;
+		if (savedBoard === undefined) delete process.env.BOARD_URL;
+		else process.env.BOARD_URL = savedBoard;
 	}
 }
-const onlyAttestation = { state: "current", database_matches_server: true, storage_root_matches_server: true };
 const onlyHolds = (...paths: string[]) => ({
 	my_reservations: paths.map((path) => ({ agent: "FixtureAgent", path, exclusive: true, remaining_seconds: 3600 })),
-	reservation_read_attestation: onlyAttestation,
 });
 
 const event = (command: string) => ({ toolName: "bash", arguments: { command } });
@@ -202,7 +195,7 @@ describe("fleet guard main-only git checks", () => {
 		});
 		expect(cloned.rc, new TextDecoder().decode(cloned.stderr)).toBe(0);
 		expect(readFileSync(join(checkout, ".git"), "utf8")).toStartWith("gitdir: ");
-		// No identity and an Agent Mail that cannot answer: the 2026-11-10 FoggyValley shape ("project not found").
+		// No identity and a Board that cannot answer: the 2026-11-10 FoggyValley shape ("project not found").
 		withOnlyFixture(onlyHolds(), "fail", undefined, () => {
 			expect(check(event("git commit --only -m msg -- ownA.txt"), { cwd: checkout })).toBeUndefined();
 			const canonical = check(event("git commit --only -m msg -- ownA.txt"), context);
@@ -233,28 +226,22 @@ describe("fleet guard main-only git checks", () => {
 		mkdirSync(other, { recursive: true });
 		execSync("git init -b main", { cwd: other, env: gitEnv });
 		const callIn = (cwd: string) => ({ toolName: "bash", input: { command: "git commit --only -m m -- some/path", cwd } });
-		const saved = process.env.AM_FIXTURE_PROJECT;
-		try {
-			withOnlyFixture(onlyHolds("some/path"), "ok", "FixtureAgent", () => {
-				// Holds live in the repository the call runs in: admitted, by absolute or session-relative cwd.
-				process.env.AM_FIXTURE_PROJECT = other;
-				expect(check(callIn(other), context)).toBeUndefined();
-				expect(check(callIn("../other"), context)).toBeUndefined();
-				// Planted: holds live only in the session's repository; the commit runs in the other one and is refused
-				// as unreserved there (it was judged against the session's holds before, and admitted).
-				process.env.AM_FIXTURE_PROJECT = repo;
-				const verdict = check(callIn(other), context);
-				expect(verdict?.block).toBe(true);
-				expect(verdict?.reason).toContain("without an active exclusive reservation");
-			});
-		} finally {
-			if (saved === undefined) delete process.env.AM_FIXTURE_PROJECT;
-			else process.env.AM_FIXTURE_PROJECT = saved;
-		}
+		withOnlyFixture(onlyHolds("some/path"), "ok", "FixtureAgent", () => {
+			// Holds live in the repository the call runs in: admitted, by absolute or session-relative cwd.
+			holdsOnlyIn(other);
+			expect(check(callIn(other), context)).toBeUndefined();
+			expect(check(callIn("../other"), context)).toBeUndefined();
+			// Planted: holds live only in the session's repository; the commit runs in the other one and is refused
+			// as unreserved there (it was judged against the session's holds before, and admitted).
+			holdsOnlyIn(repo);
+			const verdict = check(callIn(other), context);
+			expect(verdict?.block).toBe(true);
+			expect(verdict?.reason).toContain("without an active exclusive reservation");
+		});
 	});
 
 	test("ompkit-rz5.158 AC2: a path another agent holds exclusively refuses naming the holder and the path", () => {
-		const peer = (exclusive: boolean) => ({ reservation_read_attestation: onlyAttestation,
+		const peer = (exclusive: boolean) => ({
 			all_active: [{ agent: "PeerHolder", path: "some/path", exclusive, remaining_seconds: 600 }] });
 		withOnlyFixture(peer(true), "ok", "FixtureAgent", () => {
 			const verdict = check(event("git commit --only -m m -- some/path"), context);
@@ -262,7 +249,7 @@ describe("fleet guard main-only git checks", () => {
 			expect(verdict?.reason).toContain("some/path, which PeerHolder holds exclusively");
 		});
 		// Controls: a shared foreign hold and no hold at all both refuse as plainly unreserved, naming nobody.
-		for (const response of [peer(false), { reservation_read_attestation: onlyAttestation, all_active: [] }]) {
+		for (const response of [peer(false), { all_active: [] }]) {
 			withOnlyFixture(response, "ok", "FixtureAgent", () => {
 				const verdict = check(event("git commit --only -m m -- some/path"), context);
 				expect(verdict?.reason).toContain("without an active exclusive reservation");

@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { readBoardHoldsSync } from "./board-read.ts";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -523,7 +523,7 @@ function bypassVariable(inspection: ShellInspection): string | undefined {
 }
 
 function bypassReason(name: string): string {
-	return `fleet-guard BYPASS_ENV: this call sets ${name}, which switches the Agent Mail reservation guard off; agent tool calls may not set AGENT_MAIL_BYPASS or AGENT_MAIL_GUARD_MODE. Reserve the paths you commit instead (am file_reservations reserve <project> <agent> <path> --exclusive) and land with git commit --only -- <reserved paths>; no files were changed.`;
+	return `fleet-guard BYPASS_ENV: this call sets ${name}, which switches the Board reservation guard off; agent tool calls may not set AGENT_MAIL_BYPASS or AGENT_MAIL_GUARD_MODE. Reserve the paths you commit instead (am file_reservations reserve <project> <agent> <path> --exclusive) and land with git commit --only -- <reserved paths>; no files were changed.`;
 }
 
 /** BYPASSENV1 alone, as the conformance corpus dispatches it; `check` applies the same predicate first in its chain. */
@@ -580,7 +580,7 @@ function analyzeCommit(words: readonly string[]): CommitScope | null {
 const ONLY_IDENTITY_REASON =
 	"fleet-guard history: git commit --only needs an identified caller with exclusive reservations; set AGENT_NAME and reserve every named path first; no files were changed.";
 function onlyUnavailableReason(why: string): string {
-	return `fleet-guard history: the reservation lookup for git commit --only failed: ${why}; restore Agent Mail reservation reads before landing; no files were changed.`;
+	return `fleet-guard history: the reservation lookup for git commit --only failed: ${why}; restore the Board (BOARD_URL answers GET /me) before landing; no files were changed.`;
 }
 const ONLY_FOREIGN_REASON =
 	"fleet-guard history: git commit --only names a path outside the repository; no files were changed.";
@@ -598,90 +598,16 @@ export interface AttestedReservation {
 	remaining_seconds: number;
 }
 
-/**
- * The one parser of `am robot reservations --json`, for fleet-guard admissions and `omp-kit land`. Only an
- * attested-current read yields rows. am omits `my_reservations` when the agent holds nothing in that project
- * (am 0.3.36, measured 2026-10-22), so a current read without the key is zero holds, never a failed read: that
- * case used to refuse as "lookup unavailable" and sent workers to repair a healthy Agent Mail (ompkit-rz5.158).
- * Every failure names its cause.
- */
-export function parseReservationRead(stdout: string): { rows: AttestedReservation[]; active: AttestedReservation[] } | { why: string } {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(stdout);
-	} catch {
-		return { why: "am output is not JSON" };
-	}
-	if (!parsed || typeof parsed !== "object") return { why: "am output is not a JSON object" };
-	const record = parsed as Record<string, unknown>;
-	const attestation = record.reservation_read_attestation;
-	if (!attestation || typeof attestation !== "object") return { why: "am output has no reservation_read_attestation" };
-	const attested = attestation as Record<string, unknown>;
-	if (attested.state !== "current" || attested.database_matches_server !== true || attested.storage_root_matches_server !== true) {
-		return { why: `the read is not attested current (state=${String(attested.state)}, database_matches_server=${String(attested.database_matches_server)}, storage_root_matches_server=${String(attested.storage_root_matches_server)})` };
-	}
-	// Everyone's live holds, only to name who blocks a path (rz5.158 AC2); never used to admit, so a malformed row is skipped.
-	const active: AttestedReservation[] = [];
-	for (const row of Array.isArray(record.all_active) ? record.all_active : []) {
-		if (!row || typeof row !== "object") continue;
-		const entry = row as Record<string, unknown>;
-		if (typeof entry.path === "string" && entry.path && typeof entry.exclusive === "boolean" && typeof entry.remaining_seconds === "number")
-			active.push({ agent: entry.agent, path: entry.path, exclusive: entry.exclusive, remaining_seconds: entry.remaining_seconds });
-	}
-	if (!("my_reservations" in record)) return { rows: [], active };
-	const rows = record.my_reservations;
-	if (!Array.isArray(rows)) return { why: "my_reservations is not a list" };
-	const out: AttestedReservation[] = [];
-	for (const row of rows) {
-		if (!row || typeof row !== "object") return { why: "a my_reservations row is not an object" };
-		const entry = row as Record<string, unknown>;
-		if (!("agent" in entry) || typeof entry.path !== "string" || !entry.path || typeof entry.exclusive !== "boolean" || typeof entry.remaining_seconds !== "number") {
-			return { why: "a my_reservations row lacks agent, path, exclusive or remaining_seconds" };
-		}
-		out.push({ agent: entry.agent, path: entry.path, exclusive: entry.exclusive, remaining_seconds: entry.remaining_seconds });
-	}
-	return { rows: out, active };
-}
-
-function firstLine(text: unknown): string {
-	const line = String(text ?? "").trim().split("\n")[0]?.trim() ?? "";
-	return line ? `: ${line.slice(0, 200)}` : "";
-}
-/** WRITEOWNCHILD1 (d): `agent not found: <agent>` names a definitive answer — that agent holds
- * nothing in this project — not a failed read. The marker is matched on any non-blank stderr line,
- * not just the first (harnesses and wrappers can prefix output), with an exact naming of the queried
- * agent: the character after the name must end the line or leave the agent-name shape. Every other
- * failure (timeout, missing binary, unattested read) stays an outage with its named cause. */
-function agentUnknown(stderr: unknown, agent: string): boolean {
-	const marker = `agent not found: ${agent}`;
-	const names = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-";
-	for (const raw of String(stderr ?? "").split("\n")) {
-		const line = raw.trim();
-		if (line === "") continue;
-		const at = line.indexOf(marker);
-		if (at < 0) continue;
-		const next = line.charAt(at + marker.length);
-		if (next === "" || !names.includes(next)) return true;
-	}
-	return false;
-}
-
 /** The caller's live exclusive holds, and every other agent's live exclusive hold (to name a blocker); a row that is
  * shared or expired covers nothing. */
 function readReservationHolds(repoRoot: string, agent: string): { holds: ReservationHold[]; foreign: ForeignHold[] } | { why: string } {
-	const run = spawnSync("am", ["robot", "reservations", "--project", repoRoot, "--agent", agent, "--json"], { encoding: "utf8", timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
-	if (run.error) {
-		const code = (run.error as NodeJS.ErrnoException).code;
-		return { why: code === "ETIMEDOUT" ? "am did not answer within 10 s" : code === "ENOENT" ? "am is not on PATH" : `am could not run (${code ?? run.error.message})` };
-	}
-	if (run.status !== 0 && agentUnknown(run.stderr, agent)) return { holds: [], foreign: [] };
-	if (run.status !== 0) return { why: `am exited ${run.status === null ? `on signal ${run.signal}` : run.status}${firstLine(run.stderr)}` };
-	const read = parseReservationRead(String(run.stdout));
-	if ("why" in read) return read;
+	const read = readBoardHoldsSync(repoRoot, 30);
+	if (!read.ok) return { why: `the Board could not be read (${read.why}); ${read.snapshot_age_s === null ? "no last-good snapshot" : `last-good snapshot ${read.snapshot_age_s} s old`}` };
+	const nowMs = Date.now();
+	const live = read.holds.filter((hold) => hold.exclusive && hold.until > nowMs);
 	return {
-		holds: read.rows.filter((row) => row.agent === agent && row.exclusive && row.remaining_seconds > 0).map((row) => ({ pattern: row.path })),
-		foreign: read.active.filter((row) => typeof row.agent === "string" && row.agent !== agent && row.exclusive && row.remaining_seconds > 0)
-			.map((row) => ({ pattern: row.path, holder: row.agent as string })),
+		holds: live.filter((hold) => hold.holder === agent).map((hold) => ({ pattern: hold.path })),
+		foreign: live.filter((hold) => hold.holder !== agent).map((hold) => ({ pattern: hold.path, holder: hold.holder })),
 	};
 }
 

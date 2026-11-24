@@ -149,28 +149,13 @@ test("refuses when the publication parent advances before publication", () => {
 });
 
 test("refuses when live custody lapses between save and publication", () => {
-	const { work } = fixture();
+	const { work, fakeBin } = fixture();
 	const base = remoteHead(work);
-	const holdsFile = join(scratch, `custody-holds-${fixtureNumber++}.json`);
-	const currentHolds = JSON.stringify({ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 });
-	const attestation = `"reservation_read_attestation":{"state":"current","database_matches_server":true,"storage_root_matches_server":true}`;
-	writeFileSync(holdsFile, `{"my_reservations":[${currentHolds}],${attestation}}`);
-	const expiredHolds = JSON.stringify({ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 0 });
-	const statefulBin = join(scratch, `stateful-am-${fixtureNumber}`);
-	mkdirSync(statefulBin);
-	writeFileSync(join(statefulBin, "am"), String.raw`#!/bin/sh
-case "$1 $2" in
-  "agents resolve-pane") printf '{"agent_name":"DarkFern"}\n' ;;
-  "robot reservations") cat "$FAKE_HOLDS_FILE" ;;
-  *) exit 2 ;;
-esac
-`);
-	chmodSync(join(statefulBin, "am"), 0o755);
-	const postCommit = join(work, ".git", "hooks", "post-commit");
-	writeFileSync(postCommit, `#!/bin/sh\nprintf '{"my_reservations":[%s],%s}' '${expiredHolds}' '${attestation}' > "$FAKE_HOLDS_FILE"\n`);
-	chmodSync(postCommit, 0o755);
+	// The seat's Board hold is listed for land's first two reads only (the pre-commit checks); the post-commit
+	// qualification then sees none, as when the lease lapses between the save and publication.
+	const lapsing = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600, reads: 2 }];
 	writeFileSync(join(work, "owned.txt"), "owned save with lapsing custody\n");
-	const run = command(work, landArgs("owned.txt"), [], { amDir: statefulBin, gitEnv: { FAKE_HOLDS_FILE: holdsFile } });
+	const run = command(work, landArgs("owned.txt"), lapsing, { amDir: fakeBin });
 	expect(run.status).toBe(1);
 	expect(responseCode(run.body)).toBe("LAND_CUSTODY_EXPIRED");
 	expectLandSchema(run.body.data);

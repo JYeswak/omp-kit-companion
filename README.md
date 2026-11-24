@@ -223,7 +223,7 @@ mapping fields, activation commands and read-only verification.
 ### Service jobs and kit updates
 
 22 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
-`load-watch` (restarts Agent Mail on fatal pressure), `ci-poller`, `fleet-flush`, `imessage-bridge`; 300 s:
+`load-watch`, `ci-poller`, `fleet-flush`, `imessage-bridge`; 300 s:
 `kit-update`, `close-pass`; hourly: `claude-save`, [`am-retain`](docs/service-contract.md#agent-mail-retention),
 `session-retain`, `cache-retain`, `autocut`; 6 h: `scratch-reaper`,
 `fleet-lessons`, `tool-update`; daily: `cc-compress`, `skill-mine`, `imessage-brief`, `loop-close`; weekly: `gate-rationalize`; daemon: `cc`.
@@ -474,10 +474,11 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit fleet` | `fleet flush-pending\|respawn [--apply --yes] [--panes SESSION:W.P,...]` | Idle panes with queued input and frozen turns; panes whose omp predates the latest relink (`--apply` respawns named idle panes; busy, frozen, dirty, holding and sessionless panes never touched) | `omp-kit fleet flush-pending --json` |
 | `omp-kit scratch` | `scratch plan\|release DIR\|index-lock --repo DIR [--apply --yes]` | Release, quarantine and delete scratch (idle 72 h to quarantine, 7-day expiry); index-lock reports HELD pid/command and >30 min orphan helpers (`--reap --yes` renames; `--apply` refused) | `omp-kit scratch plan --json` |
 | `omp-kit checkouts` | `checkouts plan\|reap [--idle-days N] [--apply --yes]` | Idle ovnfs checkouts: `reap` archives the diff, then removes | `omp-kit checkouts plan --json` |
+| `omp-kit reserve` | `reserve GLOB... --reason BEAD`, `release GLOB...\|--all`, `reservations [--check-staged]` | Board file reservations, one leased task per glob; `omp-kit release` frees, `omp-kit reservations` lists and audits | `omp-kit reserve 'src/mod/**' --reason ID --json` |
 | `omp-kit tern` | `tern catalog\|doctor\|ctl\|script\|native\|api\|sdk\|coverage\|surface\|render` | [Native SDK/control integration](docs/tern-integration.md): context-bound Luau, drift, wire codecs; explicit targets | `omp-kit tern catalog --filter cx.agents` |
 | `omp-kit tern-ref` | `tern-ref build\|query\|validate\|drift [--root DIR]` | Version-pinned local Tern Plugin SDK reference, with blind-label eval and drift re-index | `omp-kit tern-ref query --query 'restyle without rebuild'` |
 | `omp-kit infra` | `infra pin\|check\|promote\|undo\|upgrade-plan\|upgrade-verify` | Pin, test, promote toolchain; gate machine upgrades | `omp-kit infra pin --json` |
-| `omp-kit ci` | `ci status\|wait --repo OWNER/REPO --sha SHA [--workflow NAME] [--since ISO8601] [--timeout-s N]` | Cached CI status per repo (`UNAVAILABLE` past 180 s); wait reads cache events only, exits 0 success, 1 failure, 3 timeout with age and last row | `omp-kit ci status --json` |
+| `omp-kit ci` | `ci status\|wait --repo OWNER/REPO --sha SHA [--workflow NAME] [--since ISO8601] [--timeout-s N]` | Cached CI status per repo (`UNAVAILABLE` past 180 s); wait exits 0 success, 1 failure, 3 timeout | `omp-kit ci status --json` |
 | `omp-kit examples` | `examples [memory-off\|mnemopi-manual\|model-roles\|mcp\|omp-watch\|skill-set --from-history DAYS]` | Read-only profile recipes; never activates a profile | `omp-kit examples skill-set --from-history 7 --json` |
 | `omp-kit quickstart` | `quickstart` | Safe first commands and their limits | `omp-kit quickstart` |
 | `omp-kit help` | `help [TOPIC]` | Grammar for a command | `omp-kit help update` |

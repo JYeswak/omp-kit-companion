@@ -15,7 +15,10 @@ import { convergeRepository } from "./converge.ts";
 import type { ConvergeResult } from "./converge.ts";
 import { defaultLiveness, defaultRunner, disposalGate } from "./scratch.ts";
 import type { OwnedScratchRow } from "./scratch.ts";
-import { parseReservationRead } from "./fleet-guard/git.ts";
+import { type AttestedReservation } from "./fleet-guard/git.ts";
+import { readBoardHoldsSync, releaseBoardSync, reserveBoardSync } from "./fleet-guard/board-read.ts";
+import { globsOverlap } from "./fleet-guard/board-reservations.ts";
+import { reservationPatternCovers } from "./fleet-guard/reservations.ts";
 import { reapLandedCheckouts, listOvnfsCheckouts, diffOvnfsCheckout } from "./ovnfs-checkouts.ts";
 import { commandOf, expectedOf, judge, parseBoxes, unreplayableReason } from "./verify.ts";
 import { previewText, scrubText } from "../extensions/secret-output-guard.ts";
@@ -981,50 +984,21 @@ function landLoadFactor(): number {
 	return loadFactor();
 }
 
-/** Run one `am` call under the shared load-scaled bound (LANDPANETIMEOUT1, LANDRESVTIMEOUT1). am is a single
- * leaf binary and every caller is synchronous, so this uses kitlib's synchronous bounded run (SIGKILL at the
- * deadline). `run` is absent when am could not be spawned. */
-function runAmBounded(argv: string[], repo: string, maxOutputBytes: number, spawnEnv?: Record<string, string>): { baseS: number; deadlineS: number; run?: RunResult } {
+/** The seat's Board reservation read under the load-scaled bound (bead ompkit-tnqyr.3). Attested means the Board
+ * answered GET /me 200 and the res/<project> listing succeeded; nothing else is trusted. A Board that is down
+ * refuses BOARD_UNREACHABLE and names the last-good snapshot's age; a snapshot never admits a land. */
+export function readActiveReservations(repo: string, _owner: string): { rows: AttestedReservation[] } | { error: CliResult } {
 	const baseS = resolvePaneBaseSeconds();
 	const deadlineS = Math.ceil(baseS * landLoadFactor());
-	try {
-		return { baseS, deadlineS, run: kitlibRunSync(argv, { cwd: repo, env: spawnEnv, deadline_s: deadlineS, max_output_bytes: maxOutputBytes }) };
-	} catch {
-		return { baseS, deadlineS };
+	const read = readBoardHoldsSync(repo, deadlineS);
+	if (!read.ok && read.code === "BOARD_TIMEOUT")
+		return { error: refused("RESERVATION_TIMEOUT", `the Board did not answer within ${deadlineS} s (${baseS} s base scaled by the 1-minute load), so the held reservations are unknown, not absent`, "Check the Board server (BOARD_URL), then retry land; no files were changed.") };
+	if (!read.ok) {
+		const age = read.snapshot_age_s === null ? "no last-good snapshot exists" : `the last-good snapshot is ${read.snapshot_age_s} s old`;
+		return { error: refused("BOARD_UNREACHABLE", `The Board could not be read (${read.why}); ${age}, and a snapshot never admits a land`, "Restore the Board server (BOARD_URL, GET /me) and retry; no files were changed.") };
 	}
-}
-
-/** Resolve the live owner of one pane through Agent Mail under the load-scaled bound. A timeout is its own
- * refusal, OWNER_RESOLVE_TIMEOUT; only an answer (or an absent/failed am) reads OWNER_UNKNOWN. */
-export function resolvePaneOwner(repo: string, pane: string, spawnEnv?: Record<string, string>): { owner: string } | { error: CliResult } {
-	const { baseS, deadlineS, run: identity } = runAmBounded(["am", "agents", "resolve-pane", "--project", repo, "--pane", pane, "--json"], repo, 1024 * 1024, spawnEnv);
-	if (!identity)
-		return { error: refused("OWNER_UNKNOWN", "The pane has no registered owner", "Register the pane with Agent Mail before landing; no files were changed.") };
-	if (identity.timed_out)
-		return { error: refused("OWNER_RESOLVE_TIMEOUT", `am agents resolve-pane did not answer within ${deadlineS} s (${baseS} s base scaled by the 1-minute load), so the pane owner is unknown, not unregistered`, `Check that \`am agents resolve-pane --project ${repo} --pane ${pane} --json\` answers, then retry land; no files were changed.`) };
-	if (identity.rc !== 0) return { error: refused("OWNER_UNKNOWN", "The pane has no registered owner", "Register the pane with Agent Mail before landing; no files were changed.") };
-	let owner: unknown;
-	try {
-		const parsed: unknown = JSON.parse(new TextDecoder().decode(identity.stdout));
-		owner = typeof parsed === "object" && parsed !== null && "agent_name" in parsed ? parsed.agent_name : null;
-	} catch { owner = null; }
-	if (typeof owner !== "string" || owner.length === 0) return { error: refused("OWNER_UNKNOWN", "The pane has no registered owner", "Register the pane with Agent Mail before landing.") };
-	return { owner };
-}
-
-// LANDRESVTIMEOUT1 (ompkit-fp72.120.16.282): `am robot reservations` ran under the same fixed 10 s spawnSync
-// timeout, and a load-cut read RESERVATION_UNAVAILABLE. It now shares resolve-pane's load-scaled bound and a
-// timeout is its own refusal, RESERVATION_TIMEOUT.
-/** Read the owner's active reservations through Agent Mail under the load-scaled bound. */
-export function readActiveReservations(repo: string, owner: string, spawnEnv?: Record<string, string>): { rows: AttestedReservation[] } | { error: CliResult } {
-	const { baseS, deadlineS, run: active } = runAmBounded(["am", "robot", "reservations", "--project", repo, "--agent", owner, "--json"], repo, 2 * 1024 * 1024, spawnEnv);
-	if (!active) return { error: refused("RESERVATION_UNAVAILABLE", "Active file reservations could not be read", "Restore the Agent Mail reservation service; no files were changed.") };
-	if (active.timed_out)
-		return { error: refused("RESERVATION_TIMEOUT", `am robot reservations did not answer within ${deadlineS} s (${baseS} s base scaled by the 1-minute load), so the held reservations are unknown, not absent`, `Check that \`am robot reservations --project ${repo} --agent ${owner} --json\` answers, then retry land; no files were changed.`) };
-	if (active.rc !== 0) return { error: refused("RESERVATION_UNAVAILABLE", "Active file reservations could not be read", "Restore the Agent Mail reservation service; no files were changed.") };
-	const read = parseReservationRead(new TextDecoder().decode(active.stdout));
-	if ("why" in read) return { error: refused("RESERVATION_UNREADABLE", `The current reservation read could not be verified: ${read.why}`, "Repair the Agent Mail response and retry; no files were changed.") };
-	return { rows: read.rows };
+	const nowMs = Date.now();
+	return { rows: read.holds.map((hold) => ({ agent: hold.holder, path: hold.path, exclusive: hold.exclusive, remaining_seconds: Math.floor((hold.until - nowMs) / 1000) })) };
 }
 
 /** EVALIDENTITY1 (ompkit-1ra0d.221.2): the seat name for a resolved pane key. Only a tern:<id> key
@@ -1035,23 +1009,19 @@ export function seatNameForPaneKey(key: string, home: string): string | null {
 	return seat.kind === "none" ? null : seat.name;
 }
 
-function authorizedOwner(repo: string, paths: string[], spawnEnv?: Record<string, string>): { owner: string } | { error: CliResult } {
+function authorizedOwner(repo: string, paths: string[], _spawnEnv?: Record<string, string>): { owner: string } | { error: CliResult } {
 	const selected = paneKey();
 	if ("refusal" in selected) return { error: selected.refusal };
-	const claimed = process.env.AGENT_NAME ?? seatNameForPaneKey(selected.key, homedir());
-	if (!claimed) return { error: refused("OWNER_UNKNOWN", "The agent name claim is required", "Set AGENT_NAME to the identity registered for this pane; no files were changed.") };
-	const resolved = resolvePaneOwner(repo, selected.key, spawnEnv);
-	if ("error" in resolved) return resolved;
-	const owner = resolved.owner;
-	if (owner !== claimed) return { error: refused("OWNER_MISMATCH", "AGENT_NAME does not match the live pane owner", "Use the identity registered for this pane; no files were changed.") };
-	const read = readActiveReservations(repo, owner, spawnEnv);
+	const owner = process.env.AGENT_NAME ?? seatNameForPaneKey(selected.key, homedir());
+	if (!owner) return { error: refused("OWNER_UNKNOWN", "The agent name claim is required", "Set AGENT_NAME to this seat's Board identity; no files were changed.") };
+	const read = readActiveReservations(repo, owner);
 	if ("error" in read) return read;
-	const held = new Set<string>();
-	for (const row of read.rows) {
-		if (row.agent === owner && row.exclusive === true && row.remaining_seconds > 0) held.add(row.path);
-	}
-	const missing = paths.filter((path) => !held.has(path));
-	if (missing.length) return { error: refused("RESERVATION_REQUIRED", `The owner lacks an active exclusive reservation for: ${missing.join(", ")}`, "Reserve every exact repository-relative path exclusively before landing.") };
+	const mine = read.rows.filter((row) => row.agent === owner && row.exclusive === true && row.remaining_seconds > 0);
+	const foreign = read.rows.filter((row) => row.agent !== owner && row.exclusive === true && row.remaining_seconds > 0);
+	const blocked = paths.flatMap((path) => foreign.filter((row) => globsOverlap(row.path, path)).map((row) => `${path} is held by ${String(row.agent)}`));
+	if (blocked.length) return { error: refused("RESERVATION_HELD_BY_OTHER", `Another seat holds a reservation on: ${blocked.join(", ")}`, "Wait for the holder to release, or ask them; no files were changed.") };
+	const missing = paths.filter((path) => !mine.some((row) => reservationPatternCovers(row.path, path)));
+	if (missing.length) return { error: refused("RESERVATION_REQUIRED", `The owner lacks an active exclusive reservation for: ${missing.join(", ")}`, "Run omp-kit reserve for every repository-relative path before landing.") };
 	return { owner };
 }
 
@@ -2071,52 +2041,37 @@ function landpipeParseReview(raw: string): LandpipeVerdict {
 	return { verdict: null, findings: [...findings, "unparseable or missing verdict: the final non-empty line must be exactly VERDICT: LAND or VERDICT: FIX"] };
 }
 
-/** This seat through land's existing owner resolution (pane key plus live resolve), never raw AGENT_NAME. */
-function landpipeSeat(repo: string): { owner: string } | { error: CliResult } {
+/** This seat: the pane key must resolve and AGENT_NAME (or the Tern seat file) names it. */
+function landpipeSeat(_repo: string): { owner: string } | { error: CliResult } {
 	const key = paneKey();
 	if ("refusal" in key) return { error: key.refusal };
-	return resolvePaneOwner(repo, key.key, landpipeEnv());
+	const owner = process.env.AGENT_NAME ?? seatNameForPaneKey(key.key, homedir());
+	if (!owner) return { error: refused("OWNER_UNKNOWN", "The agent name claim is required", "Set AGENT_NAME to this seat's Board identity; no files were changed.") };
+	return { owner };
 }
 
 /** Fail fast on foreign exclusive holders before review; null when the read itself is unavailable. */
 function landpipeForeignHolders(repo: string, seat: string, paths: string[]): { blockers: string[] } | { unavailable: true } {
-	let run: RunResult;
-	try {
-		run = kitlibRunSync(["am", "robot", "reservations", "--project", repo, "--agent", seat, "--json"],
-			{ cwd: repo, deadline_s: LANDPIPE_RESERVE_DEADLINE_S, max_output_bytes: 2 * 1024 * 1024, env: landpipeEnv() });
-	} catch { return { unavailable: true }; }
-	if (run.timed_out || run.killed || run.rc !== 0) return { unavailable: true };
-	const parsed = parseReservationRead(new TextDecoder().decode(run.stdout));
-	if ("why" in parsed) return { unavailable: true };
-	const blockers = parsed.active
-		.filter((row) => row.exclusive && String(row.agent) !== seat && paths.includes(row.path))
-		.map((row) => `${row.path} is exclusively held by ${String(row.agent)}`);
+	const read = readBoardHoldsSync(repo, LANDPIPE_RESERVE_DEADLINE_S);
+	if (!read.ok) return { unavailable: true };
+	const blockers = read.holds
+		.filter((hold) => hold.exclusive && hold.holder !== seat && paths.some((path) => globsOverlap(hold.path, path)))
+		.map((hold) => `${hold.path} is exclusively held by ${hold.holder}`);
 	return { blockers };
 }
 
-/** Reserve the touched paths as this seat through the existing `am file_reservations reserve` argv, then verify. */
+/** Reserve the touched paths as this seat on the Board, then verify. */
 function landpipeReserve(repo: string, seat: string, paths: string[], bead: string): { owner: string } | { finding: string } {
-	let run: RunResult;
-	try {
-		run = kitlibRunSync(["am", "file_reservations", "reserve", repo, seat, ...paths, "--exclusive", "--ttl", "3600", "--reason", bead],
-			{ cwd: repo, deadline_s: LANDPIPE_RESERVE_DEADLINE_S, max_output_bytes: 256 * 1024, env: landpipeEnv() });
-	} catch (error) {
-		return { finding: `reserve: \`am file_reservations reserve\` could not run (${error instanceof Error ? error.message : String(error)})` };
-	}
-	if (run.timed_out || run.killed) return { finding: `reserve: \`am file_reservations reserve\` timed out after ${LANDPIPE_RESERVE_DEADLINE_S} s` };
-	if (run.rc !== 0)
-		return { finding: `reserve: \`am file_reservations reserve\` exited ${run.rc}: ${new TextDecoder().decode(run.stderr).slice(0, 300)}` };
-	const checked = authorizedOwner(repo, paths, landpipeEnv());
+	const grant = reserveBoardSync(repo, seat, paths, bead, LANDPIPE_RESERVE_DEADLINE_S);
+	if (!grant.ok) return { finding: `reserve: the Board refused the reservation (${grant.conflicts.length ? grant.conflicts.map((hold) => `${hold.path} held by ${hold.holder}`).join(", ") : grant.why})` };
+	const checked = authorizedOwner(repo, paths);
 	if ("error" in checked) return { finding: `reserve: the grant did not verify (${checked.error.errors?.[0]?.code ?? "RESERVATION_UNREADABLE"})` };
 	return { owner: checked.owner };
 }
 
 /** Best-effort release of this seat's reservation on every non-land exit; never throws. */
 function landpipeRelease(repo: string, seat: string, paths: string[]): void {
-	try {
-		kitlibRunSync(["am", "file_reservations", "release", repo, seat, "--paths", ...paths],
-			{ cwd: repo, deadline_s: LANDPIPE_RESERVE_DEADLINE_S, max_output_bytes: 64 * 1024, env: landpipeEnv() });
-	} catch { /* the grant lapses on its TTL; release is hygiene */ }
+	try { releaseBoardSync(repo, seat, paths, LANDPIPE_RESERVE_DEADLINE_S); } catch { /* the grant lapses on its TTL; release is hygiene */ }
 }
 
 /** Route FIX findings to the author: always a checkout file, plus best-effort mail to the author seat. Never the lead. */

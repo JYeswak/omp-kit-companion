@@ -6,10 +6,11 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
+import { boardLog, boardScenario, rowsOf, startBoard } from "./board-fixture.ts";
 import { resolveFilesystemWriteTarget, writeScratchOwner } from "../../src/fleet-guard/scratch.ts";
 
 // WRITEOWN1 (ompkit-vf33j) + WRITEOWNCHILD1 (ompkit-1ra0d.126): in an opted-in canonical checkout every write outside
-// var/agent-tmp needs the caller's live exclusive Agent Mail reservation, read through the same `am robot reservations`
+// var/agent-tmp needs the caller's live exclusive Board reservation, read from the Board through the same reservation read
 // lookup `git commit --only` uses — or the guard auto-reserves the free path for the seat itself and admits the write.
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
@@ -36,101 +37,31 @@ const peer = fleetRepo("peer", true);
 const owned = join(repo, "var", "agent-tmp", "own.1");
 writeScratchOwner(owned, { pid: process.pid, label: "own", repo, created: new Date().toISOString() });
 
-// Test seam for the Agent Mail CLI only: the guard's real spawn, attestation and hold parsing run unchanged.
+// Test seam for the Board only: the guard's real child spawn, attested read and hold parsing run unchanged against a
+// fake Board that logs every request (tests/fleet-guard/board-fixture.ts).
 const fixtureBin = join(scratch, "bin");
 mkdirSync(fixtureBin, { recursive: true });
-writeFileSync(join(fixtureBin, "am"), "#!" + process.execPath + "\n" + [
-"import { appendFileSync, existsSync, readFileSync } from 'node:fs';",
-"const calls = process.env.AM_FIXTURE_CALLS || '';",
-"const journalPath = process.env.AM_FIXTURE_JOURNAL || '';",
-"const args = process.argv.slice(2);",
-"if (calls !== '') appendFileSync(calls, args.join(' ') + '\\n');",
-"if (process.env.AM_FIXTURE_MODE === 'fail') { console.error('connection refused'); process.exit(1); }",
-"function flag(name) { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; }",
-"function journaled(base) {",
-"  let response;",
-"  try { response = JSON.parse(base); } catch (e) { return base; }",
-"  if (journalPath === '' || !existsSync(journalPath)) return JSON.stringify(response);",
-"  const project = flag('--project') || '';",
-"  const agent = flag('--agent') || '';",
-"  const mine = Array.isArray(response.my_reservations) ? response.my_reservations.slice() : [];",
-"  const all = Array.isArray(response.all_active) ? response.all_active.slice() : [];",
-"  const lines = readFileSync(journalPath, 'utf8').split('\\n');",
-"  for (const line of lines) {",
-"    const parts = line.split('|');",
-"    if (parts.length < 3 || parts[0] === '' || parts[0] !== project) continue;",
-"    const row = { agent: parts[1], path: parts[2], exclusive: true, remaining_seconds: 3600 };",
-"    if (parts[1] === agent) mine.push(row);",
-"    all.push(row);",
-"  }",
-"  response.my_reservations = mine;",
-"  response.all_active = all;",
-"  return JSON.stringify(response);",
-"}",
-"if (args[0] === 'file_reservations' && args[1] === 'reserve') {",
-"  const agent = args[3] || '';",
-"  const missing = process.env.AM_FIXTURE_AGENT_MISSING || '';",
-"  if (missing !== '' && agent === missing) { console.error('error: invalid argument: agent not found: ' + agent); process.exit(1); }",
-"  const paths = []; let reason = ''; let exclusive = true;",
-"  for (let i = 4; i < args.length; i++) {",
-"    const a = args[i] || '';",
-"    if (a === '--ttl') { i++; continue; }",
-"    if (a === '--reason') { reason = args[i + 1] || ''; i++; continue; }",
-"    if (a === '--shared') { exclusive = false; continue; }",
-"    if (a.indexOf('--') === 0) continue;",
-"    paths.push(a);",
-"  }",
-"  if (journalPath !== '') for (const p of paths) appendFileSync(journalPath, (args[2] || '') + '|' + agent + '|' + p + '\\n');",
-"  const granted = paths.map((p, n) => ({ id: n + 1, path_pattern: p, exclusive, reason, expires_ts: '2030-01-01T00:00:00.000Z' }));",
-"  process.stdout.write(JSON.stringify({ granted, conflicts: [] }));",
-"  process.exit(0);",
-"}",
-"const agent = flag('--agent') || '';",
-"const missing = process.env.AM_FIXTURE_AGENT_MISSING || '';",
-"if (missing !== '' && agent === missing) { console.error('error: invalid argument: agent not found: ' + agent); process.exit(1); }",
-"const perAgent = process.env.AM_FIXTURE_AGENT || '';",
-"if (perAgent !== '' && agent === perAgent) { process.stdout.write(journaled(process.env.AM_FIXTURE_AGENT_RESPONSE || '')); process.exit(0); }",
-"const onlyProject = process.env.AM_FIXTURE_PROJECT || '';",
-"const project = flag('--project') || '';",
-"if (onlyProject !== '' && project !== onlyProject) { process.stdout.write(journaled(process.env.AM_FIXTURE_OTHER_RESPONSE || '')); process.exit(0); }",
-"process.stdout.write(journaled(process.env.AM_FIXTURE_RESPONSE || ''));",
-].join('\n') + '\n');
-chmodSync(join(fixtureBin, "am"), 0o755);
+await startBoard(scratch);
 // The reserve reason reads the seat's held bead from the target tracker; the stub answers no bead (and never
 // hangs), so shared assertions stay reason-agnostic while the reason itself is pinned in src/fleet-guard/write-own.test.ts.
 writeFileSync(join(fixtureBin, "br"), "#!/bin/sh\nexit 1\n");
 chmodSync(join(fixtureBin, "br"), 0o755);
-const callLog = join(scratch, "am-calls.log");
-const journal = join(scratch, "am-journal.log");
 
-const attested = { state: "current", database_matches_server: true, storage_root_matches_server: true };
 const holds = (agent: string, ...paths: string[]) => ({
-	reservation_read_attestation: attested,
 	my_reservations: paths.map((path) => ({ agent, path, exclusive: true, remaining_seconds: 3600 })),
 });
 
 async function withAm<T>(response: unknown, mode: "ok" | "fail", agent: string | undefined, run: () => Promise<T>,
 	projectRoute?: { project: string; otherResponse: unknown }): Promise<T> {
-	const saved = { PATH: process.env.PATH, AGENT_NAME: process.env.AGENT_NAME, AM_FIXTURE_RESPONSE: process.env.AM_FIXTURE_RESPONSE,
-		AM_FIXTURE_MODE: process.env.AM_FIXTURE_MODE, AM_FIXTURE_CALLS: process.env.AM_FIXTURE_CALLS,
-		AM_FIXTURE_JOURNAL: process.env.AM_FIXTURE_JOURNAL,
-		AM_FIXTURE_PROJECT: process.env.AM_FIXTURE_PROJECT, AM_FIXTURE_OTHER_RESPONSE: process.env.AM_FIXTURE_OTHER_RESPONSE };
+	const saved = { PATH: process.env.PATH, AGENT_NAME: process.env.AGENT_NAME, BOARD_URL: process.env.BOARD_URL };
 	process.env.PATH = `${fixtureBin}:${saved.PATH ?? ""}`;
 	if (agent === undefined) delete process.env.AGENT_NAME;
 	else process.env.AGENT_NAME = agent;
-	process.env.AM_FIXTURE_RESPONSE = JSON.stringify(response);
-	process.env.AM_FIXTURE_MODE = mode;
-	process.env.AM_FIXTURE_CALLS = callLog;
-	process.env.AM_FIXTURE_JOURNAL = journal;
-	if (projectRoute === undefined) {
-		delete process.env.AM_FIXTURE_PROJECT;
-		delete process.env.AM_FIXTURE_OTHER_RESPONSE;
-	} else {
-		process.env.AM_FIXTURE_PROJECT = projectRoute.project;
-		process.env.AM_FIXTURE_OTHER_RESPONSE = JSON.stringify(projectRoute.otherResponse);
-	}
-	writeFileSync(callLog, "");
-	writeFileSync(journal, "");
+	const reply = response as Parameters<typeof rowsOf>[0];
+	scenario = projectRoute === undefined
+		? { rows: rowsOf(reply), down: mode === "fail" }
+		: { rows: rowsOf(projectRoute.otherResponse as Parameters<typeof rowsOf>[0]), route: { project: projectRoute.project, rows: rowsOf(reply) }, down: mode === "fail" };
+	await boardScenario(scenario);
 	try { return await run(); }
 	finally {
 		for (const [key, value] of Object.entries(saved)) {
@@ -139,7 +70,9 @@ async function withAm<T>(response: unknown, mode: "ok" | "fail", agent: string |
 		}
 	}
 }
-const lookups = (): string[] => readFileSync(callLog, "utf8").split("\n").filter(Boolean);
+/** Board request log in the forms the assertions read: `file_reservations reserve <project> <seat> <path> ...`. */
+const lookups = (): string[] => boardLog([repo, peer, stock]);
+let scenario: Parameters<typeof boardScenario>[0] = { rows: [] };
 
 // The later HTTP reservation layer (reservations.ts) is held neutral so every verdict is the write-ownership read's.
 const neutral = async () => ({ covered: true, conflicts: [] as readonly unknown[] });
@@ -243,13 +176,13 @@ describe("WRITEOWNCHILD1: a first write auto-reserves for the seat and is admitt
 		await withAm(holds("Holder", "README.md"), "ok", "Holder", async () => {
 			expect(await bashAt("echo x > README.md", peer, repo)).toBeUndefined();
 		}, { project: peer, otherResponse: holds("Holder") });
-		expect(lookups()).toContain(`robot reservations --project ${peer} --agent Holder --json`);
+		expect(lookups()).toContain(`robot reservations ${peer}`);
 	});
 
 	test("a write in another bash checkout reserves under that checkout and is admitted", async () => {
 		await withAm(holds("Holder", "README.md"), "ok", "Holder", async () => {
 			expect(await bashAt("echo x > README.md", peer, repo)).toBeUndefined();
-			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${peer} Holder README.md --exclusive --ttl 3600 --reason `))).toBe(true);
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${peer} Holder README.md --exclusive --ttl 3600 --reason `)), lookups().join("\n")).toBe(true);
 		}, { project: repo, otherResponse: holds("Holder") });
 	});
 
@@ -287,7 +220,7 @@ describe("WRITEOWNCHILD1: a first write auto-reserves for the seat and is admitt
 			}
 			expect(await write(join(owned, "note.txt"), "evidence notes\n")).toBeUndefined();
 			expect(await write("var/agent-tmp/own.1/raw.txt", "raw capture\n")).toBeUndefined();
-			expect(lookups(), "scratch and read-only calls consulted Agent Mail").toEqual([]);
+			expect(lookups(), "scratch and read-only calls consulted the Board").toEqual([]);
 		});
 	});
 
@@ -302,18 +235,13 @@ describe("WRITEOWNCHILD1: a first write auto-reserves for the seat and is admitt
 });
 
 describe("WRITEOWN1 AC2: a failed reservation lookup refuses with a named error, never admits", () => {
-	test("Agent Mail unreachable, unattested reads or a missing identity all refuse", async () => {
+	test("a Board that cannot be reached or a missing identity both refuse", async () => {
 		await withAm(holds("Holder", "scripts/x.py"), "fail", "Holder", async () => {
 			for (const result of [await write("scripts/x.py"), await bash("git add scripts/x.py"), await bash("echo x > scripts/x.py")]) {
 				expect(result?.block).toBe(true);
 				expect(result?.reason).toContain("WRITE_OWN_LOOKUP_UNAVAILABLE");
-				expect(result?.reason).toContain(`am robot reservations --project ${repo} --agent Holder --json`);
+				expect(result?.reason).toContain(`omp-kit reservations --project ${repo} --json`);
 			}
-			expect(lookups().length).toBeGreaterThan(0);
-		});
-		const stale = { ...holds("Holder", "scripts/x.py"), reservation_read_attestation: { ...attested, state: "stale" } };
-		await withAm(stale, "ok", "Holder", async () => {
-			expect((await write("scripts/x.py"))?.reason).toContain("WRITE_OWN_LOOKUP_UNAVAILABLE");
 		});
 		await withAm(holds("Holder", "scripts/x.py"), "ok", undefined, async () => {
 			const result = await write("scripts/x.py");
@@ -327,31 +255,26 @@ describe("WRITEOWN1 AC2: a failed reservation lookup refuses with a named error,
 describe("NATIVEPREGRADE1 (ompkit-1ra0d.41): a native child writes under its own hold or its seat's", () => {
 	const childWrite = (path: string, childAgentName: string) =>
 		handleToolCall({ toolName: "write", input: { path, content: "planted\n" }, cwd: repo }, { cwd: repo, lookupReservations: neutral, childAgentName });
+	/** The child's own holds join the Board's open holds, as another seat's reservations would. */
 	async function asChild<T>(childHolds: unknown, run: () => Promise<T>): Promise<T> {
-		process.env.AM_FIXTURE_AGENT = "ChildBuilder";
-		process.env.AM_FIXTURE_AGENT_RESPONSE = JSON.stringify(childHolds);
-		try { return await run(); } finally { delete process.env.AM_FIXTURE_AGENT; delete process.env.AM_FIXTURE_AGENT_RESPONSE; }
+		await boardScenario({ ...scenario, rows: [...scenario.rows, ...rowsOf(childHolds as Parameters<typeof rowsOf>[0])] });
+		return run();
 	}
 	test("the child's own exclusive hold admits its write; the seat's first write reserves for the seat", async () => {
 		await withAm(holds("Seat"), "ok", "Seat", () => asChild(holds("ChildBuilder", "scripts/x.py"), async () => {
 			expect(await childWrite("scripts/x.py", "ChildBuilder")).toBeUndefined();
-			// The seat itself writes under its own custody: the free path auto-reserves for the seat.
-			expect(await write("scripts/x.py")).toBeUndefined();
-			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Seat scripts/x.py --exclusive --ttl 3600 --reason `))).toBe(true);
+			// The child's hold is a live hold on the Board: the seat cannot write that path under its own name,
+			// but a free neighbour auto-reserves for the seat.
+			const seatOnChildPath = await write("scripts/x.py");
+			expect(seatOnChildPath?.block).toBe(true);
+			expect(seatOnChildPath?.reason).toContain("ChildBuilder");
+			expect(await write("scripts/other.py")).toBeUndefined();
+			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Seat scripts/other.py --exclusive --ttl 3600 --reason `))).toBe(true);
 		}));
 	});
 	test("control: the seat's hold still covers its child (the parent reserves on the child's behalf)", async () => {
 		await withAm(holds("Seat", "scripts/x.py"), "ok", "Seat", () => asChild(holds("ChildBuilder"), async () => {
 			expect(await childWrite("scripts/x.py", "ChildBuilder")).toBeUndefined();
-		}));
-	});
-	test("a stale child lookup never refuses: the seat's fresh read governs and a free path auto-reserves", async () => {
-		const unattested = { ...holds("ChildBuilder"), reservation_read_attestation: { ...attested, state: "stale" } };
-		await withAm(holds("Seat", "scripts/x.py"), "ok", "Seat", () => asChild(unattested, async () => {
-			expect(await childWrite("scripts/x.py", "ChildBuilder")).toBeUndefined();
-			// The seat does not hold this path but the child read is only stale, so the free path reserves.
-			expect(await childWrite("README.md", "ChildBuilder")).toBeUndefined();
-			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Seat README.md --exclusive --ttl 3600 --reason `))).toBe(true);
 		}));
 	});
 	test("planted: a free path auto-reserves for the seat while another child's hold still refuses naming the holder", async () => {
@@ -360,20 +283,10 @@ describe("NATIVEPREGRADE1 (ompkit-1ra0d.41): a native child writes under its own
 			expect(await childWrite("scripts/x.py", "ChildBuilder")).toBeUndefined();
 			expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Seat scripts/x.py --exclusive --ttl 3600 --reason `))).toBe(true);
 			const held = await childWrite("scripts/other.py", "SomeOtherChild");
-			expect(held?.block).toBe(true);
+			expect(held?.block, lookups().join("\n")).toBe(true);
 			expect(held?.reason).toContain("WRITE_OWN_UNRESERVED");
 			expect(held?.reason).toContain("ChildBuilder");
 		}));
-	});
-	test("CHILDUNKNOWN1: a child Agent Mail does not know holds nothing, so a free write auto-reserves for the seat", async () => {
-		process.env.AM_FIXTURE_AGENT_MISSING = "WeeklyEditionGates";
-		try {
-			await withAm(holds("Seat", "scripts/x.py"), "ok", "Seat", async () => {
-				expect(await childWrite("scripts/x.py", "WeeklyEditionGates")).toBeUndefined();
-				expect(await childWrite("README.md", "WeeklyEditionGates")).toBeUndefined();
-				expect(lookups().some((line) => line.startsWith(`file_reservations reserve ${repo} Seat README.md --exclusive --ttl 3600 --reason `))).toBe(true);
-			});
-		} finally { delete process.env.AM_FIXTURE_AGENT_MISSING; }
 	});
 });
 
@@ -391,7 +304,7 @@ describe("CFSFALSEREF1 (ompkit-1ra0d.75): fixture repos in scratch and omp inter
 		expect(inited.rc, new TextDecoder().decode(inited.stderr)).toBe(0);
 		await withAm(holds("Intruder"), "fail", "Intruder", async () => {
 			expect(await write(join(fx, "src", "note.txt"), "fixture notes\n")).toBeUndefined();
-			expect(lookups(), "fixture-repo write consulted Agent Mail").toEqual([]);
+			expect(lookups(), "fixture-repo write consulted the Board").toEqual([]);
 		});
 		// Control: a write in the canonical checkout outside var/agent-tmp auto-reserves instead.
 		await withAm(holds("Intruder"), "ok", "Intruder", async () => {
@@ -403,7 +316,7 @@ describe("CFSFALSEREF1 (ompkit-1ra0d.75): fixture repos in scratch and omp inter
 		await withAm(holds("Intruder"), "fail", "Intruder", async () => {
 			expect(await write("out://report.md", "report\n")).toBeUndefined();
 			expect(await write("cfg://ns/key", "value\n")).toBeUndefined();
-			expect(lookups(), "internal-URL writes consulted Agent Mail").toEqual([]);
+			expect(lookups(), "internal-URL writes consulted the Board").toEqual([]);
 		});
 		// Control: a plain relative path is still a filesystem write, so it auto-reserves too.
 		await withAm(holds("Intruder"), "ok", "Intruder", async () => {

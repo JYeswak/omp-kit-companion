@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runReservation } from "./board-reservations-cli.ts";
 import { preflightBead, preflightCommit } from "./preflight.ts";
 import { sliceVerify } from "./slice-verify.ts";
 import { liveReadback, liveReadbackAll, verifyBead, verifyProject } from "./verify.ts";
@@ -163,7 +164,6 @@ export function registerCommandHandler(path: string, handler: CommandHandler): v
 
 /** oq1h.6: grammar paths whose handler shells out to a native binary, with the binaries probed on PATH. Drain verbs read a beads tracker and emit br reclaim commands, so they gate on the tracker CLI. */
 const TOOL_GATED_COMMANDS: Record<string, readonly string[]> = {
-	"land": ["am"],
 	"save": ["am"],
 	"send": ["ntm", "tmux"],
 	"rch lease": ["rch"],
@@ -5610,6 +5610,21 @@ registerCommandHandler("fleet-lessons", request => {
 		verification: "PERFORMED",
 	};
 });
+
+for (const verb of ["reserve", "release", "reservations"] as const) {
+	registerCommandHandler(verb, async request => {
+		const project = request.flags.get("--project");
+		const reason = request.flags.get("--reason");
+		const ttl = request.flags.get("--ttl");
+		const outcome = await runReservation({
+			verb, globs: (request.argument ?? "").split(/\s+/).filter(Boolean),
+			...(typeof project === "string" ? { project } : {}), ...(typeof reason === "string" ? { reason } : {}),
+			...(typeof ttl === "string" && Number.isFinite(Number(ttl)) ? { ttl: Number(ttl) } : {}),
+			checkStaged: request.flags.has("--check-staged"),
+		});
+		return { code: outcome.code, data: outcome.data, ...(outcome.error ? { errors: [outcome.error] } : {}), verification: outcome.code === 0 ? "PERFORMED" : "UNVERIFIED" };
+	});
+}
 
 registerCommandHandler("mine", async request => {
 	const root = kitIdentity().release.root;

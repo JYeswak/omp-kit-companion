@@ -100,6 +100,8 @@ F=$(new_repo checkfresh)
 mkdir -p "$F/.git/hooks/hooks.d/pre-push"
 printf 'dummy\n' > "$F/.git/hooks/hooks.d/pre-push/00-dummy"
 cp "$SCRIPTS/pre-push-gate.sh" "$F/.git/hooks/hooks.d/pre-push/40-omp-kit-fresh-gate"
+mkdir -p "$F/.git/hooks/hooks.d/pre-commit"
+cp "$SCRIPTS/check-staged-board-reservations.sh" "$F/.git/hooks/hooks.d/pre-commit/50-omp-kit-board-reservations"
 F_BEFORE=$(snapshot "$F")
 if sh "$SCRIPTS/install-pre-push-gate.sh" --check "$F" >"$TMP/check-fresh.log" 2>&1; then rc=0; else rc=$?; fi
 ok "$rc" "0" "check-fresh-rc"
@@ -120,6 +122,23 @@ ok "$(snapshot "$F")" "$F_STALE_BEFORE" "check-stale-writes-nothing"
 # so the target really is a non-repo.
 if GIT_CEILING_DIRECTORIES="$TMP" sh "$SCRIPTS/install-pre-push-gate.sh" --check "$TMP/norepo" >"$TMP/check-norepo.log" 2>&1; then rc=0; else rc=$?; fi
 ok "$rc" "2" "check-norepo-rc"
+
+# 8. BOARDHOOK1 (ompkit-tnqyr.3): install puts 50-omp-kit-board-reservations in pre-commit, never runs `am`, and moves
+# the Agent Mail plugins (and the storage-root bootstrap that served them) into var/agent-tmp/hook-backups. The fixture
+# is a disposable kit copy (the installer resolves its own checkout as ROOT) with a PATH `am` that records any call.
+K=$(new_repo bk)
+mkdir -p "$K/scripts" "$K/.git/hooks/hooks.d/pre-commit" "$K/.git/hooks/hooks.d/pre-push" "$TMP/bin"
+cp "$SCRIPTS/install-pre-push-gate.sh" "$SCRIPTS/pre-push-gate.sh" "$SCRIPTS/check-staged-board-reservations.sh" "$K/scripts/"
+for hook in pre-commit pre-push; do printf '#!/bin/sh\n# hooks.d %s\nexit 0\n' "$hook" > "$K/.git/hooks/$hook"; chmod +x "$K/.git/hooks/$hook"; done
+for old in pre-commit/50-agent-mail.py pre-push/50-agent-mail.py pre-commit/10-omp-kit-storage-root; do printf 'old\n' > "$K/.git/hooks/hooks.d/$old"; done
+printf '#!/bin/sh\nprintf called >> "%s/am-called"\nexit 0\n' "$TMP" > "$TMP/bin/am"; chmod +x "$TMP/bin/am"
+if PATH="$TMP/bin:$PATH" sh "$K/scripts/install-pre-push-gate.sh" >"$TMP/boardhook.log" 2>&1; then rc=0; else rc=$?; fi
+ok "$rc" "0" "boardhook-install-rc"
+ok "$([ -f "$K/.git/hooks/hooks.d/pre-commit/50-omp-kit-board-reservations" ] && echo yes || echo no)" "yes" "boardhook-member-installed"
+ok "$([ -e "$K/.git/hooks/hooks.d/pre-commit/50-agent-mail.py" ] && echo present || echo absent)" "absent" "boardhook-no-agent-mail-precommit"
+ok "$([ -e "$K/.git/hooks/hooks.d/pre-push/50-agent-mail.py" ] && echo present || echo absent)" "absent" "boardhook-no-agent-mail-prepush"
+ok "$(find "$K/var/agent-tmp/hook-backups" -type f | wc -l | tr -d ' ')" "3" "boardhook-old-members-backed-up-not-deleted"
+ok "$([ -e "$TMP/am-called" ] && echo called || echo never)" "never" "boardhook-installer-never-runs-am"
 
 printf 'install-flags: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

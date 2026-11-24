@@ -124,21 +124,6 @@ test("shared-main landing preserves peer staged and worktree bytes", () => {
 	const commitBlob = git(work, ["ls-tree", commit, "--", "owned.txt"]).trim().split("\t")[0].split(" ")[2];
 	expect(git(work, ["ls-files", "-s", "--", "owned.txt"]).trim().split("\t")[0].split(" ")[1]).toBe(commitBlob);
 }, OWNER_CASE_TIMEOUT_MS);
-test("refuses an unregistered pane identity without mutation", () => {
-	const { work, fakeBin } = fixture();
-	writeFileSync(join(work, "owned.txt"), "unpublished change\n");
-	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
-	const head = git(work, ["rev-parse", "HEAD"]).trim();
-	const remote = git(work, ["ls-remote", "--refs", "origin", "refs/heads/main"]).trim();
-	const index = readFileSync(join(work, ".git", "index"));
-	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin, reservationMode: "unregistered" });
-	expect(run.status).not.toBe(0);
-	expect(responseCode(run.body)).toBe("OWNER_UNKNOWN");
-	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
-	expect(git(work, ["ls-remote", "--refs", "origin", "refs/heads/main"]).trim()).toBe(remote);
-	expect(readFileSync(join(work, ".git", "index"))).toEqual(index);
-	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("unpublished change\n");
-});
 test("lands for a registered Tern caller through the tern key", () => {
 	const { work, fakeBin } = fixture();
 	writeFileSync(join(work, "owned.txt"), "tern owner change\n");
@@ -155,36 +140,6 @@ test("lands for a registered Tern caller through the tern key", () => {
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(commit);
 	expect(remoteHead(work)).toBe(commit);
 }, OWNER_CASE_TIMEOUT_MS);
-test("refuses an unregistered Tern pane without mutation", () => {
-	const { work, fakeBin } = fixture();
-	writeFileSync(join(work, "owned.txt"), "unpublished change\n");
-	const hold = [{ agent: "TernAgent", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
-	const head = git(work, ["rev-parse", "HEAD"]).trim();
-	const remote = git(work, ["ls-remote", "--refs", "origin", "refs/heads/main"]).trim();
-	const index = readFileSync(join(work, ".git", "index"));
-	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin, tmuxPane: null, ternPane: "9999999999999", ternAgent: "TernAgent", claimed: "TernAgent", reservationMode: "unregistered" });
-	expect(run.status).not.toBe(0);
-	expect(responseCode(run.body)).toBe("OWNER_UNKNOWN");
-	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
-	expect(git(work, ["ls-remote", "--refs", "origin", "refs/heads/main"]).trim()).toBe(remote);
-	expect(readFileSync(join(work, ".git", "index"))).toEqual(index);
-	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("unpublished change\n");
-});
-test("refuses a Tern caller whose claim does not match without mutation", () => {
-	const { work, fakeBin } = fixture();
-	writeFileSync(join(work, "owned.txt"), "unpublished change\n");
-	const hold = [{ agent: "TernAgent", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
-	const head = git(work, ["rev-parse", "HEAD"]).trim();
-	const remote = git(work, ["ls-remote", "--refs", "origin", "refs/heads/main"]).trim();
-	const index = readFileSync(join(work, ".git", "index"));
-	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin, tmuxPane: null, ternPane: "1756641624115", ternAgent: "TernAgent", claimed: "OtherAgent" });
-	expect(run.status).not.toBe(0);
-	expect(responseCode(run.body)).toBe("OWNER_MISMATCH");
-	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(head);
-	expect(git(work, ["ls-remote", "--refs", "origin", "refs/heads/main"]).trim()).toBe(remote);
-	expect(readFileSync(join(work, ".git", "index"))).toEqual(index);
-	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("unpublished change\n");
-});
 test("refuses an absent or malformed Tern pane key without mutation", () => {
 	const hold = [{ agent: "TernAgent", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 	for (const ternPane of [undefined, "", "12ab", "tern:1756641624115"]) {
@@ -215,7 +170,8 @@ test("keeps tmux precedence when both pane keys are present", () => {
 	const head = git(second.work, ["rev-parse", "HEAD"]).trim();
 	const mismatch = command(second.work, landArgs("owned.txt"), hold, { amDir: second.fakeBin, ternPane: "1756641624115", ternAgent: "OtherAgent", claimed: "OtherAgent" });
 	expect(mismatch.status).not.toBe(0);
-	expect(responseCode(mismatch.body)).toBe("OWNER_MISMATCH");
+	// The seat is AGENT_NAME; DarkFern holds the path, so the other seat is refused by the Board holder check.
+	expect(responseCode(mismatch.body)).toBe("RESERVATION_HELD_BY_OTHER");
 	expect(git(second.work, ["rev-parse", "HEAD"]).trim()).toBe(head);
 });
 test("lands through the registered Herdr pane key and canonical project identity", () => {

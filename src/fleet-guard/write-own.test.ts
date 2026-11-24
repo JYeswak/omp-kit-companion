@@ -3,11 +3,12 @@ import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync
 import { join } from "node:path";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
 import { run } from "../kitlib/run.ts";
+import { boardLog, boardRace, boardScenario, startBoard, type BoardRow } from "../../tests/fleet-guard/board-fixture.ts";
 import { ownedTmp } from "../kitlib/tmp.ts";
 
 // WRITEOWNCHILD1 (ompkit-1ra0d.126): a native task child writes under its parent seat's custody. The seat is
 // AGENT_NAME (never the child's spawn-minted name); a free path auto-reserves for the seat and admits; only a
-// foreign-held path refuses, naming the holder. `agent not found` is an answer (zero holds), not an outage.
+// foreign-held path refuses, naming the holder. A Board that cannot answer is an outage, never zero holds.
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
 const scratch = realpathSync(ownedTmp("fleet-guard-writeownchild", { root: scratchRoot }).path);
@@ -33,108 +34,30 @@ async function fleetRepo(name: string): Promise<string> {
 }
 const repo = await fleetRepo("repo");
 
-// Test seam for the Agent Mail CLI: the guard's real spawn, attestation and hold parsing run unchanged. Reserves
-// append `project|agent|path` journal rows, and `robot reservations` answers from the journal, so an auto-reserve
-// is visible to the next lookup the way the server would show it.
+// Test seam for the Board: the guard's real child spawn, attested read and hold parsing run unchanged against a fake
+// Board that seeds holds, journals auto-reserves so the next read sees them, and logs every request.
 const fixtureBin = join(scratch, "bin");
 mkdirSync(fixtureBin, { recursive: true });
-writeFileSync(join(fixtureBin, "am"), `#!/bin/sh
-printf '%s\\n' "$*" >> "$AM_FIXTURE_CALLS"
-if [ "$AM_FIXTURE_MODE" = "fail" ]; then echo 'connection refused' >&2; exit 1; fi
-if [ "$1" = "file_reservations" ] && [ "$2" = "reserve" ]; then
-  root="$3"; agent="$4"
-  if [ -n "$AM_FIXTURE_AGENT_MISSING" ] && [ "$agent" = "$AM_FIXTURE_AGENT_MISSING" ]; then
-    echo "error: invalid argument: agent not found: $agent" >&2; exit 1
-  fi
-  shift 4
-  paths=""; reason=""; exclusive="true"; skip=""; want=""
-  for p in "$@"; do
-    if [ -n "$skip" ]; then skip=""; continue; fi
-    case "$p" in
-      --ttl) skip="1"; continue;;
-      --reason) want="1"; continue;;
-      --*) continue;;
-      *) if [ -n "$want" ]; then reason="$p"; want=""; continue; fi
-        paths="$paths $p";;
-    esac
-  done
-  if [ "$AM_FIXTURE_RESERVE_MODE" = "conflict" ]; then
-    out='{"granted":[],"conflicts":['; first=1
-    for q in $paths; do
-      if [ "$first" = 1 ]; then first=0; else out="$out,"; fi
-      out="$out$(printf '{"holder":"%s","path_pattern":"%s","exclusive":true}' "\${AM_FIXTURE_RACE_HOLDER:-Other}" "$q")"
-    done
-    printf '%s]}\n' "$out"; exit 0
-  fi
-  if [ "$AM_FIXTURE_RESERVE_MODE" = "short" ]; then
-    echo '{"granted":[],"conflicts":[]}'; exit 0
-  fi
-  winner="$agent"
-  if [ "$AM_FIXTURE_RESERVE_MODE" = "race" ]; then winner="\${AM_FIXTURE_RACE_HOLDER:-Other}"; fi
-  out='{"granted":['; first=1; n=0
-  for q in $paths; do
-    n=$((n + 1))
-    out="$out$(printf '{"id":%d,"path_pattern":"%s","exclusive":%s,"reason":"%s","expires_ts":"2030-01-01T00:00:00.000Z"}' "$n" "$q" "$exclusive" "$reason")"
-    printf '%s|%s|%s\n' "$root" "$winner" "$q" >> "$AM_FIXTURE_JOURNAL"
-  done
-  printf '%s],"conflicts":[]}\n' "$out"; exit 0
-fi
-root=""; agent=""; prev=""
-for a in "$@"; do
-  if [ "$prev" = "--project" ]; then root="$a"; fi
-  if [ "$prev" = "--agent" ]; then agent="$a"; fi
-  prev="$a"
-done
-if [ -n "$AM_FIXTURE_AGENT_MISSING" ] && [ "$agent" = "$AM_FIXTURE_AGENT_MISSING" ]; then
-  echo "error: invalid argument: agent not found: $agent" >&2; exit 1
-fi
-mine_rows=""; all_rows=""
-if [ -f "$AM_FIXTURE_JOURNAL" ]; then
-  while IFS='|' read -r p a path; do
-    case "$p" in ""|\\#*) continue;; esac
-    if [ "$p" = "$root" ]; then
-      cell=$(printf '{"agent":"%s","path":"%s","exclusive":true,"remaining_seconds":3600}' "$a" "$path")
-      if [ -z "$all_rows" ]; then all_rows="$cell"; else all_rows="$all_rows,$cell"; fi
-      if [ "$a" = "$agent" ]; then
-        if [ -z "$mine_rows" ]; then mine_rows="$cell"; else mine_rows="$mine_rows,$cell"; fi
-      fi
-    fi
-  done < "$AM_FIXTURE_JOURNAL"
-fi
-printf '{"reservation_read_attestation":{"state":"current","database_matches_server":true,"storage_root_matches_server":true},"my_reservations":[%s],"all_active":[%s]}' "$mine_rows" "$all_rows"
-`);
+await startBoard(scratch);
 writeFileSync(join(fixtureBin, "br"), `#!/bin/sh
 if [ -n "$BR_FIXTURE_BEAD" ]; then printf '[{"id":"%s","status":"in_progress","assignee":"%s"}]' "$BR_FIXTURE_BEAD" "$BR_FIXTURE_ASSIGNEE"; else exit 1; fi
 `);
-chmodSync(join(fixtureBin, "am"), 0o755);
 chmodSync(join(fixtureBin, "br"), 0o755);
-const callLog = join(scratch, "am-calls.log");
-const journal = join(scratch, "holds.log");
 
-async function withAm<T>(options: { seed?: string[]; mode?: "ok" | "fail"; agent?: string; missing?: string; bead?: string; assignee?: string; reserveMode?: string; raceHolder?: string }, runFn: () => Promise<T>): Promise<T> {
-	const saved = { PATH: process.env.PATH, AGENT_NAME: process.env.AGENT_NAME, AM_FIXTURE_MODE: process.env.AM_FIXTURE_MODE,
-		AM_FIXTURE_CALLS: process.env.AM_FIXTURE_CALLS, AM_FIXTURE_JOURNAL: process.env.AM_FIXTURE_JOURNAL,
-		AM_FIXTURE_AGENT_MISSING: process.env.AM_FIXTURE_AGENT_MISSING, BR_FIXTURE_BEAD: process.env.BR_FIXTURE_BEAD,
-		BR_FIXTURE_ASSIGNEE: process.env.BR_FIXTURE_ASSIGNEE, AM_FIXTURE_RESERVE_MODE: process.env.AM_FIXTURE_RESERVE_MODE,
-		AM_FIXTURE_RACE_HOLDER: process.env.AM_FIXTURE_RACE_HOLDER };
+async function withAm<T>(options: { seed?: string[]; mode?: "ok" | "fail"; agent?: string; bead?: string; assignee?: string; raceHolder?: string }, runFn: () => Promise<T>): Promise<T> {
+	const saved = { PATH: process.env.PATH, AGENT_NAME: process.env.AGENT_NAME, BR_FIXTURE_BEAD: process.env.BR_FIXTURE_BEAD,
+		BR_FIXTURE_ASSIGNEE: process.env.BR_FIXTURE_ASSIGNEE, BOARD_URL: process.env.BOARD_URL };
 	process.env.PATH = `${fixtureBin}:${saved.PATH ?? ""}`;
 	if (options.agent === undefined) delete process.env.AGENT_NAME;
 	else process.env.AGENT_NAME = options.agent;
-	process.env.AM_FIXTURE_MODE = options.mode ?? "ok";
-	process.env.AM_FIXTURE_CALLS = callLog;
-	process.env.AM_FIXTURE_JOURNAL = journal;
-	if (options.missing === undefined) delete process.env.AM_FIXTURE_AGENT_MISSING;
-	else process.env.AM_FIXTURE_AGENT_MISSING = options.missing;
 	if (options.bead === undefined) delete process.env.BR_FIXTURE_BEAD;
 	else process.env.BR_FIXTURE_BEAD = options.bead;
 	if (options.assignee === undefined) delete process.env.BR_FIXTURE_ASSIGNEE;
 	else process.env.BR_FIXTURE_ASSIGNEE = options.assignee;
-	if (options.reserveMode === undefined) delete process.env.AM_FIXTURE_RESERVE_MODE;
-	else process.env.AM_FIXTURE_RESERVE_MODE = options.reserveMode;
-	if (options.raceHolder === undefined) delete process.env.AM_FIXTURE_RACE_HOLDER;
-	else process.env.AM_FIXTURE_RACE_HOLDER = options.raceHolder;
-	writeFileSync(callLog, "");
-	writeFileSync(journal, (options.seed ?? []).join("\n") + (options.seed?.length ? "\n" : ""));
+	// A seed row is `project|agent|path`; every row here lives in the one fixture project.
+	const rows: BoardRow[] = (options.seed ?? []).map((row) => { const [, agent, path] = row.split("|"); return { agent: agent!, path: path! }; });
+	await boardScenario({ rows, down: options.mode === "fail" });
+	if (options.raceHolder !== undefined) await boardRace(options.raceHolder);
 	try { return await runFn(); }
 	finally {
 		for (const [key, value] of Object.entries(saved)) {
@@ -155,8 +78,7 @@ interface CallContext {
 function caller(childAgentName: string | undefined, warns: string[]): CallContext {
 	return { cwd: repo, lookupReservations: neutral, ...(childAgentName === undefined ? {} : { childAgentName }), warn: (message: string) => { warns.push(message); } };
 }
-const reserves = (): string[] => readFileSync(callLog, "utf8").split("\n").filter(Boolean)
-	.filter((line) => line.startsWith("file_reservations reserve "));
+const reserves = (): string[] => boardLog([repo]).filter((line) => line.startsWith("file_reservations reserve "));
 const write = (path: string, context: CallContext) =>
 	handleToolCall({ toolName: "write", input: { path, content: "planted\n" }, cwd: repo }, context);
 test("WRITEOWNCHILD1: a task child's write to a path its parent seat reserved is admitted under the seat", async () => {
@@ -165,10 +87,7 @@ test("WRITEOWNCHILD1: a task child's write to a path its parent seat reserved is
 		expect(await write("scripts/x.py", caller("ChildA", warns))).toBeUndefined();
 		expect(await write("scripts/x.py", caller(undefined, warns))).toBeUndefined();
 		expect(warns, "seat-covered writes reserve nothing and say nothing").toEqual([]);
-		const agents = readFileSync(callLog, "utf8").split("\n").filter(Boolean)
-			.filter((line) => line.startsWith("robot reservations ")).map((line) => /--agent (\S+)/.exec(line)?.[1]);
-		expect(agents).toContain("Seat");
-		expect(agents, "the primary lookup never uses the child's own name").not.toContain("ChildA");
+		expect(boardLog([repo]).filter((line) => line.startsWith("robot reservations ")).length, "the seat read the Board").toBeGreaterThan(0);
 	});
 	expect(readFileSync(join(repo, "scripts", "x.py"), "utf8")).toBe("print('canonical')\n");
 });
@@ -244,22 +163,13 @@ test("WRITEOWNCHILD1-auto: a second seat's write to an auto-reserved path is ref
 	});
 });
 
-test("WRITEOWNCHILD1: an Agent Mail outage refuses as an outage, while agent-not-found reads as no holds", async () => {
+test("WRITEOWNCHILD1: a Board outage refuses as an outage", async () => {
 	const warns: string[] = [];
 	await withAm({ agent: "Seat", mode: "fail" }, async () => {
 		const result = await write("scripts/free.py", caller("ChildA", warns));
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toContain("WRITE_OWN_LOOKUP_UNAVAILABLE");
-		expect(result?.reason).toContain("connection refused");
-	});
-	await withAm({ agent: "Seat", missing: "Seat" }, async () => {
-		// The seat itself is unknown to Agent Mail: that is zero holds, so the guard tries the seat's own
-		// reserve, which fails with the real cause instead of a lookup outage.
-		const result = await write("scripts/free.py", caller("ChildA", warns));
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");
-		expect(result?.reason).not.toContain("LOOKUP_UNAVAILABLE");
-		expect(result?.reason).toContain("agent not found: Seat");
+		expect(result?.reason).toContain("the Board could not be read");
 	});
 });
 
@@ -287,34 +197,9 @@ test("WRITEOWNCHILD1: a foreign hold wins over child cover and names the holder"
 	});
 });
 
-test("WRITEOWNCHILD1-auto: a reserve that reports a conflict is refused", async () => {
+test("WRITEOWNCHILD1-auto: a reserve that loses the race on the Board is refused naming the winner", async () => {
 	const warns: string[] = [];
-	await withAm({ agent: "Seat", reserveMode: "conflict" }, async () => {
-		const result = await write("scripts/free.py", caller("ChildA", warns));
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");
-		expect(result?.reason).toContain("conflict");
-		expect(result?.reason).toContain("Other");
-		expect(reserves(), "the refused write attempted exactly one reserve").toHaveLength(1);
-		expect(warns).toEqual([]);
-	});
-});
-
-test("WRITEOWNCHILD1-auto: a reserve that grants nothing is refused without admitting", async () => {
-	const warns: string[] = [];
-	await withAm({ agent: "Seat", reserveMode: "short" }, async () => {
-		const result = await write("scripts/free.py", caller("ChildA", warns));
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");
-		expect(result?.reason).toContain("did not take");
-		expect(reserves(), "the refused write attempted exactly one reserve").toHaveLength(1);
-		expect(warns).toEqual([]);
-	});
-});
-
-test("WRITEOWNCHILD1-auto: a reserve the re-read does not confirm is refused naming the winner", async () => {
-	const warns: string[] = [];
-	await withAm({ agent: "Seat", reserveMode: "race", raceHolder: "Other" }, async () => {
+	await withAm({ agent: "Seat", raceHolder: "Other" }, async () => {
 		const result = await write("scripts/free.py", caller("ChildA", warns));
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");

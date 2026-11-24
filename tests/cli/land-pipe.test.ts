@@ -4,7 +4,8 @@ import { expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fixtureDeadlineS } from "./fixture-process.ts";
-import { expectLandSchema, fixture, git, registerPushCheck, remoteHead, responseCode, scratch } from "./private-index-land.helpers.ts";
+import { expectLandSchema, fixture, git, landBoardEnv, landBoardUrl, registerPushCheck, remoteHead, responseCode, scratch, seedBoardHolds } from "./private-index-land.helpers.ts";
+import { boardChannel } from "../../src/fleet-guard/board-reservations.ts";
 import { landReviewAutoCommand, type LandReviewDeps } from "../../src/land.ts";
 import type { CliResult, ParsedCommand } from "../../src/cli.ts";
 setDefaultTimeout(Math.max(120000, Math.round(fixtureDeadlineS(90) * 1000)));
@@ -127,6 +128,7 @@ async function runReviewAuto(work: string, fakeBin: string, files: { holds: stri
 		FAKE_FOREIGN_FILE: files.foreign,
 		FAKE_MAIL_LOG: files.mail,
 		FAKE_RELEASE_LOG: files.release,
+		...landBoardEnv("landpipe"),
 	}, async () => {
 		result = await landReviewAutoCommand(repo, requestFor(message), deps);
 	});
@@ -267,7 +269,7 @@ test("LANDPIPE1 a foreign exclusive holder fails fast before any review", async 
 	registerPushCheck(work, "#!/bin/bash\nset -eu\nexit 0\n");
 	const files = filesFor();
 	writeLandpipeAm(fakeBin, files.holds, files.foreign, files.mail, files.release);
-	writeFileSync(files.foreign, JSON.stringify([{ agent: "OtherSeat", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }]));
+	seedBoardHolds(work, [{ agent: "OtherSeat", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }]);
 	const co = setupCheckout(work, "base owned\ncontested change\n");
 	const calls = { review: 0 };
 	const deps = depsFor(co, beadText("TEST-6", PASS_BOX), () => ({ ok: true, text: "VERDICT: LAND", summary: "independent test reviewer (rc 0, deadline 300s)" }), calls);
@@ -294,7 +296,11 @@ test("LANDPIPE1 a refused publication releases the reservation and routes to the
 	expect(result.code, JSON.stringify(result)).toBe(1);
 	expect(calls.review).toBe(1);
 	expect(remoteHead(work)).toBe(before);
-	expect(readFileSync(files.release, "utf8")).toContain("owned.txt");
+	// The seat reserved owned.txt on the Board and released (completed) it on the refused exit: nothing stays claimed.
+	const channel = boardChannel(realpathSync(work));
+	const listed = async (state: string): Promise<string> => (await (await fetch(`${landBoardUrl}/tasks?channel=${encodeURIComponent(channel)}&state=${state}`)).text());
+	expect(await listed("completed")).toContain("owned.txt");
+	expect(await listed("claimed")).not.toContain("owned.txt");
 	const findings = join(co, "land-review-TEST.md");
 	expect(existsSync(findings)).toBe(true);
 });
