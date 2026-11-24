@@ -294,17 +294,17 @@ def replayable_claim_refusal(bead: dict) -> list[str]:
     """REPLAYABLE1 claim gate (J-2026-10-29-22): one line per reason `omp-kit
     verify` would refuse this bead ACCEPTANCE_NOT_REPLAYABLE, [] when it can
     replay it. Old and new boxes alike count: claiming is where legacy beads
-    migrate."""
+    migrate. unsourced-expectation is create/update only (MINDS1-S1): claiming
+    an already-written literal prints box is not this gate's job."""
     row = box_verdicts([{"id": bead.get("id") or "<new>",
                          "acceptance": bead.get("acceptance_criteria") or "",
                          "baseline": None}])[0]
-    if row["replayable"]:
-        return []
     if row["boxes"] == 0:
         return ["no acceptance box verify can replay (a `- [ ] [<letter>] [<phase>]` "
                 "box other than [v]); corrected shape: - [ ] [a] [build] <what it proves> "
                 "`<one bounded command>` -> rc 0 (or: N pass 0 fail, prints <text>)"]
-    return [finding["detail"] for finding in row["refused"]]
+    refused = [f for f in row["refused"] if f.get("reason") != "unsourced-expectation"]
+    return [finding["detail"] for finding in refused]
 
 
 def replayable_report(beads: list[dict]) -> list[dict]:
@@ -1281,6 +1281,21 @@ def run_selftest() -> tuple[bool, dict]:
             fails.append(f"replayable: commandless create not refused naming box 1: {rp_plant}")
         if rp_control:
             fails.append(f"replayable: replayable create refused: {rp_control}")
+        bare = "- [ ] [a] [build] the verb prints PASS `true` -> prints \"PASS\"\n"
+        sourced = bare.rstrip("\n") + "; src src/verify.ts:269\n"
+        missed = bare.rstrip("\n") + "; src src/verify.ts:1\n"
+        plant_u, _ = replayable_findings(mkbead("rp-print", acc=bare), None)
+        hold_u, _ = replayable_findings(mkbead("rp-src", acc=sourced), None)
+        miss_u, _ = replayable_findings(mkbead("rp-miss", acc=missed), None)
+        claim_u = replayable_claim_refusal({"id": "rp-print", "acceptance_criteria": bare})
+        if not (plant_u and "unsourced-expectation" in plant_u[0]):
+            fails.append(f"MINDS1-S1: unsourced prints create not refused: {plant_u}")
+        if hold_u:
+            fails.append(f"MINDS1-S1: sourced prints create refused: {hold_u}")
+        if not (miss_u and "does not contain" in miss_u[0]):
+            fails.append(f"MINDS1-S1: wrong src line not refused: {miss_u}")
+        if any("unsourced-expectation" in line for line in claim_u):
+            fails.append(f"MINDS1-S1: claim gate refused an old unsourced box: {claim_u}")
         log["replayable_report"] = {"rows": rp_rows, "refused": rp_refused,
                                     "planted_create": rp_plant}
         elapsed_forms = [

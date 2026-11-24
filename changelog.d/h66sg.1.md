@@ -1,0 +1,1 @@
+- A new acceptance box that says the tool prints a specific text is refused unless it cites a source line that actually contains that text. Claiming an old bead is unchanged.

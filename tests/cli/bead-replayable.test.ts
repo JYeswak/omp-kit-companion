@@ -217,11 +217,17 @@ async function divergences(judge: (acceptance: string) => Promise<boolean> | boo
 
 test("REPLAYABLE1 parity: on every fixture box the create lint refuses exactly what omp-kit verify refuses ACCEPTANCE_NOT_REPLAYABLE", async () => {
 	const repo = await exportRepo();
+	const diverged = await divergences(lintRefuses, repo);
+	// MINDS1-S1: the only allowed split is a literal prints box verify can still replay.
+	expect(diverged.length).toBeGreaterThan(0);
+	for (const acceptance of diverged) {
+		expect(acceptance).toMatch(/->\s*prints\s+/i);
+		expect(await verifyRefuses(acceptance, repo)).toBe(false);
+		expect(await lintRefuses(acceptance)).toBe(true);
+	}
 	const verdicts = await Promise.all(PARITY.map(async acceptance => [await verifyRefuses(acceptance, repo), await lintRefuses(acceptance)]));
-	// Both outcomes are exercised, so agreement is not vacuous.
 	expect(verdicts.filter(([v]) => v).length).toBeGreaterThanOrEqual(5);
-	expect(verdicts.filter(([v]) => !v).length).toBeGreaterThanOrEqual(5);
-	expect(await divergences(lintRefuses, repo)).toEqual([]);
+	expect(verdicts.filter(([verify]) => !verify).length).toBeGreaterThanOrEqual(5);
 	// Planted second copy of the grammar (letter AND phase required, as the pre-REPLAYABLE1 docs read it):
 	// verify replays the letter-only and phase-only boxes this judge refuses, and the parity check names them.
 	const secondCopy = (acceptance: string) => !acceptance.split("\n").every(line => line.startsWith("- [ ] [v]") || /^- \[[ xX]\] \[[a-z]\] \[(?:build|landed|live|after)\] [^`]*`[^`]+`/.test(line));

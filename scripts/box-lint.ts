@@ -15,11 +15,16 @@
  * legacy bead is reported and never refused.
  * Exit 0 with the verdict; exit 2 on unreadable input.
  */
-import { parseBoxes, unreplayableReason, type Box, type UnreplayableReason } from "../src/verify.ts";
+import { readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+import { expectedOf, parseBoxes, unreplayableReason, type Box, type UnreplayableReason } from "../src/verify.ts";
 
 interface Item { id: string; acceptance: string; baseline: string | null }
-interface Finding { index: number; letter: string | null; phase: string | null; reason: UnreplayableReason; line: string; detail: string }
+type AdmissionReason = UnreplayableReason | "unsourced-expectation";
+interface Finding { index: number; letter: string | null; phase: string | null; reason: AdmissionReason; line: string; detail: string }
 
+const ROOT = join(import.meta.dir, "..");
+const SRC_CITE = /;\s*src\s+(\S+?):(\d+)\b/g;
 const PHASES = ["build", "landed", "live", "after"];
 /** A box's identity across a write: its tags and body, not its checked state or position. */
 const key = (box: Box) => JSON.stringify([box.letter, box.phase, box.body]);
@@ -42,6 +47,50 @@ function finding(box: Box, reason: UnreplayableReason): Finding {
 	return { index: box.index, letter: box.letter, phase: box.phase, reason, line: box.line, detail: `box ${box.index} ${JSON.stringify(box.line)} ${why}; corrected shape: ${correctedShape(box)}` };
 }
 
+function literalNeedle(expected: string): string | null {
+	const text = expected.trim();
+	if (/^prints\s+(?:a\s+)?(?:count|number)\b/i.test(text)) return null;
+	const matched = /^(?:prints|contains)\s+(.+)$/i.exec(text);
+	if (matched === null) return null;
+	return matched[1]!.replace(/^["'`]|["'`]$/g, "");
+}
+
+function commandEchoes(body: string, needle: string): boolean {
+	const span = /`([^`]*)`/.exec(body);
+	return span !== null && span[1]!.includes(needle) && /\b(?:echo|printf)\b/.test(span[1]!);
+}
+
+function lineHolds(rel: string, lineNo: number, needle: string): string | null {
+	if (rel === "" || isAbsolute(rel) || rel.split("/").includes("..")) return `src ${rel}:${lineNo} is not a repo-relative path`;
+	let text: string;
+	try {
+		const bytes = readFileSync(join(ROOT, rel));
+		if (bytes.length > 1_048_576) return `src ${rel}:${lineNo} is over 1 MiB`;
+		text = bytes.toString("utf8");
+	} catch {
+		return `src ${rel}:${lineNo} is not a readable file`;
+	}
+	const line = text.split("\n")[lineNo - 1];
+	return line !== undefined && line.includes(needle) ? null : `src ${rel}:${lineNo} does not contain ${JSON.stringify(needle)}`;
+}
+
+/** MINDS1-S1 (ompkit-h66sg.1): a new literal prints/contains box cites a source line that holds the text.
+ * verify's judge already stops at `;`, so the citation does not change replay. An unchanged box stays legacy.
+ * A command that echoes the needle needs no source file. */
+function unsourced(box: Box): Finding | null {
+	const needle = literalNeedle(expectedOf(box.body) ?? "");
+	if (needle === null || needle === "" || commandEchoes(box.body, needle)) return null;
+	const cites = [...box.body.matchAll(SRC_CITE)];
+	const why = cites.length === 0
+		? `literal ${JSON.stringify(needle)} needs ; src <path>:<line> whose line contains that text`
+		: cites.map(cite => lineHolds(cite[1]!, Number(cite[2]), needle)).find(reason => reason !== null) ?? null;
+	if (why === null) return null;
+	return {
+		index: box.index, letter: box.letter, phase: box.phase, reason: "unsourced-expectation", line: box.line,
+		detail: `box ${box.index} ${JSON.stringify(box.line)} unsourced-expectation: ${why}`,
+	};
+}
+
 export function judgeItem(item: Item) {
 	const boxes = parseBoxes(item.acceptance).filter(box => box.letter !== "v");
 	const before = new Set(item.baseline === null ? [] : parseBoxes(item.baseline).map(key));
@@ -49,8 +98,12 @@ export function judgeItem(item: Item) {
 	const legacy: Finding[] = [];
 	for (const box of boxes) {
 		const reason = unreplayableReason(box);
-		if (reason === null) continue;
-		(before.has(key(box)) ? legacy : refused).push(finding(box, reason));
+		if (reason !== null) {
+			(before.has(key(box)) ? legacy : refused).push(finding(box, reason));
+			continue;
+		}
+		const sourced = unsourced(box);
+		if (sourced !== null) (before.has(key(box)) ? legacy : refused).push(sourced);
 	}
 	const replayable = boxes.length > 0 && refused.length === 0 && legacy.length === 0;
 	return { id: item.id, boxes: boxes.length, replayable, refused, legacy };
