@@ -41,8 +41,29 @@ for phase in pre-commit pre-push; do
 	fi
 done
 
-RESOLVED_ROOT=$(sh "$ROOT/scripts/pre-commit-storage-root-gate.sh" --resolve-root) || exit $?
-git -C "$TARGET" config --local --replace-all omp-kit.agent-mail-storage-root "$RESOLVED_ROOT"
+# STORAGEROOTNFS1 (ompkit-1ra0d.250): record the installer-authenticated
+# archive binding (storage root, exact archive slug, canonical project root)
+# so every later commit verifies the bound archive with local string
+# comparison only and never resolves a foreign project key. The touch-free
+# lookup runs first; when this repository's registration is an alias spelling
+# the scan cannot corroborate, the operator-authorized full verification runs
+# instead (it names each key it resolves, so a stalled mount is visible to
+# the operator rather than a silent hang).
+BINDING=$(sh "$ROOT/scripts/pre-commit-storage-root-gate.sh" --resolve-binding) || BINDING=""
+if [ -z "$BINDING" ]; then
+	BINDING=$(sh "$ROOT/scripts/pre-commit-storage-root-gate.sh" --authorize-binding) || exit $?
+fi
+BINDING_ROOT=$(printf '%s\n' "$BINDING" | sed -n '1p')
+BINDING_SLUG=$(printf '%s\n' "$BINDING" | sed -n '2p')
+BINDING_CANONICAL=$(printf '%s\n' "$BINDING" | sed -n '3p')
+if [ -z "$BINDING_ROOT" ] || [ -z "$BINDING_SLUG" ] || [ -z "$BINDING_CANONICAL" ]; then
+	echo 'install-pre-commit-storage-root-gate: the archive binding lookup returned an incomplete binding' >&2
+	exit 2
+fi
+git -C "$TARGET" config --local --replace-all omp-kit.agent-mail-storage-root "$BINDING_ROOT"
+git -C "$TARGET" config --local --replace-all omp-kit.agent-mail-archive "$BINDING_SLUG"
+git -C "$TARGET" config --local --replace-all omp-kit.agent-mail-archive-canonical "$BINDING_CANONICAL"
+RESOLVED_ROOT=$BINDING_ROOT
 
 for phase in pre-commit pre-push; do
 	DEST="$HOOKS/hooks.d/$phase/10-omp-kit-storage-root"
@@ -126,3 +147,4 @@ done
 
 printf 'installed project-bound Agent Mail storage-root bootstraps for %s\n' "$TARGET"
 printf 'storage root: %s\n' "$RESOLVED_ROOT"
+printf 'archive binding: %s\n' "$BINDING_SLUG"
