@@ -1356,11 +1356,14 @@ function scratchResponder(mine: FlywheelExecResult, beads: Record<string, Flywhe
 	return call => call.command === "omp-kit" ? mine : brAnswers(call);
 }
 
+/** SELFREPLAYGATE1: an in_review move reads the bead first; a bead with no acceptance boxes needs no receipt. */
+const KIT1 = { "kit-1": bead("kit-1", "BlueFox") };
+
 const OWED = [{ dir: "/r/var/agent-tmp/probe.1", state: "unreleased", bin: "unbinned" }, { dir: "/r/var/agent-tmp/hold.2", state: "hold-expired", bin: "hold" }];
 
 test("SCRATCH_DISPOSAL_REFUSED: moving a bead to in_review with unreleased dirs proceeds with a notice naming each dir", async () => {
 	const project = freshDir(base, "proj-");
-	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(mineAnswer(OWED)) });
+	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(mineAnswer(OWED), KIT1) });
 	const result = await toolCall(h, project, "br update kit-1 --status in_review --actor BlueFox");
 	expect(result?.block).not.toBe(true);
 	expect(result?.additionalContext).toContain("SCRATCH_DISPOSAL_NOTICE");
@@ -1399,7 +1402,7 @@ test("SCRATCHSIBLING1: SCRATCH_OWED for background agent B asks omp-kit as B's o
 			return mineAnswer([{ dir: bDir, state: "unreleased", bin: "unbinned" }]);
 		if (call.command === "omp-kit")
 			return mineAnswer([{ dir: bDir, state: "unreleased", bin: "unbinned" }, { dir: aDir, state: "unreleased", bin: "unbinned" }]);
-		return brTable({})(call);
+		return brTable(KIT1)(call);
 	} });
 	const [result] = await h.emit("tool_call", { toolCallId: "c1", toolName: "bash", input: { command: "br update kit-1 --status in_review --actor BlueFox" } },
 		{ ...h.ctx(project), sessionManager: { getSessionId: () => B } }) as (FlywheelToolCallResult | undefined)[];
@@ -1425,7 +1428,7 @@ test("SCRATCH_OWED negatives: nothing owed, only the live session dir, or an unu
 		{ stdout: JSON.stringify({ ok: true, data: {} }), stderr: "", code: 0 },
 	];
 	for (const answer of unusable) {
-		const h = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(answer) });
+		const h = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(answer, KIT1) });
 		expect(await toolCall(h, project, "br update kit-1 --status in_review --actor BlueFox")).toBeUndefined();
 		expect(h.notices).toEqual([]);
 	}
@@ -1433,10 +1436,10 @@ test("SCRATCH_OWED negatives: nothing owed, only the live session dir, or an unu
 
 test("SCRATCH_DISPOSAL_REFUSED: a thrown exec never blocks (fail-open) and a long list proceeds with a counted notice", async () => {
 	const project = freshDir(base, "proj-");
-	const throwing = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: call => { if (call.command === "omp-kit") throw new Error("spawn failed"); return { stdout: "", code: 127 }; } });
+	const throwing = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: call => { if (call.command === "omp-kit") throw new Error("spawn failed"); return brTable(KIT1)(call); } });
 	expect(await toolCall(throwing, project, "br update kit-1 --status in_review --actor BlueFox")).toBeUndefined();
 	const many = Array.from({ length: 8 }, (_, index) => ({ dir: `/r/var/agent-tmp/d.${index}`, state: "unreleased", bin: "unbinned" }));
-	const long = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(mineAnswer(many)) });
+	const long = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(mineAnswer(many), KIT1) });
 	const result = await toolCall(long, project, "br update kit-1 --status in_review --actor BlueFox");
 	expect(result?.block).not.toBe(true);
 	expect(result?.additionalContext).toContain("SCRATCH_DISPOSAL_NOTICE");

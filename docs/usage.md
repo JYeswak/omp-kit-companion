@@ -45,6 +45,25 @@ no attempt, so it never counts as the non-author verification. Anyone but
 the assignee is refused `AUTHOR_REQUIRED`; it does not combine with
 `--dry-run` or `--live-readback`.
 
+It leaves one receipt per bead at `<kit state>/self-replay/BEAD.json`
+(bead, export sha, a sha256 of the parsed box letters, phases and bodies, actor,
+time, and per box its index, phase, command, verdict and output sha256), pass
+or fail (SELFREPLAYGATE1). It exits non-zero when the receipt cannot be
+written. Ticking boxes after the replay does not invalidate the receipt;
+editing a box does. The flywheel guard refuses
+`br update BEAD --status in_review` unless that receipt exists, is by the
+bead's assignee, matches the bead's current boxes, and every [build]/[landed]
+box is PASS; [live]/[after]/[v] boxes and beads with no boxes are exempt. It
+also refuses an id it cannot resolve or a missing id, a bead it cannot read
+(retry), an acceptance rewrite in the same call (edit acceptance, self-replay,
+then move), and a transition comment that names a commit other than the
+receipt's export: only the `DONE <repo>@<sha>` subject binds, and a DONE ref
+that is not a sha (`@HEAD`, a branch) is refused (name the exact sha you
+replayed); other hashes in the comment are ignored. The refusal names
+`omp-kit verify BEAD --export SHA --self-replay` with the receipt's own sha once
+one exists (and `--tracker REPO` when the tracker is not the current
+directory); the guard only reads the receipt and never runs a replay.
+
 Unjudged/incomplete attempts and missing, expired or pre-recorder history
 cannot count as judged PASS/FAIL. `counts` covers all scoped attempts;
 `first_attempts` is the separate first-result cohort. Storage retains bounded

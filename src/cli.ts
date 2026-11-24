@@ -5354,8 +5354,8 @@ registerCommandHandler("verify", async request => {
 	const recorder = actor ?? verifier?.parent ?? "";
 	if (verifier !== undefined && recorder === "") return refusal("NO_SEAT_IDENTITY", "no --actor, no AGENT_NAME and no verifiable parent seat", "Pass --verifier-label L --verifier-parent P --verifier-session S with a registered parent seat.");
 	const res = await verifyBead({ bead: request.argument, exportSha: exportSha.trim(), repo, trackerRepo, actor: recorder, family, lesson, dryRun, ...(selfReplay ? { selfReplay } : {}), ...(verifier === undefined ? {} : { verifier }) });
-	const code = res.code === "SELF_REPLAY" ? (res.ok ? 0 : 1) : res.code === "CLOSED" || res.code === "DRY_RUN" ? 0 : res.code === "REWORK" ? 1 : 2;
-	return { code, data: { overall: res.code, bead: res.bead, export: res.export, replays: res.replays, acts: res.acts, log: res.log, ...(res.child === undefined ? {} : { child: res.child }), ...(res.rollback === undefined ? {} : { rollback: res.rollback }) }, verification: res.code === "DRY_RUN" || res.replays.length === 0 ? "NOT_RUN" : "PERFORMED" };
+	const code = res.code === "SELF_REPLAY" ? (res.ok ? (res.receipt?.path === null ? 2 : 0) : 1) : res.code === "CLOSED" || res.code === "DRY_RUN" ? 0 : res.code === "REWORK" ? 1 : 2;
+	return { code, data: { overall: res.code, bead: res.bead, export: res.export, replays: res.replays, acts: res.acts, log: res.log, ...(res.receipt === undefined ? {} : { receipt: res.receipt }), ...(res.child === undefined ? {} : { child: res.child }), ...(res.rollback === undefined ? {} : { rollback: res.rollback }) }, verification: res.code === "DRY_RUN" || res.replays.length === 0 ? "NOT_RUN" : "PERFORMED" };
 });
 // SLICEVERIFY1 (ompkit-t7cn7.7): change-vs-export verdict for one overlay.
 registerCommandHandler("slice-verify", async request => {

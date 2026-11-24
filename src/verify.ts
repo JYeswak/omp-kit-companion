@@ -40,6 +40,7 @@ import { checkPublishedCommits, preflightBead } from "./preflight.ts";
 import { installReadonlyBr, resolveRealBr } from "./kitlib/readonly-br.ts";
 import { observeAuthorClaim, observeWorkingModel } from "./model-ledger.ts";
 import { beginVerifyAttempt, finalizeVerifyAttempt, resolveVerifyStateRoot } from "./verify-ledger.ts";
+import { SELF_REPLAY_RECEIPT_SCHEMA, acceptanceDigest, sha256Hex, writeReceipt } from "./self-replay-receipt.ts";
 import type { VerifyAttemptFinish, VerifyAttemptOutcome, VerifyAttemptRef, VerifyFinalEvidence } from "./verify-ledger.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import { executedShellCommands } from "./fleet-guard/git.ts";
@@ -191,6 +192,8 @@ export interface BoxReplay {
 	index: number; letter: string | null; command: string | null; expected: string | null;
 	rc: number | null; pass: boolean | null; detail: string;
 	output?: { path: string; bytes: number; complete: boolean };
+	/** SELFREPLAYGATE1: sha256 of the box's raw stdout followed by stderr; absent when the box did not run. */
+	outputSha256?: string;
 	execution?: {
 		eligible: boolean; attempted: boolean; reused: boolean; resultObserved: boolean; completed: boolean;
 		timedOut: boolean; killed: boolean; signal: number | null; truncated: boolean; totalTruncated: boolean;
@@ -208,6 +211,8 @@ export interface VerifyResult {
 	replays: BoxReplay[];
 	log: string;
 	acts: string[][];
+	/** SELFREPLAYGATE1: where the --self-replay receipt landed; path null (with the reason) when it could not be written. */
+	receipt?: { path: string | null; reason?: string };
 	/** FIRSTVERIFY1: attempt-ledger status; native verify result codes remain authoritative. */
 	verificationEvidence?: {
 		status: "FINALIZED" | "ALREADY_FINALIZED" | "UNAVAILABLE" | "CONFLICT" | "NOT_RECORDED";
@@ -888,6 +893,22 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	};
 	const finishAttempt = async (result: VerifyResult): Promise<VerifyResult> => {
 		cleanupScratch();
+		if (selfReplay && result.replays.length > 0) {
+			// SELFREPLAYGATE1: the receipt the flywheel guard reads at `br update --status in_review`; written pass or fail.
+			let path: string | null = null;
+			let failure = "";
+			try {
+				path = writeReceipt(env, {
+					schema: SELF_REPLAY_RECEIPT_SCHEMA, bead: input.bead, export: exportCommit ?? input.exportSha, acceptance_sha256: acceptanceDigest(boxes),
+					actor: input.actor, time: new Date().toISOString(),
+					boxes: result.replays.map(r => ({ index: r.index, phase: boxes.find(b => b.index === r.index)?.phase ?? null, command: r.command, verdict: r.pass === true ? "PASS" as const : r.pass === false ? "FAIL" as const : "PENDING" as const, output_sha256: r.outputSha256 ?? null })),
+				});
+			} catch (error) {
+				failure = ` (${error instanceof Error ? error.message : String(error)})`;
+			}
+			const reason = path === null ? `NOT WRITTEN${failure || " (no usable kit state dir)"}` : null;
+			result = { ...result, receipt: { path, ...(reason === null ? {} : { reason }) }, log: `${result.log}\nself-replay receipt: ${path ?? `${reason}; the guard will refuse in_review without it`}` };
+		}
 		if (attempt === null) {
 			if (!dry) return result;
 			const reason = "dry run did not allocate an actual verification attempt";
@@ -1097,7 +1118,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		if (reused) process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(named)} elapsed=${elapsedMs}ms verdict=${v.pass ? "PASS" : "FAIL"}\n`);
 		else process.stderr.write(`; completed_elapsed=${elapsedMs}ms final_verdict=${v.pass ? "PASS" : "FAIL"}\n`);
 		const excerpt = v.pass ? "" : childExcerpt(replay.rc, replay.timed_out, out);
-		replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: replay.rc, pass: v.pass, detail: v.detail + evidence + excerpt, execution, ...(output === undefined ? {} : { output }) });
+		replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: replay.rc, pass: v.pass, detail: v.detail + evidence + excerpt, execution, outputSha256: sha256Hex(Buffer.concat([replay.stdout, replay.stderr])), ...(output === undefined ? {} : { output }) });
 		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${named} -> ${v.detail}${evidence}${excerpt} (${elapsedMs} ms)${replay.timed_out ? " TIMEOUT" : ""}`);
 	}
 	cleanupScratch();

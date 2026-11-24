@@ -20,6 +20,7 @@ import { resolveCustodyScript } from "../src/custody.ts";
 import { classifyMineResult, budgetLedgerGate } from "../src/mine-cause.ts";
 import { briefHandbackRefusal, briefHasCommitPreflight, completeTaskBrief, isBuildBriefTask, isVerifyOnlyBriefTask, type BriefCompletion } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
+import { doneBinding, selfReplayCheck } from "../src/self-replay-receipt.ts";
 import { mintNativeSpawn, nativeIdentity, type NativeContext } from "./native-identity.ts";
 import { claimTitle, parseBrCreates, priorArtForClaim, priorArtForTitle } from "./prior-art.ts";
 import { checkNativeClose } from "../src/native-close.ts";
@@ -178,6 +179,7 @@ export interface FlywheelGuardDeps {
 
 /** Per-command ceiling for `br show` and the tmux pane-key lookup. */
 export const FLYWHEEL_EXEC_TIMEOUT_MS = 3000;
+const SELF_REPLAY_GATE = "SELFREPLAYGATE1";
 export const COMPACTION_REREAD = "COMPACTION_REREAD";
 export const SELF_CLOSE_REFUSED = "SELF_CLOSE_REFUSED";
 export const CLOSE_UNRESOLVED_ID = "CLOSE_UNRESOLVED_ID";
@@ -1317,7 +1319,7 @@ export async function paneIdentities(exec: FlywheelExec, env: Record<string, str
 	return names;
 }
 
-export type BeadState = { ok: true; id: string; status: string; assignee: string | null; updatedAt: string | null } | { ok: false; why: string };
+export type BeadState = { ok: true; id: string; status: string; assignee: string | null; updatedAt: string | null; /** SELFREPLAYGATE1: the acceptance text, read for the in_review hand-over only. */ acceptance?: string } | { ok: false; why: string };
 type BeadStateWithAuthorship = BeadState & {
 	authorship?: { known: boolean; createdBy: string | null; doneAuthors: string[]; comments: { author: string; text: string; createdAt: number }[]; acceptance: string | null };
 };
@@ -1407,7 +1409,9 @@ export async function readBeadState(exec: FlywheelExec, request: Pick<TrackerReq
 				updatedAt: typeof revised === "string" ? revised : null,
 			};
 		}
-		return { ok: true, id: canonical, status, assignee: owner === "" ? null : owner, updatedAt: typeof revised === "string" ? revised : null };
+		const plain = { ok: true as const, id: canonical, status, assignee: owner === "" ? null : owner, updatedAt: typeof revised === "string" ? revised : null };
+		if (request.operation === "review") { const criteria = field(row, "acceptance_criteria"); return { ...plain, acceptance: typeof criteria === "string" ? criteria : "" }; }
+		return plain;
 	} catch {
 		return { ok: false, why: `\`${request.bin} show ${id} --json\` returned unparseable output` };
 	}
@@ -2543,6 +2547,42 @@ function incompleteCloseClause(reason: string | null): string | null {
 }
 
 
+/** The `br update` flags that rewrite acceptance text (the tick flags only mark boxes and are not edits). */
+const ACCEPTANCE_EDIT_FLAGS = ["--acceptance-criteria", "--acceptance", "--add-acceptance"];
+
+/**
+ * SELFREPLAYGATE1 (ompkit-gh3sj): `br update <bead> --status in_review` needs the assignee's passing `--self-replay` receipt for the
+ * bead's current acceptance boxes. The guard only reads the receipt and never runs a replay. An id it cannot resolve, a missing id,
+ * an unreadable bead record and an acceptance rewrite in the same call all refuse: none of them can be matched to a receipt.
+ */
+async function checkSelfReplayReceipt(request: TrackerRequest, deps: TrackerMutationDeps, notes: string[]): Promise<FlywheelToolCallResult | undefined> {
+	const refuse = (why: string): FlywheelToolCallResult => ({ block: true, reason: `kit-flywheel-guard ${SELF_REPLAY_GATE}: ${why} No status change was made.` });
+	if (request.argv.some(word => ACCEPTANCE_EDIT_FLAGS.some(flag => word === flag || word.startsWith(`${flag}=`)))) {
+		return refuse("an acceptance edit in the same `br update` as --status in_review cannot be matched to a self-replay receipt: edit acceptance, self-replay, then move (run the acceptance edit alone, `omp-kit verify <bead> --export <sha> --self-replay`, then `br update <bead> --status in_review`).");
+	}
+	if (request.ids.length === 0) return refuse("`br update --status in_review` names no bead id, so no self-replay receipt can be checked: name one literal bead id per call.");
+	const db = request.db ?? deps.env.BEADS_DB;
+	const bound = db ? { ...request, db: resolve(request.cwd, db) } : request;
+	const stateEnv = { ...deps.env, HOME: deps.env.HOME ?? deps.home };
+	const done = doneBinding(request.transitionComment);
+	for (const id of request.ids) {
+		if (shellExpands(id) || id.includes("{}")) {
+			return refuse(`cannot check the self-replay receipt of unresolvable bead id '${id}' (a shell expansion, loop variable, command substitution or xargs placeholder hides the real id): run one literal \`br update <bead> --status in_review\` per bead.`);
+		}
+		const found = await readBeadState(deps.exec, bound, id);
+		if (!found.ok || found.acceptance === undefined) {
+			return refuse(`cannot read ${id} to check its self-replay receipt (${found.ok ? "no acceptance in the record" : found.why}); retry once the tracker answers, the gate does not skip an unreadable bead.`);
+		}
+		const tracker = bound.db !== undefined ? (basename(dirname(bound.db)) === ".beads" ? dirname(dirname(bound.db)) : dirname(bound.db)) : bound.cwd;
+		const trackerFlag = resolve(tracker) === resolve(deps.sessionCwd) ? "" : ` --tracker ${tracker}`;
+		const command = (sha: string | null) => `omp-kit verify ${found.id} --export ${sha ?? "<sha>"} --self-replay${trackerFlag}`;
+		const check = selfReplayCheck(stateEnv, found.id, found.assignee, found.acceptance, parseBoxes, command, done);
+		if ("refusal" in check) return refuse(check.refusal);
+		if (check.receipt !== null) notes.push(`kit-flywheel-guard ${SELF_REPLAY_GATE}: ${found.id} admitted on the self-replay receipt of export ${check.receipt.export} (${check.receipt.time}).`);
+	}
+	return undefined;
+}
+
 export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps, attempts: CloseAttempt[] = []): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
@@ -2579,7 +2619,11 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 			if (refusal !== undefined) return refusal;
 			continue;
 		}
-		if (request.operation === "review") continue;
+		if (request.operation === "review") {
+			const refusal = await checkSelfReplayReceipt(request, deps, closeNotes);
+			if (refusal !== undefined) return refusal;
+			continue;
+		}
 		if (request.operation !== "close") {
 			const refusal = await checkNativeClaim(request, deps);
 			if (refusal !== undefined) return refusal;
