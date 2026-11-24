@@ -57,7 +57,7 @@ export type FullTestReport = {
  producer: FullTestProducer;
  failures: string[]; proof_scope: "ISOLATED_FIXTURE_ONLY";
 };
-function redactFullTestText(text: string, roots: readonly string[]): string {
+export function redactFullTestText(text: string, roots: readonly string[]): string {
  const paths = new Set<string>();
  for (const root of roots) {
   if (!root) continue;

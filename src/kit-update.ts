@@ -5,7 +5,7 @@ import { ownedTmp } from "./kitlib/tmp.ts";
 import { run } from "./kitlib/run.ts";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { assertFreshKitPlan, parseReleaseIndexJson, previewKitRelease, stageKitRelease, type BinaryReleaseInfo, type KitReleasePlan, type ReleaseManifest, type ReleasePlatform } from "./kit-release.ts";
-import { redactFullTestCause, type FullTestCause, type FullTestReport } from "./full-test-runner.ts";
+import { redactFullTestCause, redactFullTestText, type FullTestCause, type FullTestReport } from "./full-test-runner.ts";
 import { abortCompensatedKitUpdateReceipt, acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate, reconcileKitUpdateReceipt, writePrivate } from "./mutations.ts";
 import { enclosingOmpPackageVersion, observeOmpLauncherVersion, resolveSeatOmp, resolveSeatOmpIdentity, type SeatOmpSource } from "./paths.ts";
 import type { PresentationResult } from "./output.ts";
@@ -560,8 +560,24 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
 /** A postcheck's named failed and heavy-deferred stages, changed operator paths, cause and first failures; null when nothing was reported. */
 export type KitPostcheckDetail =
  | { status: FullTestReport["status"]; omp_version: string | null; live: FullTestReport["proofs"]["G4_live"]; failed_stages: string[];
-  deferred_stages: string[]; current_stage: FullTestReport["current_stage"]; cause: FullTestCause | null; changed_operator_paths: string[]; live_state_paths: string[]; failures: string[] }
+  deferred_stages: string[]; current_stage: FullTestReport["current_stage"]; cause: FullTestCause | null; changed_operator_paths: string[]; live_state_paths: string[]; failures: string[];
+  failed_stage_output?: Record<string, { stdout_chars: number; stdout_tail: string; stderr_tail: string }> }
  | { current_stage: null; cause: FullTestCause; failures: string[] };
+/** POSTCHECKLOAD2: the redacted end of each failed stage's own output, so a stage that returned rc 1 names the check that failed. */
+const FAILED_STAGE_STDOUT_CHARS = 1500;
+const FAILED_STAGE_STDERR_CHARS = 500;
+function failedStageOutput(report: FullTestReport, roots: readonly string[]): { failed_stage_output?: Record<string, { stdout_chars: number; stdout_tail: string; stderr_tail: string }> } {
+ const kept: Record<string, { stdout_chars: number; stdout_tail: string; stderr_tail: string }> = {};
+ for (const [name, stage] of Object.entries(report.stages)) {
+  if (stage.status !== "FAIL" || stage.output === undefined) continue;
+  kept[name] = {
+   stdout_chars: stage.output.stdout_chars,
+   stdout_tail: redactFullTestText(stage.output.stdout_tail, roots).slice(-FAILED_STAGE_STDOUT_CHARS),
+   stderr_tail: redactFullTestText(stage.output.stderr_tail, roots).slice(-FAILED_STAGE_STDERR_CHARS),
+  };
+ }
+ return Object.keys(kept).length > 0 ? { failed_stage_output: kept } : {};
+}
 /**
  * The detail of `postcheck`, redacted under `roots`, capped at 20 failures.
  * Shared by the `update --apply` envelope and the kit-update job record, so a failed unattended cycle keeps its reason.
@@ -583,6 +599,7 @@ export function kitPostcheckDetail(postcheck: KitPostcheck, roots: readonly stri
   changed_operator_paths: [...report.snapshots.home.changed_paths, ...report.snapshots.project.changed_paths],
   live_state_paths: [...(report.snapshots.home.live_state_paths ?? []), ...(report.snapshots.project.live_state_paths ?? [])],
   failures: report.failures.slice(0, 20),
+  ...failedStageOutput(report, roots),
  } : cause ? { current_stage: null, cause, failures: [] } : null;
 }
 

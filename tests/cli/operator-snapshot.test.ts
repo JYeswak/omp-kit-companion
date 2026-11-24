@@ -253,7 +253,9 @@ test("POSTCHECKSTATE1: live-fleet writes under the state root are live state, ot
 	writeFileSync(join(state, "model-evidence", "current.jsonl"), "{}\n");
 	writeFileSync(join(state, "native-tool-attempts.json"), "{}\n");
 	// UPDPOST1 (0.2.147 install, receipt 95d0b12e): the namespaces fleet processes wrote during that install's postcheck window.
-	const NAMESPACES_20261123 = ["pregrade", "verify-evidence", "verify-ledger-control", "tracker-snapshot", "reopen-rate", "suite-lease", "checkout-archive", "scratch-quarantine"];
+	const NAMESPACES_20261123 = ["pregrade", "verify-evidence", "verify-ledger-control", "tracker-snapshot", "reopen-rate", "suite-lease", "checkout-archive", "scratch-quarantine",
+		// UPDPOST1 (0.2.149 install, receipt 67237002): the seat extension's per-day model-work ledger and the kitlib jsonl lock files beside it.
+		"model-activity", "kitlib-jsonl"];
 	for (const name of NAMESPACES_20261123) { mkdirSync(join(state, name, "nested"), { recursive: true }); writeFileSync(join(state, name, "nested", "seed.json"), "{}\n"); }
 	const before = snapshotWatched(paths);
 	// The fleet's own clock during the isolated run: appends, a new wake file, a new job record, a rate tmp.
