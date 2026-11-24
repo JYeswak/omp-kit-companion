@@ -236,6 +236,27 @@ def prospective_bead(
     }
 
 
+def readback_baseline(parsed: dict, issues: list[dict]) -> str | None:
+    """A LIVEREADBACK child copies boxes already admitted on its one related parent.
+
+    Those copies are the parent's text, so box-lint judges them as unchanged
+    (legacy), not as a new unsourced prints claim. A prints box that is not on
+    that parent, a missing parent, or any other create stays a new claim.
+    """
+    if not str(parsed.get("title") or "").startswith("LIVEREADBACK: "):
+        return None
+    related = []
+    for item in (parsed.get("deps") or "").split(","):
+        dtype, sep, did = item.strip().partition(":")
+        if sep and dtype.strip() == "related" and did.strip():
+            related.append(did.strip())
+    if len(related) != 1:
+        return None
+    parent = next((row for row in issues if row.get("id") == related[0]), None)
+    if parent is None:
+        return None
+    return parent.get("acceptance_criteria") or ""
+
 def lint_prospective(
     parsed: dict, issues: list[dict], project: str,
     now: dt.datetime | None = None,
@@ -256,10 +277,13 @@ def lint_prospective(
     bead = prospective_bead(parsed, project, now)
     byid = {row["id"] for row in issues} | {"<new>"}
     failures = lint_bead_failures(bead, byid) + priorart_failure(bead)
+    baseline = readback_baseline(parsed, issues)
     try:
-        replay_failures, notices = replayable_findings(bead, None)
+        replay_failures, notices = replayable_findings(bead, baseline)
     except BoxGrammarUnavailable as exc:
         replay_failures, notices = [], [f"REPLAYABLE_UNVERIFIED {exc}"]
+    if baseline is not None:
+        notices = [notice for notice in notices if "unsourced-expectation" not in notice]
     for notice in notices:
         print(f"bead-lint: {notice}", file=_sys.stderr)
     return sorted(failures + replay_failures)

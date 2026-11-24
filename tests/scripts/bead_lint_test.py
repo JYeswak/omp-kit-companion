@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """RELLINT1: release-goal admission follows the real release dry-run, not bead closure.
 BEADPITFALL1: a post-cutover build bead states its Pitfalls or the repo brief digest."""
+import contextlib
+import io
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
@@ -250,6 +252,31 @@ class CreateInReviewParityTests(unittest.TestCase):
     def test_control_clean_create_admitted(self):
         self.assertEqual(self.in_review(), [])
         self.assertEqual(self.create(), [])
+    def test_livereadback_copy_is_not_a_new_prints_claim(self):
+        parent_acc = "- [ ] [c] [live] `sh scripts/t.sh` -> prints 16 pass"
+        parent = {"id": "parent-1", "status": "open", "labels": [], "dependencies": [],
+                  "acceptance_criteria": parent_acc}
+        root = str(Path(__file__).resolve().parents[2])
+
+        def judge(title: str, acc: str, deps: tuple[str, ...], rows: list[dict]) -> list[str]:
+            parsed = br_create_guard_core.parse_create_args([
+                "create", title, "-t", "task", "-l", "kind:fix,kind:intake",
+                "--description", LP_DESC, "--acceptance", acc, *deps,
+            ])
+            return br_create_guard_core.lint_prospective(parsed, rows, root)
+
+        with contextlib.redirect_stderr(io.StringIO()) as copied_err:
+            copied = judge("LIVEREADBACK: parent obligation", parent_acc, ("--deps", "related:parent-1"), [parent])
+        self.assertFalse(any("unsourced-expectation" in line for line in copied), copied)
+        self.assertNotIn("unsourced-expectation", copied_err.getvalue())
+        novel = "- [ ] [c] [live] `sh scripts/t.sh` -> prints 99 invented"
+        planted = judge("LIVEREADBACK: parent obligation", novel, ("--deps", "related:parent-1"), [parent])
+        self.assertTrue(any("unsourced-expectation" in line for line in planted), planted)
+        plain = judge("Parity create", parent_acc, (), [parent])
+        self.assertTrue(any("unsourced-expectation" in line for line in plain), plain)
+        missing = judge("LIVEREADBACK: parent obligation", parent_acc, ("--deps", "related:missing"), [parent])
+        self.assertTrue(any("unsourced-expectation" in line for line in missing), missing)
+
 
     def test_control_mention_with_create_flag_edge_admitted(self):
         for extra in (("--deps", f"related:{LP_PEER}"), ("--parent", LP_PEER)):

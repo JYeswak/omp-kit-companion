@@ -309,7 +309,8 @@ test("GATEDEMOTE1: holder-shaped release and scratch findings proceed with a not
 	const incomplete = await guardCall(narrow, project, "br --actor Verifier close kit-narrow --reason \"box 2 UNVERIFIED\"");
 	expect(incomplete?.block).toBe(true);
 	expect(incomplete?.reason).toContain("NARROW_CLOSE_REFUSED");
-	const scratch = await createFlywheelHost(root, { env: { AGENT_NAME: "BlueFox" }, respond: gatedemoteResponder({},
+	const scratch = await createFlywheelHost(root, { env: { AGENT_NAME: "BlueFox" }, respond: gatedemoteResponder(
+		{ "kit-9": { id: "kit-9", title: "t", status: "in_progress", assignee: "BlueFox", acceptance_criteria: "" } },
 		{}, { ok: true, data: { overall: "FINDINGS", unreleased: 1, dirs: [{ label: "seat", dir: "/r/var/agent-tmp/owed.1", state: "unreleased", bin: "unbinned" }] } }) });
 	const owed = await guardCall(scratch, project, "br update kit-9 --status in_review --actor BlueFox");
 	expect(owed?.block).not.toBe(true);
