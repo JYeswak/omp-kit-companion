@@ -4,6 +4,23 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.149] - 2026-11-24
+
+### Added
+
+- `omp-kit verify BEAD --export SHA` gains `--tracker PATH`: the bead resolves from the tracker repo while the export commit resolves from `--project`, so a bead in one tracker can close against a fix commit in another repo. Omit `--tracker` to resolve both from `--project`, exactly as before; `--tracker` is refused with `--live-readback`.
+
+### Changed
+
+- The runtime test fixture owns a throwaway git repo root when the source tree has no `.git` (git-archive exports), so box [b] replays green outside a checkout.
+- macOS kit jobs now run one stable service launcher, `~/.local/opt/omp-kit/service/omp-kit-svc`, instead of the per-release binary path. macOS keeps its "omp-kit would like to access files on a network volume" consent per executable path, so every release used to ask again; the launcher is a copy of the active release made at `omp-kit service install` and replaced in place by each release, starts the active release as a child with the same arguments, and forwards signals and the exit status. The first prompt after this release is the last one. A host with no active release to copy from keeps the stable CLI path in the rendered job, so an install is never refused for want of it; `service install` reports the program it rendered as `program`. The launcher registers as a pid-named temp writer and removes a copy a crashed install left under a dead pid, so a leftover binary copy never accumulates in `<prefix>/service`. The pre-push fixture test carries `src/service-launcher.ts`, which `service-run.ts` now imports, so the SAVEFIRST1 fixture gate no longer stops on a missing module.
+- `br create` and `br update --claim` / `--status in_progress` now refuse a non-epic bead whose description lacks the five prior-art lines `GOAL:`, `NATIVE:`, `EXISTING:`, `DECISION:` and `BEST:` (a field mentioned mid-line does not count), naming the missing fields and the template; the loop-close job's generated beads carry them. The readback child that `omp-kit verify` files carries them too, so a verify through the guard still closes.
+
+### Fixed
+
+- The autocut job cuts from an owned clone of origin switched to the commit being released (not from the shared working tree, which lags main), passes `--no-install` to release-local and installs from the public assets itself, and resumes a draft that release-local kept after a transient attest failure once with `--resume-from-draft`, so a cut can publish, install and land its own next-version commit without a lead. The install step verifies the downloaded archive against `SHA256SUMS` before updating, captures the update envelope, and treats an `omp-kit update` that exits 1 with the release active and matcher, live and postcheck all PASS (manifest findings only) as an installed release, logged as `INSTALLED_WITH_FINDINGS` with the findings named, instead of dying on the exit code. The verdict read now runs under the pinned tool order of `scripts/fixed-env.sh` (the producer's order): the launchd job's PATH put Homebrew python 3.15 before `/usr/bin` 3.9.6 and the store rejected every record judged under 3.9.6 as "local file evidence is incomplete or mixes producers", so the hourly job never saw a PASS that a seat shell read as PASS. A cut whose next-version commit did not land (release-local names `--advance-only` as the retry) is advanced from a fresh clone of origin/main, up to three attempts, and then installed; an install left `PARTIAL` whose only postcheck failures are fleet writes under the kit state root (matcher and live PASS, no failed stage, a valid receipt id) is reconciled with `omp-kit update --reconcile`, logged `INSTALLED_RECONCILED`. Any other failure still stops the run. The run keeps the `omp-kit update` envelope and stderr beside its decision log (`autocut-update-<version>.json`/`.err`), and a refused update is logged as a `FAILED` decision naming the action, postcheck, first failures and error codes.
+- A seat's `br comments add` without `--author` or `--actor` is no longer recorded as the OS user (Joshua): the seat-identity extension exports `BD_ACTOR` and `BEADS_ACTOR` from the seat's `AGENT_NAME` at plugin load (never replacing a value the seat set), because `br` reads those and not `AGENT_NAME`. The verify path and chief ticks read comment authors, so a seat's Lesson or verdict could read as Joshua's.
+
 ## [0.2.148] - 2026-11-23
 
 ### Added
