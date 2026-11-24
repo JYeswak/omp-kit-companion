@@ -669,7 +669,9 @@ test("SCRATCHREAP2: a run whose only refused action is user-immutable ends COMPL
   expect(existsSync(join(held, "data"))).toBe(true);
 });
 
-test("SCRATCHREAP2 cross-device quarantine stays on its source filesystem", async () => {
+// Runs only on request (OMP_KIT_XDEVICE_E2E=1, macOS): the fixture mounts a real ovnfs checkout, Linux has no ovnfs, and under load
+// its `ovnfs serve` is killed at its deadline with the NFS mount live, which blocks every process that touches the mount.
+test.skipIf(process.platform !== "darwin" || process.env.OMP_KIT_XDEVICE_E2E !== "1")("SCRATCHREAP2 cross-device quarantine stays on its source filesystem", async () => {
   const ovnfsBin = Bun.which("ovnfs");
   if (ovnfsBin === null) throw new Error("SCRATCHREAP2 [a]: ovnfs is not on PATH; the cross-device fixture needs it");
   // ovnfs refuses a checkout mount inside a repo tree, so the whole fixture (daemon state, mount,
