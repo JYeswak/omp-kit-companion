@@ -1,0 +1,1 @@
+- The kitlib-leftover acceptance proves a foreign-uid system-temp dir stays untouched: the AC1 control plants a kitlib-shaped dir and reads it as foreign-owned, and plan/apply leave it alone.\n

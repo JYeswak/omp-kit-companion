@@ -134,6 +134,27 @@ test("AC1: a dead-pid kitlib leftover with no open files is planned REAP and rem
 	expect(applied.applied.filter(session => session.action === "REAP").map(session => session.dir)).toEqual([reaped]);
 }, 120_000);
 
+test("AC1 control: a kitlib-shaped dir owned by a foreign uid stays untouched", async () => {
+	const dead = deadPid();
+	const foreign = plant(`ctl-uid.${dead}.f0r031`, { pid: dead, label: "ctl-uid" });
+	const realGetuid = process.getuid;
+	// process.getuid has no writable type here but the runtime allows reassignment (probed); hold it once with the reason.
+	const procUid = process as unknown as { getuid?: () => number };
+	try {
+		// No root in the test seat: read every planted dir as foreign-owned by shifting the
+		// uid the gate compares against. The dir itself is untouched on disk.
+		procUid.getuid = () => (realGetuid?.() ?? 0) + 1;
+		expect(kitlibTmpProblem(foreign)).toBe("kitlib-dir-not-owned");
+		const plan = planScratch(home, deps());
+		expect(plan.sessions.find(session => session.dir === foreign)).toBeUndefined();
+		const applied = applyScratch(home, deps());
+		expect(applied.applied.find(session => session.dir === foreign)).toBeUndefined();
+	} finally {
+		if (realGetuid !== undefined) procUid.getuid = realGetuid;
+	}
+	expect(existsSync(join(foreign, ".owner"))).toBe(true);
+});
+
 test("AC2: SIGKILLed ownedTmp (bun) and owned_tmp (python3) creators are planned REAP and removed by apply", async () => {
 	const env = { ...process.env, TMPDIR: temp, KITLIB_ROOT: temp };
 	const tsChild = Bun.spawn(["bun", "-e",
