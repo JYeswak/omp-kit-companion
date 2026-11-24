@@ -2,9 +2,9 @@
 // since 2026-11-04, one full-system lsof snapshot per dir). applyScratch now covers a budgeted slice
 // per run and persists its scan cursor, so successive runs advance to full coverage.
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { applyScratch, type ApplyDeps, type LivenessDeps, type ReaperCursorStore, type ScratchRunner } from "../../src/scratch.ts";
+import { applyScratch, reapLogPath, type ApplyDeps, type LivenessDeps, type ReaperCursorStore, type ScratchRunner } from "../../src/scratch.ts";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 
@@ -134,4 +134,46 @@ test("REAPTIMEOUT1 mutant: with cursor persistence disabled, the same census nev
 	expect(visited.flat().some(dir => dir.includes("f-dead"))).toBe(false);
 	for (const dir of dead) expect(existsSync(dir)).toBe(true);
 	for (const dir of kept) expect(existsSync(dir)).toBe(true);
+}, fixtureDeadlineS() * 1000);
+
+test("SCRATCHREAP2 bounded batches persist completed progress", () => {
+  const { root, home, repo, kept, dead } = world();
+  fixTextRepo(root, repo);
+  const store = memoryStore();
+  // A census larger than one run's work: interrupt the first run mid-apply with a controlled
+  // clock (the deadline is wall-clock), then prove nothing inspected-but-unapplied was skipped.
+  const realNow = Date.now;
+  const t0 = realNow();
+  let fakeNow = t0;
+  Date.now = () => fakeNow;
+  try {
+    let appliedOnce = 0;
+    const first = applyScratch(home, {
+      liveness, run: clearRun, home, systemTempBases: [],
+      entryBudget: 100, cursorStore: store, deadlineMs: t0 + 1000,
+      onProgress: () => { appliedOnce++; if (appliedOnce === 1) fakeNow = t0 + 2000; },
+    });
+    // Partial progress: exactly one verdict applied, the receipt written, the cursor parked at
+    // the last COMPLETED dir (not past the inspected-but-unapplied tail).
+    expect(first.applied.length).toBe(1);
+    const saved = store.seen();
+    expect(saved.length).toBe(1);
+    expect(saved[0]).toBe(first.applied[0]!.dir);
+    const lines = readFileSync(reapLogPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    expect(lines.filter(row => row.event === "run-receipt")).toHaveLength(1);
+  } finally {
+    Date.now = realNow;
+  }
+  // The next runs resume after the completed prefix and finish the census in bounded batches:
+  // every dead dir reaped, every kept dir still present, the cursor reset for the next cycle.
+  const visited: string[][] = [];
+  for (let run = 0; run < 4 && store.seen().at(-1) !== null; run++) {
+    const step = runOnce(home, store, visited);
+    expect(step.applied).toBeLessThanOrEqual(5);
+  }
+  for (const dir of dead) expect(existsSync(dir)).toBe(false);
+  for (const dir of kept) expect(existsSync(dir)).toBe(true);
+  expect(visited.flat().some(dir => dir.includes("f-dead"))).toBe(true);
+  expect(store.seen().at(-1)).toBeNull();
+  console.log("(pass) SCRATCHREAP2 bounded batches persist completed progress");
 }, fixtureDeadlineS() * 1000);

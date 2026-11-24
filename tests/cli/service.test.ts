@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 import { checkService, checkServiceLinux, ciPollerEnvironment, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, queryPrint, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
@@ -7,8 +7,11 @@ import { backupDir, launchdLoaded, superviseScratchJob } from "../../src/service
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 import { collectBrowserProcesses } from "../../src/browser-doctor.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { runSync } from "../../src/kitlib/run.ts";
+import { run, runSync } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS, fixtureLoad } from "./fixture-process.ts";
+import { pollUntil } from "../../src/kitlib/poll.ts";
+import { createHash } from "node:crypto";
+import { defaultLiveness } from "../../src/scratch.ts";
 // Fresh clones have no var/agent-tmp; ownedTmp below requires its root to exist.
 const AGENT_TMP = join(import.meta.dir, "../../var/agent-tmp");
 
@@ -1031,6 +1034,137 @@ test("service status reports HOME-scoped install state from source", () => {
   expect(status.envelope.data.status[0]).toMatchObject({ name: "omp-watch", installed: false });
   expect(["OK", "FINDINGS"]).toContain(status.envelope.data.overall);
 });
+function deadPid(): number {
+  for (let pid = 59999; pid > 1000; pid--) {
+    try { process.kill(pid, 0); continue; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue;
+      const out = runSync(["ps", "-p", String(pid), "-o", "pid="], { deadline_s: fixtureDeadlineS() });
+      if (out.rc !== 0) return pid;
+    }
+  }
+  throw new Error("no dead pid fixture");
+}
+
+test("SCRATCHREAP2 reclaim runs below the disk floor without bypassing its keeper", async () => {
+  // A fast fixture `lsof`: empty snapshot and clear per-dir walks, but seat-lease reads stay
+  // unavailable so unprovable seats stay unprovable. Keeps supervised runs load-independent.
+  const stubLsof = (home: string): string => {
+    const bin = join(home, "fixture-bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "lsof"), "#!/bin/sh\nif [ \"$1\" = \"-t\" ]; then echo \"lsof: unavailable\" >&2; exit 2; fi\nexit 1\n", { mode: 0o755 });
+    return bin;
+  };
+  // One supervised `service run scratch-reaper` through the full keeper admission (no claim
+  // override, no actuator bypass): a dead owner's scratch reaps, a registered user keeps its
+  // dir, and a released dir with an unprovable seat is skipped with evidence.
+  {
+    const { home } = fixture();
+    const root = join(home, "var", "agent-tmp");
+    mkdirSync(root, { recursive: true });
+    const lsofPath = `${stubLsof(home)}:${process.env.PATH ?? ""}`;
+    const gonePid = deadPid();
+    const gone = join(root, `gone.${gonePid}`);
+    mkdirSync(gone);
+    writeFileSync(join(gone, ".owner"), `pid=${gonePid}\nlabel=gone\nrepo=${home}\ncreated=2026-10-01T00:00:00Z\n`);
+    writeFileSync(join(gone, "data"), "reclaim me\n");
+    const heldPid = deadPid();
+    const held = join(root, `held.${heldPid}`);
+    mkdirSync(held);
+    writeFileSync(join(held, ".owner"), `pid=${heldPid}\nlabel=held\nrepo=${home}\ncreated=2026-10-01T00:00:00Z\n`);
+    const start = defaultLiveness().processStart(process.pid);
+    if (start === null) throw new Error("process identity unavailable");
+    writeFileSync(join(held, ".users"), JSON.stringify({ version: 1, users: [{ pid: process.pid, start }] }));
+    const zzPid = deadPid();
+    const zz = join(root, `zz.${zzPid}`);
+    mkdirSync(zz);
+    const owner = `pid=${zzPid}\nlabel=zz\nrepo=${home}\ncreated=2026-10-01T00:00:00Z\nagent=QuietSeat\nsession=a-valid-session-01\n`;
+    writeFileSync(join(zz, ".owner"), owner);
+    const st = statSync(zz);
+    writeFileSync(join(zz, ".omp-kit-release"),
+      `version=1\nowner_sha256=${createHash("sha256").update(owner).digest("hex")}\ndevice=${st.dev}\ninode=${st.ino}\nreleased_at=${new Date().toISOString()}\n`);
+    const owners = join(home, "owners");
+    mkdirSync(owners, { recursive: true });
+    symlinkSync("elsewhere", join(owners, "a-valid-session-01.lock"));
+    const result = cli(["service", "run", "scratch-reaper"], home, { OMP_KIT_SCRATCH_ROOTS: root,
+      OMP_KIT_SESSION_OWNERS_DIR: owners, PATH: lsofPath });
+    expect(result.code, JSON.stringify(result.envelope).slice(0, 2000)).toBe(0);
+    expect(result.envelope.data.receipt.status).toBe("COMPLETE");
+    expect(existsSync(gone)).toBe(false);
+    expect(existsSync(held)).toBe(true);
+    expect(result.envelope.data.sessions.find((v: { dir: string }) => v.dir === held))
+      .toMatchObject({ action: "LIVE", reason: "user-live" });
+    expect(existsSync(zz)).toBe(true);
+    expect(result.envelope.data.sessions.find((v: { dir: string }) => v.dir === zz))
+      .toMatchObject({ action: "SKIP", reason: "owner-seat-liveness-unproven" });
+    expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "scratch-reaper.lock"))).toBe(false);
+  }
+  // Below-floor lane: at a simulated below-floor disk the reclaim lane still runs (RECLAIM pressure
+  // engages the 12 h idle bound), while the same tree at a normal reading stays LIVE.
+  {
+    const { home } = fixture();
+    const root = join(home, "var", "agent-tmp");
+    mkdirSync(root, { recursive: true });
+    const backdate = (dir: string, ageMs: number) => {
+      const past = new Date(Date.now() - ageMs);
+      for (const path of [dir, join(dir, "data")]) utimesSync(path, past, past);
+    };
+    const oldA = join(root, "old-a.9");
+    const oldB = join(root, "old-b.9");
+    for (const dir of [oldA, oldB]) {
+      mkdirSync(dir);
+      writeFileSync(join(dir, "data"), "idle\n");
+      backdate(dir, 13 * 3600 * 1000);
+    }
+    const env = { OMP_KIT_SCRATCH_ROOTS: root, PATH: `${stubLsof(home)}:${process.env.PATH ?? ""}` };
+    const normal = cli(["scratch", "apply", "--apply", "--yes"], home, { ...env, OMP_KIT_SCRATCH_FREE_PCT: "40" });
+    expect(normal.code).toBe(0);
+    for (const dir of [oldA, oldB]) {
+      expect(normal.envelope.data.sessions.find((v: { dir: string }) => v.dir === dir)).toMatchObject({ action: "LIVE" });
+      expect(existsSync(dir)).toBe(true);
+    }
+    const low = cli(["scratch", "apply", "--apply", "--yes"], home, { ...env, OMP_KIT_SCRATCH_FREE_PCT: "5" });
+    expect(low.code).toBe(0);
+    expect(low.envelope.data.receipt).toMatchObject({ failed_count: 0 });
+    for (const dir of [oldA, oldB]) expect(existsSync(dir)).toBe(false);
+    expect(low.envelope.data.sessions.filter((v: { action: string }) => v.action === "QUARANTINE").length).toBe(2);
+  }
+  // Forged keeper: the worker refuses before inspecting anything (no actuator bypass).
+  {
+    const { home } = fixture();
+    const root = join(home, "var", "agent-tmp");
+    mkdirSync(root, { recursive: true });
+    const result = cli(["service", "run", "scratch-reaper"], home, {
+      OMP_KIT_SCRATCH_ROOTS: root, OMP_KIT_SCRATCH_CLAIM: "forged",
+    });
+    expect(result.code).toBe(2);
+    expect(result.envelope.errors[0].code).toBe("SCRATCH_KEEPER_CHANGED");
+    expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "scratch-reaper.lock"))).toBe(false);
+    expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "scratch-reaper.json"))).toBe(false);
+  }
+  // Extra launcher: a second live launcher outside the keeper claim refuses admission.
+  {
+    const { home } = fixture();
+    const marker = `reapx-launcher-${process.pid}`;
+    const stop = new AbortController();
+    const sleeper = run([process.execPath, "-e", `await Bun.sleep(60000) // ${marker}`, "service", "run", "scratch-reaper"],
+      { deadline_s: fixtureDeadlineS(90), signal: stop.signal, cwd: home });
+    try {
+      const seen = await pollUntil(() => new TextDecoder().decode(runSync([join(LAUNCHER_TABLE, "ps"), "-axo", "pid=,args="], { deadline_s: fixtureDeadlineS(30) }).stdout),
+        { deadline_s: fixtureDeadlineS(30), interval_s: 0.05, classify: table => table.includes(marker) ? "success" : "retry" });
+      expect(seen.outcome).toBe("success");
+      const refused = cli(["service", "run", "scratch-reaper"], home, { OMP_KIT_SCRATCH_ROOTS: join(home, "var", "agent-tmp") });
+      expect(refused.code).toBe(4);
+      expect(refused.envelope.data).toMatchObject({ status: "SKIPPED-ADMISSION" });
+    } finally {
+      const stopping = new Error("reapx: stopping the planted launcher");
+      stop.abort(stopping);
+      await sleeper.catch(error => { if (error !== stopping) throw error; });
+    }
+  }
+  console.log("(pass) SCRATCHREAP2 reclaim runs below the disk floor without bypassing its keeper");
+}, fixtureDeadlineS(90) * 1000);
+
 
 test("service install without --apply refuses and writes no plist", () => {
   const { home } = fixture();

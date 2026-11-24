@@ -1,16 +1,17 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, lutimesSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, lutimesSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
-import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, disposalGate, fleetTestTmpBase, inspectBunBuildFiles, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, ownedScratch, owesRelease, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
-import type { SeatIdentity } from "../../src/scratch.ts";
+import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, disposalGate, fleetTestTmpBase, inspectBunBuildFiles, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, ownedScratch, owesRelease, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, QUARANTINE_LOCAL_DIR, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import type { LivenessDeps, SeatIdentity } from "../../src/scratch.ts";
 import { exportCommitToScratch, parseFreeOwner, parseTextOwner, releaseBudgetEntry, repoOfRoot } from "../../src/scratch.ts";
 import type { ScratchVerdict } from "../../src/scratch.ts";
 import { domain, KNOWN_JOBS, runScratchPressureTrigger, scratchPressureChiefRoute, systemdTimer } from "../../src/service.ts";
 import { acquireRunLock } from "../../src/service-run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
-import { runSync } from "../../src/kitlib/run.ts";
+import { run, runSync } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
+import { pollUntil } from "../../src/kitlib/poll.ts";
 
 const roots: string[] = [];
 const fixtureRepo = resolve(import.meta.dir, "../..");
@@ -603,7 +604,7 @@ test("quarantineTimeOf accepts delete markers and rejects malformed or oversized
   expect(quarantineTimeOf(`${"x".repeat(300)}${entry}`)).toBeNull();
 });
 
-test("delete failure reports immutable flags only when observed", () => {
+test("SCRATCHREAP2: a delete blocked by a user-immutable flag is refused, never failed; other EPERM still fails", () => {
   const home = useState();
   const now = Date.now();
   const qt = quarantineDir(home);
@@ -628,8 +629,172 @@ test("delete failure reports immutable flags only when observed", () => {
     throw error;
   } } as ApplyDeps;
   const failed = applyQuarantineExpiry(home, deps);
-  expect(failed).toContainEqual(expect.objectContaining({ dir: immutablePath, cause: "immutable-flag" }));
-  expect(failed).toContainEqual(expect.objectContaining({ dir: unverifiedPath, cause: "unknown" }));
+  // The flagged entry is a refusal (a path the reaper may not touch), not a failure: no error
+  // rides a refusal, and the entry stays unmarked (held, not failed) for the next run to retry.
+  expect(failed).toContainEqual(expect.objectContaining({ dir: immutablePath, action: "SKIP",
+    reason: "user-immutable", cause: "immutable-flag" }));
+  expect(failed.find(row => row.dir === immutablePath && row.reason === "user-immutable")).not.toHaveProperty("error");
+  expect(failed).toContainEqual(expect.objectContaining({ dir: unverifiedPath, action: "SKIP",
+    reason: "delete-failed", cause: "unknown" }));
+  const logs = readFileSync(reapLogPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  expect(logs).toContainEqual(expect.objectContaining({ event: "user-immutable", dir: immutablePath, cause: "immutable-flag" }));
+});
+
+test("SCRATCHREAP2: a run whose only refused action is user-immutable ends COMPLETE with refused_count 1", () => {
+  const home = useState();
+  const root = agentTmp("scratch-immutable-run");
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  const now = Date.now();
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const entry = quarantineEntryFor("held.1", new Date(now - 25 * 3600 * 1000));
+  const held = join(qt, entry);
+  mkdirSync(held, { recursive: true });
+  writeFileSync(join(held, ".owner"), ownerText(deadFields("held", deadPid())));
+  writeFileSync(join(held, "data"), "protected\n");
+  const run = (args: readonly string[]) => {
+    if (args[0] === "/bin/ls") return { code: 0,
+      stdout: `drwxr-xr-x 2 josh staff uchg 64 Oct 13 06:00 ${held}`, stderr: "" };
+    return clearRun();
+  };
+  const result = applyScratch(home, { ...depsFor({ run, now }), home, now,
+    remove: () => {
+      const error = new Error("operation not permitted") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    } } as ApplyDeps);
+  expect(result.expired).toContainEqual(expect.objectContaining({ dir: held, action: "SKIP", reason: "user-immutable" }));
+  expect(result.receipt).toMatchObject({ failed_count: 0, refused_count: 1 });
+  expect(existsSync(join(held, "data"))).toBe(true);
+});
+
+test("SCRATCHREAP2 cross-device quarantine stays on its source filesystem", async () => {
+  const ovnfsBin = Bun.which("ovnfs");
+  if (ovnfsBin === null) throw new Error("SCRATCHREAP2 [a]: ovnfs is not on PATH; the cross-device fixture needs it");
+  // ovnfs refuses a checkout mount inside a repo tree, so the whole fixture (daemon state, mount,
+  // source) lives on platform temp, outside every repo. ownedTmp still owns it (HUP/INT/TERM-safe).
+  const base = ownedTmp("reap-xdev", { root: "/tmp" });
+  roots.push(base.path);
+  const baseReal = realpathSync(base.path);
+  for (const dir of ["s", "m", "repo", "home"]) mkdirSync(join(baseReal, dir));
+  writeFileSync(join(baseReal, "repo", "seed.txt"), "checkout seed\n");
+  const mount = join(baseReal, "m");
+  const stopServe = new AbortController();
+  const served = run([ovnfsBin, "--state", "s", "--mount", mount, "serve"],
+    { deadline_s: fixtureDeadlineS(120), signal: stopServe.signal, cwd: baseReal });
+  const ovnfs = (...args: string[]) => {
+    const out = runSync([ovnfsBin, "--state", "s", "--mount", mount, ...args], { deadline_s: fixtureDeadlineS(30), cwd: baseReal });
+    if (out.rc !== 0 || out.timed_out) throw new Error(`ovnfs ${args[0]} failed: ${new TextDecoder().decode(out.stderr)}`);
+    return new TextDecoder().decode(out.stdout);
+  };
+  const name = `reapx-${process.pid}`;
+  try {
+    const opened = await pollUntil(() => {
+      try { ovnfs("new", join(baseReal, "repo"), "--name", name, "--json"); return "opened"; }
+      catch { return "waiting"; }
+    }, { deadline_s: fixtureDeadlineS(60), interval_s: 0.5,
+      classify: state => state === "opened" ? "success" : "retry" });
+    expect(opened.outcome).toBe("success");
+    const checkout = realpathSync(join(mount, name));
+    const home = join(baseReal, "home");
+    // The pass line below is vacuous unless the checkout really is another filesystem.
+    const checkoutDev = statSync(checkout).dev;
+    expect(checkoutDev).not.toBe(statSync(home).dev);
+
+    const root = join(checkout, "var", "agent-tmp");
+    mkdirSync(root, { recursive: true });
+    // An unowned dir idle past the bound quarantines (terminal QUARANTINE, still on disk for proof).
+    const dir = join(root, "stale.9");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "data"), "cross-device payload\n");
+    const ancient = new Date(Date.now() - 73 * 3600 * 1000);
+    utimesSync(join(dir, "data"), ancient, ancient);
+    utimesSync(dir, ancient, ancient);
+    const identity = statSync(dir);
+    process.env.OMP_KIT_SCRATCH_ROOTS = root;
+
+    // The old production path: a cross-device rename fails EXDEV instead of reaping.
+    const qt = quarantineDir(home);
+    mkdirSync(qt, { recursive: true });
+    let probe: unknown = null;
+    try { renameSync(dir, join(qt, "probe-entry")); } catch (error) { probe = error; }
+    expect((probe as NodeJS.ErrnoException)?.code).toBe("EXDEV");
+    expect(existsSync(dir)).toBe(true);
+
+    const liveness: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
+      probe: holder => ({ state: "dead", evidence: { pid: holder.pid, recorded_start: holder.start,
+        observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
+    const result = applyScratch(home, { liveness, run: clearRun, home, systemTempBases: [], entryBudget: 10,
+      statfs: () => ({ bavail: 40, blocks: 100 }) });
+    const moved = result.applied.find(row => row.action === "QUARANTINE");
+    expect(moved).toBeDefined();
+    expect(moved!.reason).toBe("unowned-idle-72h-quarantined");
+    expect(moved!.dir.startsWith(`${root}/${QUARANTINE_LOCAL_DIR}/`)).toBe(true);
+    const after = statSync(moved!.dir);
+    expect(after.ino).toBe(identity.ino);
+    expect(after.dev).toBe(identity.dev);
+    expect(readFileSync(join(moved!.dir, "data"), "utf8")).toBe("cross-device payload\n");
+    expect(result.receipt).toMatchObject({ failed_count: 0 });
+    expect(existsSync(dir)).toBe(false);
+    expect(readdirSync(qt)).toHaveLength(0);
+
+    // The expiry sweep drains same-filesystem quarantine entries too: plant an expired one by hand.
+    const oldEntry = join(root, QUARANTINE_LOCAL_DIR,
+      quarantineEntryFor("ancient.1", new Date(Date.now() - 25 * 3600 * 1000)));
+    mkdirSync(oldEntry, { recursive: true });
+    writeFileSync(join(oldEntry, ".owner"), ownerText(deadFields("ancient", deadPid())));
+    const swept = applyQuarantineExpiry(home, { liveness, run: clearRun, home });
+    expect(swept).toContainEqual(expect.objectContaining({ dir: oldEntry, action: "DELETE" }));
+    expect(existsSync(oldEntry)).toBe(false);
+    console.log("(pass) SCRATCHREAP2 cross-device quarantine stays on its source filesystem");
+  } finally {
+    // Teardown order matters: SIGTERM the owned daemon first (a checkout `rm` racing the kill
+    // orphaned the mount), then drain. The dead daemon's state dir is disposable plain files.
+    const stopping = new Error("reap-xdev: stopping the fixture ovnfs daemon");
+    stopServe.abort(stopping);
+    await served.catch(error => { if (error !== stopping) throw error; });
+    const mountGone = async () => new TextDecoder().decode(
+      runSync(["mount"], { deadline_s: fixtureDeadlineS(30) }).stdout).split("\n").every(line => !line.includes(` on ${mount} `));
+    let drained = (await pollUntil(mountGone, { deadline_s: fixtureDeadlineS(15), interval_s: 0.5,
+      classify: gone => gone ? "success" : "retry" })).outcome === "success";
+    if (!drained) {
+      runSync(["umount", mount], { deadline_s: fixtureDeadlineS(30) });
+      drained = (await pollUntil(mountGone, { deadline_s: fixtureDeadlineS(15), interval_s: 0.5,
+        classify: gone => gone ? "success" : "retry" })).outcome === "success";
+    }
+    // Zero orphan daemons and zero leftover mounts after the replay, on every exit path. Never
+    // let file cleanup walk a live mount: de-register the tree and fail loudly instead of hanging.
+    const table = runSync(["ps", "-axo", "pid=,args="], { deadline_s: fixtureDeadlineS(30) });
+    if (!drained) {
+      roots.splice(roots.indexOf(base.path), 1);
+      expect(drained).toBe(true);
+    }
+  }
+}, fixtureDeadlineS(120) * 1000);
+
+test("SCRATCHREAP2 removal receipts preserve measured bytes", () => {
+  const home = useState();
+  const root = agentTmp("scratch-measured");
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  const now = Date.now();
+  const dead = sessionDir(root, "gone", deadPid());
+  const pid = Number(dead.split(".").at(-1));
+  const owner = ownerText(deadFields("gone", pid));
+  writeFileSync(join(dead, ".owner"), owner);
+  const payload = "measured\n".repeat(100);
+  writeFileSync(join(dead, "data"), payload);
+  const expected = Buffer.byteLength(payload) + Buffer.byteLength(owner);
+  const result = applyScratch(home, { ...depsFor(), home, now });
+  const reaped = result.applied.find(row => row.dir === dead);
+  expect(reaped).toMatchObject({ action: "REAP", sizeBytes: expected });
+  expect(result.receipt.reaped_gb).toBe(expected / 1_000_000_000);
+  const events = readFileSync(reapLogPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  expect(events).toContainEqual(expect.objectContaining({ event: "reap", dir: dead, sizeBytes: expected }));
+  // No removal row is ever a zero placeholder: every actual removal carries its measured bytes.
+  for (const row of result.applied) if (row.action === "REAP") expect(row.sizeBytes).toBeGreaterThan(0);
+  console.log("(pass) SCRATCHREAP2 removal receipts preserve measured bytes");
 });
 
 test("killOrphan rejects a bare numeric PID instead of signalling its current occupant", () => {
@@ -771,7 +936,7 @@ function fakePs(): { dir: string } {
   return { dir };
 }
 
-test("scratch release quarantines its live owner while leaving unreleased live scratch", () => {
+test("SCRATCHREAP2: a released dir whose owner is still live is left in place with liveness evidence", () => {
   const { home, state } = cliHome();
   const root = agentTmp("scratch");
   roots.push(root);
@@ -794,24 +959,20 @@ test("scratch release quarantines its live owner while leaving unreleased live s
   expect(marked.code).toBe(0);
   expect(marked.envelope.data).toMatchObject({ overall: "CHANGED", action: "RELEASED", dir: released });
 
+  // The marker is authority to collect, not proof the owner is gone: the reaper leaves a live
+  // owner's released dir in place (never removal) instead of quarantining it out from under them.
   const run = cli(["service", "run", "scratch-reaper"], home, { ...env,
     PATH: `${fakePs().dir}:${lsof}:${process.env.PATH ?? ""}` });
   expect(run.code).toBe(0);
-  expect(existsSync(released)).toBe(false);
+  expect(existsSync(released)).toBe(true);
   expect(existsSync(live)).toBe(true);
   expect(run.envelope.data.sessions.find((v: { dir: string }) => v.dir === live)?.action).toBe("LIVE");
-  expect(run.envelope.data.sessions.some((v: { action: string; reason: string }) =>
-    v.action === "QUARANTINE" && v.reason.includes("owner-released"))).toBe(true);
+  const verdict = run.envelope.data.sessions.find((v: { dir: string }) => v.dir === released);
+  expect(verdict).toMatchObject({ action: "LIVE", reason: "owner-alive" });
+  expect(verdict?.ownerLiveness).toMatchObject({ state: "live" });
   const quarantine = join(state, "omp-kit", "scratch-quarantine");
-  expect(readdirSync(quarantine)).toHaveLength(1);
-  const oldEntry = quarantineEntryFor(`omp.${process.pid}`, new Date(Date.now() - 8 * 24 * 3600 * 1000));
-  const onlyEntry = readdirSync(quarantine)[0]!;
-  renameSync(join(quarantine, onlyEntry), join(quarantine, oldEntry));
-  const expired = cli(["service", "run", "scratch-reaper"], home, { ...env,
-    PATH: `${fakePs().dir}:${lsof}:${process.env.PATH ?? ""}` });
-  expect(expired.code).toBe(0);
-  expect(existsSync(join(quarantine, oldEntry))).toBe(false);
- }, 30000);
+  expect(existsSync(quarantine) ? readdirSync(quarantine) : []).toHaveLength(0);
+ }, fixtureDeadlineS(60) * 1000);
 
 for (const { label, payload } of [
   { label: "known-nonzero", payload: "quarantine byte accounting\n" },
@@ -861,7 +1022,7 @@ test("scratch release refuses a live directory owned by a different process", as
     owner.kill("SIGTERM");
     await owner.exited;
   }
-});
+}, fixtureDeadlineS(30) * 1000);
 
 test("scratch plan reports planted sessions and apply refuses without consent", () => {
   const { home, state } = cliHome();
@@ -881,7 +1042,7 @@ test("scratch plan reports planted sessions and apply refuses without consent", 
   expect(refused.code).toBe(2);
   expect(refused.envelope.errors[0].code).toBe("SCRATCH_REQUIRES_APPLY");
   expect(existsSync(dead)).toBe(true);
-});
+}, fixtureDeadlineS(30) * 1000);
 
 test("scratch plan public JSON exposes byte totals, malformed counts, sized skips, and the active rule", () => {
 	const { home, state } = cliHome();
@@ -939,7 +1100,7 @@ test("scratch plan public JSON exposes byte totals, malformed counts, sized skip
 	const help = cli(["help", "scratch"], home);
 	expect(help.code).toBe(0);
 	expect(help.envelope.data.text).toContain(UNOWNED_ACTIVE_RULE);
-});
+}, fixtureDeadlineS(30) * 1000);
 
 test("scratch apply removes dead sessions, quarantines idle unowned, and logs JSONL", () => {
   const { home, state } = cliHome();
@@ -972,7 +1133,7 @@ test("scratch apply removes dead sessions, quarantines idle unowned, and logs JS
   const lines = readFileSync(join(state, "omp-kit", "scratch-reap-log.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
   expect(lines.some(entry => entry.event === "reap" && entry.dir === dead)).toBe(true);
   expect(lines.some(entry => entry.event === "quarantine")).toBe(true);
-});
+}, fixtureDeadlineS(30) * 1000);
 
 test("scratch apply preserves 73-hour unowned dirs on open-fd and unknown lsof evidence", () => {
 	for (const fixture of [
@@ -998,7 +1159,7 @@ test("scratch apply preserves 73-hour unowned dirs on open-fd and unknown lsof e
 		expect(row?.reason).toBe(fixture.reason);
 		expect(applied.envelope.data.unownedActiveRule).toBe(UNOWNED_ACTIVE_RULE);
 	}
-});
+}, fixtureDeadlineS(30) * 1000);
 
 test("scratch plan keeps 60-hour idle unowned dirs LIVE (mid-boundary literals)", () => {
 	// Literals only: 60h sits strictly between a 48h constant-drift mutant and the real
@@ -1022,7 +1183,7 @@ test("scratch plan keeps 60-hour idle unowned dirs LIVE (mid-boundary literals)"
 	const pressedRow = pressed.envelope.data.sessions.find((value: { dir: string }) => value.dir === mid);
 	expect(pressedRow?.action).toBe("QUARANTINE");
 	expect(pressedRow?.reason).toBe("unowned-idle-12h-reclaim-would-quarantine");
-});
+}, fixtureDeadlineS(30) * 1000);
 
 test("service run applies scratch reaping and writes a receipt", () => {
   const { home, state } = cliHome();
@@ -1040,7 +1201,7 @@ test("service run applies scratch reaping and writes a receipt", () => {
   const receipt = JSON.parse(readFileSync(join(state, "omp-kit", "jobs", "scratch-reaper.json"), "utf8"));
   expect(typeof receipt.started_at).toBe("string");
   expect(receipt.exit).toBe(0);
-});
+}, fixtureDeadlineS(30) * 1000);
 test("manual scratch apply returns BUSY with the scheduled reaper holder PID", () => {
   const { home, state } = cliHome();
   const root = agentTmp("scratch");
@@ -1058,7 +1219,7 @@ test("manual scratch apply returns BUSY with the scheduled reaper holder PID", (
   } finally {
     holder.lock.release();
   }
-});
+}, fixtureDeadlineS(30) * 1000);
 
 test("scratch-reaper reports invalid quarantine TTL configuration", () => {
   const { home, state } = cliHome();
@@ -1074,7 +1235,7 @@ test("scratch-reaper reports invalid quarantine TTL configuration", () => {
   expect(run.envelope.data.expired).toContainEqual(expect.objectContaining({ action: "SKIP", reason: "quarantine-ttl-config-invalid" }));
   const receipt = JSON.parse(readFileSync(join(state, "omp-kit", "jobs", "scratch-reaper.json"), "utf8"));
   expect(receipt.exit).toBe(1);
-});
+}, fixtureDeadlineS(30) * 1000);
 
 
 test("resolveScratchRoots honors the override and skips symlinked components", () => {
@@ -2208,27 +2369,32 @@ test("EXPORTOWNER: raw root extraction is diagnosed and explicit legacy release 
 	expect(defaultRunner(["git", "-C", source, "archive", "--format=tar", `--output=${tarball}`, head]).code).toBe(0);
 	expect(defaultRunner(["tar", "-xf", tarball, "-C", made.dir]).code).toBe(0);
 	expect(readFileSync(join(made.dir, ".owner"), "utf8")).toBe("");
+	// SCRATCHREAP2 (ompkit-3gxfa): the reaper quarantines a release only on proven owner death. The
+	// clobbered owner names the live creator pid, which now (correctly) stays put; rename to a dead pid
+	// so this explicit operator recovery keeps proving reclaimable.
+	const reclaimed = join(root, `raw-clobber.${deadPid()}`);
+	renameSync(made.dir, reclaimed);
 	const deps = { ...depsFor(), home };
-	expect(inspectOne(made.dir, root, deps)?.detail).toContain("archive extraction");
-	const refused = releaseScratch(made.dir, home, deps, { capability: made.capability });
+	expect(inspectOne(reclaimed, root, deps)?.detail).toContain("archive extraction");
+	const refused = releaseScratch(reclaimed, home, deps, { capability: made.capability });
 	expect(refused.ok).toBe(false);
 	expect(refused.detail).toContain("--legacy-owner --reason");
-	const held = releaseScratch(made.dir, home, { ...deps,
+	const held = releaseScratch(reclaimed, home, { ...deps,
 		run: () => ({ code: 0, stdout: "p123\n", stderr: "" }),
 	}, { legacyOwner: true, reason: "archive extraction clobbered .owner" });
 	expect(held.reason).toBe("release-open-fds-present");
-	expect(existsSync(join(made.dir, ".omp-kit-release"))).toBe(false);
+	expect(existsSync(join(reclaimed, ".omp-kit-release"))).toBe(false);
 	// A vanished capability hash cannot establish authority; the existing explicit
 	// operator recovery keeps unchanged-owner, pinned-inode and open-file checks.
-	expect(releaseScratch(made.dir, home, deps, {
+	expect(releaseScratch(reclaimed, home, deps, {
 		legacyOwner: true, reason: "archive extraction overwrote the owner marker",
 	}).ok).toBe(true);
-	expect(inspectOne(made.dir, root, deps)).toMatchObject({
+	expect(inspectOne(reclaimed, root, deps)).toMatchObject({
 		action: "QUARANTINE", reason: "owner-released-would-quarantine",
 	});
 	const applied = applyScratch(home, { ...deps, now: Date.now() });
 	expect(applied.applied.some(row => row.action === "QUARANTINE" && row.reason === "owner-released-quarantined")).toBe(true);
-	expect(existsSync(made.dir)).toBe(false);
+	expect(existsSync(reclaimed)).toBe(false);
 });
 
 test("EXPORTOWNER.retire: an empty owner on a 73-hour-idle dir reaches safe reaper quarantine", () => {

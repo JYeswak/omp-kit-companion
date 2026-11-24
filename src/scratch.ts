@@ -440,6 +440,82 @@ function blockingUsers(users: ScratchUser[] | null, liveness: Pick<LivenessDeps,
 	return null;
 }
 
+export interface OwnerLivenessEvidence {
+	state: "live" | "dead" | "unknown";
+	evidence: Probe["evidence"] | { pid: number; recorded_start: null; observed_start: string | null; stat: null;
+		signal0: "alive" | "esrch" | null; ps_visible: boolean | null; reason: string };
+	seat?: { agent: string; session: string; state: "live" | "dead" | "unknown" };
+}
+
+/**
+ * SCRATCHREAP2 (ompkit-3gxfa): owner liveness is independent of release authority. Only proven
+ * death/reuse (pid plus process-start incarnation proof, then seat liveness) permits reaper
+ * quarantine or removal of an owned dir; a live or unproven owner is left in place with evidence,
+ * never removed. A pid that names nobody's process (0, 1) cannot be a live owner, so an explicit
+ * release naming one keeps its authority. Re-derived from the salvaged assessOwnerRemoval sketch:
+ * the process-identity branch probes the recorded incarnation, the legacy branch falls back to
+ * pid signal/ps plus pid-reuse proof, and the seat has the final word for seated owners.
+ */
+function assessOwnerRemoval(owner: ScratchOwner, deps: InspectDeps): {
+	evidence: OwnerLivenessEvidence;
+	blocked: { action: "LIVE" | "SKIP"; reason: string } | null;
+} {
+	if (owner.pid <= 1) {
+		return { evidence: { state: "dead", evidence: { pid: owner.pid, recorded_start: null, observed_start: null,
+			stat: null, signal0: null, ps_visible: false, reason: "pid names nobody's process" } }, blocked: null };
+	}
+	let state: OwnerLivenessEvidence["state"] = "unknown";
+	let evidence: OwnerLivenessEvidence["evidence"];
+	if (hasProcessIdentity(owner)) {
+		const probe = probeUser({ pid: owner.pid, start: owner.processStart }, deps.liveness);
+		if (probe === null) {
+			evidence = { pid: owner.pid, recorded_start: owner.processStart, observed_start: null, stat: null,
+				signal0: null, reason: "owner liveness probe failed" };
+		} else {
+			state = probe.state === "live" ? "live" : isDead(probe) ? "dead" : "unknown";
+			evidence = probe.evidence;
+		}
+	} else {
+		let signal: boolean | null = null;
+		let visible: boolean | null = null;
+		let start: string | null = null;
+		try { signal = deps.liveness.signalAlive(owner.pid); } catch { /* unknown */ }
+		try { visible = deps.liveness.psVisible(owner.pid); } catch { /* unknown */ }
+		if (signal === true || visible === true) {
+			try { start = deps.liveness.processStart(owner.pid); } catch { /* unknown */ }
+		}
+		let reused: boolean | null = null;
+		if (start !== null) {
+			const startMs = parsePsStart(start) ?? Date.parse(start);
+			const createdMs = createdLatestMs(owner.createdAt);
+			if (Number.isFinite(startMs) && createdMs !== null) reused = startMs > createdMs;
+		}
+		state = signal === false && visible === false ? "dead"
+			: reused === true ? "dead"
+				: reused === false ? "live" : "unknown";
+		evidence = { pid: owner.pid, recorded_start: null, observed_start: start, stat: null,
+			signal0: signal === true ? "alive" : signal === false ? "esrch" : null, ps_visible: visible,
+			reason: state === "dead" ? reused === true ? "pid started after owner creation" : "pid absent from signal 0 and ps"
+				: state === "live" ? "pid is present and was not proven reused" : "pid liveness or reuse is unproven" };
+	}
+	let proof: OwnerLivenessEvidence = { state, evidence };
+	if (state !== "dead") return { evidence: proof, blocked: {
+		action: state === "live" ? "LIVE" : "SKIP",
+		reason: state === "live" ? "owner-alive" : "owner-liveness-unproven",
+	} };
+	if (owner.agent !== null && owner.session !== null) {
+		let seat: boolean | null;
+		try { seat = deps.liveness.seatLive?.(owner.agent, owner.session) ?? null; } catch { seat = null; }
+		proof = { ...proof, seat: { agent: owner.agent, session: owner.session,
+			state: seat === true ? "live" : seat === false ? "dead" : "unknown" } };
+		if (seat !== false) return { evidence: proof, blocked: {
+			action: seat === true ? "LIVE" : "SKIP",
+			reason: seat === true ? "owner-seat-alive" : "owner-seat-liveness-unproven",
+		} };
+	}
+	return { evidence: proof, blocked: null };
+}
+
 export function describeUserBlock(user: ScratchUserBlock): string {
 	const who = user.pid === null ? SCRATCH_USERS_FILE : `pid ${user.pid} start '${normalizeStart(user.start ?? "")}'`;
 	return `registered user ${who} is ${user.state} (${user.reason}); the user must finish, or run \`scratch unuse\``;
@@ -840,6 +916,8 @@ export type ScratchAction = "REAP" | "QUARANTINE" | "DELETE" | "LIVE" | "SKIP";
 export interface ScratchVerdict { dir: string; action: ScratchAction; reason: string; owner: ScratchOwner | null; sizeBytes: number; cause?: "permission" | "immutable-flag" | "open-fd" | "lsof-unavailable" | "unknown" | "delete-leftover";
 	/** The OS error that failed this action (e.g. "EACCES: permission denied, mkdir '/...'"). Present only on failed mutations; a refusal never carries one. */
 	error?: string;
+	/** Final process and seat proof attached to reaper decisions about an owned directory. */
+	ownerLiveness?: OwnerLivenessEvidence;
 	/** Ownership diagnosis and recovery, without granting release authority. */
 	detail?: string }
 
@@ -2338,6 +2416,17 @@ function removeExpiredEntry(path: string, entry: string, owner: ScratchOwner | n
 	if (errorCode !== null || existsSync(path)) {
 		const clear = existsSync(path) ? lsofClear(path, deps.run, lsofTimeoutMs) : null;
 		const immutable = errorCode === "EPERM" && immutableFlagPresent(path, deps);
+		// SCRATCHREAP2 (ompkit-3gxfa): a user-immutable flag is a refusal, not a failure. The path
+		// is protected (uchg/schg: set deliberately, e.g. archived patches), so the run stays COMPLETE
+		// with refused_count; every other delete failure still fails the run. The entry is left in
+		// place (no .delete- marker: it is held, not failed) and retried next run.
+		if (immutable) {
+			const refused: ScratchVerdict = { dir: path, action: "SKIP", reason: "user-immutable",
+				owner: verdictOwner, sizeBytes: dirSize(path), cause: "immutable-flag" };
+			appendLog(home, { event: "user-immutable", dir: path, at, entry: basename(path), source_entry: entry,
+				cause: "immutable-flag", error_code: errorCode });
+			return refused;
+		}
 		const cause = clear === false ? "open-fd"
 			: clear === null ? "lsof-unavailable"
 				: errorCode === "EACCES" ? "permission"
@@ -3457,7 +3546,7 @@ function expireEntryUnlessUsed(path: string, entry: string, owner: ScratchOwner 
 
 /** Reasons whose own event already reached the reap log; any other kept or skipped expired entry logs `quarantine-keep`. */
 const QUARANTINE_KEEP_LOGGED: Record<string, true> = {
-	"user-live": true, "delete-failed": true, "quarantine-hold-expired": true, "quarantine-hold-active": true,
+	"user-live": true, "delete-failed": true, "user-immutable": true, "quarantine-hold-expired": true, "quarantine-hold-active": true,
 };
 
 /** Expired quarantine entries are deleted after owner-release or lsof rechecks. */
@@ -3760,8 +3849,14 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 		return { dir, action: "SKIP", reason: "owner-repo-outside-scratch-root", owner: released.owner, sizeBytes: dirSize(dir) };
 	}
 	if (released && dirname(dir) === root && resolve(dir) === dir && releasedNameOk) {
+		if (released.legacy) return { dir, action: "QUARANTINE", reason: "owner-released-would-quarantine", owner: released.owner, sizeBytes: dirSize(dir) };
+		// SCRATCHREAP2: a structured release is authority to collect, not proof the owner is gone.
+		// Quarantine waits for proven death/reuse; a live or unproven owner stays with evidence.
+		const assessment = assessOwnerRemoval(released.owner, deps);
+		if (assessment.blocked) return { dir, action: assessment.blocked.action, reason: assessment.blocked.reason,
+			owner: released.owner, sizeBytes: dirSize(dir), ownerLiveness: assessment.evidence };
 		return { dir, action: "QUARANTINE", reason: "owner-released-would-quarantine",
-			owner: released.owner, sizeBytes: dirSize(dir) };
+			owner: released.owner, sizeBytes: dirSize(dir), ownerLiveness: assessment.evidence };
 	}
 	const verdict = inspectSession(dir, root, deps, nameRequired);
 	const mismatch = verdict.action === "SKIP" && verdict.reason === "session-name-owner-mismatch";
@@ -3959,7 +4054,8 @@ export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	const rootMetrics = scratchRootMetrics(allRoots, totals.sizeByRoot, deps.statfs, rootSourceMap(entries, systemWorkDirs));
 	const bunBuilds = inspectBunBuildFiles(entries, snapDeps);
 	return { roots: allRoots, sessions: sized, bunBuilds, orphans, orphanDecisions, totals, rootMetrics,
-		pressure: pressureForRoots(rootMetrics), quarantineBuckets: quarantineBuckets(home, deps.now ?? Date.now()),
+		pressure: pressureForRoots(rootMetrics), quarantineBuckets: quarantineBuckets(home, deps.now ?? Date.now(),
+			undefined, new Set()),
 		unownedActiveRule: UNOWNED_ACTIVE_RULE,
 		reapableBytes: sized.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0)
 			+ bunBuilds.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0),
@@ -4289,15 +4385,16 @@ function applyScratchInner(home: string, deps: ApplyDeps): ScratchApplyResult {
 		return { ...snapDeps, lsofSnapshot: snap };
 	};
 	const systemSet = new Set(systemWorkDirs);
-	const planned: { verdict: ScratchVerdict; root: string }[] = [];
+	const planned: { verdict: ScratchVerdict; root: string; sliceIdx: number }[] = [];
 	let consumed = 0;
 	for (const row of slice) {
 		if (pastDeadline()) break;
+		const sliceIdx = consumed;
 		consumed++;
 		const verdict = systemSet.has(row.dir)
 			? inspectSystemWorkDir(row.dir, snapDeps)
 			: inspectOne(row.dir, row.root, snapDeps, row.nameRequired);
-		if (verdict !== null) planned.push({ verdict, root: row.root });
+		if (verdict !== null) planned.push({ verdict, root: row.root, sliceIdx });
 	}
 	const bunBuildPlan = inspectBunBuildFiles(entries, snapDeps);
 	const sessions: ScratchVerdict[] = [];
@@ -4328,27 +4425,33 @@ function applyScratchInner(home: string, deps: ApplyDeps): ScratchApplyResult {
 			error: terminal.error ?? terminal.reason });
 		deps.onProgress?.(terminal, { done: index + 1, total: planned.length });
 	}
-	// REAPTIMEOUT1: the next run resumes after the last candidate consumed (inspected, whether or
-	// not it produced a verdict or applied). A fully covered census resets to null so the
-	// following run starts over; a cursor past every candidate (all reaped) is covered too.
+	// SCRATCHREAP2 (ompkit-3gxfa): the cursor persists COMPLETED progress only. The next run resumes
+	// after the last slice entry fully processed (inspected, verdict applied when one was planned);
+	// entries inspected but left unapplied by the deadline are revisited, never silently skipped.
+	// A fully covered census resets to null so the following run starts over.
 	if (store !== null) {
-		const expired = pastDeadline();
-		const covered = (start < 0 || start + consumed >= candidates.length) && !expired;
-		store.save(covered ? null : (consumed > 0 ? slice[consumed - 1]!.dir : cursor));
+		const hitDeadline = pastDeadline();
+		const covered = (start < 0 || start + consumed >= candidates.length) && !hitDeadline;
+		const settled = applied.length >= planned.length ? consumed
+			: Math.min(consumed, planned[applied.length]!.sliceIdx);
+		store.save(covered ? null : (settled > 0 ? slice[settled - 1]!.dir : cursor));
 	}
-	const bunBuilds = bunBuildPlan.map(row => {
+	// SCRATCHREAP2 (ompkit-3gxfa): a batch that already spent its deadline stops after the receipt.
+	// Orphan and bun-build work ride the next batch instead of blowing this one's bound.
+	const batchOpen = !pastDeadline();
+	const bunBuilds = batchOpen ? bunBuildPlan.map(row => {
 		const terminal = applyBunBuildFile(row, entries, deps);
 		appendLog(home, { event: "bun-build", dir: terminal.path, at: new Date(now).toISOString(),
 			action: terminal.action, reason: terminal.reason, bytes: terminal.sizeBytes });
 		return terminal;
-	});
-	const orphanDecisions = scratchOrphanDecisions(home, snapDeps);
+	}) : [];
+	const orphanDecisions = batchOpen ? scratchOrphanDecisions(home, snapDeps) : [];
 	const orphans = orphanDecisions.flatMap(row => row.proof === undefined ? [] : [row.proof]);
-	const killed = orphans.map(proc => {
+	const killed = batchOpen ? orphans.map(proc => {
 		const outcome = killOrphan(proc, deps);
 		appendLog(home, { event: "orphan-kill", dir: proc.dir, at: new Date(now).toISOString(), ...outcome });
 		return outcome;
-	});
+	}) : [];
 	for (const decision of orphanDecisions) if (decision.proof === undefined)
 		appendLog(home, { event: "orphan-preserved", dir: decision.path ?? "", at: new Date(now).toISOString(), ...decision });
 	const planEcho = dedupeNestedSizes(sessions);
