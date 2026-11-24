@@ -19,6 +19,7 @@
  * links and no flag points a start at a pending store, so a start that hangs on the
  * machine is the incident this refuses.
  */
+import { cpus, loadavg } from "node:os";
 import { run } from "./kitlib/run.ts";
 
 /** Wall-clock bound for the probe; tests shorten it with OMP_KIT_START_PROBE_DEADLINE_S. */
@@ -38,11 +39,32 @@ export interface StartProbeResult {
 	tail: string;
 }
 
+/**
+ * PENDINGSTUCK1 (ompkit-hhqsz): omp started in 6 s on a hand rerun a minute after a 45 s probe held the 0.2.147 update at load ~28.
+ * The default deadline therefore grows with the host's load per CPU, up to START_PROBE_MAX_LOAD_FACTOR times; a start that hangs
+ * (the consent-prompt incident) never exits, so a longer bound only delays that hold. An explicit env deadline is used as given.
+ */
+export const START_PROBE_MAX_LOAD_FACTOR = 4;
+
+export interface StartProbeOptions {
+	/** One-minute load average and CPU count the deadline scales by; default the host's. */
+	load1?: number;
+	cpus?: number;
+	/** The unscaled deadline when the env override is unset; default START_PROBE_DEFAULT_DEADLINE_S (tests shorten it). */
+	baseDeadlineS?: number;
+}
+
+export function startProbeLoadFactor(load1: number, cpus: number): number {
+	const ratio = cpus > 0 ? load1 / cpus : 1;
+	return Number.isFinite(ratio) ? Math.min(START_PROBE_MAX_LOAD_FACTOR, Math.max(1, ratio)) : 1;
+}
+
 /** Only a hang holds: a start that exits (zero or not) inside the deadline, or an unspawnable omp, lets the update proceed. */
-export async function runStartProbe(): Promise<StartProbeResult> {
+export async function runStartProbe(options: StartProbeOptions = {}): Promise<StartProbeResult> {
 	const raw = (process.env[START_PROBE_DEADLINE_ENV] ?? "").trim();
-	const parsed = raw === "" ? START_PROBE_DEFAULT_DEADLINE_S : Number(raw);
-	const deadline = Number.isFinite(parsed) && parsed > 0 ? parsed : START_PROBE_DEFAULT_DEADLINE_S;
+	const parsed = raw === "" ? options.baseDeadlineS ?? START_PROBE_DEFAULT_DEADLINE_S : Number(raw);
+	const base = Number.isFinite(parsed) && parsed > 0 ? parsed : START_PROBE_DEFAULT_DEADLINE_S;
+	const deadline = raw === "" ? base * startProbeLoadFactor(options.load1 ?? loadavg()[0] ?? 0, options.cpus ?? cpus().length) : base;
 	// Snapshot the environment explicitly: Bun resolves the binary against the env the
 	// spawn call carries, not later in-process PATH edits, so inherit exactly what this
 	// process sees (a test fake placed first on PATH included).

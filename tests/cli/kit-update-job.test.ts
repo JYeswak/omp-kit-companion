@@ -11,6 +11,7 @@ import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 import { binary, fixtureContractFiles, manifest, tar } from "./kit-update-fixture.ts";
 import { liveHookRefreshIo, refreshFleetHooks } from "../../src/hook-refresh.ts";
+import { runStartProbe, startProbeLoadFactor, START_PROBE_MAX_LOAD_FACTOR, type StartProbeOptions, type StartProbeResult } from "../../src/start-probe.ts";
 const dirs: string[] = [];
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 function config(enabled = true): KitUpdateJobConfig {
@@ -320,13 +321,17 @@ test("planted: a live install that does not match its activation record stays PE
 	});
 });
 
+// PENDINGSTUCK1: a pending receipt with no deferred detail is finished by the tick only when a live recheck passes, so a fixture that
+// expects it to stay PENDING says there is no live witness (the real ladder is never run here).
+const noLiveWitness = async (): Promise<never> => { throw new Error("no live witness in this fixture"); };
+
 test("KITREC1: a restarted tick exposes pending recovery before polling, even without a newer release", async () => {
 	const value = config(); installSymlink(value.prefix, "1.2.3");
 	preparePluginUpdate(value);
 	const receiptId = activate(value);
 	value.pollRelease = async () => { throw new Error("pending recovery must precede polling"); };
 	const notes: string[] = [];
-	const result = await runKitUpdateJob(value, { notify: message => { notes.push(message); } });
+	const result = await runKitUpdateJob(value, { recheckLive: noLiveWitness, notify: message => { notes.push(message); } });
 	expect(result).toMatchObject({ status: "PENDING", receiptId, receipt: "PENDING", reason: "KIT_RECOVERY_UNVERIFIED",
 		activeVersion: "1.2.4", relink: "NOT_RUN", service: "NOT_RUN" });
 	expect(inspectPendingKitUpdate(value.stateRoot)?.id).toBe(receiptId);
@@ -334,6 +339,70 @@ test("KITREC1: a restarted tick exposes pending recovery before polling, even wi
 	expect(notes[0]).toContain(`omp-kit update --reconcile ${receiptId} --yes`);
 	expect(notes[0]).not.toContain("omp-kit undo");
 });
+
+// PENDINGSTUCK1 (ompkit-hhqsz): a pending receipt the tick can verify is finished by the tick, not left for a hand `--reconcile`.
+const seatOmpForRecovery = { launcher: "/seat/omp", version: "18.18.9", resolvedFrom: "tern-bundle" as const };
+function recoveryDependencies(notes: string[], recheck: () => Promise<never>, relinked: { count: number }) {
+	return {
+		plan: async () => { throw new Error("a pending receipt must be recovered, never re-planned"); },
+		apply: async () => { throw new Error("a pending receipt must be recovered, never re-applied"); },
+		recheckLive: recheck,
+		relink: async () => { relinked.count += 1; return { ok: true, detail: "", receiptId: "plugin-recovered", undoCommand: "omp-kit undo plugin-recovered --yes" }; },
+		reconcile: async () => ({ ok: true, detail: "" }),
+		omp: () => seatOmpForRecovery,
+		notify: (message: string) => { notes.push(String(message)); },
+	};
+}
+
+test("PENDINGSTUCK1: a pending receipt whose postimage verifies and whose live recheck passes is finished by the tick", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		preparePluginUpdate(value);
+		const receiptId = activate(value);
+		const notes: string[] = []; const relinked = { count: 0 };
+		const result = await runKitUpdateJob(value, recoveryDependencies(notes, async () => passedLiveReport(), relinked));
+		expect(result).toMatchObject({ status: "UPDATED", receiptId, activeVersion: "1.2.4", receipt: "RECONCILED", postcheck: "PASS",
+			relink: "APPLIED", service: "APPLIED", pluginReceiptId: "plugin-recovered" });
+		expect(relinked.count).toBe(1);
+		expect(inspectPendingKitUpdate(value.stateRoot)).toBeNull();
+		expect(readlinkSync(join(value.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.4/bin/omp-kit");
+		expect(notes.some(note => note.includes("updated to 1.2.4"))).toBe(true);
+		expect(kitUpdateJobOverall(result)).toBe("OK");
+	});
+}, fixtureDeadlineS() * 1000);
+
+test("PENDINGSTUCK1 planted: a receipt whose postimage does not verify stays PENDING and is never reconciled or relinked, even when the live recheck passes", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		mkdirSync(join(value.prefix, "releases", "1.2.4", "bin"), { recursive: true });
+		writeFileSync(join(value.prefix, "releases", "1.2.4", "bin", "omp-kit"), "#!/bin/sh\n", { mode: 0o755 });
+		const receiptId = activate(value, Buffer.from("bytes the activation recorded, not the live binary"));
+		const notes: string[] = []; const relinked = { count: 0 };
+		const result = await runKitUpdateJob(value, recoveryDependencies(notes, async () => passedLiveReport(), relinked));
+		expect(result).toMatchObject({ status: "PENDING", receiptId, receipt: "PENDING", reason: "KIT_RECOVERY_UNVERIFIED", relink: "NOT_RUN", service: "NOT_RUN" });
+		expect(relinked.count).toBe(0);
+		expect(inspectPendingKitUpdate(value.stateRoot)?.id).toBe(receiptId);
+	});
+}, fixtureDeadlineS() * 1000);
+
+test("PENDINGSTUCK1 planted: a failing live recheck leaves the receipt PENDING (nothing undone), and a recent attempt is not retried inside the window", async () => {
+	await withPollEnv(null, async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		preparePluginUpdate(value);
+		const receiptId = activate(value);
+		const notes: string[] = []; const relinked = { count: 0 };
+		let rechecks = 0;
+		const first = await runKitUpdateJob(value, recoveryDependencies(notes, async () => { rechecks += 1; return executedLivePostcheck().report as never; }, relinked));
+		expect(first).toMatchObject({ status: "PENDING", receiptId, receipt: "PENDING", reason: "KIT_RECOVERY_UNVERIFIED", relink: "NOT_RUN" });
+		expect(rechecks).toBe(1);
+		expect(readlinkSync(join(value.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.4/bin/omp-kit");
+		const second = await runKitUpdateJob(value, recoveryDependencies(notes, async () => { rechecks += 1; return passedLiveReport(); }, relinked));
+		expect(second).toMatchObject({ status: "PENDING", receiptId, reason: "KIT_RECOVERY_UNVERIFIED", notification: false });
+		expect(rechecks).toBe(1);
+		expect(relinked.count).toBe(0);
+		expect(inspectPendingKitUpdate(value.stateRoot)?.id).toBe(receiptId);
+	});
+}, fixtureDeadlineS() * 1000);
 
 test("KITREC1 planted: an OMP-changed PARTIAL cannot be automatically reconciled or undone", async () => {
 	const value = config(); installSymlink(value.prefix, "1.2.3");
@@ -1195,10 +1264,10 @@ test("KITLIVEDEFER1: a recorded PENDING is not notified again", async () => {
 		preparePluginUpdate(value);
 		activate(value);
 		const notes: string[] = [];
-		const first = await runKitUpdateJob(value, { notify: message => { notes.push(String(message)); } });
+		const first = await runKitUpdateJob(value, { recheckLive: noLiveWitness, notify: message => { notes.push(String(message)); } });
 		expect(first).toMatchObject({ status: "PENDING", reason: "KIT_RECOVERY_UNVERIFIED", notification: true });
 		expect(notes).toHaveLength(1);
-		const second = await runKitUpdateJob(value, { notify: message => { notes.push(String(message)); } });
+		const second = await runKitUpdateJob(value, { recheckLive: noLiveWitness, notify: message => { notes.push(String(message)); } });
 		expect(second).toMatchObject({ status: "PENDING", reason: "KIT_RECOVERY_UNVERIFIED", notification: false });
 		expect(notes).toHaveLength(1);
 	});
@@ -1470,3 +1539,37 @@ Bun.plugin({ name: "hook-job-member-retention-only", setup(builder) {
 }, fixtureDeadlineS(600) * 1000);
 
 afterAll(() => cleanupAllOwnedTmp());
+
+// PENDINGSTUCK1-probe (ompkit-hhqsz box [b]): the default start-probe deadline grows with load per CPU, and a start that never finishes still holds.
+async function probeWithFakeOmp(body: string, options: StartProbeOptions): Promise<StartProbeResult> {
+	const dir = realpathSync(ownedTmp("start-probe-fake", { root: process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp") }).path); dirs.push(dir);
+	writeFileSync(join(dir, "omp"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+	const savedPath = process.env.PATH; const savedDeadline = process.env.OMP_KIT_START_PROBE_DEADLINE_S;
+	process.env.PATH = `${dir}:${savedPath ?? ""}`; delete process.env.OMP_KIT_START_PROBE_DEADLINE_S;
+	try { return await runStartProbe(options); } finally {
+		if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+		if (savedDeadline !== undefined) process.env.OMP_KIT_START_PROBE_DEADLINE_S = savedDeadline;
+	}
+}
+
+test("PENDINGSTUCK1-probe: the load factor is 1 up to one CPU's worth of load per CPU, grows with it, and stops at the cap", () => {
+	expect(startProbeLoadFactor(0, 12)).toBe(1);
+	expect(startProbeLoadFactor(12, 12)).toBe(1);
+	expect(startProbeLoadFactor(24, 12)).toBe(2);
+	expect(startProbeLoadFactor(400, 12)).toBe(START_PROBE_MAX_LOAD_FACTOR);
+	expect(startProbeLoadFactor(Number.NaN, 12)).toBe(1);
+	expect(startProbeLoadFactor(30, 0)).toBe(1);
+});
+
+test("PENDINGSTUCK1-probe: a slow start on a loaded host finishes inside the scaled deadline, while the same start on an idle host holds", async () => {
+	const slowStart = "sleep 2\nexit 1";
+	const loaded = await probeWithFakeOmp(slowStart, { load1: 48, cpus: 12, baseDeadlineS: 1 });
+	expect(loaded).toMatchObject({ started: true, timedOut: false, exit: 1 });
+	const idle = await probeWithFakeOmp(slowStart, { load1: 0, cpus: 12, baseDeadlineS: 1 });
+	expect(idle.timedOut).toBe(true);
+}, fixtureDeadlineS() * 1000);
+
+test("PENDINGSTUCK1-probe planted: a probe that never finishes still holds, however loaded the host", async () => {
+	const hung = await probeWithFakeOmp("sleep 30", { load1: 48, cpus: 12, baseDeadlineS: 1 });
+	expect(hung).toMatchObject({ started: true, timedOut: true });
+}, fixtureDeadlineS() * 1000);

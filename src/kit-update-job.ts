@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { parseReleaseIndexJson } from "./kit-release.ts";
-import { applyKitUpdate, fetchAttestationBundleFor, isLiveDeferredOnly, judgeKitPostcheck, kitPostcheckDetail, planKitUpdate, reconcilePendingUpdate, runKitPostcheck, selectUpdateOmp, undoKitUpdate, type KitPostcheck, type KitPostcheckDetail, type KitUndoResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult, type LiveDeferredOnlyDetail, type UpdateOmpSelection } from "./kit-update.ts";
+import { applyKitUpdate, fetchAttestationBundleFor, isLiveDeferredOnly, judgeKitPostcheck, kitPostcheckDetail, planKitUpdate, reconcilePendingUpdate, runKitPostcheck, selectUpdateOmp, undoKitUpdate, type KitPostcheck, type KitPostcheckDetail, type KitReconcileResult, type KitUndoResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult, type LiveDeferredOnlyDetail, type UpdateOmpSelection } from "./kit-update.ts";
 import type { FullTestReport } from "./full-test-runner.ts";
 import { refreshFleetHooksLive, type HookRefreshReport } from "./hook-refresh.ts";
 import { acquireKitUpdateLock, inspectPendingKitUpdate, type PendingKitUpdate, type UpdateLockToken } from "./mutations.ts";
@@ -422,6 +422,27 @@ function pendingReceiptRecorded(stateRoot: string, receiptId: string): boolean {
 	return false;
 }
 
+/** PENDINGSTUCK1: a pending receipt that could not be finished is retried at most this often (one live ladder per window). */
+const KIT_RECOVERY_RETRY_MS = 30 * 60 * 1000;
+
+/** A PENDING KIT_RECOVERY_UNVERIFIED run record for this receipt is younger than `windowMs`: the last recovery attempt is recent. */
+function recoveryAttemptedWithin(stateRoot: string, receiptId: string, windowMs: number, now = Date.now()): boolean {
+	let names: string[];
+	try { names = readdirSync(stateRoot); } catch { return false; }
+	for (const name of names) {
+		if (!RUN_RECORD_NAME.test(name)) continue;
+		try {
+			if (now - lstatSync(join(stateRoot, name)).mtimeMs >= windowMs) continue;
+			const parsed: unknown = JSON.parse(readFileSync(join(stateRoot, name), "utf8"));
+			if (!parsed || typeof parsed !== "object") continue;
+			if (!("receiptId" in parsed) || parsed.receiptId !== receiptId) continue;
+			if (!("status" in parsed) || parsed.status !== "PENDING") continue;
+			if ("reason" in parsed && parsed.reason === "KIT_RECOVERY_UNVERIFIED") return true;
+		} catch { continue; }
+	}
+	return false;
+}
+
 /**
  * KITLIVEDEFER1: the newest PENDING run record for this receipt whose detail is
  * deferred-only live. Its deferred_stages ride on the PENDING record so a later
@@ -629,6 +650,31 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		return await compensateFailure({ receiptId: receipt.id, automatic: judged, postcheck: check,
 			activeVersion: liveVersion, targetVersion: receipt.kitVersion, omp: judgedOmp, runningVersion });
 	};
+	/**
+	 * PENDINGSTUCK1: finish a pending receipt that carries no deferred-live detail. The live ladder runs again; only a PASS with
+	 * the matcher PASS reconciles (reconcilePendingUpdate refuses unless the symlink target and binary sha256 still match the
+	 * receipt's postimage), relinks the plugins and re-renders the services. Anything else returns null and the receipt stays
+	 * PENDING exactly as before: a restart has no witness for why the first postcheck failed, so nothing is undone here.
+	 */
+	const finishRecovered = async (receipt: Pick<PendingKitUpdate, "id" | "kitVersion">): Promise<KitUpdateJobResult | null> => {
+		const ompResolver = dependencies.omp ?? (() => selectUpdateOmp({ ...process.env, HOME: config.home }));
+		const judgedOmp = ompResolver();
+		if (judgedOmp === null) return null;
+		let report: FullTestReport;
+		try {
+			report = await (dependencies.recheckLive ?? runKitPostcheck)({ executablePath: join(config.prefix, "bin", "omp-kit"), home: config.home, stateRoot: config.stateRoot });
+		} catch { return null; }
+		const afterOmp = ompResolver();
+		const identityKnown = afterOmp !== null && report.omp_version !== null && report.omp_version === judgedOmp.version;
+		const changed = afterOmp === null || afterOmp.version !== judgedOmp.version || afterOmp.launcher !== judgedOmp.launcher ||
+			(report.omp_version !== null && report.omp_version !== judgedOmp.version);
+		const judged = judgeKitPostcheck(report, { identityKnown, changed });
+		if (!(judged.status === "PASS" && judged.matcher === "PASS")) return null;
+		let reconciled: KitReconcileResult;
+		try { reconciled = reconcilePendingUpdate({ stateRoot: config.stateRoot, prefix: config.prefix, id: receipt.id }); } catch { return null; }
+		return await finishActivation({ receiptId: receipt.id, activeVersion: reconciled.activeVersion, omp: judgedOmp,
+			postcheck: { postcheck: "PASS" }, targetVersion: receipt.kitVersion, runningVersion: runningReleaseVersion(config.prefix) });
+	};
 	try {
 		// A restart has no trustworthy postcheck/OMP identity witness. Never guess an undo reason or
 		// hide the receipt behind CURRENT when polling finds no newer release.
@@ -642,6 +688,13 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 				// instead of waiting blindly. reconcilePendingUpdate alone only
 				// checks the symlink and postimage, so it never blesses this path.
 				return await finishDeferredLive(pending, deferred, recorded);
+			}
+			// PENDINGSTUCK1: a pending receipt with no deferred detail (the run that made it died, or its postcheck read a false PARTIAL)
+			// whose postimage verifies and whose live recheck now passes is finished here, as `update --reconcile --yes` does by hand.
+			// While it cannot finish it is retried at most once per KIT_RECOVERY_RETRY_MS, so a broken release costs one ladder per window.
+			if (installedVersion(config.prefix) !== null && !recoveryAttemptedWithin(config.stateRoot, pending.id, KIT_RECOVERY_RETRY_MS)) {
+				const finished = await finishRecovered(pending);
+				if (finished !== null) return finished;
 			}
 			const activeVersion = installedVersion(config.prefix);
 			const reason = activeVersion === null ? "KIT_ACTIVATION_UNVERIFIED" : "KIT_RECOVERY_UNVERIFIED";
