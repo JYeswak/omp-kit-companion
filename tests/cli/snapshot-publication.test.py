@@ -136,7 +136,7 @@ def mutation_refused(fixture: Fixture) -> None:
     index_entries = fixture.git("ls-files", "--stage", "-z")
     head = fixture.git("rev-parse", "HEAD")
     result = fixture.run("git", "commit", "-m", "foreign mutation [test]", allow_failure=True)
-    assert result.returncode != 0 and "reservation conflict" in result.stderr, (
+    assert result.returncode != 0 and ("reservation conflict" in result.stderr or "staged-board-reservations: REFUSED" in result.stderr), (
         f"mutation-custody: foreign commit not refused for custody\n{result.stdout}{result.stderr}")
     assert fixture.git("rev-parse", "HEAD") == head, "mutation-custody: refused commit changed history"
     assert fixture.peer_bytes(include_index=False) == before, "mutation-custody: refusal modified peer bytes"
@@ -162,7 +162,7 @@ def unadmitted_history_refused(fixture: Fixture) -> None:
 def installer_regenerates_custody(fixture: Fixture) -> None:
     scripts = fixture.repo / "scripts"
     scripts.mkdir(exist_ok=True)
-    for name in ("install-pre-push-gate.sh", "pre-push-gate.sh"):
+    for name in ("install-pre-push-gate.sh", "pre-push-gate.sh", "check-staged-board-reservations.sh"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
     # A stale installed member must be replaced through the native installer,
     # not repaired by a test's own patch. Prove restoration by actual commit
@@ -179,7 +179,7 @@ def installer_migrates_prepush_install(fixture: Fixture) -> None:
     # adds the real fresh gate as a pre-push member; publication without the plugin is the `publication` case.)
     scripts = fixture.repo / "scripts"
     scripts.mkdir(exist_ok=True)
-    for name in ("install-pre-push-gate.sh", "pre-push-gate.sh"):
+    for name in ("install-pre-push-gate.sh", "pre-push-gate.sh", "check-staged-board-reservations.sh"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
     fixture.install("agent-mail-default")
     hooks = fixture.repo / ".git/hooks"
@@ -189,14 +189,15 @@ def installer_migrates_prepush_install(fixture: Fixture) -> None:
     assert not plugin.exists(), "migration: the installer left Agent Mail's pre-push plugin installed"
     assert os.access(hooks / "pre-push", os.X_OK), "migration: the pre-push chain runner was removed"
     assert (hooks / "hooks.d/pre-push/30-omp-kit-on-main").is_file(), "migration: the kit's history member was removed"
-    assert (hooks / "hooks.d/pre-commit/50-agent-mail.py").is_file(), "migration: pre-commit custody plugin missing"
+    assert not (hooks / "hooks.d/pre-commit/50-agent-mail.py").exists(), "migration: Agent Mail pre-commit plugin still installed"
+    assert (hooks / "hooks.d/pre-commit/50-omp-kit-board-reservations").is_file(), "migration: board reservation member missing"
     mutation_refused(fixture)
 
 
 def nonchain_hook_preserved(fixture: Fixture, hook_name: str = "pre-push") -> None:
     scripts = fixture.repo / "scripts"
     scripts.mkdir(exist_ok=True)
-    for name in ("install-pre-push-gate.sh", "pre-push-gate.sh"):
+    for name in ("install-pre-push-gate.sh", "pre-push-gate.sh", "check-staged-board-reservations.sh"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
     hooks = fixture.repo / ".git/hooks"
     custom = hooks / hook_name
