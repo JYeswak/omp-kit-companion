@@ -35,7 +35,7 @@ function robot(args: string[], root: string, bindir: string): CapsResult & { err
 	};
 }
 
-/** Empty bindir: none of am, ntm, rch, tern, br, tmux is on PATH. */
+/** Empty bindir: none of ntm, rch, tern, br, tmux is on PATH. */
 function stockBin(): string {
 	const dir = ownedTmp("omp-kit-stockbin").path;
 	fixtures.push(dir);
@@ -58,7 +58,8 @@ describe("oq1h.6 tool-gated capabilities", () => {
 		const root = workspace();
 		const caps = robot(["capabilities", "--json"], root, stockBin());
 		const names = caps.data.commands.map((command) => command.name);
-		expect(names).not.toContain("land");
+		// land needs only git and the Board (J-2026-11-24-09: Agent Mail retired), so a stock runner keeps it.
+		expect(names).toContain("land");
 		expect(names).not.toContain("send");
 		expect(names).not.toContain("rch");
 		expect(names).not.toContain("fleet");
@@ -75,9 +76,6 @@ describe("oq1h.6 tool-gated capabilities", () => {
 	test("stock runner refuses with named codes and exit 3", () => {
 		const root = workspace();
 		const bin = stockBin();
-		const land = robot(["land", "--paths", "x", "--message", "m", "--json"], root, bin);
-		expect(land.code).toBe(3);
-		expect(land.errorsCode).toBe("AGENT_MAIL_UNAVAILABLE");
 		const send = robot(["send", "S", "P", "hello", "--json"], root, bin);
 		expect(send.code).toBe(3);
 		expect(send.errorsCode).toBe("NTM_UNAVAILABLE");
@@ -86,19 +84,10 @@ describe("oq1h.6 tool-gated capabilities", () => {
 		expect(tern.errorsCode).toBe("TERN_UNAVAILABLE");
 	});
 
-	test("stock runner: an unconfirmed --apply refuses CONSENT_REQUIRED (exit 2) before the missing-tool refusal; --yes and preview keep exit 3", () => {
+	test("stock runner: an unconfirmed --apply refuses CONSENT_REQUIRED (exit 2) before the missing-tool refusal; --yes keeps exit 3", () => {
 		const root = workspace();
 		const bin = stockBin();
-		const unconfirmed = robot(["land", "--paths", "x", "--message", "m", "--apply", "--json"], root, bin);
-		expect(unconfirmed.code).toBe(2);
-		expect(unconfirmed.errorsCode).toBe("CONSENT_REQUIRED");
-		const confirmed = robot(["land", "--paths", "x", "--message", "m", "--apply", "--yes", "--json"], root, bin);
-		expect(confirmed.code).toBe(3);
-		expect(confirmed.errorsCode).toBe("AGENT_MAIL_UNAVAILABLE");
-		const preview = robot(["land", "--paths", "x", "--message", "m", "--json"], root, bin);
-		expect(preview.code).toBe(3);
-		expect(preview.errorsCode).toBe("AGENT_MAIL_UNAVAILABLE");
-		// A second verb on the shared dispatch path: the rule is the dispatcher's, not land's (save declares no --apply and never asks consent).
+		// The rule is the dispatcher's, not one verb's (save declares no --apply and never asks consent); rch lease is a tool-gated verb that takes --apply.
 		const rchUnconfirmed = robot(["rch", "lease", "--slots", "2", "--apply", "--json", "--", "cargo", "test"], root, bin);
 		expect(rchUnconfirmed.code).toBe(2);
 		expect(rchUnconfirmed.errorsCode).toBe("CONSENT_REQUIRED");
@@ -113,8 +102,7 @@ describe("oq1h.6 tool-gated capabilities", () => {
 		const rchNames = rchOnly.data.commands.map((command) => command.name);
 		const rch = rchOnly.data.commands.find((command) => command.name === "rch");
 		expect((rch?.subcommands ?? []).map((child) => child.name)).toContain("lease");
-		expect(rchNames).not.toContain("land");
-		const full = robot(["capabilities", "--json"], root, fakeBin(["am", "ntm", "rch", "tern", "br", "tmux"]));
+		const full = robot(["capabilities", "--json"], root, fakeBin(["ntm", "rch", "tern", "br", "tmux"]));
 		expect(full.data.commands.map((command) => command.name)).toEqual(expect.arrayContaining(["land", "send", "rch", "fleet", "tern-ref", "drain"]));
 		const planning = full.data.commands.find((command) => command.name === "planning");
 		expect((planning?.subcommands ?? []).map((child) => child.name)).toContain("convert");
@@ -122,7 +110,7 @@ describe("oq1h.6 tool-gated capabilities", () => {
 
 	test("a complete explicit tool PATH lists every tool-backed verb", () => {
 		const root = workspace();
-		const caps = robot(["capabilities", "--json"], root, fakeBin(["am", "ntm", "rch", "tern", "br", "tmux"]));
+		const caps = robot(["capabilities", "--json"], root, fakeBin(["ntm", "rch", "tern", "br", "tmux"]));
 		expect(caps.data.commands.map((command) => command.name)).toEqual(expect.arrayContaining(["land", "send", "rch", "fleet", "tern-ref", "drain"]));
 	});
 });

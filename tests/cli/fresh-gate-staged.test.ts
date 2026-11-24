@@ -13,6 +13,8 @@ import { gate, gateFunctions, root, scratchRoot } from "./fresh-gate.helpers.ts"
 
 const decoder = new TextDecoder();
 const gitEnv = {
+	// The Board reservation member calls omp-kit; the fixture repo carries no src/cli.ts and no kit, so `true` stands for a Board that admits.
+	OMP_KIT_BIN: "true",
 	PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
 	GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid",
 };

@@ -58,7 +58,7 @@ test("the package list is derived from the real installers' references", () => {
 	const names = ["scripts/install-commit-msg-bead.sh", "scripts/install-pre-push-gate.sh"];
 	closeOverInstallerReferences(names, name => readFileSync(join(repo, name), "utf8"));
 	for (const expected of ["scripts/check-deploy-step.sh", "scripts/check-red-main.py", "scripts/check-staged-wallclock.sh",
-		"scripts/install-pre-commit-storage-root-gate.sh", "scripts/pre-commit-storage-root-gate.sh", ...Object.values(RELOCATED_SOURCES)])
+		"scripts/check-staged-board-reservations.sh", ...Object.values(RELOCATED_SOURCES)])
 		expect(names).toContain(expected);
 	expect(names.some(name => name.startsWith("src/"))).toBe(false);
 });

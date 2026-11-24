@@ -16,12 +16,14 @@ import { cleanupAllOwnedTmp } from ${JSON.stringify(join(repoRoot, "src/kitlib/t
 import { fixture, git } from ${JSON.stringify(join(import.meta.dir, "private-index-land.helpers.ts"))};
 cleanupAllOwnedTmp();
 const { work } = fixture();
-process.stdout.write(git(work, ["rev-parse", "--is-inside-work-tree"]).trim());
+// The helpers start a fake Board child that outlives the probe, so the probe flushes its answer and exits itself.
+await new Promise(resolve => process.stdout.write(git(work, ["rev-parse", "--is-inside-work-tree"]).trim(), resolve));
+process.exit(0);
 `;
 	const result = runFixture([process.execPath, "-e", probe], { cwd: repoRoot, floor_s: 60 });
 	expect(result.rc, decoder.decode(result.stderr)).toBe(0);
 	expect(decoder.decode(result.stdout)).toBe("true");
-});
+}, fixtureDeadlineS(60) * 1000);
 const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 
 function saveOnce(work: string, fakeBin: string, args: string[]) {

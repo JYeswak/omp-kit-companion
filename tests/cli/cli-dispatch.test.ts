@@ -33,7 +33,7 @@ import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 const cli = ${JSON.stringify(join(root, "src/cli.ts"))};
 Bun.plugin({ name: "handlercause-bare-catch", setup(builder) {
-	builder.onLoad({ filter: /cli\\.ts$/ }, args => {
+	builder.onLoad({ filter: /\\/src\\/cli\\.ts$/ }, args => {
 		if (args.path !== cli) return;
 		const source = readFileSync(cli, "utf8");
 		const current = ${JSON.stringify(current)};
