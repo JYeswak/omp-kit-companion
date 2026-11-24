@@ -23,15 +23,17 @@ or the candidate changes its bytes, status is `SKIP`; unavailable registered
 execution is `UNRUN`.
 `PUSHED` is reported only after the exact candidate is published by an ordinary, non-force push.
 `REFUSED` means no publication; a constructed candidate may remain locally for inspection.
-Failed admission does not publish, and an origin advance after checking
-is refused without force or retry. `UNRUN` means admission or publication could
-not be verified. `SKIP` does not prove that a full suite passed.
+ Failed admission does not publish, and an origin advance after checking
+ is refused without force or retry. A local `main` advance during the check
+ refuses as `LAND_LOCAL_REF_MOVED` without pushing the stale candidate, so the
+ new tip is judged by a fresh run instead of being stranded. `UNRUN` means
+ admission or publication could not be verified. `SKIP` does not prove that a full suite passed.
 On `PUSHED`, land removes every matching ovnfs checkout whose whole diff was published, after re-checking its diff and bytes plus modes right before `ovnfs rm`; `--checkout NAME` (or `land --patch` when the patch file lies inside a checkout's path) pins the removal to one checkout, and a checkout with any further change is kept and named. All files inside a removed checkout, including untracked and ignored ones, are removed with it. Pass `--keep-checkout` to keep all checkouts; `ovnfs rm <name>` is for abandoned ones.
 
 | Result | Exit | Meaning |
 |---|---|---|
 | `PUSHED` | 0 | The exact candidate that was checked is now origin `main`. |
-| `REFUSED` | 1 | Nothing was published: a hook or check failed, or origin moved after the check. |
+ | `REFUSED` | 1 | Nothing was published: a hook or check failed, origin moved after the check, or local `main` moved during it. |
 | `UNRUN` | 77 | Admission or publication could not be verified. |
 
 ## `omp-kit ovnfs-land`

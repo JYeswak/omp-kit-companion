@@ -1646,9 +1646,11 @@ async function publishQualifiedCandidate(
 			? { code: "LAND_CHECK_FAILED", message: `The registered repo check failed for the exact publication candidate${checkResult.diagnostic_path ? `; diagnostics: ${checkResult.diagnostic_path}` : ""}`, remediation: checkResult.diagnostic_path ? `Inspect diagnostics at ${checkResult.diagnostic_path}, then repair the check or candidate; it was not published.` : "Repair the check or candidate; it was not published." }
 			: checkUnavailable
 				? { code: "LAND_CHECK_UNRUN", message: `The registered repo check did not complete: ${checkResult.reason ?? "unknown"}`, remediation: "Restore the registered check tooling and retry; no publication was authorized." }
-				: convergence.reason === "PUSH_REJECTED"
-					? { code: "LAND_PUSH_REJECTED", message: "origin/main advanced after candidate check; the exact checked candidate was refused without retry or force", remediation: "Reconcile with current origin/main and run land again so the new candidate is checked." }
-					: pushUnverified
+					: convergence.reason === "PUSH_REJECTED"
+						? { code: "LAND_PUSH_REJECTED", message: "origin/main advanced after candidate check; the exact checked candidate was refused without retry or force", remediation: "Reconcile with current origin/main and run land again so the new candidate is checked." }
+						: convergence.reason === "LOCAL_REF_MOVED"
+							? { code: "LAND_LOCAL_REF_MOVED", message: "Local main advanced while the exact candidate was checked; the stale candidate was not published and nothing was pushed", remediation: "Run land again so the new tip is checked before anything publishes; the advanced tip is preserved on local main." }
+						: pushUnverified
 						? pushUnverifiedFailure(repo, input.pushDeadlineS ?? landPushDeadlineSeconds(), convergence)
 						: { code: "LAND_PUBLICATION_REFUSED", message: `The exact checked candidate was not published: ${convergence.reason ?? "publication was not verified"}`, remediation: "Preserve the candidate and resolve the typed refusal before another landing." });
 		let checkoutFields: Record<string, unknown> = {};

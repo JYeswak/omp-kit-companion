@@ -479,6 +479,18 @@ export async function convergeRepository(options: ConvergeOptions): Promise<Conv
 					result.reason = admission.reason ?? "PRE_PUSH_REFUSED";
 					return done();
 				}
+				// LANDSAVED1 (ompkit-1ra0d.170): the check judged exactly `head`.
+				// Local main may have advanced while it ran; pushing the stale
+				// head would publish a candidate the new tip never judged and
+				// strand the new tip on local main. Re-resolve and refuse
+				// one-shot without pushing when it moved; the caller re-runs so
+				// the new tip is checked before anything publishes.
+				const freshHead = out(repo, ["rev-parse", "refs/heads/main"]);
+				if (freshHead !== head) {
+					result.state = "REFUSED";
+					result.reason = "LOCAL_REF_MOVED";
+					return done();
+				}
 			}
 			// The publication push alone may run under a caller deadline (LANDPUSH1):
 			// the pre-push hook chain runs under it, and an interruption is
