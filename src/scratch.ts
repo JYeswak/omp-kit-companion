@@ -2326,25 +2326,19 @@ export function appendLog(home: string, event: ReapEvent): void {
 }
 
 function immutableFlagPresent(path: string, deps: ApplyDeps): boolean {
-	const result = deps.run(["/bin/ls", "-ldO", path]);
-	if (result.code !== 0 || result.stdout.length > 8192) return false;
-	const end = result.stdout.indexOf("\n");
-	const line = end < 0 ? result.stdout : result.stdout.slice(0, end);
-	let flags: string | null = null;
-	let field = 0;
-	let offset = 0;
-	while (offset < line.length && field < 5) {
-		while (offset < line.length && (line[offset] === " " || line[offset] === "\t" || line[offset] === "\r")) offset++;
-		const start = offset;
-		while (offset < line.length && line[offset] !== " " && line[offset] !== "\t" && line[offset] !== "\r") offset++;
-		if (start === offset) break;
-		if (field === 4) {
-			flags = line.slice(start, offset);
-			break;
-		}
-		field++;
+	try {
+		// The immutable bit may live on any descendant, not only the quarantine root. -P is
+		// find's default: symlinks stay entries and their targets are never inspected.
+		const result = deps.run(["/usr/bin/find", path, "(", "-flags", "+uchg", "-o", "-flags", "+schg", ")", "-print0", "-quit"],
+			{ timeoutMs: LSOF_TIMEOUT_MS });
+		if (result.code !== 0 || result.stdout.length > 8192) return false;
+		const end = result.stdout.indexOf("\0");
+		if (end <= 0 || end !== result.stdout.length - 1) return false;
+		const flagged = result.stdout.slice(0, end);
+		return flagged === path || flagged.startsWith(`${path}${sep}`);
+	} catch {
+		return false;
 	}
-	return flags !== null && flags.split(",").some(flag => flag === "uchg" || flag === "schg");
 }
 
 function removeExpiredEntry(path: string, entry: string, owner: ScratchOwner | null, released: ReleaseRecord | null,

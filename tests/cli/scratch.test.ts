@@ -604,7 +604,7 @@ test("quarantineTimeOf accepts delete markers and rejects malformed or oversized
   expect(quarantineTimeOf(`${"x".repeat(300)}${entry}`)).toBeNull();
 });
 
-test("SCRATCHREAP2: a delete blocked by a user-immutable flag is refused, never failed; other EPERM still fails", () => {
+test("SCRATCHREAP2: a nested user-immutable file is refused, never failed; other EPERM still fails", () => {
   const home = useState();
   const now = Date.now();
   const qt = quarantineDir(home);
@@ -616,12 +616,19 @@ test("SCRATCHREAP2: a delete blocked by a user-immutable flag is refused, never 
     return path;
   };
   const immutablePath = createMarker("immutable");
+  const nestedImmutable = join(immutablePath, "42a2-hunks.patch");
+  writeFileSync(nestedImmutable, "protected patch\n");
   const unverifiedPath = createMarker("unverified");
+  const nonzeroProbePath = createMarker("nonzero-probe");
+  const thrownProbePath = createMarker("thrown-probe");
+  const truncatedProbePath = createMarker("truncated-probe");
   const run = (args: readonly string[]) => {
-    if (args[0] !== "/bin/ls") return clearRun();
-    const path = args[args.length - 1]!;
-    const flags = path === immutablePath ? "uchg" : "-";
-    return { code: 0, stdout: `drwxr-xr-x 2 josh staff ${flags} 64 Oct 13 06:00 ${path}`, stderr: "" };
+    if (args[0] !== "/usr/bin/find") return clearRun();
+    const path = args[1]!;
+    if (path === nonzeroProbePath) return { code: 1, stdout: `${join(path, "flagged")}\0`, stderr: "find failed" };
+    if (path === thrownProbePath) throw new Error("find probe unavailable");
+    if (path === truncatedProbePath) return { code: 0, stdout: join(path, "flagged"), stderr: "" };
+    return { code: 0, stdout: path === immutablePath ? `${nestedImmutable}\0` : "", stderr: "" };
   };
   const deps = { ...depsFor({ run }), home, now, remove: () => {
     const error = new Error("operation not permitted") as NodeJS.ErrnoException;
@@ -629,15 +636,85 @@ test("SCRATCHREAP2: a delete blocked by a user-immutable flag is refused, never 
     throw error;
   } } as ApplyDeps;
   const failed = applyQuarantineExpiry(home, deps);
-  // The flagged entry is a refusal (a path the reaper may not touch), not a failure: no error
-  // rides a refusal, and the entry stays unmarked (held, not failed) for the next run to retry.
+  // A nested uchg/schg entry is a refusal (not a failure); an unproven EPERM remains a failure.
   expect(failed).toContainEqual(expect.objectContaining({ dir: immutablePath, action: "SKIP",
     reason: "user-immutable", cause: "immutable-flag" }));
   expect(failed.find(row => row.dir === immutablePath && row.reason === "user-immutable")).not.toHaveProperty("error");
-  expect(failed).toContainEqual(expect.objectContaining({ dir: unverifiedPath, action: "SKIP",
-    reason: "delete-failed", cause: "unknown" }));
+  expect(existsSync(nestedImmutable)).toBe(true);
+  for (const path of [unverifiedPath, nonzeroProbePath, thrownProbePath, truncatedProbePath]) {
+    expect(failed).toContainEqual(expect.objectContaining({ dir: path, action: "SKIP",
+      reason: "delete-failed", cause: "unknown" }));
+  }
   const logs = readFileSync(reapLogPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
   expect(logs).toContainEqual(expect.objectContaining({ event: "user-immutable", dir: immutablePath, cause: "immutable-flag" }));
+});
+
+test("SCRATCHREAP2: a run whose only nested immutable refusal ends COMPLETE with refused_count 1", () => {
+  const home = useState();
+  const root = agentTmp("scratch-immutable-run");
+  roots.push(root);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  const now = Date.now();
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const entry = quarantineEntryFor("held.1", new Date(now - 25 * 3600 * 1000));
+  const held = join(qt, entry);
+  mkdirSync(held, { recursive: true });
+  writeFileSync(join(held, ".owner"), ownerText(deadFields("held", deadPid())));
+  const protectedFile = join(held, "data");
+  writeFileSync(protectedFile, "protected\n");
+  const run = (args: readonly string[]) => {
+    if (args[0] !== "/usr/bin/find") return clearRun();
+    const probeRoot = args[1]!;
+    return { code: 0, stdout: probeRoot === held || probeRoot.startsWith(`${held}.delete-`)
+      ? `${join(probeRoot, "data")}\0` : "", stderr: "" };
+  };
+  const result = applyScratch(home, { ...depsFor({ run, now }), home, now,
+    remove: () => {
+      const error = new Error("operation not permitted") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    } } as ApplyDeps);
+  expect(result.expired.some(row => row.action === "SKIP" && row.reason === "user-immutable" &&
+    (row.dir === held || row.dir.startsWith(`${held}.delete-`)))).toBe(true);
+  expect(result.receipt).toMatchObject({ failed_count: 0, refused_count: 1 });
+  expect(readFileSync(protectedFile, "utf8")).toBe("protected\n");
+});
+
+// Opt-in: run from an APFS export; ovnfs COW volumes reject chflags with EOPNOTSUPP.
+test.skipIf(process.platform !== "darwin" || process.env.OMP_KIT_IMMUTABLE_E2E !== "1")("SCRATCHREAP2: a real nested uchg file is refused without deleting data", () => {
+  const home = useState();
+  const now = Date.now();
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const dir = join(qt, `${quarantineEntryFor("native-immutable", new Date(now - 25 * 3600 * 1000))}.delete-56789`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, ".owner"), ownerText(deadFields("native-immutable", deadPid())));
+  const protectedFile = join(dir, "locked.patch");
+  writeFileSync(protectedFile, "protected patch\n");
+  try {
+    const set = runSync(["/usr/bin/chflags", "uchg", protectedFile], { deadline_s: fixtureDeadlineS() });
+    if (set.rc !== 0) throw new Error(`could not set fixture uchg: ${new TextDecoder().decode(set.stderr)}`);
+    const run: ApplyDeps["run"] = (args, options) => {
+      if (args[0] !== "/usr/bin/find") return clearRun();
+      const checked = runSync(args, {
+        deadline_s: (options?.timeoutMs ?? 15_000) / 1000, max_output_bytes: 8192,
+      });
+      return { code: checked.rc, stdout: new TextDecoder().decode(checked.stdout), stderr: new TextDecoder().decode(checked.stderr) };
+    };
+    const result = applyQuarantineExpiry(home, { ...depsFor({ run }), home, now, remove: () => {
+      const error = new Error("operation not permitted") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    } } as ApplyDeps);
+    expect(result).toContainEqual(expect.objectContaining({
+      dir, action: "SKIP", reason: "user-immutable", cause: "immutable-flag",
+    }));
+    expect(readFileSync(protectedFile, "utf8")).toBe("protected patch\n");
+  } finally {
+    const clear = runSync(["/usr/bin/chflags", "nouchg", protectedFile], { deadline_s: fixtureDeadlineS() });
+    if (clear.rc !== 0) throw new Error(`could not clear fixture uchg: ${new TextDecoder().decode(clear.stderr)}`);
+  }
 });
 
 test("SCRATCHREAP2: a run whose only refused action is user-immutable ends COMPLETE with refused_count 1", () => {
@@ -654,9 +731,8 @@ test("SCRATCHREAP2: a run whose only refused action is user-immutable ends COMPL
   writeFileSync(join(held, ".owner"), ownerText(deadFields("held", deadPid())));
   writeFileSync(join(held, "data"), "protected\n");
   const run = (args: readonly string[]) => {
-    if (args[0] === "/bin/ls") return { code: 0,
-      stdout: `drwxr-xr-x 2 josh staff uchg 64 Oct 13 06:00 ${held}`, stderr: "" };
-    return clearRun();
+    if (args[0] !== "/usr/bin/find") return clearRun();
+    return { code: 0, stdout: `${args[1]}\0`, stderr: "" };
   };
   const result = applyScratch(home, { ...depsFor({ run, now }), home, now,
     remove: () => {
@@ -664,7 +740,8 @@ test("SCRATCHREAP2: a run whose only refused action is user-immutable ends COMPL
       error.code = "EPERM";
       throw error;
     } } as ApplyDeps);
-  expect(result.expired).toContainEqual(expect.objectContaining({ dir: held, action: "SKIP", reason: "user-immutable" }));
+  expect(result.expired.some(row => row.action === "SKIP" && row.reason === "user-immutable" &&
+    (row.dir === held || row.dir.startsWith(`${held}.delete-`)))).toBe(true);
   expect(result.receipt).toMatchObject({ failed_count: 0, refused_count: 1 });
   expect(existsSync(join(held, "data"))).toBe(true);
 });
@@ -808,7 +885,7 @@ test("killOrphan rejects a bare numeric PID instead of signalling its current oc
 
 function cli(args: string[], home: string, extraEnv: Record<string, string> = {}) {
   const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"], {
-    cwd: home, env: { ...process.env, HOME: home, ...extraEnv, PATH: `${LAUNCHER_TABLE}:${extraEnv.PATH ?? process.env.PATH ?? ""}`,
+    cwd: home, env: { ...process.env, HOME: home, ...extraEnv, PATH: `${LAUNCHER_TABLE}:${join(home, ".local", "bin")}:${extraEnv.PATH ?? process.env.PATH ?? ""}`,
       BUN_OPTIONS: `--preload=${join(home, "browser-inventory.ts")}` }, stdout: "pipe", stderr: "pipe",
   });
   return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
@@ -824,6 +901,16 @@ function cliHome(): { home: string; state: string } {
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, "omp-kit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   chmodSync(join(bin, "omp-kit"), 0o755);
+  // Real `ovnfs ls` lazily starts `ovnfs serve`; synthetic HOME tests must not leak host daemons.
+  writeFileSync(join(bin, "ovnfs"), [
+    "#!/bin/sh",
+    "case \"$1\" in",
+    "  ls) printf '%s\\n' '{\"checkouts\":[]}' ;;",
+    "  *) printf 'scratch CLI fixture: unsupported ovnfs command: %s\\n' \"$1\" >&2; exit 1 ;;",
+    "esac",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  chmodSync(join(bin, "ovnfs"), 0o755);
   // PATH's fake ps does not intercept the browser collector's absolute /bin/ps.
   // Keep that inventory empty in both the keeper and its inherited worker;
   // real owner-PID/start and lsof probes remain unchanged.
