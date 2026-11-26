@@ -32,6 +32,9 @@ function fixture(versions = ["1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5
 		pollRelease: async () => ({ indexPath: join(prefix, "index.json"), archivePath: join(prefix, "kit.tar"), version: active, sourceTag: `v${active}` }),
 	};
 	const dependencies: KitUpdateJobDependencies = {
+		// Retention is independent of the runner's installed OMP and startup latency.
+		omp: () => null,
+		startProbe: async () => ({ started: true, timedOut: false, exit: 0, tail: "" }),
 		plan: async input => ({
 			...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY",
 			current: { version: "1.0.0", sha256: "a".repeat(64), target: "../releases/1.0.0/bin/omp-kit", binary: stable },
@@ -145,6 +148,8 @@ const result = await runKitUpdateJob({ ...config, pollRelease: async () => sourc
 	relink: async () => ({ ok: true, detail: "fixture", receiptId: "plugin-fixture", undoCommand: "fixture undo" }),
 	reconcile: async () => ({ ok: true, detail: "fixture" }),
 	refreshHooks: async () => ({ repos: 0, refreshed: 0, fresh: 0, pending_commit: 0, failed: 0, results: [] }),
+	omp: () => null,
+	startProbe: async () => ({ started: true, timedOut: false, exit: 0, tail: "" }),
 });
 console.log(JSON.stringify({ executable: process.execPath, result }));
 `);
