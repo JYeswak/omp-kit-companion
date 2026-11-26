@@ -397,6 +397,31 @@ def helper_format(source: str) -> int:
     return 0 if not drift else 1
 
 
+def check_legacy_head_rows(repo: str, plan_path: str) -> int:
+    """Check both Git hook protocols against one real reviewed transaction."""
+    os.chdir(repo)
+    module = witness()
+    checkout = module.Repo()
+    with open(plan_path, encoding="utf-8") as handle:
+        value = json.load(handle)
+    old, new = value["old_tip"], value["new_tip"]
+    commands = module.transaction(checkout, value)
+    rows = module.hook_lines(checkout, commands)
+    alias = f"{old} {new} HEAD"
+    legacy = sorted(rows + [alias])
+    for bad_rows in (rows + [f"{old} {old} HEAD"], legacy + [alias], legacy + [f"{old} {new} refs/heads/extra"]):
+        try:
+            module.check_hook_rows(checkout, sorted(bad_rows), commands, old, new)
+        except module.Refused as error:
+            if str(error) != "TRANSACTION_MISMATCH":
+                raise
+        else:
+            fail("wrong or additional hook row admitted")
+    module.check_hook_rows(checkout, rows, commands, old, new)
+    module.check_hook_rows(checkout, legacy, commands, old, new)
+    return 0
+
+
 def main() -> int:
     command, target, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
     if command == "build":
@@ -419,6 +444,8 @@ def main() -> int:
         approval(repo, argv)
     elif command == "drive":
         return drive(repo, argv)
+    elif command == "check-legacy-head-rows":
+        return check_legacy_head_rows(repo, argv[0])
     else:
         fail("unknown command " + command)
     return 0

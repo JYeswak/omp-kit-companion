@@ -28,6 +28,74 @@ LSP_POSITIVE_CHECKS = ("lsp_tool_advertised", "only_lsp_tool_enabled", "read_onl
                        "lsp_mux_stopped", "mock_model_clean", "process_output_complete")
 
 
+def lsp_reference_fixture(withhold_reference):
+    """A ready LSP server that returns no references or withholds only that reply."""
+    return "#!/usr/bin/env node\nconst withholdReference = " + json.dumps(withhold_reference) + r''';
+const fs = require("node:fs");
+fs.writeFileSync(process.argv[1] + ".started", "started");
+let input = Buffer.alloc(0);
+function send(message) {
+  const body = Buffer.from(JSON.stringify(message));
+  process.stdout.write(`Content-Length: ${body.length}\r\n\r\n`);
+  process.stdout.write(body);
+}
+process.stdin.on("data", chunk => {
+  input = Buffer.concat([input, chunk]);
+  for (;;) {
+    const boundary = input.indexOf("\r\n\r\n");
+    if (boundary < 0) return;
+    const headers = input.subarray(0, boundary).toString("ascii");
+    const length = /Content-Length:\s*(\d+)/i.exec(headers);
+    if (!length) process.exit(2);
+    const start = boundary + 4;
+    const size = Number(length[1]);
+    if (input.length < start + size) return;
+    const message = JSON.parse(input.subarray(start, start + size).toString("utf8"));
+    input = input.subarray(start + size);
+    if (message.method === "initialize") {
+      send({ jsonrpc: "2.0", id: message.id,
+        result: { capabilities: { textDocumentSync: 1, referencesProvider: true,
+          workspaceSymbolProvider: true }, serverInfo: { name: "native-reference-fixture" } } });
+    } else if (message.method === "textDocument/didOpen") {
+      const { uri, text } = message.params.textDocument;
+      const lines = text.split("\n");
+      const line = lines.findIndex(row => row.startsWith("void LspProbeReadinessWitness_"));
+      if (line !== -1) {
+        const name = lines[line].slice(5, -1);
+        send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri, diagnostics: [{
+          range: { start: { line, character: 5 }, end: { line, character: 5 + name.length } },
+          severity: 1, message: `Cannot find name '${name}'.`
+        }] } });
+      }
+    } else if (withholdReference && message.method === "textDocument/references") {
+      // Withhold only this response to exercise the OMP tool-call deadline.
+    } else if (message.method === "shutdown") {
+      send({ jsonrpc: "2.0", id: message.id, result: null });
+    } else if (message.method === "exit") {
+      process.exit(0);
+    } else if (message.id !== undefined) {
+      send({ jsonrpc: "2.0", id: message.id, result: [] });
+    }
+  }
+});
+'''
+
+
+def check_lsp_incomplete(report, server_started):
+    checks = report["checks"]
+    calls = report["calls"]
+    actions = [call.get("action") for call in calls]
+    expected = {key: key != "known_positive_reference" for key in LSP_POSITIVE_CHECKS}
+    expected.update(first_diagnostic_observed=True, has_failed_checks=True)
+    mismatches = [key for key, value in expected.items() if checks.get(key) is not value]
+    ordered = (len(actions) >= 6 and actions[:2] == ["status", "capabilities"]
+               and all(action == "diagnostics" for action in actions[2:-3])
+               and actions[-3:] == ["status", "references", "symbols"])
+    if not server_started or mismatches or not ordered or not calls[1].get("result"):
+        raise ValueError(f"compiled LSP incomplete negative did not isolate the absent reference: "
+                         f"server_started={server_started}, mismatched_checks={mismatches}, calls={actions}")
+
+
 def digest(path):
     h = hashlib.sha256()
     with open(path, "rb") as source:
@@ -824,99 +892,13 @@ def native(args):
             if (not Path(str(immediate_server) + ".started").is_file() or lsp_exit["timed_out"]
                     or "exited" not in lsp_exit.get("reason", "").lower()):
                 raise ValueError("compiled LSP immediate-exit process was not exercised and classified")
-            incomplete_source = r'''#!/usr/bin/env node
-const fs = require("node:fs");
-fs.writeFileSync(process.argv[1] + ".started", "started");
-let input = Buffer.alloc(0);
-function send(message) {
-  const body = Buffer.from(JSON.stringify(message));
-  process.stdout.write(`Content-Length: ${body.length}\r\n\r\n`);
-  process.stdout.write(body);
-}
-process.stdin.on("data", chunk => {
-  input = Buffer.concat([input, chunk]);
-  for (;;) {
-    const boundary = input.indexOf("\r\n\r\n");
-    if (boundary < 0) return;
-    const headers = input.subarray(0, boundary).toString("ascii");
-    const length = /Content-Length:\s*(\d+)/i.exec(headers);
-    if (!length) process.exit(2);
-    const start = boundary + 4;
-    const size = Number(length[1]);
-    if (input.length < start + size) return;
-    const message = JSON.parse(input.subarray(start, start + size).toString("utf8"));
-    input = input.subarray(start + size);
-    if (message.method === "initialize") {
-      send({ jsonrpc: "2.0", id: message.id,
-        result: { capabilities: { textDocumentSync: 1, referencesProvider: true,
-          workspaceSymbolProvider: true }, serverInfo: { name: "native-incomplete-lsp" } } });
-    } else if (message.method === "shutdown") {
-      send({ jsonrpc: "2.0", id: message.id, result: null });
-    } else if (message.method === "exit") {
-      process.exit(0);
-    } else if (message.id !== undefined) {
-      send({ jsonrpc: "2.0", id: message.id, result: [] });
-    }
-  }
-});
-'''
+            incomplete_source = lsp_reference_fixture(False)
             incomplete_path, incomplete_server = lsp_runtime_path("incomplete-response", incomplete_source)
             incomplete_project, incomplete_file = lsp_project("incomplete-response")
             incomplete, lsp_incomplete = lsp_call(
                 incomplete_project, incomplete_file, "INCOMPLETE", incomplete_path)
-            incomplete_checks = lsp_incomplete.get("checks", {})
-            incomplete_calls = lsp_incomplete.get("calls", [])
-            if (not Path(str(incomplete_server) + ".started").is_file()
-                    or incomplete_checks.get("lsp_tool_advertised") is not True
-                    or incomplete_checks.get("all_tool_results_present") is not True
-                    or incomplete_checks.get("server_ready_after_request") is not True
-                    or incomplete_checks.get("initialized_capabilities") is not True
-                    or incomplete_checks.get("known_positive_reference") is not False
-                    or incomplete_checks.get("absent_symbol_control") is not True
-                    or incomplete_checks.get("has_failed_checks") is not True
-                    or len(incomplete_calls) != 5
-                    or incomplete_calls[1].get("action") != "capabilities"
-                    or not incomplete_calls[1].get("result")):
-                raise ValueError("compiled LSP incomplete negative did not isolate a missing positive reference with healthy capabilities")
-            pending_source = r'''#!/usr/bin/env node
-const fs = require("node:fs");
-fs.writeFileSync(process.argv[1] + ".started", "started");
-let input = Buffer.alloc(0);
-function send(message) {
-  const body = Buffer.from(JSON.stringify(message));
-  process.stdout.write(`Content-Length: ${body.length}\r\n\r\n`);
-  process.stdout.write(body);
-}
-process.stdin.on("data", chunk => {
-  input = Buffer.concat([input, chunk]);
-  for (;;) {
-    const boundary = input.indexOf("\r\n\r\n");
-    if (boundary < 0) return;
-    const headers = input.subarray(0, boundary).toString("ascii");
-    const length = /Content-Length:\s*(\d+)/i.exec(headers);
-    if (!length) process.exit(2);
-    const start = boundary + 4;
-    const size = Number(length[1]);
-    if (input.length < start + size) return;
-    const message = JSON.parse(input.subarray(start, start + size).toString("utf8"));
-    input = input.subarray(start + size);
-    if (message.method === "initialize") {
-      send({ jsonrpc: "2.0", id: message.id,
-        result: { capabilities: { textDocumentSync: 1, referencesProvider: true,
-          workspaceSymbolProvider: true }, serverInfo: { name: "native-pending-reference-lsp" } } });
-    } else if (message.method === "textDocument/references") {
-      // Withhold only this response to exercise the bounded OMP tool-call deadline.
-    } else if (message.method === "shutdown") {
-      send({ jsonrpc: "2.0", id: message.id, result: null });
-    } else if (message.method === "exit") {
-      process.exit(0);
-    } else if (message.id !== undefined) {
-      send({ jsonrpc: "2.0", id: message.id, result: [] });
-    }
-  }
-});
-'''
-            pending_path, pending_server = lsp_runtime_path("pending-reference", pending_source)
+            check_lsp_incomplete(lsp_incomplete, Path(str(incomplete_server) + ".started").is_file())
+            pending_path, pending_server = lsp_runtime_path("pending-reference", lsp_reference_fixture(True))
             pending_project, pending_file = lsp_project("pending-reference")
             pending, lsp_timeout = lsp_call(pending_project, pending_file, "TIMEOUT", pending_path)
             timeout_checks = lsp_timeout.get("checks", {})
@@ -924,6 +906,7 @@ process.stdin.on("data", chunk => {
                     or lsp_timeout["timed_out"] is not True
                     or "bounded timeout" not in lsp_timeout.get("reason", "").lower()
                     or timeout_checks.get("initialized_capabilities") is not True
+                    or timeout_checks.get("first_diagnostic_observed") is not True
                     or timeout_checks.get("known_positive_reference") is not False
                     or timeout_checks.get("absent_symbol_control") is not True
                     or timeout_checks.get("server_ready_after_request") is not True):

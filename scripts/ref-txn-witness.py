@@ -591,12 +591,23 @@ def check_review(repo: Repo, plan: dict, intent: dict, applied: bool = False) ->
     return path, record
 
 
+def check_hook_rows(repo: Repo, lines: list, commands: list, old_tip: str, new_tip: str) -> None:
+    expected = hook_lines(repo, commands)
+    if lines == expected:
+        return
+    # Git 2.39 emits the reflog-only HEAD alias for a direct update to its
+    # referent. Newer Git filters REF_LOG_ONLY rows. The files backend refuses
+    # a competing explicit HEAD update in the same transaction at prepare.
+    alias = f"{old_tip} {new_tip} HEAD"
+    if lines != sorted(expected + [alias]) or line("symbolic-ref", "-q", "HEAD") != MAIN:
+        raise Refused("TRANSACTION_MISMATCH")
+
+
 def verify_witness(repo: Repo, lines: list, lock_bytes: bytes, lock: dict, plan_value: object) -> str:
     plan = check_plan(repo, plan_value)
     intent = check_context(repo, lock_bytes, lock, plan)
     path, record = check_review(repo, plan, intent)
-    if lines != hook_lines(repo, record["transaction"]):
-        raise Refused("TRANSACTION_MISMATCH")
+    check_hook_rows(repo, lines, record["transaction"], plan["old_tip"], plan["new_tip"])
     if repo.ref_value(MAIN) != plan["old_tip"]:
         raise Refused("STALE_OLD_TIP")
     check_transform(repo, plan)

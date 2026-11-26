@@ -66,6 +66,8 @@ PLAN="$H/.git/reviewed.plan.json"
 fx approval "$H" "$H/.git/reviewed.approval.json" --plan "$PLAN" --id 61 --from independent-reviewer > /dev/null
 (CDPATH='' cd -- "$H" && python3 -B -c 'import runpy, sys; sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")' "$RTX/ref-txn-witness.py" review --plan "$PLAN" --reviewer independent-reviewer --approval-message-id 61 --approval-file "$H/.git/reviewed.approval.json") > /dev/null
 ok "$?" "0" "witness-installed-review-rc"
+fx check-legacy-head-rows "$H" "$PLAN"
+ok "$?" "0" "witness-legacy-head-exact-not-extra-ref"
 refs_now() { git -C "$H" for-each-ref --format='%(refname) %(objectname)'; }
 PRE="refs/preserve/history-scrub/$L2"
 D=$(printf 'unrelated work with no identity\n' | git -C "$H" commit-tree "$NEW^{tree}" -p "$NEW")

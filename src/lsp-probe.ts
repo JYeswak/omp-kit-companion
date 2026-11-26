@@ -611,7 +611,9 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 				else writeFileSync(path, "probe-root-marker\n", { mode: 0o600 });
 			}
 		}
-		writeFileSync(join(template, "config.yml"), "memory:\n  backend: off\n", { mode: 0o600 });
+		// OMP can advertise report_issue even with --tools lsp. Disable Auto-QA
+		// only in this private profile so the wire proof remains LSP-only.
+		writeFileSync(join(template, "config.yml"), "memory:\n  backend: off\ndev:\n  autoqa: false\n", { mode: 0o600 });
 		const absentSymbol = `LspProbeAbsentSymbol_${randomUUID().replaceAll("-", "")}`;
 		// Reserve ten seconds of the whole-probe deadline for completion and cleanup.
 		const sequence = lspProbeTurns(diagnosticMarker, absentSymbol, startedAt => Math.max(1_000,

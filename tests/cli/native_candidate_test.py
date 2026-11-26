@@ -391,6 +391,58 @@ class CandidateReceiptTests(unittest.TestCase):
 
 
 
+class LspReferenceFixtureTests(unittest.TestCase):
+    def test_incomplete_rejects_a_probe_that_never_reached_references(self):
+        actions = ["status", "capabilities", "diagnostics", "diagnostics", "status", "references", "symbols"]
+        checks = dict.fromkeys(native_candidate.LSP_POSITIVE_CHECKS, True)
+        checks.update(known_positive_reference=False, first_diagnostic_observed=True, has_failed_checks=True)
+        calls = [{"action": action, "result": "fixture result"} for action in actions]
+        early = {"checks": {**checks, "first_diagnostic_observed": False}, "calls": calls[:4]}
+        with self.assertRaisesRegex(ValueError, "first_diagnostic_observed"):
+            native_candidate.check_lsp_incomplete(early, True)
+        native_candidate.check_lsp_incomplete({"checks": checks, "calls": calls}, True)
+
+    def test_servers_publish_readiness_and_only_the_pending_server_withholds_references(self):
+        def frame(method, request_id=None, params=None):
+            message = {"jsonrpc": "2.0", "method": method}
+            if request_id is not None:
+                message["id"] = request_id
+            if params is not None:
+                message["params"] = params
+            body = json.dumps(message)
+            return f"Content-Length: {len(body)}\r\n\r\n{body}"
+
+        marker = "LspProbeReadinessWitness_fixture"
+        payload = "".join((
+            frame("initialize", 1),
+            frame("textDocument/didOpen", params={"textDocument": {
+                "uri": "file:///fixture/src/api.ts", "text": f"void {marker};\n"}}),
+            frame("textDocument/references", 2),
+            frame("workspace/symbol", 3),
+        ))
+        with owned_tmp("native-lsp-reference") as temp:
+            for pending in (False, True):
+                with self.subTest(pending=pending):
+                    server = Path(temp) / str(pending)
+                    server.write_text(native_candidate.lsp_reference_fixture(pending), encoding="utf-8")
+                    result = native_candidate.kitlib_run.run(
+                        ["node", str(server)], stdin=payload.encode(), deadline_s=10,
+                    )
+                    self.assertEqual(result.rc, 0, result.stderr)
+                    messages = [json.loads(part) for part in reassemble_lsp_frames(result.stdout)]
+                    diagnostic = next(row for row in messages if row.get("method") == "textDocument/publishDiagnostics")
+                    self.assertEqual(diagnostic["params"]["diagnostics"][0]["message"], f"Cannot find name '{marker}'.")
+                    self.assertEqual([row["id"] for row in messages if "id" in row], [1, 3] if pending else [1, 2, 3])
+
+
+def reassemble_lsp_frames(wire):
+    while wire:
+        header, _, wire = wire.partition(b"\r\n\r\n")
+        length = int(header.removeprefix(b"Content-Length: "))
+        body, wire = wire[:length], wire[length:]
+        yield body
+
+
 class CertEnvTests(unittest.TestCase):
     """RELEASE BLOCKER A2: the CI-judge signal must survive the scrubbed env."""
 
