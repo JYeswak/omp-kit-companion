@@ -55,13 +55,6 @@ TIMEOUT="${TIMEOUT:-120}"
 ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)
 case "$ncpu" in ''|*[!0-9]*) ncpu=1 ;; esac
 default_jobs=$((ncpu / 4))
-# Scheduled Intel certification runs the live pool in its own Actions job,
-# not beside the global pool. Width one consumed the remaining 496–589 s
-# of the native deadline in both tracks of run 45791605747.
-if [ "${GITHUB_ACTIONS:-}" = true ] && [ "$(uname -sm)" = 'Darwin x86_64' ]; then
-  default_jobs=$ncpu
-  [ "$default_jobs" -le 4 ] || default_jobs=4
-fi
 [ "$default_jobs" -ge 1 ] || default_jobs=1
 [ "$default_jobs" -le 8 ] || default_jobs=8
 JOBS=${OMP_KIT_E2E_JOBS:-$default_jobs}

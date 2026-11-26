@@ -622,7 +622,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [darwin-arm64-none, darwin-x64-none, linux-arm64-gnu, linux-x64-gnu]
+        platform: [darwin-arm64-none, linux-arm64-gnu, linux-x64-gnu]
     env:
       CANDIDATE_VERSION: ${{ inputs.version || format('0.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
     steps:
@@ -740,17 +740,13 @@ jobs:
   native-certification:
     if: github.event.repository.private == false && github.event_name != 'push'
     needs: [build-candidates, resolve-omp-versions]
-    # Intel macOS is a non-shipping probe; release aggregation ignores it and requires all three ship targets.
-    # For release runs, certify only shipping targets: macOS has five concurrent slots, and queued Intel
-    # probes previously held the candidate. Daily and omp-certify runs keep the Intel probe in this matrix.
-    continue-on-error: true
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        platform: ${{ fromJSON(inputs.version != '' && '["darwin-arm64-none","linux-arm64-gnu","linux-x64-gnu"]' || '["darwin-arm64-none","darwin-x64-none","linux-arm64-gnu","linux-x64-gnu"]') }}
+        platform: [darwin-arm64-none, linux-arm64-gnu, linux-x64-gnu]
         omp: ${{ fromJSON(needs.resolve-omp-versions.outputs.matrix) }}
-    runs-on: ${{ fromJSON('{"darwin-arm64-none":"macos-15","darwin-x64-none":"macos-15-intel","linux-arm64-gnu":"ubuntu-24.04-arm","linux-x64-gnu":"ubuntu-24.04"}')[matrix.platform] }}
+    runs-on: ${{ fromJSON('{"darwin-arm64-none":"macos-15","linux-arm64-gnu":"ubuntu-24.04-arm","linux-x64-gnu":"ubuntu-24.04"}')[matrix.platform] }}
     env:
       CANDIDATE_VERSION: ${{ inputs.version || format('0.0.0-ci.{0}.{1}', github.run_id, github.run_attempt) }}
       OMP_VERSION: ${{ matrix.omp.version }}
