@@ -4,6 +4,20 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.151] - 2026-11-26
+
+### Fixed
+
+- Owned-scratch reaper (SCRATCHREAP2): an expired quarantine tree with a macOS user-immutable flag (`uchg`/`schg`) on a nested file or directory is a named `user-immutable` refusal, not a failed deletion; other delete failures remain failures.
+- Require fresh GitHub CI success on the exact main source SHA in both autocut and `release-local.sh`, independently of the main-role full-suite verdict. Refuse a failed, missing, or unreadable run before cutting or resuming a release.
+- Give the README currency check release tags on scheduled and dispatched CI runs as well as pushes. Keep unrelated suites shallow.
+- Keep release-retention fixtures independent of the runner’s installed OMP, while retaining the real running-executable check.
+- Accept Git's legacy reflog-only `HEAD` notification for an exact reviewed update of its symbolic target, without allowing unrelated ref changes.
+- Make native LSP's incomplete and timeout controls publish the same readiness diagnostic the probe requires before it issues references. The controls still require an answered absent-symbol query.
+- Disable Auto-QA inside the private LSP probe profile so OMP 19.2 keeps the advertised tool surface LSP-only.
+- Build and certify only shipped targets in CI: Apple Silicon, Linux arm64 and Linux x64. A native certification failure on any shipped target fails CI.
+- Restore a seat and its tracker actor with a deterministic recorded spelling when pane identity files differ only in case. Conflicting names still refuse recovery.
+
 ## [0.2.150] - 2026-11-26
 
 ### Added
