@@ -1,4 +1,0 @@
-### Added
-- `scripts/agent-spawn-env.sh` exports `BOARD_URL` and `BOARD_PROFILE` (the seat's Agent Mail name) when `FLEET_MAIL_BACKEND=board`, so a seat can post and read on the local Board as itself; unset or `am` leaves the launch environment unchanged. `BOARD_URL` defaults to `http://127.0.0.1:4178/api/board` and can be set with `url` under `[board]` in the fleet overlay; `--board-env` prints just those exports.
-- `omp-kit doctor --scope mail_backend` runs the Board CLI `whoami --json` (bounded) and reports `OK` only when the Board answers as `BOARD_PROFILE`; a missing profile or URL, an unreachable Board, a timeout, or another identity fails with a named reason. `OMP_KIT_BOARD_CLI` selects the CLI path (default `vb`).
-- Cutover note: install the Board's own agent skill with `npx skills add vercel/board --skill board -g`. This release does not install it.

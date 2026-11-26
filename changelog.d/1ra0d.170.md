@@ -1,2 +1,0 @@
-- `omp-kit land` refuses as `LAND_LOCAL_REF_MOVED` when local `main` advances while the exact candidate is checked: the stale candidate is not pushed, nothing is retried unchecked, and a fresh run judges the new tip.
-- A saved owned tip ahead of origin resumes through the stranded-tip retry path: a failing registered check refuses without publishing and preserves the saved commit plus peer staged and worktree bytes, while a passing check publishes exactly the checked tip.
