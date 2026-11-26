@@ -63,6 +63,47 @@ releases "2026-01-01T00:00:00Z"
 export AUTOCUT_RELEASES_JSON="$TMP/releases.json"
 field() { printf '%s' "$1" | tail -n 1 | jq -r ".$2"; }
 
+# Exact source workflow lookup; all other GitHub calls in this fixture use
+# the existing local release-list and publication seams.
+mkdir -p "$TMP/ci-bin"
+cat > "$TMP/ci-bin/gh" <<'SH'
+#!/bin/sh
+[ "$1 $2 $3 $5 $6 $7 $9 ${10}" = 'run list --repo --workflow ci.yml --commit --branch main' ] || exit 92
+sha=$8
+case "${CI_TEST_MODE:-green}" in
+	error) exit 93 ;;
+	missing) printf '[]\n'; exit 0 ;;
+	dispatch) event=workflow_dispatch ;;
+	*) event=push ;;
+esac
+status=success
+[ "$sha" != "${CI_TEST_RED_SHA:-}" ] || status=failure
+printf '[{"databaseId":1,"headSha":"%s","event":"push","status":"completed","conclusion":"success"},{"databaseId":2,"headSha":"%s","event":"%s","status":"completed","conclusion":"%s"}]\n' \
+	"0000000000000000000000000000000000000000" "$sha" "$event" "$status"
+SH
+chmod +x "$TMP/ci-bin/gh"
+PATH="$TMP/ci-bin:$PATH"
+export PATH
+
+# A locally passing tree still cannot cut from red, absent, unreadable, or
+# input-overridable CI. A passed older candidate may be selected instead.
+tree "$c3" > "$PASS_TREES"
+for state in red error missing dispatch; do
+	if [ "$state" = red ]; then
+		out=$(CI_TEST_RED_SHA="$c3" sh "$AUTOCUT" plan --repo "$repo" 2>&1)
+	else
+		out=$(CI_TEST_MODE="$state" sh "$AUTOCUT" plan --repo "$repo" 2>&1)
+	fi
+	if [ "$(field "$out" action)" = WAIT ] && printf '%s' "$out" | grep -q 'CI_NOT_GREEN'; then
+		ok
+	else
+		bad "CI $state must wait despite full-suite PASS: $out"
+	fi
+done
+tree "$c2" >> "$PASS_TREES"
+out=$(CI_TEST_RED_SHA="$c3" sh "$AUTOCUT" plan --repo "$repo" 2>&1)
+if [ "$(field "$out" action)" = CUT ] && [ "$(field "$out" source)" = "$c2" ]; then ok; else bad "red CI skips newest tree: $out"; fi
+
 # 1. Newest commit FAIL/missing, previous PASS: the PASS one is picked (planted FAIL skips to the previous PASS).
 tree "$c2" > "$PASS_TREES"
 out=$(sh "$AUTOCUT" plan --repo "$repo" 2>&1)
@@ -175,8 +216,11 @@ if [ "$rc" = 4 ] && [ "$(field "$out" action)" = FAILED ] && [ "$(wc -l < "$TMP/
 mkdir -p "$TMP/fakebin" "$TMP/fakehome"
 cat > "$TMP/fakebin/gh" <<'EOF'
 #!/bin/sh
+if [ "$1" = run ]; then exec "$(dirname -- "$0")/../ci-bin/gh" "$@"; fi
+[ "$1 $2" = 'release download' ] || exit 92
 dir=''
 while [ $# -gt 0 ]; do [ "$1" = --dir ] && dir=$2; shift; done
+[ -n "$dir" ] || exit 92
 printf '{}\n' > "$dir/release-index.json"
 printf 'archive-bytes\n' > "$dir/omp-kit-v0.1.2-darwin-arm64-none.tar.gz"
 if [ "${FAKE_BAD_SUMS:-0}" = 1 ]; then printf '%064d  omp-kit-v0.1.2-darwin-arm64-none.tar.gz\n' 0 > "$dir/SHA256SUMS"

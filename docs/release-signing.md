@@ -242,11 +242,12 @@ created a run: find that run in the Actions list before you delete the receipt.
 Revert: set `darwin_signing` back to `adhoc` (see the flip procedure). Reverting the whole
 DEVID-SIGN-V1 change is safe while the switch is `adhoc`.
 
-## Local release without the CI pipeline (LOCAL-RELEASE-V1)
+## Local signing after green CI (LOCAL-RELEASE-V1)
 
-While J-2026-10-18-30 suspends the CI pipeline ("signed releases skipping ci like jeff"),
-`scripts/release-local.sh` cuts a release on the signing Mac (bead `ompkit-v66l.27.11`). The switch
-is `developer-id` since that bead. The consumers' trust root is unchanged: the installer and
+`scripts/release-local.sh` cuts the release on the signing Mac, including when invoked
+by autocut. A successful GitHub `CI` run on the exact SHA and a main-role full-suite
+PASS on its exact tree are both required (J-2026-11-26-02). The signing mode is
+`developer-id`. The consumers' trust root is unchanged: the installer and
 `omp-kit update` (`installer/install.py` `verify_attestation`, `src/kit-update.ts`
 `authenticateUpdateArchive`, `src/kit-update-job.ts` `pollPublishedRelease`) still require a
 GitHub Actions OIDC SLSA provenance from `release.yml` at the tag's source digest. So one small

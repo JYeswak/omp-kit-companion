@@ -412,9 +412,9 @@ must match the same postimages. A mismatch stays pending. A receipt already
 ABORTED_AFTER_COMPENSATION with activation RESTORED is not this READY path, and
 its retained release directory must not be deleted or overwritten to force retry.
 
-## 7. Release train (RELTRAIN1, automatic; manual cut is the fallback)
+## 7. Release route and version order
 
-**Current route.** The CI pipeline and this train are suspended. Their workflows are disabled. Releases are cut on the signing Mac with `scripts/release-local.sh` as soon as accepted work is on `main` (see [release-signing.md](release-signing.md) and the stages in [AGENTS.md](../AGENTS.md#landing-the-plane)). The train described below is kept for the day CI returns. It is not the authority for done while CI is suspended.
+**Current route.** Autocut invokes `scripts/release-local.sh` on the signing Mac. A successful GitHub `CI` run on the exact SHA and a main-role full-suite PASS on its exact tree are both required before a cut (J-2026-11-26-02). The old hosted build-and-release train below is historical; it does not publish releases in this route. See [release-signing.md](release-signing.md) for signing and attestation.
 
 **Version order (NEXTVERSION1, ompkit-d8qic).** Shared `main` always states the version it would ship as, the way Maven's `release:prepare` ends with "prepare for next development iteration":
 

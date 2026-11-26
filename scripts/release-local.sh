@@ -633,6 +633,9 @@ if [ "$PREPARE" = 1 ]; then
 	prepare_release
 fi
 # Explicit --source remains the immutable resume/preview path.
+SOURCE="$(git -C "$ROOT" rev-parse "$SOURCE^{commit}")" || die "cannot resolve release source"
+bounded 40 sh "$ROOT/scripts/release-preflight.sh" ci "$REPO" "$SOURCE" ||
+	die "CI_NOT_GREEN: the release requires successful CI on $SOURCE"
 sh "$ROOT/scripts/release-preflight.sh" version "$ROOT" "$SOURCE" "$VERSION" "$ROOT" ||
 	die "package.json version does not match v$VERSION at $SOURCE"
 MODE="$(bounded 30 sh "$ROOT/scripts/release-preflight.sh" signing "$ROOT" "$SOURCE" "$VERSION" "$ROOT" "$DRY_RUN")" ||
@@ -1152,6 +1155,8 @@ bounded 300 git -C "$ROOT" fetch --quiet origin "refs/tags/v$VERSION:refs/tags/v
 SOURCE="$(git -C "$ROOT" rev-parse "v$VERSION^{commit}")" || die "tag v$VERSION is not a commit; retry: $resume"
 sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$SOURCE" --repo "$ROOT" ||
 	die "remote v$VERSION does not name a commit stating $VERSION; retry: $resume"
+bounded 40 sh "$ROOT/scripts/release-preflight.sh" ci "$REPO" "$SOURCE" ||
+	die "CI_NOT_GREEN: the draft stays unpublished; retry after CI is green on $SOURCE"
 # Same read-only release listing the normal path uses for its base tag, minus the refusal: the draft for
 # vVERSION exists by design, so only the latest published stable release feeds the receipt.
 bounded 120 gh api --paginate --slurp "repos/$REPO/releases?per_page=100" >"$WORK/releases.json" || die "listing releases failed; retry: $resume"
@@ -1219,6 +1224,8 @@ if [ "${RESUME_FROM_DRAFT:-0}" = 0 ]; then
 stage tag
 remote_tags="$(bounded 120 git -C "$ROOT" ls-remote --tags origin "refs/tags/v$VERSION")" || die "tag lookup failed"
 [ -z "$remote_tags" ] || die "tag v$VERSION appeared during the build; never re-tagged"
+bounded 40 sh "$ROOT/scripts/release-preflight.sh" ci "$REPO" "$SOURCE" ||
+	die "CI_NOT_GREEN: CI changed while preparing $SOURCE; refusing tag"
 # This transport includes every unchanged local pre-push hook, not just the network.
 # 360s focused selection + 180s machinery + 180s checker contracts + 60s cached
 # full-verdict readback + 120s margin = 900s. The selected pre-push fixture alone

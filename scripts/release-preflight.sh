@@ -55,10 +55,37 @@ release_preflight_next_version() {
 	fi
 }
 
+release_preflight_ci() {
+	# A dispatched run can check out inputs.source_sha instead of its head SHA.
+	repository=$1
+	sha=$2
+	case "$sha" in *[!0-9a-f]*|'') printf 'CI_NOT_GREEN sha=%s reason=invalid-source\n' "$sha"; return 1 ;; esac
+	[ "${#sha}" = 40 ] || { printf 'CI_NOT_GREEN sha=%s reason=invalid-source\n' "$sha"; return 1; }
+	if ! runs=$(gh run list --repo "$repository" --workflow ci.yml --commit "$sha" --branch main --limit 20 \
+		--json databaseId,headSha,status,conclusion,event); then
+		printf 'CI_NOT_GREEN sha=%s reason=lookup-failed\n' "$sha"
+		return 1
+	fi
+	if ! row=$(printf '%s\n' "$runs" | jq -er --arg sha "$sha" '
+		[.[] | select(.headSha == $sha and (.event == "push" or .event == "schedule"))]
+		| sort_by(.databaseId) | last
+		| select((.databaseId | type) == "number" and .databaseId > 0 and (.status | type) == "string")
+		| if .status == "completed" and .conclusion == "success" then
+			"CI_GREEN sha=\($sha) run=\(.databaseId) conclusion=success"
+		  else
+			"CI_NOT_GREEN sha=\($sha) run=\(.databaseId) status=\(.status) conclusion=\(.conclusion // "none")"
+		  end'); then
+		printf 'CI_NOT_GREEN sha=%s reason=no-readable-push-or-scheduled-run\n' "$sha"
+		return 1
+	fi
+	printf '%s\n' "$row"
+	case "$row" in 'CI_GREEN '*) return 0 ;; *) return 1 ;; esac
+}
+
 check=${1:-}
 [ "$#" -eq 0 ] || shift
 case "$check" in
-	version|signing|attestation|verdict|releases|export|next_version)
+	version|signing|attestation|verdict|releases|export|next_version|ci)
 		"release_preflight_$check" "$@" ;;
-	*) printf 'release-preflight: expected version|signing|attestation|verdict|releases|export|next_version\n' >&2; exit 2 ;;
+	*) printf 'release-preflight: expected version|signing|attestation|verdict|releases|export|next_version|ci\n' >&2; exit 2 ;;
 esac

@@ -152,6 +152,9 @@ function buildFixture(label: string, draft: DraftCase): {
 printf '%s\\n' "$*" >>"$RELEASE_TEST_WORK/gh-calls"
 case "$*" in
 "auth status"*) exit 0 ;;
+"run list "*)
+	[ "$5 $6 $7 $8" = "--workflow ci.yml --commit ${git(origin, ["rev-parse", `v${VERSION}^{commit}`])}" ] || exit 98
+	printf '[{"headSha":"%s","event":"push","status":"completed","conclusion":"success","databaseId":1}]\\n' "$8" ;;
 "api --paginate --slurp"*) cat "$RELEASE_TEST_WORK/releases-page.json" ;;
 "release view"*) cat "$RELEASE_TEST_WORK/draft-page.json" ;;
 "release download"*)

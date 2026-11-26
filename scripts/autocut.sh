@@ -5,7 +5,7 @@
 #   plan  pick the newest first-parent origin/main commit since the latest published release whose package.json
 #         version is newer than that release and untagged, and whose exact tree has a reusable main-role
 #         full-suite PASS (read through that commit's own full-suite-verdict-store.py, as release-local does).
-#         A FAIL or missing verdict is skipped, never waited on: the next older candidate is tried.
+#         A FAIL or missing verdict is skipped. Hosted CI must also be green on the exact source.
 #   run   plan; when a candidate exists and the floor has passed (--floor-hours since the latest release, default
 #         12, J-2026-10-29-13) or --now is given, cut it with release-local.sh --version V --source SHA, then
 #         install it (gh release download + omp-kit update --apply) and read the version back. --dry-run passes
@@ -91,12 +91,21 @@ for sha in $(git -C "$ROOT" rev-list --first-parent --max-count="$max_candidates
 	fi
 	verdict=$(cd "$export_dir" && env PATH="$pinned_path" python3 -B scripts/pysafe.py run --timeout 30 -- python3 -B scripts/full-suite-verdict-store.py require-pass \
 		--repo "$ROOT" --tree "$tree" --role main --judge-root "$export_dir" --suite-root "$export_dir" 2>"$WORK/verdict.err") || verdict=''
-	if [ "$verdict" = PASS ]; then source_sha=$sha version=$candidate_version; break; fi
-	skipped="$skipped ${sha%"${sha#??????????}"}:no-pass"
+	if [ "$verdict" != PASS ]; then
+		skipped="$skipped ${sha%"${sha#??????????}"}:no-pass"
+		continue
+	fi
+	ci=$(cd "$(dirname -- "$0")" && python3 -B pysafe.py run --timeout 40 -- \
+		sh ./release-preflight.sh ci "$REPO_SLUG" "$sha") || {
+		skipped="$skipped ${sha%"${sha#??????????}"}:${ci:-CI_NOT_GREEN lookup-failed}"
+		continue
+	}
+	source_sha=$sha version=$candidate_version
+	break
 done
 
 if [ -z "$source_sha" ]; then
-	decide WAIT "no origin/main commit since $base_tag has a newer untagged version with a main-role PASS;${skipped:- no candidates}"
+	decide WAIT "no origin/main commit since $base_tag has a newer untagged version with a main-role PASS and green CI;${skipped:- no candidates}"
 	exit 0
 fi
 age_h=$(( ($(date +%s) - base_epoch) / 3600 ))
@@ -105,7 +114,7 @@ if [ "$now" = 0 ] && [ "$age_h" -lt "$floor_hours" ]; then
 	exit 0
 fi
 if [ "$mode" = plan ]; then
-	decide CUT "planned: newest main-role PASS with an untagged newer version" "$source_sha" "$version"
+	decide CUT "planned: newest main-role PASS with green CI and an untagged newer version ($ci)" "$source_sha" "$version"
 	exit 0
 fi
 

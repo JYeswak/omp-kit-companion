@@ -13,7 +13,7 @@
 </div>
 
 <!-- kit-release:start -->
-Current release: v0.2.149
+Current release: v0.2.150
 <!-- kit-release:end -->
 
 A tested rule pack, 15 extensions, six skills, and a guarded CLI for an
@@ -345,14 +345,13 @@ verified release (see [Limitations](#limitations)). Contributor checks are in
 
 ### Release and update flow
 
-Every green `main` commit with release notes (a `changelog.d/` fragment, or a
-`[no-changelog]` reason, enforced at push) becomes the next patch release: CI
-folds the fragments into `CHANGELOG.md`, sets the version and README release
-line, and tags that commit `vX.Y.Z`. `release.yml` builds and certifies the ship
-set (`darwin-arm64-none`, `linux-arm64-gnu`, `linux-x64-gnu`) and publishes the
-release; red CI is never tagged. The `kit-update` service
-(`OMP_KIT_UPDATE_POLL=github`) checks every 300 s, applies a newer release under
-a receipt and relinks the plugin; a failed postcheck keeps the prior version.
+Autocut selects an untagged `main` commit only after GitHub CI succeeds on that
+exact SHA and the local full suite records a main-role PASS on its exact tree.
+`scripts/release-local.sh` builds, signs and tags the release; the GitHub
+attestation job verifies the draft's assets and publishes it. Red or unreadable
+CI blocks the cut. The `kit-update` service (`OMP_KIT_UPDATE_POLL=github`)
+checks every 300 s, applies a newer release under a receipt and relinks the
+plugin. An unsuccessful postcheck prevents clean activation.
 
 The manual cut and rehearsal are documented in
 [docs/release-procedure.md](docs/release-procedure.md).

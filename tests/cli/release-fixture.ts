@@ -40,7 +40,7 @@ export function fixture(label: string, mainVersion: string, fullTree = false): F
 	// release-local names the commit agent from AGENT_NAME or user.name; a grader shell may have neither.
 	git(repo, "config", "user.name", "fixture");
 	for (const dir of ["scripts", "changelog.d", ".github/workflows"]) mkdirSync(join(repo, dir), { recursive: true });
-	for (const name of ["release-notes.sh", "release-notes.ts", "release-train.sh", "stamp-release-line.sh", "kitlib-tmp.sh"])
+	for (const name of ["release-notes.sh", "release-notes.ts", "release-preflight.sh", "release-train.sh", "stamp-release-line.sh", "kitlib-tmp.sh"])
 		copyFileSync(join(ROOT, "scripts", name), join(repo, "scripts", name));
 	// Execute the real preflight in the fixture cwd without maintaining a second dependency closure.
 	writeFileSync(join(repo, "scripts/commit-preflight.sh"),
@@ -63,8 +63,16 @@ export function fixture(label: string, mainVersion: string, fullTree = false): F
 	git(repo, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main");
 	const bin = join(work, "bin");
 	mkdirSync(bin);
-	// The only GitHub read on these paths is the release listing; anything else is a test failure.
-	writeFileSync(join(bin, "gh"), `#!/bin/sh\ncase "$*" in\n\t"api --paginate --slurp "*) echo '[[{"tag_name":"v1.2.3","draft":false,"prerelease":false}]]' ;;\n\t*) echo "unexpected gh $*" >&2; exit 97 ;;\nesac\n`);
+	const head = git(repo, "rev-parse", "HEAD");
+	writeFileSync(join(bin, "gh"), `#!/bin/sh
+case "$*" in
+	"api --paginate --slurp "*) echo '[[{"tag_name":"v1.2.3","draft":false,"prerelease":false}]]' ;;
+	"run list "*)
+		[ "$5 $6 $7 $8" = "--workflow ci.yml --commit ${head}" ] || exit 98
+		printf '[{"headSha":"%s","event":"push","status":"completed","conclusion":"success","databaseId":1}]\\n' "$8" ;;
+	*) echo "unexpected gh $*" >&2; exit 97 ;;
+esac
+`);
 	chmodSync(join(bin, "gh"), 0o755);
 	// README_GATE: the optional readme-update skill gate is machine state, not part of this contract.
 	const runEnv = { ...env, PATH: `${bin}:${process.env.PATH ?? ""}`, TMPDIR: work, README_GATE: join(work, "no-readme-update-gate") };
