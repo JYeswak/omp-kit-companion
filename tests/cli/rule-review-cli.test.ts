@@ -58,7 +58,9 @@ beforeAll(async () => {
 	writeFileSync(join(home, "canary"), "operator state must not change\n");
 	writeFileSync(join(project, "canary"), "project contents are data, not executable configuration\n");
 	for (const [directory, pattern] of [[incumbent, "PUBLIC DANGER"], [candidate, "PUBLIC"]]) {
-		writeFileSync(join(directory!, "rules", "transition.md"), "---\ncondition:\n  - '" + pattern + "'\nscope:\n  - text\ninterruptMode: never\n---\nSynthetic authored matcher fixture.\n");
+		// The fixture requires a streaming prefix. Newer OMP deliberately checks
+		// non-interrupting text rules only at the final boundary.
+		writeFileSync(join(directory!, "rules", "transition.md"), "---\ncondition:\n  - '" + pattern + "'\nscope:\n  - text\ninterruptMode: prose-only\n---\nSynthetic authored matcher fixture.\n");
 	}
 	writeFileSync(join(incumbent, "cases.tsv"), header + fire + quiet);
 	writeFileSync(join(candidate, "cases.tsv"), header + fire + "transition\tquiet\ttext\t-\t-\tMUNDANE SAFE\tcandidate-substitute-quiet\t\n");

@@ -331,7 +331,8 @@ test("SKILLMINE1: CLI run renders the envelope and status reads it back", async 
 		HOME: f.home, TMPDIR: tmp, GIT_CEILING_DIRECTORIES: f.root,
 		PATH: [f.bin, ...env.PATH!.split(delimiter)].join(delimiter),
 	});
-	const out = runFixture([process.execPath, resolve(repo, "src", "cli.ts"), "skill-mine", "--since", "21d",
+	// The fixture mail is dated 2026-11-05; a rolling window expires it.
+	const out = runFixture([process.execPath, resolve(repo, "src", "cli.ts"), "skill-mine", "--since", "2026-11-01T00:00:00Z",
 		"--mail-archive", f.mail, "--skills-dir", f.skills, "--sink", f.sink, "--json"],
 		{ cwd: f.projA, env, floor_s: 30 });
 	const envelope = JSON.parse(new TextDecoder().decode(out.stdout));
@@ -359,7 +360,7 @@ test("SKILLMINE1: CLI --apply --yes files through the consent gate", async () =>
 		HOME: f.home, TMPDIR: tmp, GIT_CEILING_DIRECTORIES: f.root,
 		PATH: [f.bin, ...env.PATH!.split(delimiter)].join(delimiter),
 	});
-	const out = runFixture([process.execPath, resolve(repo, "src", "cli.ts"), "skill-mine",
+	const out = runFixture([process.execPath, resolve(repo, "src", "cli.ts"), "skill-mine", "--since", "2026-11-01T00:00:00Z",
 		"--mail-archive", f.mail, "--skills-dir", f.skills, "--sink", f.sink,
 		"--apply", "--yes", "--max-new", "1", "--json"],
 		{ cwd: f.projA, env, floor_s: 30 });

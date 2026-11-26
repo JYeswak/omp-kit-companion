@@ -4,3 +4,4 @@
 - Accept Git's legacy reflog-only `HEAD` notification for an exact reviewed update of its symbolic target, without allowing unrelated ref changes.
 - Make native LSP's incomplete and timeout controls publish the same readiness diagnostic the probe requires before it issues references. The controls still require an answered absent-symbol query.
 - Disable Auto-QA inside the private LSP probe profile so OMP 19.2 keeps the advertised tool surface LSP-only.
+- Let the live ladder use up to four scenario slots on dedicated Intel GitHub Actions runners, without changing scenario coverage, deadlines, or the shared-host default.
