@@ -1,29 +1,81 @@
 #!/usr/bin/env python3
-"""SNAPSHOTPUB1: native generated guards, local Git only, no runtime certification.
+"""SNAPSHOTPUB1: real Git, installed kit hooks, and isolated Board custody.
 
-Run explicitly with python3.11 ./tests/cli/snapshot-publication.test.py.
-AM_BIN selects the real generator being qualified; it is never mocked. All
-repositories, reservations, hook mutations and remotes belong to this test.
+The repository, bare origin, and Board endpoint are owned by this test.
+Legacy hook files are inert migration inputs; no Agent Mail tool is needed.
 """
 from __future__ import annotations
 
 import argparse
-import ast
-import hashlib
 import json
 import os
-from pathlib import Path
+import shlex
 import shutil
 import subprocess
+import sys
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from threading import Thread
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from scripts.kitlib_run import run
+from scripts.kitlib_tmp import owned_tmp
+
+BOARD_MEMBER = "50-omp-kit-board-reservations"
+
+
+def executable(path: Path, text: str) -> None:
+    path.write_text(text)
+    path.chmod(0o755)
+
+
+@contextmanager
+def board_fixture(parent: Path):
+    seed = parent / "claimed-board-tasks.json"
+    auth = parent / "xdg/board/local"
+    auth.mkdir(parents=True)
+    (auth / "t.json").write_text('{"token":"t"}')
+    bun = shutil.which("bun")
+    if bun is None:
+        raise AssertionError("bun is required for the isolated Board fixture")
+    launcher = parent / "fixture-omp-kit"
+    executable(launcher, f'#!/bin/sh\nexec {shlex.quote(bun)} {shlex.quote(str(ROOT / "src/cli.ts"))} "$@"\n')
+    class BoardTasks(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            request = urlsplit(self.path)
+            if request.path != "/api/board/tasks":
+                self.send_error(404)
+                return
+            claimed = parse_qs(request.query).get("state") == ["claimed"]
+            payload = seed.read_bytes() if claimed and seed.is_file() else b'{"tasks":[]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), BoardTasks) as server:
+        Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            yield {"BOARD_URL": f"http://127.0.0.1:{server.server_port}/api/board",
+                   "XDG_CONFIG_HOME": str(parent / "xdg"), "OMP_KIT_BIN": str(launcher)}, seed
+        finally:
+            server.shutdown()
 
 
 class Fixture:
-    def __init__(self, parent: Path, am: str, mutant: str | None) -> None:
+    def __init__(self, parent: Path, runners: Path, board_env: dict[str, str],
+                 seed: Path, mutant: str | None) -> None:
         self.repo = parent / "repo"
         self.remote = parent / "origin.git"
-        self.am = am
+        self.seed = seed
+        self.seed.unlink(missing_ok=True)
         self.mutant = mutant
         self.repo.mkdir()
         self.env = {
@@ -32,6 +84,8 @@ class Fixture:
             "AGENT_NAME": "SnapshotPublisher",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_TERMINAL_PROMPT": "0", "PYTHONDONTWRITEBYTECODE": "1",
+            "FLEET_BOARD_RES_STATE": str(parent / "board-state"),
+            **board_env,
         }
         self.run("git", "init", "-q", "-b", "main")
         self.run("git", "config", "user.name", "Snapshot Publisher")
@@ -46,23 +100,32 @@ class Fixture:
         (self.repo / "leased.txt").write_text("committed candidate\n")
         self.commit("snapshot")
         self.tip = self.git("rev-parse", "HEAD")
+        self.hooks = self.repo / ".git/hooks"
+        for hook in ("pre-commit", "pre-push"):
+            shutil.copy2(runners / hook, self.hooks / hook)
+            (self.hooks / "hooks.d" / hook).mkdir(parents=True)
+        member = self.hooks / "hooks.d/pre-push/30-omp-kit-on-main"
+        shutil.copyfile(ROOT / "scripts/check-pushed-on-main.sh", member)
+        member.chmod(0o755)
         self.install()
-        leases = self.repo / "file_reservations"
-        leases.mkdir()
-        for name in ("leased.txt", "foreign-untracked.txt"):
-            (leases / (name + ".json")).write_text(json.dumps({
-                "path_pattern": name, "agent_name": "ForeignHolder",
-                "exclusive": True, "expires_ts": "2099-01-01T00:00:00Z",
-                "released_ts": None,
-            }))
+        self.seed.write_text(json.dumps({"tasks": [
+            {"message": {
+                "id": str(idx),
+                "labels": {"path": path, "holder": "ForeignHolder", "exclusive": "1"},
+                "task": {"state": "claimed", "claim": {"until": "2099-01-01T00:00:00Z"}},
+            }}
+            for idx, path in enumerate(("leased.txt", "foreign-untracked.txt"), 1)
+        ]}))
         (self.repo / "leased.txt").write_text("foreign staged bytes\n")
         self.run("git", "add", "--", "leased.txt")
         (self.repo / "leased.txt").write_text("foreign unstaged bytes\n")
         (self.repo / "foreign-untracked.txt").write_bytes(b"foreign\x00untracked\n")
 
     def run(self, *args: str, allow_failure: bool = False) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(args, cwd=self.repo, env=self.env, text=True,  # pysafe: leaf git/agent-mail fixture subprocess; timeout bounds the wait, DEVNULL stdin
-                                capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+        outcome = run(list(args), cwd=str(self.repo), env=self.env, deadline_s=30)
+        if outcome.rc is None or outcome.timed_out or outcome.truncated:
+            raise AssertionError(f"{args!r}: bounded fixture command failed to finish")
+        result = subprocess.CompletedProcess(args, outcome.rc, outcome.stdout.decode(), outcome.stderr.decode())
         if result.returncode and not allow_failure:
             raise AssertionError(f"{args!r}: rc={result.returncode}\n{result.stdout}{result.stderr}")
         return result
@@ -74,53 +137,36 @@ class Fixture:
         self.run("git", "add", "--", "leased.txt")
         self.run("git", "commit", "-qm", message + " [test]")
 
-    def install(self, mode: str = "fleet") -> None:
-        # Agent Mail's own setup installs both chain runners and both plugins (its default is --prepush). The fleet
-        # then keeps custody at pre-commit only, through the same am steps scripts/install-pre-push-gate.sh runs
-        # (ompkit-v66l.14, J-2026-10-25-12): uninstall our plugins, reinstall --no-prepush. The pre-push chain runner
-        # stays because the kit's own member below uses it.
-        self.run(self.am, "guard", "install", str(self.repo), str(self.repo), "--prepush")
-        hooks = self.repo / ".git/hooks/hooks.d"
-        # The kit's existing history authority remains a real chain member.
-        member = hooks / "pre-push/30-omp-kit-on-main"
-        shutil.copyfile(ROOT / "scripts/check-pushed-on-main.sh", member)
-        member.chmod(0o755)
-        if mode == "fleet":
-            self.run(self.am, "guard", "uninstall", str(self.repo))
-            self.run(self.am, "guard", "install", str(self.repo), str(self.repo), "--no-prepush")
+    def install(self) -> None:
+        scripts = self.repo / "scripts"
+        scripts.mkdir(exist_ok=True)
+        for name in ("install-pre-push-gate.sh", "pre-push-gate.sh", "check-staged-board-reservations.sh"):
+            shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+        self.run("sh", str(scripts / "install-pre-push-gate.sh"))
+        member = self.hooks / "hooks.d/pre-commit" / BOARD_MEMBER
         if self.mutant == "mutation-custody":
-            plugin = hooks / "pre-commit/50-agent-mail.py"
-            tree = ast.parse(plugin.read_text())
-            changed = 0
-            for node in ast.walk(tree):
-                if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
-                        and isinstance(node.value.func, ast.Name)
-                        and node.value.func.id == "check_conflicts"):
-                    node.value = ast.List(elts=[], ctx=ast.Load())
-                    changed += 1
-            if changed != 1:
-                raise AssertionError("mutation-custody injection requires exactly one native conflict decision")
-            plugin.write_text("#!/usr/bin/env python3\n" + ast.unparse(ast.fix_missing_locations(tree)) + "\n")
+            executable(member, "#!/bin/sh\nexit 0\n")
         elif self.mutant == "publication-scope":
-            # Restore the erroneous decision at the real chain boundary: apply
-            # mutation custody to an immutable publication. The pre-commit
-            # plugin is still the native generated implementation, not an echo.
-            member = hooks / "pre-push/49-publication-scope-mutant"
-            member.write_text('#!/bin/sh\nexec python3 .git/hooks/hooks.d/pre-commit/50-agent-mail.py\n')
-            member.chmod(0o755)
+            # A real Board reservation must not veto publication of committed main.
+            shutil.copy2(member, self.hooks / "hooks.d/pre-push/49-publication-scope-mutant")
+
+    def isolate_publication_gate(self) -> None:
+        # This small Git repo has no release inputs. Judge history here; the
+        # fresh-gate suite separately exercises the full source/CI checks.
+        (self.hooks / "hooks.d/pre-push/40-omp-kit-fresh-gate").unlink()
 
     def peer_bytes(self, *, include_index: bool = True) -> dict[str, bytes]:
-        paths = [self.repo / "leased.txt", self.repo / "foreign-untracked.txt",
-                 *sorted((self.repo / "file_reservations").iterdir())]
+        paths = [self.repo / "leased.txt", self.repo / "foreign-untracked.txt", self.seed]
         if include_index:
             paths.append(self.repo / ".git/index")
-        return {str(path.relative_to(self.repo)): path.read_bytes() for path in paths}
+        return {str(path): path.read_bytes() for path in paths}
 
     def remote_tip(self) -> str:
         return self.git("--git-dir=" + str(self.remote), "rev-parse", "refs/heads/main")
 
 
 def publication(fixture: Fixture) -> None:
+    fixture.isolate_publication_gate()
     before = fixture.peer_bytes()
     result = fixture.run("git", "push", "origin", "main", allow_failure=True)
     assert result.returncode == 0, f"publication: rc={result.returncode}\n{result.stdout}{result.stderr}"
@@ -136,7 +182,8 @@ def mutation_refused(fixture: Fixture) -> None:
     index_entries = fixture.git("ls-files", "--stage", "-z")
     head = fixture.git("rev-parse", "HEAD")
     result = fixture.run("git", "commit", "-m", "foreign mutation [test]", allow_failure=True)
-    assert result.returncode != 0 and ("reservation conflict" in result.stderr or "staged-board-reservations: REFUSED" in result.stderr), (
+    assert (result.returncode != 0 and "RESERVED_BY_OTHER" in result.stderr
+            and "leased.txt held by ForeignHolder" in result.stderr), (
         f"mutation-custody: foreign commit not refused for custody\n{result.stdout}{result.stderr}")
     assert fixture.git("rev-parse", "HEAD") == head, "mutation-custody: refused commit changed history"
     assert fixture.peer_bytes(include_index=False) == before, "mutation-custody: refusal modified peer bytes"
@@ -144,6 +191,7 @@ def mutation_refused(fixture: Fixture) -> None:
 
 
 def unadmitted_history_refused(fixture: Fixture) -> None:
+    fixture.isolate_publication_gate()
     # Construct an object without moving or checking out any branch. It is not
     # published: the existing native shared-main member must reject it.
     tree = fixture.git("rev-parse", "HEAD^{tree}")
@@ -160,82 +208,53 @@ def unadmitted_history_refused(fixture: Fixture) -> None:
     assert fixture.peer_bytes() == before, "unadmitted-history: peer bytes changed"
 
 def installer_regenerates_custody(fixture: Fixture) -> None:
-    scripts = fixture.repo / "scripts"
-    scripts.mkdir(exist_ok=True)
-    for name in ("install-pre-push-gate.sh", "pre-push-gate.sh", "check-staged-board-reservations.sh"):
-        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
-    # A stale installed member must be replaced through the native installer,
-    # not repaired by a test's own patch. Prove restoration by actual commit
-    # behavior, not by comparing generated source text.
-    plugin = fixture.repo / ".git/hooks/hooks.d/pre-commit/50-agent-mail.py"
-    plugin.write_text("#!/usr/bin/env python3\nraise RuntimeError('STALE-GENERATED-GUARD')\n")
-    fixture.run("sh", str(scripts / "install-pre-push-gate.sh"))
+    plugin = fixture.hooks / "hooks.d/pre-commit" / BOARD_MEMBER
+    executable(plugin, "#!/bin/sh\nexit 0\n")
+    fixture.install()
     mutation_refused(fixture)
 
 
 def installer_migrates_prepush_install(fixture: Fixture) -> None:
-    # Today's live repos carry Agent Mail's pre-push plugin. The supported installer must convert them: plugin gone,
-    # pre-push chain runner and the kit's members kept, custody still refused at commit. (No push here: the installer
-    # adds the real fresh gate as a pre-push member; publication without the plugin is the `publication` case.)
-    scripts = fixture.repo / "scripts"
-    scripts.mkdir(exist_ok=True)
-    for name in ("install-pre-push-gate.sh", "pre-push-gate.sh", "check-staged-board-reservations.sh"):
-        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
-    fixture.install("agent-mail-default")
-    hooks = fixture.repo / ".git/hooks"
-    plugin = hooks / "hooks.d/pre-push/50-agent-mail.py"
-    assert plugin.is_file(), "migration: the Agent Mail default install did not create the pre-push plugin"
-    fixture.run("sh", str(scripts / "install-pre-push-gate.sh"))
-    assert not plugin.exists(), "migration: the installer left Agent Mail's pre-push plugin installed"
-    assert os.access(hooks / "pre-push", os.X_OK), "migration: the pre-push chain runner was removed"
-    assert (hooks / "hooks.d/pre-push/30-omp-kit-on-main").is_file(), "migration: the kit's history member was removed"
-    assert not (hooks / "hooks.d/pre-commit/50-agent-mail.py").exists(), "migration: Agent Mail pre-commit plugin still installed"
-    assert (hooks / "hooks.d/pre-commit/50-omp-kit-board-reservations").is_file(), "migration: board reservation member missing"
+    # Plant the known old filenames without running the retired generator.
+    legacy = [fixture.hooks / "hooks.d" / kind / "50-agent-mail.py"
+              for kind in ("pre-commit", "pre-push")]
+    for plugin in legacy:
+        executable(plugin, "#!/bin/sh\nexit 73\n")
+    fixture.install()
+    assert not any(plugin.exists() for plugin in legacy), "migration: retired member still active"
+    assert os.access(fixture.hooks / "pre-push", os.X_OK), "migration: pre-push runner removed"
+    assert (fixture.hooks / "hooks.d/pre-push/30-omp-kit-on-main").is_file(), "migration: history member removed"
     mutation_refused(fixture)
 
 
 def nonchain_hook_preserved(fixture: Fixture, hook_name: str = "pre-push") -> None:
-    scripts = fixture.repo / "scripts"
-    scripts.mkdir(exist_ok=True)
-    for name in ("install-pre-push-gate.sh", "pre-push-gate.sh", "check-staged-board-reservations.sh"):
-        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
-    hooks = fixture.repo / ".git/hooks"
-    custom = hooks / hook_name
+    custom = fixture.hooks / hook_name
     custom.write_text("#!/bin/sh\nexit 23\n")
-    before = {path: path.read_bytes() for path in hooks.rglob("*") if path.is_file()}
-    result = fixture.run("sh", str(scripts / "install-pre-push-gate.sh"), allow_failure=True)
+    before = {path: path.read_bytes() for path in fixture.hooks.rglob("*") if path.is_file()}
+    installer = fixture.repo / "scripts/install-pre-push-gate.sh"
+    result = fixture.run("sh", str(installer), allow_failure=True)
     assert result.returncode == 2 and "non-chain" in result.stderr, (
         f"nonchain-custody: wrong refusal\n{result.stdout}{result.stderr}")
-    after = {path: path.read_bytes() for path in hooks.rglob("*") if path.is_file()}
+    after = {path: path.read_bytes() for path in fixture.hooks.rglob("*") if path.is_file()}
     assert after == before, "nonchain-custody: refused installer changed existing hook bytes"
 
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mutant", choices=("mutation-custody", "publication-scope"))
-    args = parser.parse_args()
-    am = shutil.which(os.environ.get("AM_BIN", "am"))
-    if am is None:
-        parser.error("real native am is required (or AM_BIN=/absolute/path/to/am)")
-    tmp = Path(os.environ.get("TMPDIR", ""))
-    agent_tmp = ROOT / "var/agent-tmp"
-    # Owned scratch (`omp-kit scratch new`), or an exact-commit archive's own var/agent-tmp: full-suite-verdict.sh
-    # exports exactly that for archived suites, and the archive is the checker's owned scratch.
-    # 2026-10-25: the base checker's run on 409b3f0e went RED here because that TMPDIR carries no .owner. The e7bba
-    # publish (06:34Z) went RED here again: inside the pre-push gate's archive an earlier suite leaves a .git, so
-    # "no .git" did not identify an archive. An archive lives inside some repo's var/agent-tmp; the shared live
-    # checkout never does, so it still needs an owned TMPDIR.
-    # A scratch dir is a child of var/agent-tmp, never var/agent-tmp itself: the live companion's var/agent-tmp carries a
-    # stray free-text .owner (2026-10-20), which made the bare root pass as "owned".
-    owned = tmp.is_dir() and tmp != agent_tmp and (tmp / ".owner").is_file() and tmp.is_relative_to(agent_tmp)
-    inside_scratch = any(p.name == "agent-tmp" and p.parent.name == "var" for p in ROOT.parents)
-    archived = tmp == agent_tmp and tmp.is_dir() and (inside_scratch or not (ROOT / ".git").exists())
-    if not (owned or archived):
-        parser.error("TMPDIR must be an owned directory under this repo's var/agent-tmp, or an archive's var/agent-tmp")
-    print("generator", am, "sha256", hashlib.sha256(Path(am).read_bytes()).hexdigest(), flush=True)
+def exercise(tmp: Path, board_env: dict[str, str], seed: Path, mutant: str | None) -> int:
+    template = tmp / "hook-template"
+    template.mkdir()
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp),
+           "TMPDIR": str(tmp), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+           "OMP_KIT_GATE_EVENTS_SKIP": "1"}
+    actions = [
+        ["git", "init", "-q", "--template="],
+        ["sh", str(ROOT / "scripts/install-commit-msg-bead.sh"), "--no-pushed-beads", str(template)],
+    ]
+    for argv in actions:
+        outcome = run(argv, cwd=str(template), env=env, deadline_s=30)
+        assert outcome.rc == 0, (argv, outcome.stdout.decode(), outcome.stderr.decode())
+    runners = template / ".git/hooks"
     failures = 0
-    # Remove passing fixtures; keep failed fixtures and complete producer output for the scratch reaper.
     for name, check in (("publication", publication), ("mutation-custody", mutation_refused),
                         ("unadmitted-history", unadmitted_history_refused),
                         ("installer-regeneration", installer_regenerates_custody),
@@ -243,21 +262,31 @@ def main() -> int:
                         ("nonchain-custody", nonchain_hook_preserved),
                         ("nonchain-precommit-custody", lambda fixture: nonchain_hook_preserved(fixture, "pre-commit"))):
         for phase in ("installed", "regenerated"):
-            # A fresh origin keeps publication a real ref update on both
-            # trials; re-pushing an up-to-date ref would not exercise a hook.
-            parent = tmp / f"snapshot-{name}-{phase}.{os.getpid()}"
+            parent = tmp / f"snapshot-{name}-{phase}"
             parent.mkdir(mode=0o700)
-            fixture = Fixture(parent, am, args.mutant)
-            if phase == "regenerated":
-                fixture.install()
             try:
+                fixture = Fixture(parent, runners, board_env, seed, mutant)
+                if phase == "regenerated":
+                    fixture.install()
                 check(fixture)
                 print("PASS", name, phase, flush=True)
-                shutil.rmtree(parent)
             except AssertionError as error:
                 failures += 1
                 print("FAIL", name, phase, error, "fixture", parent, flush=True)
     return 1 if failures else 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mutant", choices=("mutation-custody", "publication-scope"))
+    args = parser.parse_args()
+    work = ROOT / "var/agent-tmp"
+    work.mkdir(parents=True, exist_ok=True)
+    # The retry's inherited TMPDIR can name a different worker export.
+    with owned_tmp("snapshot-publication", root=str(work)) as scratch:
+        tmp = Path(scratch)
+        with board_fixture(tmp) as (board_env, seed):
+            return exercise(tmp, board_env, seed, args.mutant)
 
 
 if __name__ == "__main__":
