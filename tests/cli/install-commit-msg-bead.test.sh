@@ -139,5 +139,29 @@ sh "$TMP/mut/scripts/install-commit-msg-bead.sh" --check "$R" > /dev/null 2>&1
 ok "$?" "0" "runnercheck-mutant-misses-wrapper"
 }
 
+group_foreign_index() {
+	TARGET_REPO=$(new_repo target-index) || return 1
+	CALLER_REPO=$(new_repo caller-index) || return 1
+	FOREIGN_INDEX="$CALLER_REPO/.git/expired-scratch/staged-index"
+	# Model a target-owned commit hook that must acquire the target index lock.
+	cat > "$TARGET_REPO/.git/hooks/commit-msg" <<'HOOK'
+#!/bin/sh
+git read-tree HEAD || exit
+gitdir=$(git rev-parse --absolute-git-dir) || exit
+: > "$gitdir/target-probe-ran"
+HOOK
+	chmod +x "$TARGET_REPO/.git/hooks/commit-msg"
+	rc=0
+	(CDPATH='' cd -- "$CALLER_REPO" && GIT_INDEX_FILE="$FOREIGN_INDEX" sh "$INSTALLER" "$TARGET_REPO") > "$TMP/o-index" 2>&1 || rc=$?
+	[ "$rc" = 0 ] || cat "$TMP/o-index" >&2
+	ok "$rc" "0" "foreign-index-target-install"
+	if [ ! -e "$FOREIGN_INDEX" ] && [ ! -e "$CALLER_REPO/.git/target-probe-ran" ]; then rc=0; else rc=1; fi
+	ok "$rc" "0" "foreign-index-caller-untouched"
+	test -f "$TARGET_REPO/.git/target-probe-ran"
+	ok "$?" "0" "foreign-index-target-probe-ran"
+	sh "$INSTALLER" --check "$TARGET_REPO" > "$TMP/o-index-check" 2>&1
+	ok "$?" "0" "foreign-index-target-hooks-fresh"
+}
+
 start_group group_witness
-run_installer_groups group_plain group_sibling group_pathbound group_refusing group_restore group_idless group_stdin group_upgrade group_inert group_runnercheck group_modedrift
+run_installer_groups group_plain group_sibling group_pathbound group_refusing group_restore group_idless group_stdin group_upgrade group_inert group_runnercheck group_modedrift group_foreign_index

@@ -127,6 +127,9 @@ done
 export OMP_KIT_GATE_EVENTS_SKIP=1
 TARGET=${POS:-$KITROOT}
 TARGET=$(CDPATH='' cd -- "$TARGET" && pwd -P) || { echo "install-commit-msg-bead: cannot enter ${POS:-$KITROOT}" >&2; exit 2; }
+# The installer takes an explicit target; hook probes must use that repo's index,
+# not the alternate index of the caller that triggered a cross-repo refresh.
+unset GIT_INDEX_FILE
 HOOKS=$(git -C "$TARGET" rev-parse --git-path hooks) || { echo "install-commit-msg-bead: $TARGET is not a git repo" >&2; exit 2; }
 case "$HOOKS" in
 	/*) ;;
@@ -628,6 +631,7 @@ EOF
 
 # Use the same interpreter contract while probing a pre-existing bespoke hook.
 execute_hook() (
+	CDPATH='' cd -- "$TARGET" || exit 1
 	hook=$1
 	shift
 	first=''
