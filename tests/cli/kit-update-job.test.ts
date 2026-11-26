@@ -14,6 +14,11 @@ import { liveHookRefreshIo, refreshFleetHooks } from "../../src/hook-refresh.ts"
 import { runStartProbe, startProbeLoadFactor, START_PROBE_MAX_LOAD_FACTOR, type StartProbeOptions, type StartProbeResult } from "../../src/start-probe.ts";
 const dirs: string[] = [];
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
+// These cases exercise activation and relink, not the host OMP startup probe.
+const fixtureActivation = {
+	omp: () => null,
+	startProbe: async () => ({ started: true, timedOut: false, exit: 0, tail: "" }),
+};
 function config(enabled = true): KitUpdateJobConfig {
 	const root = realpathSync(ownedTmp("l8-job", { root: process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp") }).path); dirs.push(root);
 	writeFileSync(join(root, ".owner"), `pid=${process.pid}\nlabel=ompkit-fp72.22-test\nrepo=${join(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
@@ -139,9 +144,10 @@ test("kit-update job is disabled by default and does not poll", async () => {
 	expect(result).toMatchObject({ status: "DISABLED", notification: false }); expect(polled).toBe(false);
 });
 
-test("fake newer certified release becomes UPDATED, relinks the plugin and notifies one line", async () => {
+test("fake newer certified release becomes UPDATED, relinks the plugin and notifies one line", () => withPollEnv(null, async () => {
 	const value = config(); let applied = false; const notes: string[] = [];
 	const result = await runKitUpdateJob(value, {
+		...fixtureActivation,
 		plan: async () => ({ ...value, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY", current: { version: "1.2.3", sha256: "a".repeat(64), target: "../releases/1.2.3/bin/omp-kit", binary: "/x" }, release: {} } as never),
 		apply: async () => { applied = true; return { status: "UPDATED", exitCode: 0, receiptId: "r1", activeVersion: "1.2.4", postcheck: { status: "PASS", matcher: "PASS", live: "PASS" }, provenance: "INTEGRITY_ONLY" }; },
 		relink: async (binary, store) => { expect(binary).toBe(join(value.prefix, "bin", "omp-kit")); expect(store).toBe(join(value.prefix, "releases", "1.2.4")); return { ok: true, detail: "linked", receiptId: "plugin-r1", undoCommand: "omp-kit undo plugin-r1 --yes" }; },
@@ -151,7 +157,7 @@ test("fake newer certified release becomes UPDATED, relinks the plugin and notif
 	expect(applied).toBe(true); expect(result).toMatchObject({ status: "UPDATED", receiptId: "r1", activeVersion: "1.2.4", notification: true, relink: "APPLIED", pluginReceiptId: "plugin-r1", pluginUndoCommand: "omp-kit undo plugin-r1 --yes", service: "APPLIED" });
 	expect(notes).toHaveLength(1); expect(notes[0]).toContain("1.2.4"); expect(notes[0]).toContain("r1"); expect(notes[0]).toContain("plugin-r1"); expect(notes[0]).toContain("omp-kit undo plugin-r1 --yes");
 	expect(readdirSync(value.stateRoot)).toHaveLength(1);
-});
+}));
 
 test("service update applies a receipt-backed plugin relink to covered profiles and undo restores them", async () => {
 	await withPollEnv(null, async () => {
@@ -161,6 +167,7 @@ test("service update applies a receipt-backed plugin relink to covered profiles 
 		const stableLink = join(value.prefix, "bin", "omp-kit");
 		const notes: string[] = [];
 		const result = await runKitUpdateJob(value, {
+			...fixtureActivation,
 			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
 			apply: async () => {
 				rmSync(stableLink);
@@ -200,6 +207,7 @@ test("planted: an OMP no-op cannot claim a complete update when a profile remain
 		installSymlink(value.prefix, "1.2.3");
 		const stableLink = join(value.prefix, "bin", "omp-kit");
 		const result = await runKitUpdateJob(value, {
+			...fixtureActivation,
 			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
 			apply: async () => {
 				rmSync(stableLink);
@@ -453,6 +461,7 @@ for (const plant of ["control", "all-scope", "not-ready", "prior-tamper", "recon
 			let receiptId = "";
 			const notes: string[] = [];
 			const result = await runKitUpdateJob(value, {
+				startProbe: fixtureActivation.startProbe,
 				plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
 				apply: async () => {
 					receiptId = activate(value, undefined, plant === "all-scope" ? "all" : "kit");

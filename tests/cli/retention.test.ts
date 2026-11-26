@@ -119,6 +119,11 @@ function jobConfig(prefix: string, stateRoot: string): KitUpdateJobConfig {
 		pollRelease: async () => ({ indexPath: join(prefix, "index.json"), archivePath: join(prefix, "kit.tar"), version: "1.0.7", sourceTag: "v1.0.7" }) };
 }
 
+const retentionActivation = {
+	omp: () => null,
+	startProbe: async () => ({ started: true, timedOut: false, exit: 0, tail: "" }),
+};
+
 test("STATERETAIN1: postcheck FAIL after a successful activation still prunes older than active+5", async () => {
 	// The deadlock: retention used to require postcheck PASS, so a bloated state
 	// root failed every postcheck and retention never ran. The job now retains on
@@ -131,6 +136,7 @@ test("STATERETAIN1: postcheck FAIL after a successful activation still prunes ol
 	delete process.env.OMP_KIT_UPDATE_POLL; delete process.env.OMP_KIT_UPDATE_REPO;
 	try {
 		const result = await runKitUpdateJob(jobConfig(prefix, stateRoot), {
+			...retentionActivation,
 			plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" }) as never,
 			apply: async () => ({ status: "UPDATED", exitCode: 0, receiptId: "stateretain-r1",
 				activeVersion: "1.0.7", postcheck: { status: "FAIL", matcher: "PASS", live: "PASS", reason: "KIT_POSTCHECK_FAILED" },
@@ -168,6 +174,7 @@ test("STATERETAIN1: a CURRENT no-op job run writes no record while a FAILED run 
 	expect(current).toMatchObject({ status: "CURRENT", activeVersion: "1.0.7" });
 	expect(readdirSync(stateRoot).filter(name => name.startsWith("kit-update-job-"))).toEqual([]);
 	const failing = await runKitUpdateJob(jobConfig(prefix, stateRoot), {
+		...retentionActivation,
 		plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" }) as never,
 		apply: async () => { throw new Error("fixture activation refused"); },
 	});
