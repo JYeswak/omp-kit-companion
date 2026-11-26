@@ -50,7 +50,10 @@ export function paneSeatName(env: Record<string, string | undefined>, home: stri
 		const name = fileName(join(root, dir, `tern-${pane}`));
 		if (name === null) continue;
 		if (!NAME.test(name)) return { kind: "none", why: `malformed name in ${dir}/tern-${pane}` };
-		names.set(name.toLowerCase(), name);
+		const folded = name.toLowerCase();
+		const recorded = names.get(folded);
+		// Choose a recorded spelling independently of directory enumeration order.
+		if (recorded === undefined || name < recorded) names.set(folded, name);
 	}
 	if (names.size === 0) return { kind: "none", why: `no identity file for tern-${pane}` };
 	if (names.size > 1) return { kind: "none", why: `tern-${pane} is bound to ${[...names.values()].join(", ")}` };

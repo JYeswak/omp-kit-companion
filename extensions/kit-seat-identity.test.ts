@@ -27,6 +27,12 @@ async function load(env: Record<string, string | undefined>, h: string): Promise
 test("SEATNAME1: a restored seat without AGENT_NAME takes the one name its own pane's identity files give", async () => {
 	const h = home({ "aaa/tern-929": '{"name":"OrangeRiver"}', "bbb/tern-929": '{"name":"orangeriver"}', "ccc/tern-930": '{"name":"Other"}' });
 	expect((await load({ TERN_PANE: "929" }, h)).AGENT_NAME).toBe("OrangeRiver");
+	// Swap the aliases without replacing the directories or changing the pane.
+	const identity = join(h, ".config", "agent-mail", "identity");
+	writeFileSync(join(identity, "aaa/tern-929"), '{"name":"orangeriver"}');
+	writeFileSync(join(identity, "bbb/tern-929"), '{"name":"OrangeRiver"}');
+	const restored = await load({ TERN_PANE: "929" }, h);
+	expect([restored.AGENT_NAME, restored.BD_ACTOR, restored.BEADS_ACTOR]).toEqual(["OrangeRiver", "OrangeRiver", "OrangeRiver"]);
 	// legacy bare-name body
 	expect((await load({ TERN_PANE: "7" }, home({ "aaa/tern-7": "JadeDuck\n" }))).AGENT_NAME).toBe("JadeDuck");
 });
