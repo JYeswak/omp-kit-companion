@@ -1,8 +1,7 @@
 // Synchronous Board reservation access for the sync land/fleet-guard paths (bead ompkit-tnqyr.3).
 // The Board adapter is async (fetch) and these callers are not, so each call runs the kit's own `reservations`,
-// `reserve` or `release` verb as a bounded child. The same argv works from source (`bun src/cli.ts`) and from the
-// compiled binary, which is its own entrypoint.
-import { dirname, resolve } from "node:path";
+// `reserve` or `release` verb as a bounded child, without falling back to a CLI found on PATH.
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runSync } from "../kitlib/run.ts";
 import type { Hold } from "./board-reservations.ts";
@@ -11,10 +10,13 @@ export type BoardHoldsRead =
 	| { ok: true; holds: Hold[] }
 	| { ok: false; code: "BOARD_UNREACHABLE" | "BOARD_TIMEOUT"; why: string; snapshot_age_s: number | null };
 
-/** The command that starts this kit: `bun <cli.ts>` from source, the binary itself once compiled. */
+/** Source, installed extension bundle, and compiled CLI have distinct entrypoints. */
 function kitArgv(): string[] {
 	const here = fileURLToPath(import.meta.url);
-	return here.endsWith(".ts") && !here.includes("$bunfs") ? [process.execPath, resolve(dirname(here), "..", "cli.ts")] : [process.execPath];
+	if (!here.endsWith(".ts") || here.includes("$bunfs")) return [process.execPath];
+	const directory = dirname(here);
+	if (basename(directory) === "extensions") return [resolve(directory, "..", "bin", "omp-kit")];
+	return [process.execPath, resolve(directory, "..", "cli.ts")];
 }
 
 function childEnv(extra: Record<string, string> = {}): Record<string, string> {
@@ -26,9 +28,9 @@ function childEnv(extra: Record<string, string> = {}): Record<string, string> {
 type Envelope = { data?: Record<string, unknown>; errors?: { code?: string; message?: string }[] };
 
 function runVerb(args: string[], repo: string, deadlineS: number, extra: Record<string, string> = {}): { timedOut: boolean; envelope: Envelope | null } {
-	const run = runSync([...kitArgv(), ...args, "--project", repo, "--json"], { cwd: repo, env: childEnv(extra), deadline_s: deadlineS, max_output_bytes: 2 * 1024 * 1024 });
-	if (run.timed_out || run.killed) return { timedOut: true, envelope: null };
 	try {
+		const run = runSync([...kitArgv(), ...args, "--project", repo, "--json"], { cwd: repo, env: childEnv(extra), deadline_s: deadlineS, max_output_bytes: 2 * 1024 * 1024 });
+		if (run.timed_out || run.killed) return { timedOut: true, envelope: null };
 		const parsed: unknown = JSON.parse(new TextDecoder().decode(run.stdout));
 		return { timedOut: false, envelope: parsed !== null && typeof parsed === "object" ? parsed : null };
 	} catch {

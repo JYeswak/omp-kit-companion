@@ -11,6 +11,8 @@ import type { FullTestReport } from "../../src/full-test-runner.ts";
 import { packageSourceRevision, packageSecretOutputGuard, checkPackagedExtensionLoads, checkPackagedScriptDependencies, flywheelProofFiles, releaseExcluded } from "../../scripts/package-release.ts";
 import { GATE_DEADLINE_MS, TIMING_SAMPLE_COUNT } from "../../scripts/regex-budget.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import type { handleToolCall as sourceHandleToolCall } from "../../extensions/fleet-guard.ts";
+import { boardScenarioSync, startBoard } from "../fleet-guard/board-fixture.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 import { startGithubApiProcess } from "./github-api-fixture.ts";
@@ -47,6 +49,38 @@ async function stagePackageArchive(): Promise<PackageArchiveStage> {
 }
 
 let stagedArchive: Promise<PackageArchiveStage> | undefined;
+
+test("BOARDLAUNCH1: packaged guard checks live Board custody through its own CLI", async () => {
+	const { staged } = await (stagedArchive ??= stagePackageArchive());
+	// Only the runtime-staged package has the bundled extension and sibling native CLI.
+	const { handleToolCall }: { handleToolCall: typeof sourceHandleToolCall } = await import(join(staged.root, "extensions", "fleet-guard.ts"));
+	const target = join(output, "board-guard-project");
+	mkdirSync(target);
+	sourceGit(target, ["init", "-q", "-b", "main"]);
+	writeFileSync(join(target, "owned.txt"), "fixture\n");
+	const vars = ["AGENT_NAME", "BOARD_PROFILE", "BOARD_URL", "XDG_CONFIG_HOME", "FLEET_BOARD_RES_STATE"] as const;
+	const saved = vars.map(key => process.env[key]);
+	try {
+		await startBoard(output);
+		process.env.AGENT_NAME = "BoardFixture";
+		process.env.BOARD_PROFILE = "t";
+		const event = { toolName: "bash", arguments: { command: "git commit --only -m fixture -- owned.txt" } };
+		const context = { cwd: target, agentName: "BoardFixture" };
+		boardScenarioSync({ rows: [{ agent: "OtherSeat", path: "owned.txt" }] });
+		expect((await handleToolCall(event, context))?.reason).toContain("OtherSeat holds exclusively");
+		boardScenarioSync({ rows: [{ agent: "BoardFixture", path: "owned.txt" }] });
+		expect(await handleToolCall(event, context)).toBeUndefined();
+		boardScenarioSync({ rows: [], down: true });
+		expect((await handleToolCall(event, context))?.reason).toContain("the Board could not be read");
+	} finally {
+		for (const [index, key] of vars.entries()) {
+			const value = saved[index];
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+}, fixtureDeadlineS(60) * 1_000);
+
 test("native release derives the rule manifest from rules, covers it in archive integrity, and refuses corrupted bytes", async () => {
 	expect(asset.filename).toBe(`omp-kit-v1.2.3-${key}.tar.gz`);
 	expect([...bytes.subarray(0, 2)]).toEqual([0x1f, 0x8b]);
