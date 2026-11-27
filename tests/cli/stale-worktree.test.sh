@@ -130,9 +130,55 @@ if [ "${1:-}" != -t ] || [ "${2:-}" = STALEOWNHEAD1 ]; then
 	fi
 fi
 
+# STALEMOVE1 exercises the installed commit-msg member, with a deliberately
+# old mtime so the exception has to pass both stale and foreign-bead checks.
+stalemove_cases() {
+	for mode in wrap delete cross-file cross-hunk count preimage; do
+		R=$(new_repo "stalemove-$mode") || return 1
+		base=$(git -C "$R" rev-parse HEAD) || return 1
+		case "$mode" in
+			count) printf 'base line\npeer wording\npeer wording\n' > "$R/pkg/f.txt" ;;
+			cross-hunk) printf 'base line\npeer wording\nsteady 1\nsteady 2\nsteady 3\n' > "$R/pkg/f.txt" ;;
+			*) printf 'base line\npeer wording\n' > "$R/pkg/f.txt" ;;
+		esac
+		git -C "$R" add pkg/f.txt || return 1
+		git -C "$R" commit -q --message "[test] peer edit" --message "Bead: t-peer" --message "Supersedes: $base" || return 1
+		peer=$(git -C "$R" rev-parse HEAD) || return 1
+		case "$mode" in
+			wrap|count) printf 'base line\nif ready:\n    peer wording\n' > "$R/pkg/f.txt" ;;
+			delete) printf 'base line\n' > "$R/pkg/f.txt" ;;
+			cross-file)
+				printf 'base line\n' > "$R/pkg/f.txt"
+				printf '    peer wording\n' > "$R/pkg/g.txt" ;;
+			cross-hunk) printf 'base line\nsteady 1\nsteady 2\nsteady 3\nif ready:\n    peer wording\n' > "$R/pkg/f.txt" ;;
+			preimage) printf 'base line\nif ready:\n    peer wording\nlanded line L\n' > "$R/pkg/f.txt" ;;
+		esac
+		backdate "$R/pkg/f.txt"
+		git -C "$R" add pkg || return 1
+		out=$(git -C "$R" commit --message "[test] wrap peer edit" --message "Bead: t-other" 2>&1)
+		rc=$?
+		case "$mode" in
+			wrap)
+				check "$rc" "0" "STALEMOVE1-wrap-passes" "$out" ""
+				check "$(git -C "$R" show HEAD:pkg/f.txt)" "$(printf 'base line\nif ready:\n    peer wording')" "STALEMOVE1-wrap-retains-line" "$out" "" ;;
+			preimage) check "$rc" "1" "STALEMOVE1-preimage-refused" "$out" "reverts $peer .* from bead t-peer" ;;
+			*) check "$rc" "1" "STALEMOVE1-$mode-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $peer" ;;
+		esac
+	done
+}
+
+if [ "${1:-}" = -t ] && [ "${2:-}" = STALEMOVE1 ]; then
+	stalemove_cases || exit 1
+	printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
+	[ "$fail" -eq 0 ]
+	exit $?
+fi
+
 # STALELOCK1 (ompkit-fp72.120.16.229): the member reaps its own commit's
 # orphan index.lock only when that git is dead, no process holds the lock,
 # and no live git works in the tree. `-t STALELOCK1` runs only this block.
+# The regular suite schedules this group separately; the public -t selector stays unchanged.
+if [ "${1:-}" = -t ] && [ "${2:-}" = STALELOCK1 ]; then
 # shellcheck source=scripts/kitlib-proc.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-proc.sh"
 MEMBER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/check-stale-worktree.sh
@@ -216,7 +262,6 @@ orphans=$(stalelock_cwd_survivors)
 check "$([ -n "$orphans" ] && printf leaked)" "leaked" "STALELOCK1-mutant-sh-holder-orphans-sleep" "$orphans" ""
 for p in $orphans; do stalelock_reap_pid "$p"; done
 check "$(stalelock_cwd_survivors)" "" "STALELOCK1-mutant-orphans-reaped" "" ""
-if [ "${1:-}" = -t ] && [ "${2:-}" = STALELOCK1 ]; then
 	printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
 	[ "$fail" -eq 0 ]; exit
 fi

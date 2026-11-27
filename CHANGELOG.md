@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.156] - 2026-11-27
+
+### Fixed
+
+- `land --review auto` replays source acceptance from the native bead’s structured criteria, not checklists copied into its description. Live and after-release checks remain pending for later verification and cannot substitute for a source check.
+
 ## [0.2.155] - 2026-11-27
 
 ### Changed

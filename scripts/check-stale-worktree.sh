@@ -29,6 +29,8 @@
 # on stale mtimes, so re-adding elsewhere launders nothing), and tracker
 # export regenerations that lose no issue row (every removed row's issue id
 # still present in the staged file; any lost id falls through, fail closed).
+# A same-file, same-hunk re-add with strictly deeper indentation can also
+# preserve a line under both rules, but never exempts a landed pre-image.
 # Reads the effective tree through the index (GIT_INDEX_FILE is respected, so
 # `git commit --only` temporary indexes are judged). Renames are read as
 # delete+add (no -M follow): the delete side is judged by the rules above.
@@ -399,6 +401,64 @@ moved_lines() {
 	cut -f1 "$mvhit"
 }
 
+reindented_lines() {
+	# The old whitespace must be a prefix of the new whitespace.
+	# Exclude additions usable by the exact global move bag so one add
+	# can never excuse both an exact and an indentation-only move.
+	awk '
+		function finish(  i,j,k,key,best) {
+			for (i = 1; i <= nold; i++) {
+				key = oldbody[i]
+				best = 0
+				for (j = 1; j <= slots[key]; j++) {
+					k = slot[key,j]
+					if (left[k] > 0 && length(indent[k]) > length(oldindent[i]) &&
+					    (oldindent[i] == "" || index(indent[k], oldindent[i]) == 1) &&
+					    (!best || length(indent[k]) < length(indent[best]))) best = k
+				}
+				if (best) { print oldline[i]; left[best]-- }
+			}
+			for (i in slots) delete slots[i]
+			for (i in unique) delete unique[i]
+			nold = nadd = 0
+		}
+		FILENAME == ARGV[1] { exact[$0] = 1; next }
+		/^diff --git / { finish(); inat = 0; next }
+		/^@@ / {
+			finish()
+			split(substr($2, 2), range, ",")
+			old = range[1] + 0
+			inat = 1
+			next
+		}
+		!inat { next }
+		/^[+-]/ {
+			text = substr($0, 2)
+			match(text, /^[ \t]*/)
+			lead = substr(text, 1, RLENGTH)
+			body = substr(text, RLENGTH + 1)
+			if (/^-/) {
+				if (body != "") {
+					i = ++nold
+					oldbody[i] = body
+					oldindent[i] = lead
+					oldline[i] = old
+				}
+				old++
+			} else if (body != "" && lead != "" && !(text in exact)) {
+				if (!(text in unique)) {
+					k = unique[text] = ++nadd
+					slot[body,++slots[body]] = k
+					indent[k] = lead
+					left[k] = 0
+				}
+				left[unique[text]]++
+			}
+		}
+		END { finish() }
+	' "$metadata_dir/removals.raw" "$metadata_dir/diff.raw"
+}
+
 split_hunks() {
 	# $1 = hunk dir. Parses the staged diff for the current path from the
 	# current $metadata_dir/diff.raw — callers capture it for this same path
@@ -505,7 +565,11 @@ mvhit="$metadata_dir/hit"
 # when a linked worktree's .git is a file rather than a directory.
 # Join I/O failures propagate in pipeline status, not a disk error marker.
 capture_diff || { printf 'stale-worktree: cannot read staged diff\n' >&2; exit 1; }
-awk '/^diff --git /{inat=0;next} /^@@ /{inat=1;next} !inat{next} /^\+/{print substr($0,2)}' "$metadata_dir/diff.raw" > "$metadata_dir/additions.raw" || exit 1
+: > "$metadata_dir/removals.raw" || exit 1
+awk -v removed="$metadata_dir/removals.raw" '
+	/^diff --git /{inat=0;next} /^@@ /{inat=1;next} !inat{next}
+	/^\+/{print substr($0,2)} /^-/{print substr($0,2) > removed}
+' "$metadata_dir/diff.raw" > "$metadata_dir/additions.raw" || exit 1
 sort "$metadata_dir/additions.raw" > "$mvadd_sorted" || exit 1
 : > "$mvused" || exit 1
 hunk_n=0
@@ -546,6 +610,8 @@ while IFS= read -r path; do
 	comm -23 "$mvadd_sorted" "$mvused" > "$mvavail" || exit 1
 	moved_numbers=$(moved_lines "$path") || { printf 'stale-worktree: cannot read moved sites: %s\n' "$path" >&2; exit 1; }
 	moved=" $(printf '%s\n' "$moved_numbers" | tr '\n' ' ')"
+	reindent_numbers=$(reindented_lines) || { printf 'stale-worktree: cannot read re-indented sites: %s\n' "$path" >&2; exit 1; }
+	reindented=" $(printf '%s\n' "$reindent_numbers" | tr '\n' ' ')"
 	mt=$(mtime_of "$root/$path")
 	hunk_n=$((hunk_n + 1))
 	hdir="$metadata_dir/h$hunk_n"
@@ -604,8 +670,15 @@ while IFS= read -r path; do
 		for r in $reverts; do
 			case "$sha" in "$r"*) declared=1 ;; esac
 		done
-		# Rule (a): worktree predates the landing (absent file skips: no mtime).
-		if [ -n "$mt" ] && [ -n "$cdate" ] && [ "$cdate" -gt "$mt" ] && [ "$declared" -eq 0 ]; then
+		deeper=0
+		if [ "$export_ok" -eq 0 ] && [ -n "$bead" ] && [ -n "$cbead" ] && [ "$cbead" != "$bead" ]; then
+			case "$reindented" in *" $ln "*) deeper=1 ;; esac
+		fi
+		# Keep the original stale check for exact global moves.
+		case "$moved" in *" $ln "*) deeper=0 ;; esac
+		# The local match may satisfy rule (a), but still enters
+		# the foreign-bead pre-image checks below.
+		if [ "$deeper" -eq 0 ] && [ -n "$mt" ] && [ -n "$cdate" ] && [ "$cdate" -gt "$mt" ] && [ "$declared" -eq 0 ]; then
 			[ "$review" -eq 0 ] || printf 'REVIEW_CANDIDATE\t%s\t%s\t%s\t%s\n' "$path" "$sha" "$cbead" "$ln"
 			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s)\n' "$path" "$sha" "$subject" >> "$metadata_dir/report" || exit 1; printf '%s\n' "$sha" >> "$metadata_dir/shas" || exit 1 ;; esac
 			seen="$seen $sha"
@@ -616,14 +689,14 @@ while IFS= read -r path; do
 		# Skipped for loss-free export regenerations and for moved lines
 		# (re-added in this same commit, count-aware); rule (a) above already
 		# judged those lines. Candidate removals are collected per staged
-		# hunk ("line sha hunk") and judged after the loop: only a hunk that
+		# hunk ("line sha hunk deeper") and judged after the loop: a hunk that
 		# restores the blamed commits' pre-image refuses. Each removed line
 		# is evaluated (multiset); the report names each sha once.
 		skip_b=0
 		[ "$export_ok" -eq 1 ] && skip_b=1
 		case "$moved" in *" $ln "*) skip_b=1 ;; esac
 		if [ "$skip_b" -eq 0 ] && [ -n "$cbead" ] && [ -n "$bead" ] && [ "$cbead" != "$bead" ] && [ "$declared" -eq 0 ]; then
-			printf '%s %s %s\n' "$ln" "$sha" "$hseq" >> "$hdir/fsites" || exit 1
+			printf '%s %s %s %s\n' "$ln" "$sha" "$hseq" "$deeper" >> "$hdir/fsites" || exit 1
 		fi
 	done < "$mvhit" || exit 1
 	# Rule (b) hunk judgement (STALEEXACT1 rework): each staged hunk holding
@@ -663,6 +736,8 @@ while IFS= read -r path; do
 			sort -u "$hdir/hshas.raw" > "$hdir/hshas" || exit 1
 			hunk_shas=$(cat "$hdir/hshas") || exit 1
 			[ -n "$hunk_shas" ] || continue
+			unpaired_shas=$(awk -v s="$hseq" '$3 == s && $4 == 0 { print $2 }' "$hdir/fsites") || exit 1
+			unpaired=" $(printf '%s\n' "$unpaired_shas" | tr '\n' ' ')"
 			: > "$hdir/preall.$hseq" || exit 1
 			for hsha in $hunk_shas; do
 				pre_lines "$hsha" "$path" "$hdir" || { printf 'stale-worktree: unreadable landed history: %s %s\n' "$path" "$hsha" >&2; exit 1; }
@@ -683,6 +758,7 @@ while IFS= read -r path; do
 				exempt_found=0
 				for hsha in $hunk_shas; do
 					if base_contains "$hsha"; then exempt_found=1; break; fi
+					case "$unpaired" in *" $hsha "*) ;; *) exempt_found=1; break ;; esac
 				done
 				if [ "$exempt_found" -eq 1 ] && [ "$twohop_max" -ge 2 ]; then
 					printf '%s\n' "$hunk_shas" | sort -u > "$hdir/chain.$hseq" || exit 1
@@ -794,8 +870,9 @@ while IFS= read -r path; do
 				done
 			else
 			for hsha in $hunk_shas; do
-				if [ "$r1_restores" -eq 0 ] && base_contains "$hsha"; then
-					continue
+				if [ "$r1_restores" -eq 0 ]; then
+					if base_contains "$hsha"; then continue; fi
+					case "$unpaired" in *" $hsha "*) ;; *) continue ;; esac
 				fi
 				if ! commit_facts "$hsha"; then
 					printf 'UNREADABLE_COMMIT_FACTS %s %s\n' "$path" "$hsha" >&2

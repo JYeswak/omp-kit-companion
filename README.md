@@ -13,7 +13,7 @@
 </div>
 
 <!-- kit-release:start -->
-Current release: v0.2.155
+Current release: v0.2.156
 <!-- kit-release:end -->
 
 A tested rule pack, 15 extensions, six skills, and a guarded CLI for an
@@ -454,7 +454,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Report landed-but-open beads and orphaned claims; reclaim only with no live holder; UNKNOWN never reclaimed | `omp-kit drain stale-claims --project .` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
 | `omp-kit heavy` | `heavy [--label LABEL] [--lane NAME] [--no-wait] [--max-runtime S] -- COMMAND [ARG ...]` | Run one load/disk-admitted command at nice 10; exit 75 deferred, 124 over budget, 69 observer-unavailable | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
-| `omp-kit next` | `next --role worker\|director [--repo PATH] [--agent NAME]` | Read-only next action and applicable skills | `omp-kit next --role worker --json` |
+| `omp-kit next` | `next --role worker\|director [--repo PATH] [--agent NAME] [--full-facts]` | Read-only next action and applicable skills; fact summaries by default, complete payloads only with --full-facts | `omp-kit next --role worker --json` |
 | `omp-kit grader next` | `grader next [--repo PATH] [--agent NAME]` | Select one prioritized grader action (`OMP_KIT_GRADE_WAVE` = `grade_wave.py` path); unavailable sources read UNKNOWN, never empty | `OMP_KIT_GRADE_WAVE=/path/to/grade_wave.py omp-kit grader next --repo . --json` |
 | `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan; needs native `rch` on PATH with a parseable `status --json` (else `rch_status_unavailable`; no binary at all is `RCH_UNAVAILABLE`) | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
 | `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or resolve shared-main convergence; keeps peer state, refuses owner conflicts, never force-pushes | `omp-kit converge --repo . --json` |
@@ -483,7 +483,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit quickstart` | `quickstart` | Safe first commands and their limits | `omp-kit quickstart` |
 | `omp-kit help` | `help [TOPIC]` | Grammar for a command | `omp-kit help update` |
 | `omp-kit completion` | `completion bash\|zsh\|fish` | Shell completion | `omp-kit completion zsh` |
-| `omp-kit capabilities` | `capabilities` | Only the commands runnable right now | `omp-kit capabilities --json` |
+| `omp-kit capabilities` | `capabilities [--command NAME]...` | Runnable commands; narrow to names or quoted command paths (repeatable or comma-separated) | `omp-kit capabilities --json --command land` |
 | `omp-kit schema` | `schema` | Envelope, command data, exit codes and grammar | `omp-kit schema --json` |
 | `omp-kit robot-docs` | `robot-docs guide` | Automation guidance from the live grammar | `omp-kit robot-docs guide` |
 
