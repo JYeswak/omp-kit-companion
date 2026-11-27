@@ -30,7 +30,7 @@ import { applyExtensions, planExtensions } from "./apply-extensions.ts";
 import { profilePluginRuleStatus, readManifest } from "./diagnostics.ts";
 import { extractImportSpecifiers } from "./extensions.ts";
 import { censusHookFreshness, liveHookFreshnessIo, liveHookRefreshIo, refreshFleetHooks, type HookRefreshIo, type HookRefreshReport, type HookRepoRefresh, type HookRepoRow } from "./hook-refresh.ts";
-import { installedJobs, KNOWN_JOBS } from "./service.ts";
+import { domain, installedJobs, KNOWN_JOBS } from "./service.ts";
 import { livePluginReleaseIo, type PluginLink } from "./plugin-release.ts";
 import { defaultInventoryDeps, inventoryServices, type ServiceRow } from "./services.ts";
 
@@ -420,6 +420,7 @@ export interface ManifestApplyResult {
 export interface ManifestApplyDeps {
 	exec?: (argv: readonly string[]) => Promise<{ exit: number; stdout: string; stderr: string }>;
 	hookIo?: HookRefreshIo;
+	platform?: NodeJS.Platform;
 }
 const MANIFEST_TOUCH_ACTIONS: Record<string, true> = { collision: true, install: true, retire: true, update: true };
 async function manifestExec(argv: readonly string[]): Promise<{ exit: number; stdout: string; stderr: string }> {
@@ -532,11 +533,29 @@ export async function applyActivationManifest(input: { root: string; home: strin
 	// checkout) and that has no plist or unit here is not part of this host, so the update leaves it alone. Every update on a clean home
 	// used to fail 23 of these and exit 1 with ok:false even though the release was installed and judged PASS. An installed job that
 	// fails, and any other refusal, stays a failure.
-	const installedNames = new Set(installedJobs(home).map(job => job.name));
-	for (const name of Object.keys(KNOWN_JOBS)) {
+	const platform = input.platform ?? process.platform;
+	const installedNames = new Set(installedJobs(home, platform).map(job => job.name));
+	// launchd's persistent override is separate from kit opt-outs. Never
+	// attempt to refresh labels confirmed disabled by the host.
+	const disabled = new Set<string>();
+	if (platform === "darwin") {
+		try {
+			const ran = await exec(["/bin/launchctl", "print-disabled", domain()]);
+			if (ran.exit === 0) {
+				for (const match of ran.stdout.matchAll(/^\s*"([^"\r\n]+)"\s*=>\s*(?:disabled|true)\s*$/gm)) {
+					disabled.add(match[1]!);
+				}
+			}
+		} catch { /* Unavailable is not evidence that a service is disabled. */ }
+	}
+	for (const [name, job] of Object.entries(KNOWN_JOBS)) {
 		const item = `service:${name}`;
 		if (optedOut.has(item)) {
 			skipped.push({ item, reason: "opted out" });
+			continue;
+		}
+		if (disabled.has(job.label)) {
+			skipped.push({ item, reason: "disabled by launchd; left untouched" });
 			continue;
 		}
 		try {

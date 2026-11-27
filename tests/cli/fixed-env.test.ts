@@ -56,6 +56,19 @@ test("release, post-push and suite gates ignore reordered/extended caller PATH a
 	}
 }, fixtureDeadlineS(60) * 1000); // eight gate probes, each a python constructor run
 
+test("RELCOPYENV1: the copied runner uses the source environment without a scratch-root diagnostic", () => {
+	const path = `${poison}:/usr/bin:/bin`;
+	const control = probe("full-suite-verdict.sh", path);
+	const result = runFixture(["/bin/bash", join(kit, "scripts/release-local.sh"), "--check-env"], {
+		cwd: kit, env: { ...env(path), TMPDIR: scratch.path }, floor_s: 60,
+	});
+	const diagnostic = text(result.stderr);
+	expect(result.rc, diagnostic).toBe(0);
+	expect(diagnostic).not.toContain("fixed-env.sh");
+	expect(JSON.parse(text(result.stdout))).toEqual(control);
+	expect(readFileSync(join(scratch.path, "release-local-copy/release-local.sh")).length).toBeGreaterThan(0);
+}, fixtureDeadlineS(30) * 1_000);
+
 test("shell and Python qualification construct the same environment despite arbitrary caller inputs", () => {
 	const resolver = `import { resolveOmpIdentity } from ${JSON.stringify(join(kit, "src/paths.ts"))}; console.log(JSON.stringify(resolveOmpIdentity()));`;
 	const shell = ["/bin/sh", "-c", '. "$1"; fixed_env_exec "$2" bun -e "$3"', "fixture",

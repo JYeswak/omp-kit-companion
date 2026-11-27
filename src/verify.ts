@@ -30,7 +30,7 @@
  * for bead_lint's create and update admission (REPLAYABLE1 ompkit-fp72.135.3.71).
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { run, type RunResult } from "./kitlib/run.ts";
@@ -1007,9 +1007,22 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const replayEnv = { ...replayBase, AGENT_NAME: prover, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, KITLIB_TMP_ROOT: exportTmp, ...(wantsOwned ? { OWNED_TRACKER_DB: ownedDb } : {}), PATH: `${replayBin}${delimiter}${replayBase.PATH}` };
 	if (wantsOwned) log.push(`owned fixture ${ownedDb} (per-run read-only replay)`);
 	mkdirSync(exportDir, { recursive: true });
-	const archive = await run(["sh", "-c", `git -C ${JSON.stringify(input.repo)} archive ${JSON.stringify(input.exportSha)} | tar -x -C ${JSON.stringify(exportDir)}`], { deadline_s: 300, env });
-	if (archive.rc !== 0 || !existsSync(join(exportDir, "scripts")) && !existsSync(join(exportDir, "src"))) {
-		return await finishAttempt({ ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`export failed rc ${archive.rc}: ${text(archive.stderr).slice(0, 200)}`).join("\n"), acts });
+	const archivePath = join(scratch.path, "export.tar");
+	const archive = await run(["git", "-C", input.repo, "archive", "--format=tar", `--output=${archivePath}`, input.exportSha], { deadline_s: 300, env });
+	const archiveReason = text(archive.stderr).trim() || text(archive.stdout).trim();
+	if (archive.rc !== 0 || archive.timed_out || archive.killed) {
+		const why = archive.timed_out ? "git archive timed out" : archive.killed ? "git archive was killed" : archiveReason || "git archive produced no error text";
+		return await finishAttempt({ ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`export failed rc ${archive.rc ?? "null"}: ${why.slice(0, 200)}`).join("\n"), acts });
+	}
+	const extract = await run(["tar", "-x", "-f", archivePath, "-C", exportDir], { deadline_s: 300, env });
+	if (extract.rc !== 0 || extract.timed_out || extract.killed) {
+		const why = text(extract.stderr).trim() || text(extract.stdout).trim() || (extract.timed_out ? "tar timed out" : extract.killed ? "tar was killed" : "tar produced no error text");
+		return await finishAttempt({ ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`export extract failed rc ${extract.rc ?? "null"}: ${why.slice(0, 200)}`).join("\n"), acts });
+	}
+	let extracted: string[] = [];
+	try { extracted = readdirSync(exportDir); } catch { extracted = []; }
+	if (extracted.length === 0) {
+		return await finishAttempt({ ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("export extracted nothing: the archive has no files").join("\n"), acts });
 	}
 	mkdirSync(exportTmp, { recursive: true });
 	log.push(`exported ${input.exportSha} to ${exportDir}`);

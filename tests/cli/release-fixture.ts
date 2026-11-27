@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -40,7 +40,7 @@ export function fixture(label: string, mainVersion: string, fullTree = false): F
 	// release-local names the commit agent from AGENT_NAME or user.name; a grader shell may have neither.
 	git(repo, "config", "user.name", "fixture");
 	for (const dir of ["scripts", "changelog.d", ".github/workflows"]) mkdirSync(join(repo, dir), { recursive: true });
-	for (const name of ["release-notes.sh", "release-notes.ts", "release-preflight.sh", "release-train.sh", "stamp-release-line.sh", "kitlib-tmp.sh"])
+	for (const name of ["release-notes.sh", "release-notes.ts", "release-preflight.sh", "release-train.sh", "stamp-release-line.sh", "kitlib-tmp.sh", "fixed-env.sh"])
 		copyFileSync(join(ROOT, "scripts", name), join(repo, "scripts", name));
 	// Execute the real preflight in the fixture cwd without maintaining a second dependency closure.
 	writeFileSync(join(repo, "scripts/commit-preflight.sh"),
@@ -63,6 +63,11 @@ export function fixture(label: string, mainVersion: string, fullTree = false): F
 	git(repo, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main");
 	const bin = join(work, "bin");
 	mkdirSync(bin);
+	// The real startup pins PATH. Put the fixture transport and current Bun in its first search slot.
+	const runtime = join(work, "Library", "Application Support", "Tern", "omp");
+	mkdirSync(runtime, { recursive: true });
+	symlinkSync(bin, join(runtime, "bin"), "dir");
+	symlinkSync(process.execPath, join(bin, "bun"));
 	const head = git(repo, "rev-parse", "HEAD");
 	writeFileSync(join(bin, "gh"), `#!/bin/sh
 case "$*" in
@@ -75,7 +80,7 @@ esac
 `);
 	chmodSync(join(bin, "gh"), 0o755);
 	// README_GATE: the optional readme-update skill gate is machine state, not part of this contract.
-	const runEnv = { ...env, PATH: `${bin}:${process.env.PATH ?? ""}`, TMPDIR: work, README_GATE: join(work, "no-readme-update-gate") };
+	const runEnv = { ...env, HOME: work, PATH: `${bin}:${process.env.PATH ?? ""}`, TMPDIR: work, README_GATE: join(work, "no-readme-update-gate") };
 	return { work, origin, repo, git, env: runEnv };
 }
 

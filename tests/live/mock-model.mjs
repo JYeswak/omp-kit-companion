@@ -77,5 +77,8 @@ const server = http.createServer((req, res) => {
 	});
 });
 server.listen(0, "127.0.0.1", () => {
-	fs.writeFileSync(process.env.PORTFILE, String(server.address().port));
+	const ready = process.env.PORTFILE;
+	const pending = `${ready}.${process.pid}.tmp`;
+	fs.writeFileSync(pending, String(server.address().port), { flag: "wx", mode: 0o600 });
+	fs.renameSync(pending, ready);
 });

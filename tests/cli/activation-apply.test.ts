@@ -210,6 +210,29 @@ test("planted: the same refusal for a job that IS installed, and any other refus
 		expect(other.ok, code).toBe(false);
 	}
 });
+
+test("SVCDISABLED1: manifest refresh leaves the host-disabled job untouched", async () => {
+	const { root, home, stateRoot } = fixtureDirs("launchd-disabled");
+	const disabled = plistPath(home, serviceLabel("claude-save"));
+	mkdirSync(dirname(disabled), { recursive: true });
+	writeFileSync(disabled, "existing disabled plist\n");
+	const result = await applyActivationManifest({
+		root, home, stateRoot, platform: "darwin", binary: "/nonexistent/omp-kit", hookIo: hookIo([]),
+		exec: async (argv) => {
+			if (argv[1] === "print-disabled") return { exit: 0, stderr: "", stdout: `disabled services = {
+				"${serviceLabel("claude-save")}" => disabled
+				"${serviceLabel("kit-update")}" => enabled
+			}` };
+			if (argv[3] === "claude-save") throw new Error("the disabled job must not be installed");
+			return { exit: 0, stdout: serviceEnvelope(true), stderr: "" };
+		},
+	});
+	expect(result.failed).toEqual([]);
+	expect(result.skipped).toContainEqual({ item: "service:claude-save", reason: "disabled by launchd; left untouched" });
+	expect(result.servicesApplied).toContain("kit-update");
+	expect(readFileSync(disabled, "utf8")).toBe("existing disabled plist\n");
+});
+
 // RULESKEEP1: an edited managed rule is kept; the update that installed the release reports it as skipped, not as a failure.
 test("a locally edited managed rule is kept untouched and named under skipped; the update is not failed", async () => {
 	const { root, home, stateRoot } = fixtureDirs("rules-kept");

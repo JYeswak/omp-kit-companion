@@ -285,4 +285,41 @@ test("TRANSCRIPT_LIES: minimized claims cannot override an actually present forb
 	expect(verdict.failures).toContain("EXPECTED_BLOCKED_MARKER_PRESENT");
 });
 
+test("MOCKPORT1: the bound mock publishes readiness only after the port bytes are complete", async () => {
+	const portFile = join(scratch, "mock-port");
+	const program = `
+import fs from "node:fs";
+const ready = process.env.PORTFILE;
+const write = fs.writeFileSync.bind(fs);
+// Allow a reader to see the actual directory between the producer's open and write.
+fs.writeFileSync = (file, data, options) => {
+  const fd = fs.openSync(file, "wx", 0o600);
+  try {
+    if (fs.existsSync(ready)) throw new Error("PORT_VISIBLE_BEFORE_WRITE");
+    write(fd, data, options);
+  } finally { fs.closeSync(fd); }
+};
+const { promise: published, resolve: onPublished } = Promise.withResolvers();
+const watcher = fs.watch(${JSON.stringify(scratch)}, (_event, name) => {
+  if (name === "mock-port" && fs.existsSync(ready)) onPublished();
+});
+// Load after the probe is registered so it can see the producer's first write.
+await import(${JSON.stringify(join(REPO_ROOT, "tests/live/mock-model.mjs"))});
+await published;
+watcher.close();
+const port = Number(fs.readFileSync(ready, "utf8"));
+if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("INVALID_PORT");
+const response = await fetch("http://127.0.0.1:" + port + "/");
+if (response.status !== 404) throw new Error("MOCK_NOT_SERVING");
+process.exit(0);
+`;
+	const result = await runFixtureAsync([process.execPath, "-e", program], {
+		cwd: REPO_ROOT, floor_s: 20, env: {
+			...process.env, SCEN: writeFixture("mock-port-scenario", { turns: [] }),
+			LOG: join(scratch, "mock-port-log"), PORTFILE: portFile,
+		},
+	});
+	expect(result.rc, Buffer.from(result.stderr).toString()).toBe(0);
+}, fixtureDeadlineS(30) * 1_000);
+
 afterAll(() => cleanupAllOwnedTmp());

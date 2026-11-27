@@ -1386,19 +1386,19 @@ export function installService(home: string, job: ServiceJobDef, launcher: strin
 	// definition. bootout takes a single domain/label target; separate domain
 	// and label arguments fail with exit 5.
 	const target = `${domain()}/${job.label}`;
-	// INSTALLROLLBACK1 (ompkit-fp72.120.16.84): once the old job is booted out, every failure path restores the
-	// installed bytes and bootstraps them again, so a failed install never leaves the job unloaded. On 2026-11-02 a
-	// cc install failed `bootstrap retry failed: Bootstrap failed: 5` and left the command center down until a hand
-	// restore of the backup, which bootstrapped at once.
+	// INSTALLROLLBACK1 (ompkit-fp72.120.16.84): restore the prior plist and
+	// verify actual registration before saying it was reloaded.
 	const rollBack = (why: string): LifecycleResult => {
 		if (!installed) return { ok: false, changed: true, backup: plan.backup, detail: why };
 		writeFileSync(dest, installed.text, { mode: 0o644 });
 		waitUnloaded();
 		const restored = run(["launchctl", "bootstrap", domain(), dest]);
-		const back = restored.code === 0 || isAlreadyLoaded(restored);
+		const verified = run(["launchctl", "print", target]);
+		const back = verified.code === 0 && parseLaunchctlPrint(verified.stdout).path === dest;
+		const detail = verified.stderr.trim() || verified.stdout.trim() || restored.stderr.trim() || restored.stdout.trim();
 		return { ok: false, changed: true, backup: plan.backup,
 			detail: `INSTALL_ROLLED_BACK: ${why}; restored the previous plist${plan.backup ? ` (backup ${plan.backup})` : ""} and ` +
-				(back ? "reloaded it" : `its reload also failed: ${restored.stdout.trim() || restored.stderr.trim()}`) };
+				(back ? "reloaded it" : `reload not verified${detail ? `: ${detail.slice(0, 200)}` : ""}`) };
 	};
 	// A bootout returns before launchd has removed the label; bootstrapping in that window fails with exit 5.
 	// Bounded at 2 s (8 polls of 250 ms); the wait ends as soon as the label reads absent.

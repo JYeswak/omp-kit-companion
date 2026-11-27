@@ -47,9 +47,13 @@
 # Exit: 0 installed/released (or dry run complete), 2 usage, 3 caller-owned next-version commit pending, 4 refused (a prepare may already be published).
 # bash only, never `sh`: macOS /bin/sh is bash in POSIX mode, which runs the early stages, then aborts on the process
 # substitution at the sign stage with no failing command, so the EXIT trap re-exited 0 (2026-10-22 lead run of 0.2.73).
-ROOT="$(cd "$(/usr/bin/dirname "$0")/.." && pwd -P)"
+if [ -n "${OMP_KIT_RELEASE_LOCAL_COPIED:-}" ]; then
+	ROOT="${OMP_KIT_RELEASE_LOCAL_ROOT:?copied release runner requires its source root}"
+else
+	ROOT="$(CDPATH='' cd -- "$(/usr/bin/dirname "$0")/.." && pwd -P)" || exit 4
+fi
 # shellcheck source=scripts/fixed-env.sh
-. "$ROOT/scripts/fixed-env.sh"
+. "$ROOT/scripts/fixed-env.sh" || exit 4
 if [ -z "${BASH_VERSION:-}" ] || (set -o | grep -q '^posix[[:space:]]*on'); then
 	echo "release-local: run it with bash (./scripts/release-local.sh), not sh" >&2
 	exit 2
@@ -68,8 +72,6 @@ if [ -z "${OMP_KIT_RELEASE_LOCAL_COPIED:-}" ]; then
 		/bin/cp -p "${BASH_SOURCE[0]}" "$_rlc_copy"
 		OMP_KIT_RELEASE_LOCAL_COPIED=1 OMP_KIT_RELEASE_LOCAL_ROOT="$ROOT" exec /bin/bash "$_rlc_copy" ${1+"$@"}
 	fi
-elif [ -n "${OMP_KIT_RELEASE_LOCAL_ROOT:-}" ]; then
-	ROOT="$OMP_KIT_RELEASE_LOCAL_ROOT"
 fi
 unset _rlc_dir _rlc_copy || true
 

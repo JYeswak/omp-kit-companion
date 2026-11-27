@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 import { checkService, checkServiceLinux, ciPollerEnvironment, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, queryPrint, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
 import { backupDir, launchdLoaded, superviseScratchJob } from "../../src/service.ts";
@@ -392,7 +392,9 @@ test("INSTALLROLLBACK1: a bootstrap that fails after bootout restores the previo
       if (bootstraps === 2) return { code: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error" };
       return { code: 0, stdout: "", stderr: "" };
     }
-    if (args[1] === "print") return { code: 113, stdout: "", stderr: "Could not find service" };
+    if (args[1] === "print") return bootstraps === 3
+      ? { code: 0, stdout: healthyPrint(dest), stderr: "" }
+      : { code: 113, stdout: "", stderr: "Could not find service" };
     return { code: 0, stdout: "", stderr: "" };
   });
   const result = installService(home, job, launcher, watch, { path: dest, text: old },
@@ -414,6 +416,25 @@ test("INSTALLROLLBACK1: a bootstrap that fails after bootout restores the previo
   expect(reportedBackupProblems({ backup: wrong, detail: result.detail.replace(result.backup ?? "", wrong) }, old, backupsAtBootout))
     .toEqual([`reported backup ${wrong} was not written before bootout`]);
   expect(reportedBackupProblems(result, old.replace("Other", "Changed"), backupsAtBootout).length).toBeGreaterThan(0);
+});
+
+test("SVCDISABLED1: generic bootstrap exit 5 cannot prove rollback registration", () => {
+  const { home, launcher, watch } = fixture();
+  const dest = join(home, "Library", "LaunchAgents", `${job.label}.plist`);
+  const old = renderLaunchdPlist(home, job, launcher, watch).text.replace("ThrottleInterval", "Other");
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(dest, old);
+  const run = runner([], args => {
+    if (args[1] === "bootstrap") return { code: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error" };
+    if (args[1] === "print") return { code: 113, stdout: "", stderr: "Could not find service" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const result = installService(home, job, launcher, watch, { path: dest, text: old },
+    { loaded: false, path: null, state: null, pid: null, runs: null, lastExit: null }, run);
+  expect(result.ok).toBe(false);
+  expect(readFileSync(dest, "utf8")).toBe(old);
+  expect(result.detail).toContain("reload not verified: Could not find service");
+  expect(result.detail).not.toContain("reloaded it");
 });
 
 test("INSTALLROLLBACK1: the retry bootstrap waits until the old label reads absent", () => {
