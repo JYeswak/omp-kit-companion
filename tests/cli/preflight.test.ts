@@ -320,7 +320,12 @@ async function releaseFixtureRoot(root: { dir: string; capability: string }): Pr
 	} catch {
 		scratchRoots = join(resolve(root.dir, "..", "..", ".."), "var", "agent-tmp");
 	}
-	const r = await run(["omp-kit", "scratch", "release", root.dir, "--bin", "throwaway", "--now", "--capability", root.capability], { deadline_s: 60, cwd: kitRoot, env: { ...process.env, OMP_KIT_SCRATCH_ROOTS: scratchRoots, AGENT_NAME: process.env.AGENT_NAME || FIXTURE_AGENT } });
+	// Retire using the candidate under test; the installed kit may predate its scratch fix.
+	const r = await run([process.execPath, join(kitRoot, "src", "cli.ts"), "scratch", "release", root.dir,
+		"--bin", "throwaway", "--now", "--capability", root.capability], {
+		deadline_s: fixtureDeadlineS(60), cwd: kitRoot,
+		env: { ...process.env, OMP_KIT_SCRATCH_ROOTS: scratchRoots, AGENT_NAME: process.env.AGENT_NAME || FIXTURE_AGENT },
+	});
 	if (r.rc !== 0) throw new Error(`scratch release failed: ${new TextDecoder().decode(r.stderr)}`);
 }
 

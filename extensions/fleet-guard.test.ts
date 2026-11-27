@@ -8,7 +8,7 @@ import type { FleetGuardBlock, FleetGuardEvent } from "../src/fleet-guard/scratc
 import { parseOwnerFile } from "../src/scratch.ts";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { check as checkDurability } from "../src/fleet-guard/durability.ts";
-import { runFixture } from "../tests/cli/fixture-process.ts";
+import { fixtureDeadlineS, runFixture } from "../tests/cli/fixture-process.ts";
 import { boardLog, boardScenario, startBoard, type BoardRow } from "../tests/fleet-guard/board-fixture.ts";
 
 let freshSeq = 0;
@@ -335,7 +335,7 @@ test("canonical edits follow the caller's attested reservation read; a free path
 			else process.env[key] = value;
 		}
 	}
-});
+}, fixtureDeadlineS(5) * 1000);
 
 
 test("filesystem refusals survive an unavailable storage-root lookup", async () => {

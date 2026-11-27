@@ -122,6 +122,52 @@ test("an open file or missing lsof evidence keeps the marked dir and is not succ
 	expect(existsSync(join(blind.dir, ".omp-kit-release"))).toBe(true);
 });
 
+test("LSOFLOAD1: one bounded timeout retry never licenses retirement without fresh evidence", () => {
+	const original = process.env.OMP_KIT_LOAD_OVERRIDE;
+	process.env.OMP_KIT_LOAD_OVERRIDE = "40/32";
+	try {
+		for (const recovers of [true, false]) {
+			const { dir, home } = fixture(ownerText(process.pid, "bin=throwaway\n"));
+			writeFileSync(join(dir, "work.txt"), "done");
+			const deadlines: number[] = [];
+			const run: ScratchRunner = (argv, opts) => {
+				if (argv[0] !== "lsof") return clearRun(argv);
+				expect(argv).toEqual(["lsof", "-nP", "-Fn"]);
+				deadlines.push(opts?.timeoutMs ?? 0);
+				if (recovers && deadlines.length === 2) return clearRun(argv);
+				return { code: null, stdout: "", stderr: "", timedOut: true };
+			};
+			const result = releaseScratch(dir, home, deps({ run }), { bin: "throwaway", now: true });
+			expect(deadlines).toEqual([60_000, 60_000]);
+			if (recovers) {
+				expect(result).toMatchObject({ ok: true, reason: "owner-released-deleted" });
+				expect(existsSync(dir)).toBe(false);
+			} else {
+				expect(result).toMatchObject({ ok: false, changed: true, reason: "now-held-lsof-timeout" });
+				expect(result.detail).toContain("deadline_ms=60000");
+				expect(existsSync(join(dir, ".omp-kit-release"))).toBe(true);
+				expect(readFileSync(join(dir, "work.txt"), "utf8")).toBe("done");
+			}
+		}
+	} finally {
+		if (original === undefined) delete process.env.OMP_KIT_LOAD_OVERRIDE;
+		else process.env.OMP_KIT_LOAD_OVERRIDE = original;
+	}
+});
+
+test("LSOFLOAD1: a completed observation cannot retire a directory with a replaced owner", () => {
+	const { dir, home } = fixture(ownerText(process.pid, "bin=throwaway\n"));
+	const payload = join(dir, "work.txt");
+	writeFileSync(payload, "still owned");
+	const run: ScratchRunner = (argv) => {
+		if (argv[0] === "lsof") writeFileSync(join(dir, ".owner"), ownerText(process.pid + 1, "bin=throwaway\n"));
+		return clearRun(argv);
+	};
+	expect(releaseScratch(dir, home, deps({ run }), { bin: "throwaway", now: true }))
+		.toMatchObject({ ok: false, changed: true, reason: "now-held-owner-changed" });
+	expect(readFileSync(payload, "utf8")).toBe("still owned");
+});
+
 // SCRATCHRETIRE1 AC5: a delete that fails partway keeps the released dir, reports non-success with the retained
 // responsibility, and claims no reclaimed bytes; once the cause clears, the same release retires it. A read-only nested
 // dir is no longer a cause (REAPRO1 grants owner rwx and retries), so the failure is injected through the removeTree
@@ -283,9 +329,9 @@ test("RELNOW2 CLI: after a bin-less release, --bin throwaway --now reports delet
 	const fd = openSync(join(busy.dir, "open.txt"), "r");
 	let held: ReleaseEnvelope;
 	try {
-		// A loaded machine can time the one lsof snapshot out (now-held-lsof-unavailable): re-observe a bounded number of times.
+		// A loaded host can leave the complete observation unproven. Re-observe only that held outcome.
 		let attempt = 0;
-		do held = cli(busy.dir, busy.home); while (++attempt < 3 && held.errors?.[0]?.message.includes("now-held-lsof-unavailable"));
+		do held = cli(busy.dir, busy.home); while (++attempt < 3 && /now-held-lsof-(?:unavailable|timeout)/.test(held.errors?.[0]?.message ?? ""));
 	} finally {
 		closeSync(fd);
 	}

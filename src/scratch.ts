@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { incarnationSync, isDead, normalizeStart, probeIncarnationSync, type Incarnation, type Probe, type ProbeState } from "./kitlib/proc.ts";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { privateLock } from "./kitlib/lock.ts";
+import { loadFactor } from "./kitlib/load.ts";
 import { runSync } from "./kitlib/run.ts";
 
 /**
@@ -20,7 +21,7 @@ import { runSync } from "./kitlib/run.ts";
  * incarnation-bound proof of exclusive abandoned scratch ownership, never argv/age alone.
  */
 
-export interface ScratchRunResult { code: number | null; stdout: string; stderr: string }
+export interface ScratchRunResult { code: number | null; stdout: string; stderr: string; timedOut?: true }
 export type ScratchRunner = (args: readonly string[], opts?: { timeoutMs?: number; env?: Record<string, string> }) => ScratchRunResult;
 
 export type ScratchBin = "throwaway" | "evidence" | "promote" | "hold";
@@ -845,24 +846,27 @@ export function lsofClear(dir: string, run: ScratchRunner, timeoutMs = 0): boole
 export const LSOF_TIMEOUT_MS = 15000;
 
 /**
- * One system-wide open-file snapshot per plan/apply (`lsof -nP -Fn`, ~2 s at
- * load 34): per-dir `lsof +D` tree walks take 30 s+ on cache-dense dirs and
- * time out, failing closed forever. Null when the snapshot itself fails or
- * times out (callers fail closed). Absolute `n<path>` lines only. `onFailure`
- * receives why a null happened (exit status plus the first 160 bytes of lsof's
- * own words), so a run that fails closed can say what lsof said (LSOFWHY1).
+ * System-wide open-file evidence instead of a recursive walk of every dir.
+ * Under load, retry an expired default window once; a missing or incomplete
+ * snapshot still returns null. `onFailure` carries the producer diagnostic.
  */
-export function takeLsofSnapshot(run: ScratchRunner, timeoutMs = LSOF_TIMEOUT_MS, onFailure?: (why: string) => void): Set<string> | null {
+export function takeLsofSnapshot(run: ScratchRunner, timeoutMs?: number, onFailure?: (why: string) => void): Set<string> | null {
 	const failed = (why: string): null => {
 		onFailure?.(why);
 		return null;
 	};
+	const deadlineMs = timeoutMs ?? Math.ceil(LSOF_TIMEOUT_MS * loadFactor());
+	const argv = ["lsof", "-nP", "-Fn"];
+	const options = deadlineMs > 0 ? { timeoutMs: deadlineMs } : {};
 	let out: ScratchRunResult;
 	try {
-		out = timeoutMs > 0 ? run(["lsof", "-nP", "-Fn"], { timeoutMs }) : run(["lsof", "-nP", "-Fn"], {});
+		out = run(argv, options);
+		if (out.timedOut && timeoutMs === undefined && deadlineMs > LSOF_TIMEOUT_MS)
+			out = run(argv, options);
 	} catch (error) {
 		return failed(`threw: ${(error instanceof Error ? error.message : String(error)).slice(0, 160)}`);
 	}
+	if (out.timedOut) return failed(`lsof-timeout deadline_ms=${deadlineMs}`);
 	if ((out.code !== 0 && out.code !== 1) || out.stderr !== "")
 		return failed(`rc=${String(out.code)} stderr=${JSON.stringify(out.stderr.slice(0, 160))}`);
 	const text = out.stdout;
@@ -897,7 +901,8 @@ export function defaultRunner(args: readonly string[], opts?: { timeoutMs?: numb
 		const child = runSync(args, { deadline_s: (opts?.timeoutMs ?? 30_000) / 1000, max_output_bytes: 8 * 1024 * 1024,
 			env: args[0] === "ps" ? { ...env, LC_ALL: "C" } : { ...env, ...(opts?.env ?? {}) } });
 		return { code: child.timed_out || child.truncated ? null : child.rc,
-			stdout: new TextDecoder().decode(child.stdout), stderr: new TextDecoder().decode(child.stderr) };
+			stdout: new TextDecoder().decode(child.stdout), stderr: new TextDecoder().decode(child.stderr),
+			...(child.timed_out ? { timedOut: true } : {}) };
 	} catch (error) {
 		return { code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
 	}
@@ -2034,7 +2039,8 @@ export function inspectScratchOrphan(proc: OrphanProcess, home: string, deps: In
 }
 
 function inspectScratchOrphanMetadata(proc: OrphanProcess, home: string, deps: InspectDeps): ScratchOrphanDecision {
-	const deadline = performance.now() + 15_000;
+	const factor = loadFactor();
+	const deadline = performance.now() + Math.ceil(15_000 * factor);
 	const proofLiveness: Pick<LivenessDeps, "probe"> = { probe: recorded => {
 		if (performance.now() >= deadline) throw new Error("orphan proof deadline");
 		return (deps.liveness.probe ?? probeIncarnationSync)(recorded);
@@ -2115,7 +2121,10 @@ function inspectScratchOrphanMetadata(proc: OrphanProcess, home: string, deps: I
 	const currentImage = statSync(meta.executable);
 	if (currentImage.dev !== exeStat.dev || currentImage.ino !== exeStat.ino || currentImage.ctimeMs !== exeStat.ctimeMs)
 		return refuse("executable-image-changed");
-	const exclusive = orphanDirectoryExclusive(session.dir, proc.pid, deps.run);
+	const remaining = Math.floor(deadline - performance.now());
+	if (remaining <= 0) return refuse("process-proof-deadline");
+	const exclusive = orphanDirectoryExclusive(session.dir, proc.pid, deps.run,
+		Math.min(remaining, Math.ceil(ORPHAN_DIRECTORY_TIMEOUT_MS * factor)));
 	if (exclusive !== true) return refuse(exclusive === false ? "other-process-using-scratch" : "directory-users-unproven", "preserved");
 	const finalVeto = ownershipVeto();
 	if (finalVeto !== null) return finalVeto;
@@ -2133,12 +2142,12 @@ function inspectScratchOrphanMetadata(proc: OrphanProcess, home: string, deps: I
 }
 
 /** No unregistered live/unknown process may be sharing the abandoned session either. */
-function orphanDirectoryExclusive(dir: string, pid: number, run: ScratchRunner): boolean | null {
+function orphanDirectoryExclusive(dir: string, pid: number, run: ScratchRunner, timeoutMs: number): boolean | null {
 	let out: ScratchRunResult;
-	try { out = run(["lsof", "-nP", "+D", dir, "-F0p"], { timeoutMs: ORPHAN_DIRECTORY_TIMEOUT_MS }); } catch { return null; }
+	try { out = run(["lsof", "-nP", "+D", dir, "-F0p"], { timeoutMs }); } catch { return null; }
 	// Like lsofClear/takeLsofSnapshot, status 1 can still carry complete matched records on macOS.
 	// Empty, warning-bearing, truncated or malformed observations never grant exclusivity.
-	if ((out.code !== 0 && out.code !== 1) || out.stderr !== "" || out.stdout.length >= ORPHAN_METADATA_BYTES) return null;
+	if (out.timedOut || (out.code !== 0 && out.code !== 1) || out.stderr !== "" || out.stdout.length >= ORPHAN_METADATA_BYTES) return null;
 	let targetSeen = false;
 	for (const field of out.stdout.split("\0")) {
 		const token = field.startsWith("\n") ? field.slice(1) : field;
@@ -2826,10 +2835,26 @@ ownerText: string, dev: number, ino: number, releasedAt: string, bin: ScratchBin
 	// One system-wide open-file snapshot, the evidence apply's final delete gate uses: the legacy per-dir `lsof +D` walk
 	// times out on large or cache-dense dirs and fails closed forever (a 64 GB throwaway held at
 	// now-held-lsof-unavailable, 2026-10-22). A snapshot the caller injected is used as is.
-	const evidence = deps.lsofSnapshot !== undefined ? deps
-		: { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
-	const clear = lsofClearDir(evidence, dir);
-	if (clear !== true) return held(clear === null ? "now-held-lsof-unavailable" : "now-held-open-fds");
+	let lsofFailure = "";
+	const snapshot = deps.lsofSnapshot !== undefined ? deps.lsofSnapshot
+		: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs, reason => { lsofFailure = reason; });
+	const clear = snapshotClear(snapshot, dir);
+	if (clear === null) {
+		if (lsofFailure.startsWith("lsof-timeout "))
+			return { ...held("now-held-lsof-timeout"), detail: `${lsofFailure}; released (marker kept), not retired` };
+		return held("now-held-lsof-unavailable");
+	}
+	if (!clear) return held("now-held-open-fds");
+	// Rebind the directory and owner after the potentially slow observation.
+	try {
+		const current = lstatSync(dir);
+		if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== dev || current.ino !== ino)
+			return held("now-held-inode-changed");
+		if (isSymlink(join(dir, ".owner")) || readText(join(dir, ".owner")) !== ownerText)
+			return held("now-held-owner-changed");
+	} catch {
+		return held("now-held-directory-unavailable");
+	}
 	// RELEASELIVE1: a user that registered between the release check and here still keeps the dir.
 	if (blockingScratchUser(dir, deps.liveness) !== null) return held("now-held-user-live");
 	// SCRATCHRETIRE1 AC5: the owner record and the release marker go last. A delete that fails partway (a nested dir the
@@ -3953,7 +3978,7 @@ function bunBuildRepoRoots(entries: readonly ScratchRootEntry[]): string[] {
 export function inspectBunBuildFiles(entries: readonly ScratchRootEntry[], deps: InspectDeps): BunBuildVerdict[] {
 	const now = deps.now ?? Date.now();
 	const snapshot = deps.lsofSnapshot !== undefined ? deps.lsofSnapshot
-		: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS);
+		: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs);
 	const rows: BunBuildVerdict[] = [];
 	for (const repo of bunBuildRepoRoots(entries)) {
 		let names: string[];
@@ -3979,7 +4004,7 @@ export function inspectBunBuildFiles(entries: readonly ScratchRootEntry[], deps:
 function applyBunBuildFile(row: BunBuildVerdict, entries: readonly ScratchRootEntry[], deps: ApplyDeps): BunBuildVerdict {
 	if (row.action !== "REAP") return row;
 	const checked = inspectBunBuildFiles(entries, {
-		...deps, now: deps.now, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS),
+		...deps, now: deps.now, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs),
 	}).find(candidate => candidate.path === row.path);
 	if (checked === undefined || checked.action !== "REAP") return checked ?? { ...row, action: "KEEP", reason: "bun-build-disappeared" };
 	try {
@@ -4026,10 +4051,14 @@ export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	const roots = entries.map(entry => entry.root);
 	const systemWorkDirs = resolveSystemWorkDirs(deps);
 	const sessions: ScratchVerdict[] = [];
-	const snapDeps: InspectDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS),
+	let lsofFailure: string | undefined;
+	const snapDeps: InspectDeps = { ...deps,
+		lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs, reason => { lsofFailure = reason; }),
 		bootMs: deps.bootMs ?? systemBootMs(deps.run), checkoutNameCache: deps.checkoutNameCache ?? new Map() };
 	const record = (verdict: ScratchVerdict | null) => {
 		if (verdict === null) return;
+		if (lsofFailure !== undefined && verdict.reason.endsWith("lsof-evidence-unavailable"))
+			verdict = { ...verdict, detail: lsofFailure };
 		sessions.push(verdict);
 		deps.onProgress?.(verdict);
 	};
@@ -4364,7 +4393,7 @@ function applyScratchInner(home: string, deps: ApplyDeps): ScratchApplyResult {
 	// so a receipt that failed closed on lsof-evidence-unavailable says what lsof said, not only that it failed.
 	let lsofSnapshotFailure: string | null = null;
 	const noteLsofFailure = (why: string): void => { lsofSnapshotFailure ??= why; };
-	let snap = takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS, noteLsofFailure);
+	let snap = takeLsofSnapshot(deps.run, deps.lsofTimeoutMs, noteLsofFailure);
 	const snapDeps: ApplyDeps = { ...deps, lsofSnapshot: snap,
 		bootMs: deps.bootMs ?? systemBootMs(deps.run), checkoutNameCache: deps.checkoutNameCache ?? new Map() };
 	const refreshSnap = (): ApplyDeps => {
@@ -4372,7 +4401,7 @@ function applyScratchInner(home: string, deps: ApplyDeps): ScratchApplyResult {
 		// dir, which cost ~2 s each and blew the 30 min cap on a 6k+ census. A null snapshot still
 		// retries on the cadence, so a recovered lsof is picked up without per-dir spawns.
 		if (Date.now() - snapAt >= refreshMs) {
-			const next = takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS, noteLsofFailure);
+			const next = takeLsofSnapshot(deps.run, deps.lsofTimeoutMs, noteLsofFailure);
 			if (next !== null || snap === undefined) snap = next;
 			snapAt = Date.now();
 		}
