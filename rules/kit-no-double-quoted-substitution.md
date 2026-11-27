@@ -1,7 +1,9 @@
 ---
 description: "Never pass a double-quoted argument containing command substitution to br or git commit"
+# Consume a complete single-quoted shell literal before examining double quotes.
+# The second branch recognizes serialized tool calls; both consume the final quote.
 condition:
-  - '\b(?:(?:br|bd)(?:[ \t]+--\S+(?:[ \t]+[^\s"'';&|]+)?)*[ \t]+(?:comments[ \t]+add|create|update)|git[ \t]+commit\b[^\s;&|]*(?:[ \t]+--\S+)*[ \t]+-m)\b(?:(?!",")[^;&])*(?:"(?:[^"\\]|\\.)*(?<!\\)(?:\\\\\\\\)*(?:\x60|\$\()[^"]*")'
+  - '\b(?:(?:br|bd)(?:[ \t]+--\S+(?:[ \t]+(?:[^\s"'';&|]+|''[^'']*''))?)*[ \t]+(?:comments[ \t]+add|create|update)|git[ \t]+commit\b[^\s;&|]*(?:[ \t]+--\S+)*[ \t]+-m)\b(?:(?:[^''"\\;&|]|''[^'']*''|\\[\s\S]|"(?:[^"\\]|\\[\s\S])*")*"(?:[^"\\]|\\[\s\S])*(?:\x60|\$\()(?:[^"\\]|\\[\s\S])*|(?:[^''"\\;&|]|''[^'']*''|\\\\(?:[^"\\]|\\"|\\\\|\\[nrtbf])|\\"(?:[^"\\]|\\\\(?:[^"\\]|\\"|\\\\|\\[nrtbf])|\\[nrtbf])*\\"|\\[nrtbf])*\\"(?:[^"\\]|\\\\(?:[^"\\]|\\"|\\\\|\\[nrtbf])|\\[nrtbf])*(?:\x60|\$\()(?:[^"\\]|\\\\(?:[^"\\]|\\"|\\\\|\\[nrtbf])|\\[nrtbf])*\\)"'
 scope: tool:bash
 interruptMode: tool-only
 ---

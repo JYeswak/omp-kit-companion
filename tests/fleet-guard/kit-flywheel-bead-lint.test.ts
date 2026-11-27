@@ -196,6 +196,31 @@ test("LINTEVERY1: a single-quoted acceptance with apostrophes and backticks is l
 	expect(unchanged).toEqual([expect.objectContaining({ id, acceptance_criteria: ACCEPTANCE_FIXTURE })]);
 });
 
+test("LITERALINPUT1: serialized Bash keeps quoted acceptance inert and still blocks an adjacent substitution", async () => {
+	const t = tracker();
+	const id = t.create(["Quoted recipe data", "-t", "task", "-l", "admission", "--description", CLEAN_DESCRIPTION, "--acceptance", CLEAN_ACCEPTANCE]);
+	const literal = [
+		'- [ ] [a] [build] Fixture job\'s expected output `printf "%s\\n" sample` -> rc 0',
+		"- [ ] [b] [build] Planted negative: a deliberately failed producer `false` -> rc 1",
+	].join("\n");
+	const quoted = `'${literal.split("'").join("'\\''")}'`;
+	const command = `br --db '${t.db}' --actor LintFixture update ${id} --acceptance ${quoted} --json`;
+	const wire = (value: string) => JSON.stringify({ command: value, cwd: t.project });
+	expect(await ttsrMatches(command)).toBe(false);
+	expect(await ttsrMatches(wire(command))).toBe(false);
+	const unsafe = command + ' --notes "substitution witness ' + '$' + '(printf fixture-only)"';
+	expect(await ttsrMatches(unsafe)).toBe(true);
+	expect(await ttsrMatches(wire(unsafe))).toBe(true);
+
+	const h = await createFlywheelHost(base, { respond: t.respond });
+	const admitted = await toolCall(h, t.project, command);
+	expect(admitted?.block).not.toBe(true);
+	expect(lintExecs(h.execs).map(call => call.args.includes(literal))).toEqual([true]);
+	const applied = await t.respond({ command: "sh", args: ["-c", command], options: { cwd: t.project } });
+	expect(applied.code).toBe(0);
+	expect(JSON.parse(t.run(["show", id]).stdout)).toEqual([expect.objectContaining({ id, acceptance_criteria: literal })]);
+});
+
 test("LINTEVERY1: content-changing br update is gated; workflow-only updates spawn no helper", async () => {
 	const t = tracker();
 	const id = t.create(["Gate refuses unlinted update", "-t", "task", "-l", "admission", "--description", CLEAN_DESCRIPTION, "--acceptance", CLEAN_ACCEPTANCE]);

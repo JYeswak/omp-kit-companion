@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.157] - 2026-11-27
+
+### Fixed
+
+- The stale-worktree guard permits a line to move to deeper indentation within the same staged hunk. It still refuses cross-hunk and cross-file moves, restored landed pre-images, and reuse of one addition for multiple removals.
+
 ## [0.2.156] - 2026-11-27
 
 ### Fixed
