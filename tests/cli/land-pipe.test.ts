@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 import { expectLandSchema, fixture, git, landBoardEnv, landBoardUrl, registerPushCheck, remoteHead, responseCode, scratch, seedBoardHolds } from "./private-index-land.helpers.ts";
 import { boardChannel } from "../../src/fleet-guard/board-reservations.ts";
-import { landReviewAutoCommand, type LandReviewDeps } from "../../src/land.ts";
+import { defaultLandReviewDeps, landReviewAutoCommand, type LandBeadRead, type LandReviewDeps } from "../../src/land.ts";
 import type { CliResult, ParsedCommand } from "../../src/cli.ts";
 setDefaultTimeout(Math.max(120000, Math.round(fixtureDeadlineS(90) * 1000)));
 
@@ -82,17 +82,17 @@ function setupCheckout(work: string, change: string): string {
 	return co;
 }
 
-function beadText(bead: string, box: string): string {
-	return `${bead} title\nassignee: AuthorSeat\n\nAcceptance:\n${box}\n`;
+function beadText(bead: string, box: string): LandBeadRead {
+	return { ok: true, text: `${bead} title\nassignee: AuthorSeat\n\nAcceptance:\n${box}\n`, acceptance: box, author: "AuthorSeat" };
 }
 
 const PASS_BOX = "- [ ] [a] [build] Replay `test -f owned.txt` -> rc 0";
 const FAIL_BOX = "- [ ] [b] [build] Replay `grep -q 'no-such-needle-xyz' owned.txt` -> rc 0";
 
-function depsFor(co: string, text: string, reviewer: (prompt: string) => { ok: true; text: string; summary: string }, calls: { review: number }): LandReviewDeps {
+function depsFor(co: string, bead: LandBeadRead, reviewer: (prompt: string) => { ok: true; text: string; summary: string }, calls: { review: number }): LandReviewDeps {
 	return {
 		checkoutDir: () => co,
-		beadText: () => ({ ok: true, text }),
+		beadText: () => bead,
 		runReviewer: (prompt: string) => { calls.review += 1; return reviewer(prompt); },
 	};
 }
@@ -240,6 +240,44 @@ test("LANDPIPE1 a failing acceptance box routes the replay log and never spawns 
 	const findings = join(co, "land-review-TEST.md");
 	expect(existsSync(findings)).toBe(true);
 	expect(readFileSync(findings, "utf8")).toContain("replay log:");
+});
+
+test.each(["source-and-live", "malformed-source", "live-only", "missing-field"] as const)("LANDREPLAY1 uses only structured tracker acceptance: %s", async (kind) => {
+	const { work, fakeBin } = fixture();
+	registerPushCheck(work, "#!/bin/bash\nset -eu\nexit 0\n");
+	const files = filesFor();
+	writeLandpipeAm(fakeBin, files.holds, files.foreign, files.mail, files.release);
+	const co = setupCheckout(work, "base owned\nLANDREPLAY1 published change\n");
+	const br = join(fakeBin, "br");
+	const description = "- [ ] [a] [build] Duplicate display-only checklist without a command";
+	const build = "- [ ] [a] [build] Replay `test ! -e .git/landreplay-count && printf once > .git/landreplay-count` -> rc 0";
+	const live = "- [ ] [b] [live] Installed check `false` -> rc 0";
+	const acceptance = kind === "missing-field" ? undefined : kind === "malformed-source" ? description : kind === "live-only" ? live : `${build}\n${live}`;
+	writeFileSync(`${br}.json`, JSON.stringify([{ id: "TEST", title: "LandReplay1", assignee: "AuthorSeat", description, acceptance_criteria: acceptance }]));
+	writeFileSync(`${br}.txt`, `TEST title\nassignee: AuthorSeat\n${description}\nAcceptance:\n${acceptance}\n`);
+	writeFileSync(br, "#!/bin/sh\ncase \"$*\" in\n  'show TEST --json') exec /bin/cat \"$0.json\";;\n  'show TEST') exec /bin/cat \"$0.txt\";;\n  *) exit 2;;\nesac\n", { mode: 0o755 });
+	let review: string | undefined;
+	const deps: LandReviewDeps = { ...defaultLandReviewDeps, checkoutDir: () => co, runReviewer: (prompt) => {
+		review = prompt;
+		return { ok: true, text: "VERDICT: LAND", summary: "independent test review" };
+	} };
+	const before = remoteHead(work);
+	const result = await runReviewAuto(work, fakeBin, files, deps, "fix(land): source-only acceptance [test]");
+	if (kind === "source-and-live") {
+		expect(result.code, JSON.stringify(result)).toBe(0);
+		expect(review).toContain("box 2 PENDING live (requires later verification)");
+		expect(readFileSync(join(co, ".git", "landreplay-count"), "utf8")).toBe("once");
+		expect(remoteHead(work)).not.toBe(before);
+		expect(git(work, ["show", "HEAD:owned.txt"])).toContain("LANDREPLAY1 published change");
+	} else {
+		expect(responseCode(result)).toBe("COMMIT_GATE_REFUSED");
+		const data = result.data as { review: { findings: string[] } };
+		const expected = kind === "malformed-source" ? "not replayable" : kind === "live-only" ? "no replayable acceptance boxes for source review" : "structured acceptance_criteria";
+		expect(data.review.findings.join("\n")).toContain(expected);
+		expect(review).toBeUndefined();
+		expect(existsSync(join(co, ".git", "landreplay-count"))).toBe(false);
+		expect(remoteHead(work)).toBe(before);
+	}
 });
 
 test("LANDPIPE1 a hostile diff cannot land through an echoing reviewer", async () => {

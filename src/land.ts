@@ -1814,10 +1814,12 @@ function landpipeEnv(): Record<string, string> {
 	return env;
 }
 
-/** Injected seams: checkout resolution, bead text, and the reviewer. Production defaults run `ovnfs ls`, `br show`, and `omp -p`. Tests pass fakes. */
+export type LandBeadRead = { ok: true; text: string; acceptance: string; author: string | null } | { ok: false; finding: string };
+
+/** Production resolves the checkout, reads the native bead record, and starts an independent review session. */
 export interface LandReviewDeps {
 	checkoutDir(repo: string, name: string): string | null;
-	beadText(bead: string): { ok: true; text: string } | { ok: false; finding: string };
+	beadText(bead: string): LandBeadRead;
 	runReviewer(prompt: string): { ok: true; text: string; summary: string } | { ok: false; finding: string };
 }
 
@@ -1876,16 +1878,27 @@ async function checkoutAuthoredMessage(repo: string, checkout: string | null, me
 	} catch { return unchanged; }
 }
 
-function defaultBeadText(bead: string): { ok: true; text: string } | { ok: false; finding: string } {
+function defaultBeadText(bead: string): LandBeadRead {
 	let run: RunResult;
+	const command = `br show ${bead} --json`;
 	try {
-		run = kitlibRunSync(["br", "show", bead], { deadline_s: LANDPIPE_RESERVE_DEADLINE_S, max_output_bytes: 64 * 1024, env: landpipeEnv() });
+		run = kitlibRunSync(["br", "show", bead, "--json"], { deadline_s: LANDPIPE_RESERVE_DEADLINE_S, max_output_bytes: 64 * 1024, env: landpipeEnv() });
 	} catch (error) {
-		return { ok: false, finding: `acceptance: \`br show ${bead}\` could not run (${error instanceof Error ? error.message : String(error)})` };
+		return { ok: false, finding: `acceptance: \`${command}\` could not run (${error instanceof Error ? error.message : String(error)})` };
 	}
 	if (run.timed_out || run.killed || run.rc !== 0)
-		return { ok: false, finding: `acceptance: \`br show ${bead}\` failed (rc ${run.rc}): ${new TextDecoder().decode(run.stderr).slice(0, 300)}` };
-	return { ok: true, text: new TextDecoder().decode(run.stdout) };
+		return { ok: false, finding: `acceptance: \`${command}\` failed (rc ${run.rc}): ${previewText(new TextDecoder().decode(run.stderr), 300)}` };
+	if (run.truncated || run.total_truncated)
+		return { ok: false, finding: `acceptance: \`${command}\` exceeded the bead read limit` };
+	const text = new TextDecoder().decode(run.stdout);
+	let doc: unknown;
+	try { doc = JSON.parse(text); } catch { return { ok: false, finding: `acceptance: \`${command}\` returned invalid JSON` }; }
+	const row: unknown = Array.isArray(doc) && doc.length === 1 ? doc[0] : doc;
+	if (!row || typeof row !== "object" || !("acceptance_criteria" in row) || typeof row.acceptance_criteria !== "string")
+		return { ok: false, finding: `acceptance: \`${command}\` did not return one bead with structured acceptance_criteria` };
+	const assignee = "assignee" in row && typeof row.assignee === "string" ? row.assignee.trim() : "";
+	const owner = "owner" in row && typeof row.owner === "string" ? row.owner.trim() : "";
+	return { ok: true, text, acceptance: row.acceptance_criteria, author: assignee || owner || null };
 }
 
 /** Native independent-session reviewer: `omp -p` over a prompt file in an owned temp dir. */
@@ -1916,13 +1929,6 @@ export const defaultLandReviewDeps: LandReviewDeps = {
 	beadText: defaultBeadText,
 	runReviewer: defaultRunReviewer,
 };
-
-/** The checkout's author from the bead's assignee/owner line, else null (file-only routing). */
-function landpipeAuthor(beadText: string): string | null {
-	const match = /^(?:assignee|owner|author)[ \t]*:[ \t]*(\S.*)$/im.exec(beadText);
-	const name = match?.[1]?.trim();
-	return name !== undefined && name.length > 0 ? name : null;
-}
 
 /** Touched paths in the checkout, with renames and out-of-tree paths reported loudly instead of skipped. */
 function landpipeTouched(repo: string, checkout: string, name: string): { touched: LandpipeTouched[]; renamed: string[]; outOfTree: string[] } | null {
@@ -1979,13 +1985,14 @@ function landpipeDiff(repo: string, checkout: string, touched: LandpipeTouched[]
 	return text.length > 0 ? text : "(empty diff: touched paths carry no byte change against shared main)";
 }
 
-/** Replay every replayable acceptance box in the checkout (verify's grammar and judge, checkout cwd). Any failure is a FIX with the replay log, and no review is spawned. */
+/** Replay source-verifiable boxes before review. Live and after boxes stay pending for verify; they do not count as source proof. */
 function landpipeReplayAcceptance(checkout: string, acceptance: string): { ok: true; log: string } | { ok: false; findings: string[]; log: string } {
 	const boxes = parseBoxes(acceptance);
-	const replayable = boxes.filter((box) => box.letter !== "v");
+	const reviewBoxes = boxes.filter((box) => box.letter !== "v");
 	const log: string[] = [];
 	const findings: string[] = [];
-	if (replayable.length === 0) return { ok: false, findings: ["acceptance: the bead names no replayable acceptance boxes"], log: "" };
+	if (!reviewBoxes.some((box) => box.phase !== "live" && box.phase !== "after"))
+		return { ok: false, findings: ["acceptance: the bead names no replayable acceptance boxes for source review"], log: "" };
 	// Box commands run from script files, never `sh -c` with a dynamic payload: the staged gate refuses dynamic executable shell arguments.
 	let scriptRoot: OwnedTmp;
 	try {
@@ -1994,11 +2001,11 @@ function landpipeReplayAcceptance(checkout: string, acceptance: string): { ok: t
 		return { ok: false, findings: [`acceptance: box scripts could not be staged (${error instanceof Error ? error.message : String(error)})`], log: "" };
 	}
 	try {
-		for (const box of replayable) {
+		for (const box of reviewBoxes) {
 		const tag = `box ${box.index}`;
+		if (box.phase === "live" || box.phase === "after") { log.push(`${tag} PENDING ${box.phase} (requires later verification)`); continue; }
 		const reason = unreplayableReason(box);
 		if (reason !== null) { findings.push(`acceptance: ${tag} is not replayable (${reason})`); log.push(`${tag} NOT_REPLAYABLE ${reason}`); continue; }
-		if (box.phase === "live" || box.phase === "after") { findings.push(`acceptance: ${tag} needs a ${box.phase} prerequisite; not replayable here`); log.push(`${tag} PENDING ${box.phase}`); continue; }
 		const command = commandOf(box.body) ?? "";
 		const expected = expectedOf(box.body) ?? "";
 		const env: Record<string, string> = {};
@@ -2138,8 +2145,8 @@ export async function landReviewAutoCommand(repo: string, request: ParsedCommand
 		return failRoute(foreign.blockers.map((blocker) => `refused land: ${blocker}`), null);
 	const beadRead = deps.beadText(bead);
 	if (!beadRead.ok) return failRoute([beadRead.finding], null);
-	const author = landpipeAuthor(beadRead.text);
-	const replay = landpipeReplayAcceptance(checkoutDir, beadRead.text);
+	const author = beadRead.author;
+	const replay = landpipeReplayAcceptance(checkoutDir, beadRead.acceptance);
 	if (!replay.ok) return failRoute([...replay.findings, `replay log:\n${replay.log}`.slice(0, LANDPIPE_MAIL_BYTES)], author);
 	const diff = landpipeDiff(repo, checkoutDir, seen.touched);
 	const prompt = [
