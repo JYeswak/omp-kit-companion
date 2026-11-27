@@ -23,10 +23,11 @@ coverage = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(coverage)
 
 SHARDS = 3
+PACKAGE_LIVE = "tests/cli/package-release-live.test.ts"
 FILES = ["tests/cli/a.test.ts", "tests/cli/b.test.ts", "tests/cli/nested/c.test.ts", "tests/cli/d_test.ts",
-         "tests/guard/e.test.ts", "tests/cli/release.test.ts"]
+         "tests/guard/e.test.ts", "tests/cli/release.test.ts", PACKAGE_LIVE]
 ROOTS = ["tests/cli", "tests/guard"]
-IGNORES = ["**/release.test.ts"]
+IGNORES = ["**/release.test.ts", PACKAGE_LIVE]
 
 
 class ShardCoverageTest(unittest.TestCase):
@@ -81,6 +82,19 @@ class ShardCoverageTest(unittest.TestCase):
         code, output = self.run_check(self.reports)
         self.assertEqual(code, 0, output)
         self.assertIn("CORE_SHARD_COVERAGE=ok shards=3 files=5", output)
+
+    def test_live_package_file_runs_in_the_separate_lane_only(self) -> None:
+        report = Path(self.tmp.path) / "junit-package-release-live.xml"
+        run = run_bounded(["bun", "test", f"./{PACKAGE_LIVE}", "--reporter=junit", f"--reporter-outfile={report}"],
+                          cwd=self.repo, timeout=30)
+        self.assertEqual(run.outcome, "OK")
+        self.assertEqual(run.returncode, 0, run.text("stderr"))
+        self.assertEqual(coverage.report_files(report), [PACKAGE_LIVE])
+        for shard in self.reports.glob("junit-*.xml"):
+            self.assertNotIn(PACKAGE_LIVE, coverage.report_files(shard))
+        code, output = self.run_check(self.reports, ignores=IGNORES[:1])
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"NOT_RUN {PACKAGE_LIVE}", output)
 
     def test_dropped_shard_leg_fails(self) -> None:
         reports = self.copy_reports()

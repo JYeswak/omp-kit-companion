@@ -42,6 +42,9 @@ on:
 permissions:
   contents: read
 
+env:
+  PACKAGE_LIVE_TEST: tests/cli/package-release-live.test.ts
+
 # The event name keeps the daily schedule (and a workflow_call caller's event) from queueing behind, or being
 # cancelled by, the push run of the same main SHA.
 concurrency:
@@ -249,8 +252,12 @@ jobs:
         if: runner.os == 'Linux' && (startsWith(matrix.suite, 'core') || matrix.suite == 'package-release')
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap
+          # Ubuntu provides bubblewrap; third-party runner feeds are not dependencies.
+          ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+          test -s "$ubuntu_sources"
+          apt_ubuntu=(sudo apt-get -o "Dir::Etc::sourcelist=$ubuntu_sources" -o "Dir::Etc::sourceparts=/dev/null")
+          "${apt_ubuntu[@]}" update
+          "${apt_ubuntu[@]}" install -y bubblewrap
           # Ubuntu 24.04 AppArmor denied bwrap's user namespace with EPERM on run 39040382320.
           # This is a runtime-only change on the ephemeral runner; containment stays enabled.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -346,6 +353,7 @@ jobs:
             bun scripts/test-quarantine.ts run --junit "$RUNNER_TEMP/core-shard/junit-$shard.attempt-$GITHUB_RUN_ATTEMPT.xml" \
               --report "$RUNNER_TEMP/core-shard/quarantine-$SUITE.json" -- \
               bun test tests/cli tests/fleet-guard --path-ignore-patterns='**/package-release.test.ts' --path-ignore-patterns='**/kit-update.test.ts' \
+              --path-ignore-patterns="$PACKAGE_LIVE_TEST" \
               --shard="$shard/$CORE_SHARDS" --timings=.github/core-test-timings.json
           fi
       - name: Retain this core shard's JUnit (file list for the coverage check) and quarantine reports
@@ -364,6 +372,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/test-reports"
           bun scripts/test-quarantine.ts run --junit "$RUNNER_TEMP/test-reports/junit-package-release.xml" \
             --report "$RUNNER_TEMP/test-reports/quarantine-package-release.json" -- bun test ./tests/cli/package-release.test.ts
+      # The live package journey took 486 s of the slowest core test step's
+      # 1,296 s on run 45900797593. The unsharded core keeps it.
+      - name: Exercise the installed package journey for sharded Ubuntu CI
+        if: matrix.suite == 'package-release' && matrix.os == 'ubuntu-24.04' && needs.resolve-omp-versions.outputs.core_shards != '1'
+        env:
+          OMP_MEMORY_SOURCE_PATH: ${{ runner.temp }}/omp-reviewed/package/dist/cli.js
+        run: |
+          bun scripts/test-quarantine.ts run --junit "$RUNNER_TEMP/test-reports/junit-package-release-live.xml" \
+            --report "$RUNNER_TEMP/test-reports/quarantine-package-release-live.json" -- bun test "./$PACKAGE_LIVE_TEST"
       - name: Exercise kit update contracts
         if: matrix.suite == 'kit-update'
         env:
@@ -493,7 +510,7 @@ jobs:
         run: |
           python3 scripts/ci-shard-coverage.py --shards "$CORE_SHARDS" --junit-dir "$RUNNER_TEMP/core-shard" \
             --root tests/cli --root tests/fleet-guard \
-            --ignore '**/package-release.test.ts' --ignore '**/kit-update.test.ts'
+            --ignore '**/package-release.test.ts' --ignore '**/kit-update.test.ts' --ignore "$PACKAGE_LIVE_TEST"
   ladder:
     if: github.event.repository.private == false
     needs: resolve-omp-versions
@@ -564,8 +581,12 @@ jobs:
       - name: Lint shell and workflow
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
+          # Keep this install on the runner's signed Ubuntu mirrors too.
+          ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+          test -s "$ubuntu_sources"
+          apt_ubuntu=(sudo apt-get -o "Dir::Etc::sourcelist=$ubuntu_sources" -o "Dir::Etc::sourceparts=/dev/null")
+          "${apt_ubuntu[@]}" update
+          "${apt_ubuntu[@]}" install -y shellcheck
           shellcheck scripts/*.sh checkers/*.sh installer/install.sh installer/get.sh tests/cli/installer.test.sh tests/cli/install-verify.test.sh tests/e2e/real-home-journey.sh
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color=false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
