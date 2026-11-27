@@ -4,6 +4,13 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.152] - 2026-11-27
+
+### Fixed
+
+- Hook refresh uses the target repository’s Git index even when the updater was launched with another checkout’s private index.
+- Installed fleet guards query Board reservations through their bundled CLI instead of an unshipped TypeScript entrypoint.
+
 ## [0.2.151] - 2026-11-26
 
 ### Fixed
