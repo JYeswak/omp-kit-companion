@@ -5,3 +5,4 @@
 - Shell edit, search, and wait reminders match the live command text, including an unwrapped command, and stay quiet on stream edits, phrase searches, and a single sleep.
 - Frontend and regex reminders check their required shell or constructor text before nearby exclusions, keeping legacy streamed checks within the existing budgets without changing their match windows.
 - Retired kit-rea-heavy-summary, kit-solo-review-not-review, and rs-unsafe-added-router after zero recorded reminders. The pack no longer ships a router class.
+- Linux regex-budget checks pass long stream and calibration inputs to the worker without hitting the OS command-line limit.

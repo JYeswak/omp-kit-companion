@@ -9,10 +9,12 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { loadavg } from "node:os";
 import path from "node:path";
+import { run } from "../src/kitlib/run.ts";
 import { OMP_SRC, loadRuleFile, loadRules } from "./rule-class.ts";
 import type { LoadedRule } from "./rule-class.ts";
 
 const KIT = path.resolve(import.meta.dir, "..");
+const workerDecoder = new TextDecoder();
 export const DEFAULT_SIZES = [4096, 8192, 16384] as const;
 export const DEFAULT_SHAPES = ["single-quote", "escaped-double-quote", "backslash", "space", "semicolon", "newline", "literal"] as const;
 export const DEFAULT_ENCODINGS = ["raw", "json"] as const;
@@ -432,9 +434,8 @@ async function oneRuleManager(request: WorkerRequest): Promise<StreamManager> {
 }
 
 async function workerMain(): Promise<void> {
-	const payloadIndex = process.argv.indexOf("--regex-budget-worker") + 1;
 	try {
-		const request = JSON.parse(Buffer.from(process.argv[payloadIndex] ?? "", "base64").toString("utf8")) as WorkerRequest;
+		const request = await Bun.stdin.json() as WorkerRequest;
 		// OMP_SRC is selected from the installed OMP build at runtime; a static import would pin a version-specific path.
 		const ruleModule = await import(path.join(request.ompSource, "capability/rule.ts"));
 		const compileRuleCondition = request.compile === "native"
@@ -606,21 +607,17 @@ export async function measureCondition(input: {
 		...(input.rulePath === undefined ? {} : { rulePath: input.rulePath }),
 		ompSource: OMP_SRC,
 	};
-	const payload = Buffer.from(JSON.stringify(request), "utf8").toString("base64");
-	const child = Bun.spawn([process.execPath, import.meta.path, "--regex-budget-worker", payload], {
+	// The frozen reference and stream wires can exceed Linux's per-argument limit.
+	// Keep the same request on stdin so neither argv size nor base64 affects admission.
+	const timeoutMs = input.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS;
+	const worker = await run([process.execPath, import.meta.path, "--regex-budget-worker"], {
 		cwd: KIT,
 		env: { ...process.env, OMP_SRC, OMP_BIN: process.env.OMP_BIN ?? "omp" },
-		stdout: "pipe",
-		stderr: "pipe",
+		stdin: JSON.stringify(request),
+		deadline_s: timeoutMs / 1000,
 	});
-	const stdoutPromise = new Response(child.stdout).text();
-	const stderrPromise = new Response(child.stderr).text();
-	let timedOut = false;
-	const timeoutMs = input.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS;
-	const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutMs);
-	const exitCode = await child.exited;
-	clearTimeout(timer);
-	const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+	const stdout = workerDecoder.decode(worker.stdout);
+	const stderr = workerDecoder.decode(worker.stderr);
 	const result = parseWorkerOutput(stdout);
 	const samples: ProbeSample[] = result.samples.map(sample => ({
 		shape: sample.shape,
@@ -644,7 +641,7 @@ export async function measureCondition(input: {
 			failures.push({ code: "SINGLE_CHECK_CEILING", shape: sample.shape, encoding: sample.encoding, message: "rule=" + input.rule + " condition=" + input.conditionIndex + " shape=" + sample.shape + " encoding=" + sample.encoding + " 16k=" + sample.ms[sample.ms.length - 1].toFixed(2) + "ms exceeds " + SINGLE_CHECK_CEILING_MS + "ms single-check ceiling" });
 		}
 	}
-	if (timedOut) {
+	if (worker.timed_out) {
 		// The last phase marker names where the worker was when it was killed.
 		const streamAt = stderr.lastIndexOf("RX_BUDGET_STREAM_START");
 		const referenceAt = stderr.lastIndexOf("RX_BUDGET_REFERENCE_START");
@@ -653,8 +650,10 @@ export async function measureCondition(input: {
 		failures.push({ code: timeoutCode, message: "worker exceeded " + timeoutMs + "ms during " + phase + "; rule=" + input.rule + " condition=" + input.conditionIndex });
 		return { rule: input.rule, condition_index: input.conditionIndex, status: "TIMEOUT", literal, samples, failures };
 	}
-	if (result.error || !result.complete || exitCode !== 0) {
-		failures.push({ code: "REGEX_COMPILE_ERROR", message: result.error ?? (stderr || "worker exited " + exitCode + " without a completion record") });
+	if (result.error || !result.complete || worker.rc !== 0 || worker.killed || worker.truncated) {
+		const detail = worker.truncated ? "worker output exceeded the capture limit"
+			: result.error ?? (stderr || "worker exited " + worker.rc + " without a complete result");
+		failures.push({ code: "REGEX_COMPILE_ERROR", message: detail });
 		return { rule: input.rule, condition_index: input.conditionIndex, status: "COMPILE_ERROR", literal, samples, failures };
 	}
 	return {

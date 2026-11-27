@@ -61,6 +61,17 @@ test("live stream threshold accepts 500ms and rejects a larger cost", () => {
 	expect(failsStreamBudget(500.1)).toBe(true);
 });
 
+test("regex worker measures a complete stream larger than Linux's single argument limit", async () => {
+	const wire = buildWriteEditWire("measured-token" + "x".repeat(160 * 1024));
+	const measured = await measureCondition({
+		rule: "large-worker-request", conditionIndex: 0, pattern: "measured-token", scope: ["tool:write(src/**)"],
+		sizes: [32, 64, 128], shapes: ["literal"], encodings: ["raw"], writeEditWire: wire,
+	});
+	expect(measured.status).toBe("MEASURED");
+	expect(measured.write_edit_deltas).toBe(Math.ceil(wire.length / 16));
+	expect(measured.failures).toEqual([]);
+});
+
 test("Bash condition lint catches leading assertions and wildcards", () => {
 	expect(lintCondition("(?<!x)needle")).toContain("LEADING_LOOKAROUND");
 	expect(lintCondition(".*needle")).toContain("LEADING_UNBOUNDED_WILDCARD");
