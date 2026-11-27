@@ -46,7 +46,14 @@ esac
 	const am = join(fakeBin, "am");
 	writeFileSync(am, readFileSync(am, "utf8").replace("  *) exit 2 ;;", '  "file_reservations reserve"|"file_reservations release"|"mail send") exit 0 ;;\n  *) exit 2 ;;'));
 	chmodSync(am, 0o755);
-	writeFileSync(join(fakeBin, "br"), "#!/bin/sh\nprintf '%s\\n' 'assignee: AuthorSeat' 'Acceptance:' '- [ ] [a] [build] Replay `test -f owned.txt` -> rc 0'\n", { mode: 0o755 });
+	const bead = JSON.stringify([{ id: "caller-237", assignee: "AuthorSeat",
+		acceptance_criteria: "- [ ] [a] [build] Replay `test -f owned.txt` -> rc 0" }]);
+	writeFileSync(join(fakeBin, "br"), `#!/bin/sh
+case "$*" in
+  'show caller-237 --json') printf '%s\\n' '${bead}' ;;
+  *) exit 2 ;;
+esac
+`, { mode: 0o755 });
 	writeFileSync(join(fakeBin, "omp"), "#!/bin/sh\nprintf '%s\\n' 'VERDICT: LAND'\n", { mode: 0o755 });
 	const repo = realpathSync(work);
 	const env = {
