@@ -721,7 +721,11 @@ function variantsFor(c: Case, admission = false): { variants: MetamorphicVariant
 	if (bash) variants.push({ relation: "whitespace", snippet: `  ${c.snippet}` });
 	if (c.snippet.includes(" --")) variants.push({ relation: "whitespace", snippet: c.snippet.replace(" --", " \\\n--") });
 	if (bash) {
-		variants.push({ relation: "env-prefix", snippet: `FOO=1 ${c.snippet}` });
+		// Assignment words can precede an external command, but not Bash compound syntax.
+		// Export the unrelated fixture variable before the compound command instead.
+		const snippet = c.snippet.trimStart();
+		const compound = /^(?:for|while|until|select|if|case|function|time|coproc)(?=\s)|^(?:\(|\{[ \t]|\[\[[ \t])/.test(snippet);
+		variants.push({ relation: "env-prefix", snippet: `${compound ? "export FOO=1;" : "FOO=1"} ${c.snippet}` });
 	} else {
 		skipped.push({ relation: "env-prefix", reason: "env assignment prefixes shell invocations only" });
 	}

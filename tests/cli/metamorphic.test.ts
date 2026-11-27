@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const REPO_ROOT = join(import.meta.dir, "../..");
@@ -132,6 +133,31 @@ test("strict zero-break gate fails on a planted fresh break", () => {
 	expect(report?.status).toBe("FAIL");
 	expect(report?.breaks.length).toBeGreaterThan(0);
 }, 120_000);
+
+test("shell variants keep continued Git options quiet and route edits and valid polling loops", () => {
+	const shellPack = join(base, "shellpack");
+	const rules = join(shellPack, "rules");
+	mkdirSync(rules, { recursive: true });
+	for (const rule of ["kit-commit-preflight", "kit-tool-route-edit", "kit-tool-route-wait"]) {
+		cpSync(join(REPO_ROOT, "rules", `${rule}.md`), join(rules, `${rule}.md`));
+	}
+	const cases = [
+		["kit-commit-preflight", "quiet", "git commit --dry-run"],
+		["kit-commit-preflight", "quiet", "git commit --help"],
+		["kit-commit-preflight", "fire", "git commit --only -F msg"],
+		["kit-tool-route-edit", "fire", `python3 -c 'Path("src/item.ts").write_text(x.replace("a", "b"))'`],
+		["kit-tool-route-edit", "fire", `perl -pi -e 's/old/new/' src/item.ts`],
+		["kit-tool-route-wait", "fire", "for n in 1 2; do sleep 0; done"],
+		["kit-tool-route-wait", "fire", "while ! test -f ready; do sleep 1; done"],
+	];
+	const path = join(shellPack, "cases.tsv");
+	writeFileSync(path, CASES_HEADER + cases.map(([rule, expect, command]) =>
+		`${rule}\t${expect}\ttool\tbash\t-\t${command}\tPOSIX-equivalent transformation\t\n`).join(""));
+	const { exitCode, envelope } = runCli(["test", "--metamorphic", "--rules", rules, "--cases", path, "--json"]);
+	expect(envelope.data?.metamorphic?.breaks).toEqual([]);
+	expect(exitCode).toBe(0);
+	expect(envelope.data?.metamorphic?.counts).toMatchObject({ cases: cases.length, breaks: 0 });
+}, fixtureDeadlineS(120) * 1_000);
 
 test("text-scope cases have no shell relations: prose in quotes still fires, nothing counted", () => {
 	const textPack = join(base, "textpack");

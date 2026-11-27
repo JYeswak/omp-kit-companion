@@ -4,7 +4,8 @@ condition:
   # Stay quiet when commit-preflight is within 80 characters before this git,
   # or 120 after it, and on help or dry-run. Wait for the next complete word or
   # command delimiter so a streamed "git commit " cannot fire before "--help".
-  - 'git(?<!commit-preflight[\s\S]{0,80})(?![\s\S]{0,120}commit-preflight)(?<=\bgit|\\ngit|\\tgit)(?=\s+(?:-C\s+[^\s"\\;&|]+\s+)?commit(?=[\s;&|)"\x60]|\\n)(?=\s*(?:[;&|)"\x60]|\\n|[^\s;&|)"\x60]+[\s;&|)"\x60]))(?!\s+(?:--dry-run|--help|-h)\b))(?<!\b(?:echo|printf|e?grep|fgrep|rg|ag|ack)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+''[^'']*)(?<!\b(?:echo|printf|e?grep|fgrep|rg|ag|ack)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+\\"(?:[^"\\$\x60]|\\\\(?:\\.|[^\\"])|\\[^"\\]|\$(?!\())*)(?<=(?:^|"command"\s*:\s*"|[;&|(]|\\n|\\t)\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s"\\;&|]*\s+)*(?:(?:env|sudo|time)\s+)*(?:command\s+)?git)'
+  # A shell continuation can be raw or escaped inside a streamed JSON string.
+  - 'git(?<!commit-preflight[\s\S]{0,80})(?![\s\S]{0,120}commit-preflight)(?<=\bgit|\\ngit|\\tgit)(?=\s+(?:-C\s+[^\s"\\;&|]+\s+)?commit(?=[\s;&|)"\x60]|\\n)(?=\s*(?:[;&|)"\x60]|\\n|[^\s;&|)"\x60]+[\s;&|)"\x60]))(?!\s+(?:(?:[\\]\r?\n|[\\]{3}(?:r[\\])?n)[ \t]*)*(?:--dry-run|--help|-h)\b))(?<!\b(?:echo|printf|e?grep|fgrep|rg|ag|ack)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+''[^'']*)(?<!\b(?:echo|printf|e?grep|fgrep|rg|ag|ack)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+\\"(?:[^"\\$\x60]|\\\\(?:\\.|[^\\"])|\\[^"\\]|\$(?!\())*)(?<=(?:^|"command"\s*:\s*"|[;&|(]|\\n|\\t)\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s"\\;&|]*\s+)*(?:(?:env|sudo|time)\s+)*(?:command\s+)?git)'
 scope: "tool:bash"
 interruptMode: never
 ---
