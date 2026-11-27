@@ -59,14 +59,14 @@ const readArgs = { path: ".beads/issues.jsonl?q=group_by(.status)" };
 const readCall = { event: "call", timestamp: 1, id: "read_1", name: "read", args: readArgs };
 const readAbort = { event: "stop", timestamp: 1, reason: "aborted", error: "TTSR matched rule: kit-jsonl-aggregate" };
 
-function readVerdict(events: unknown[], complete = true): string {
+function readVerdict(events: unknown[], complete = true, requests = 3): string {
 	mkdirSync(join(project, ".beads"), { recursive: true });
 	writeFileSync(join(project, ".beads/issues.jsonl"), '{"id":"example","status":"open","labels":[]}\n');
 	writeFileSync(join(project, ".omp-kit-tool-events.jsonl"), [...events, ...(complete ? [{ event: "end" }] : [])].map(row => JSON.stringify(row)).join("\n") + "\n");
 	const log = join(fixture, "read-requests.jsonl");
 	const injection = { role: "user", content: 'rule="kit-jsonl-aggregate"' };
-	writeFileSync(log, [0, 1, 2].map(n => JSON.stringify({
-		n, main: true, body: { messages: n === 2 ? [injection] : [{ role: "user", content: "go" }] },
+	writeFileSync(log, Array.from({ length: requests }, (_, n) => JSON.stringify({
+		n, main: true, body: { messages: n === requests - 1 ? [injection] : [{ role: "user", content: "go" }] },
 	})).join("\n") + "\n");
 	const run = runFixture([process.execPath, join(root, "tests/live/lib.mjs"), "verdict", String(readIndex), log, project, "0"], { cwd: root, label: "live-verdict-read" });
 	if (run.rc !== 0) throw new Error(`verdict parser failed: ${Buffer.from(run.stderr).toString()}`);
@@ -121,6 +121,27 @@ test("an advisory tool fire requires native execution and result for its exact c
 	expect(executionVerdict([{ ...grepCall, args: { path: "elsewhere" } }, grepExecution, grepResult])).toMatch(/^FAIL:.*original tool/);
 	expect(executionVerdict([grepCall, grepExecution, grepResult, { event: "stop", timestamp: 3, reason: "aborted" }])).toMatch(/^FAIL:.*aborted/);
 	expect(executionVerdict([grepCall, grepExecution, grepResult], false)).toMatch(/^FAIL:.*rule/);
+});
+
+test("GOCONTINUE1: two scripted tool turns cannot substitute for the interruption follow-up", () => {
+	const goIndex = scenarios.findIndex((s: { id: string }) => s.id === "test-skip-go-edit-fire");
+	expect(goIndex).toBeGreaterThanOrEqual(0);
+	const { path, content } = scenarios[goIndex].turns[0].tool.args;
+	mkdirSync(join(project, "pkg"), { recursive: true });
+	writeFileSync(join(project, path), content);
+	const log = join(fixture, "go-edit-requests.jsonl");
+	const requests = (count: number, interrupted: boolean) => {
+		writeFileSync(log, Array.from({ length: count }, (_, n) => JSON.stringify({
+			n, main: true, body: { messages: [{ role: "user", content: interrupted && n === 2 ? 'rule="kit-test-skip"' : "go" }] },
+		})).join("\n") + "\n");
+		const run = runFixture([process.execPath, join(root, "tests/live/lib.mjs"), "verdict", String(goIndex), log,
+			project, interrupted ? "0" : "1"], { cwd: root, label: "live-verdict-go-edit" });
+		expect(run.rc, Buffer.from(run.stderr).toString()).toBe(0);
+		return Buffer.from(run.stdout).toString().trim();
+	};
+	expect(requests(2, false)).toContain("2 model request(s), want >=3");
+	expect(requests(3, true)).toBe("ok");
+	expect(readVerdict([readCall, readAbort], true, 2)).toContain("2 model request(s), want >=3");
 });
 
 afterAll(() => cleanupAllOwnedTmp());

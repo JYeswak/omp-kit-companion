@@ -141,6 +141,19 @@ function stampPackageVersion(source: Buffer, version: string, sourceRevision: st
 	return Buffer.from(JSON.stringify(stamped, null, 2) + "\n");
 }
 
+/** Bind only the generated pack column to the same final identity as package.json. */
+function stampRuleManifest(manifest: Buffer, revision: string | null): Buffer {
+	const pack = revision ?? `uncommitted-${new Date().toISOString().slice(0, 10)}`;
+	const rows = manifest.toString("utf8").split("\n");
+	for (let i = 1; i < rows.length - 1; i++) {
+		const row = rows[i]!;
+		const packStart = row.lastIndexOf("\t") + 1;
+		if (packStart === 0 || packStart === row.length) fail("MANIFEST_PACK_UNSTAMPABLE");
+		rows[i] = row.slice(0, packStart) + pack;
+	}
+	return Buffer.from(rows.join("\n"));
+}
+
 /**
  * Build-source metadata only, not authenticated provenance. An archive's expanded
  * export-subst stamp survives without Git; a checkout must have its own clean HEAD.
@@ -500,6 +513,7 @@ async function run(): Promise<void> {
 		const source_revision = finalSourcePackage.equals(sourcePackage)
 			? packageSourceRevision(root, finalSourcePackage, initialSourceRevision) : null;
 		content.set("package.json", stampPackageVersion(sourcePackage, version, source_revision));
+		content.set("MANIFEST.tsv", stampRuleManifest(ruleManifest, source_revision));
 		const manifest = Buffer.from(`${JSON.stringify({ schema_version: 1, version, source_tag: `v${version}`,
 			files: names.map(path => ({ path, sha256: sha(content.get(path)!) })) })}\n`);
 		validateReleaseManifest(JSON.parse(manifest.toString("utf8")));

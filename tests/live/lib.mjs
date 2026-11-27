@@ -249,7 +249,11 @@ function verdict(i, log, proj, ompExit) {
 		.split("\n")
 		.map(l => JSON.parse(l))
 		.filter(r => r.main);
-	const minReq = e.min_requests ?? 2;
+	// A blocking final tool must be followed by a model request carrying the
+	// interruption. The mock consumes one main request per scripted turn.
+	const defaultMinReq = s.class === "tripwire" && s.kind === "fire" && s.turns.at(-1)?.tool
+		? s.turns.length + 1 : 2;
+	const minReq = e.min_requests ?? defaultMinReq;
 	if (reqs.length < minReq) errs.push(`${reqs.length} model request(s), want >=${minReq}`);
 	if (reqs.length === 0) return console.log(`FAIL: ${errs.join("; ")}`);
 

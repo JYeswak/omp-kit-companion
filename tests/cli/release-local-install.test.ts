@@ -100,9 +100,12 @@ const diagnosticsScenarios = ["diagnostics-partial", "diagnostics-foreign"] as c
 // (chief/**, model-evidence/*.jsonl, native-tool-attempts.json), a foreign negative (a receipt no seat writes and a look-alike
 // top-level name), and a mutant that restores the previous class and must fall back to the refusal.
 const fleetScenarios = ["fleet-partial", "fleet-foreign", "fleet-mutant"] as const;
-for (const scenario of ["updated", "symlinked-work", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused", ...writerScenarios, ...diagnosticsScenarios, ...fleetScenarios, ...reconcileScenarios] as const) {
+const findingsScenarios = ["findings", "findings-wrong-version", "findings-postcheck-fail", "findings-stale-link"] as const;
+for (const scenario of ["updated", "symlinked-work", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused", ...writerScenarios, ...diagnosticsScenarios, ...fleetScenarios, ...reconcileScenarios, ...findingsScenarios] as const) {
 	const writer = (writerScenarios as readonly string[]).includes(scenario);
-	test(`${writer ? "RELREMEDY1 " : ""}release install ${scenario} only stamps installed after real store alignment`, async () => {
+	const findings = (findingsScenarios as readonly string[]).includes(scenario);
+	const staleLink = scenario === "stale-link" || scenario === "findings-stale-link";
+	test(`${findings ? "RELFINDS1 " : writer ? "RELREMEDY1 " : ""}release install ${scenario} only stamps installed after real store alignment`, async () => {
 		const work = realpathSync(ownedTmp("release-install", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
 		// RELINSTALLPATH1 (ompkit-fp72.120.16.155): macOS TMPDIR lies under /var -> /private/var; the stage must hand the
 		// updater physical paths even when its work dir is reached through a symlinked parent.
@@ -169,6 +172,14 @@ if (args[0] === "update" && args.includes("--reconcile")) {
   emit({ action: "RECONCILED", active_version: "0.0.0" }); process.exit(0);
 }
 if (args[0] === "update") {
+  if (scenario.startsWith("findings")) {
+    console.log(JSON.stringify({ ok: false, data: {
+      action: "UPDATED", active_version: scenario === "findings-wrong-version" ? "0.0.1" : "0.0.0",
+      overall: "FINDINGS", manifest: { status: "FINDINGS" },
+      matcher: "PASS", live: "PASS", postcheck: scenario === "findings-postcheck-fail" ? "FAIL" : "PASS"
+    }, errors: [{ code: "MANIFEST_APPLY_FAILED", message: "hooks: fixture repository refused refresh" }] }));
+    process.exit(1);
+  }
   if (["browser-partial", "foreign-write", "reconcile-refused"].includes(scenario) || scenario.startsWith("reconciled-")) {
     emit({ action: "PARTIAL", receipt_id: "abc-123", active_version: "0.0.0", matcher: "PASS", live: "PASS", postcheck: "FAIL",
       postcheck_detail: { changed_operator_paths: scenario === "foreign-write" ? ["config.yml"] : [], failures: [], cause: null, live_state_paths: ["Library/Application Support/Google/Chrome/Default/History"] } },
@@ -215,7 +226,7 @@ if (args[0] === "apply" && args[1] === "plugin") {
     const link = join(process.env.HOME, ".omp", profile, "plugins/node_modules/omp-kit-companion");
     mkdirSync(dirname(link), { recursive: true });
     rmSync(link, { force: true });
-    symlinkSync(scenario === "stale-link" && profile === "profiles/codex/" ? join(prefix, "releases/old") : store, link);
+    symlinkSync(${staleLink} && profile === "profiles/codex/" ? join(prefix, "releases/old") : store, link);
   }
   emit({ action: "APPLIED" }); process.exit(0);
 }
@@ -248,7 +259,7 @@ receipt installed fixture fixture
 			const result = await runFixtureAsync(["bash", fixture, stageWork, ROOT, home], { cwd: ROOT, env: env as Record<string, string>, floor_s: 30 });
 			const stdout = new TextDecoder().decode(result.stdout);
 			const stderr = new TextDecoder().decode(result.stderr);
-			const successful = scenario === "updated" || scenario === "symlinked-work" || scenario === "browser-partial" || scenario === "writer-partial" || scenario === "diagnostics-partial" || scenario === "fleet-partial" || scenario.startsWith("reconciled-");
+			const successful = scenario === "updated" || scenario === "symlinked-work" || scenario === "browser-partial" || scenario === "writer-partial" || scenario === "diagnostics-partial" || scenario === "fleet-partial" || scenario.startsWith("reconciled-") || scenario === "findings";
 			expect(result.rc, stderr).toBe(successful ? 0 : 4);
 			const calls = readFileSync(join(work, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
 			expect(calls[0]).toEqual(["update", "--apply", "--yes", "--version", "0.0.0", "--index", join(work, "public/release-index.json"),
@@ -288,6 +299,10 @@ receipt installed fixture fixture
 				if (scenario === "fleet-mutant") expect(stderr).toContain("~/.local/state/omp-kit/chief/fleet-guard/state.json: changed outside the kit live-writer class");
 			}
 			if (successful) {
+				if (scenario === "findings") {
+					expect(stdout).toContain("INSTALLED_WITH_FINDINGS: hooks: fixture repository refused refresh");
+					expect(stderr).not.toContain("re-apply with:");
+				}
 				expect(stdout).toContain('"installed": true');
 				expect(stdout).toContain('"push_to_installed_seconds":');
 				expect(stdout).toContain("substep install.align-readback took");
@@ -298,8 +313,9 @@ receipt installed fixture fixture
 			} else {
 				expect(stdout).not.toContain('"installed": true');
 				expect(stdout).not.toContain("installed 0.0.0; every profile link aligned");
-				const refusal = scenario === "foreign-write" || scenario === "writer-foreign" || scenario === "writer-mutant" || scenario === "diagnostics-foreign" || scenario === "fleet-foreign" || scenario === "fleet-mutant" ? "not the known live-browser, kit live-writer or deferred-live PARTIAL"
-					: scenario === "stale-link" ? "installed profile alignment is stale"
+				expect(stdout).not.toContain("INSTALLED_WITH_FINDINGS:");
+				const refusal = staleLink ? "installed profile alignment is stale"
+					: findings || scenario === "foreign-write" || scenario === "writer-foreign" || scenario === "writer-mutant" || scenario === "diagnostics-foreign" || scenario === "fleet-foreign" || scenario === "fleet-mutant" ? "not the known live-browser, kit live-writer or deferred-live PARTIAL"
 					: scenario === "wrong-version" ? "installed CLI version readback differs"
 					: "live-browser-state reconcile refused";
 				expect(stderr).toContain(refusal);

@@ -449,7 +449,7 @@ install_release() {
 	stage install
 	local kit="$INSTALL_PREFIX/bin/omp-kit" store="$INSTALL_PREFIX/releases/$VERSION"
 	local update_rc=0 reconcile_id kit_state_root class_filter reconcile_class=live-browser reused_relink=0
-	local pending_id=''
+	local pending_id='' manifest_findings=''
 	kit_state_root="${XDG_STATE_HOME-$HOME/.local/state}/omp-kit"
 	# RELINSTALLPATH1 (ompkit-fp72.120.16.155): `omp-kit update --apply` refuses a source that is not its own realpath
 	# (UNSAFE_KIT_SOURCE, kit-update.ts assertRegular), and $WORK under macOS TMPDIR sits below the /var -> /private/var
@@ -459,7 +459,19 @@ install_release() {
 	bounded 3600 "$kit" update --apply --yes --version "$VERSION" \
 		--index "$PUB/release-index.json" --archive "$PUB/$DARWIN" --json >"$WORK/install-update.json" || update_rc=$?
 	cat "$WORK/install-update.json"
-	if [ "$update_rc" -ne 0 ]; then
+	# A completed update can return 1 for manifest findings alone. Do not
+	# reconcile or reinstall it; still require the normal installed readbacks.
+	if [ "$update_rc" -eq 1 ] && [ ! -e "$kit_state_root/kit-update.pending.json" ] &&
+		manifest_findings="$(jq -er --arg v "$VERSION" '
+			.data as $d |
+			select(.ok == false and $d.action == "UPDATED" and $d.active_version == $v and
+				$d.overall == "FINDINGS" and $d.manifest.status == "FINDINGS" and
+				$d.matcher == "PASS" and $d.live == "PASS" and $d.postcheck == "PASS" and
+				(.errors | type == "array" and length > 0 and all(.[]; .code == "MANIFEST_APPLY_FAILED"))) |
+			[.errors[:6][].message | .[0:180] | gsub("[[:cntrl:]]"; " ")] | join("; ")
+		' "$WORK/install-update.json")"; then
+		say "update reported manifest findings; verifying installed links and version"
+	elif [ "$update_rc" -ne 0 ]; then
 		# RELPENDING1 (ompkit-1ra0d.210): a deferred-live PARTIAL keeps the new version active with its
 		# live check pending (KITLIVEDEFER1): the updater returns before its own relink, and reconcile
 		# alone never blesses the deferred path, so the install finishes the relink and readbacks now
@@ -539,6 +551,7 @@ install_release() {
 	substep ''
 	INSTALLED=1
 	say "installed $VERSION; every profile link aligned"
+	if [ -n "$manifest_findings" ]; then say "INSTALLED_WITH_FINDINGS: $manifest_findings"; fi
 }
 
 # ---------------------------------------------------------------------------------------------- 1. preflight

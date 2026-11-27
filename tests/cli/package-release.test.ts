@@ -1,7 +1,8 @@
 import { beforeAll, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { delimiter, dirname, join } from "node:path";
+import { parseRuleManifest } from "../../src/diagnostics.ts";
 import { countCaseRows } from "../../src/test-runner.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { previewKitRelease, stageKitRelease, validateReleaseManifest } from "../../src/kit-release.ts";
@@ -17,7 +18,7 @@ import { run as runBounded } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 import { startGithubApiProcess } from "./github-api-fixture.ts";
 import { repo, caseCwd, nativeCacheEnv, output, stubFirstPath, authorityPath, platform, key, indexPath,
- asset, bytes, index, sourceRevision, sourceGit, installArgs, installCandidate, run, candidateEnv,
+ asset, bytes, index, sourceRevision, sourceGit, sourceTree, installArgs, installCandidate, run, candidateEnv,
 } from "./package-release-fixture.ts";
 import type { Candidate } from "./package-release-fixture.ts";
 test("native release refuses a drifted or duplicate policy import before staging", () => {
@@ -105,6 +106,7 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(staged.manifest.version).toBe("1.2.3");
 	expect(Object.keys(staged.manifest).sort()).toEqual(["files", "schema_version", "source_tag", "version"]);
 	expect(JSON.parse(readFileSync(join(staged.root, "package.json"), "utf8")).source_revision).toBe(sourceRevision);
+	expect(new Set(parseRuleManifest(generatedRuleManifest).map(rule => rule.pack))).toEqual(new Set([sourceRevision]));
 	expect(staged.manifest.files.find(file => file.path === "package.json")?.sha256)
 		.toBe(createHash("sha256").update(readFileSync(join(staged.root, "package.json"))).digest("hex"));
 	expect(staged.executable).toBe(join(staged.root, "bin", "omp-kit"));
@@ -316,6 +318,25 @@ test("SourceStamp uses the physical source checkout and refuses dirty, missing, 
 	expect(packageSourceRevision(join(output, "does-not-exist"), packageBytes)).toBe(null);
 	expect(packageSourceRevision(join(output, "does-not-exist"), packageBytes, revision)).toBe(null);
 });
+
+test("SourceStamp: a native package without an archive stamp keeps its shipped rule pack unverified", async () => {
+	const unverified = join(output, "unverified-source");
+	cpSync(join(output, "archived-source"), unverified, { recursive: true });
+	sourceTree(unverified, "release");
+	const metadataPath = join(unverified, "package.json");
+	chmodSync(metadataPath, 0o600);
+	const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+	metadata.source_revision = "$Format:%H$";
+	writeFileSync(metadataPath, JSON.stringify(metadata));
+	const result = await runBounded(["sh", join(unverified, "scripts/package-release.sh"), "--version", "1.2.4",
+		"--platform", key, "--out", output], { cwd: output, env: { ...process.env, OMP_KIT_TEST_WORK_ROOT: output, TMPDIR: output }, deadline_s: fixtureDeadlineS(90) });
+	expect(result.rc, Buffer.from(result.stderr).toString()).toBe(0);
+	const built = JSON.parse(Buffer.from(result.stdout).toString());
+	const members = await new Bun.Archive(readFileSync(join(output, built.filename))).files();
+	expect(JSON.parse(await members.get("package.json")!.text()).source_revision).toBeNull();
+	const rules = parseRuleManifest(await members.get("MANIFEST.tsv")!.text());
+	expect(rules.every(rule => rule.pack.startsWith("uncommitted-"))).toBe(true);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("SourceStamp retains actual Git archive expansion without selecting an ancestor checkout", () => {
 	const archived = join(output, "archived-source");
