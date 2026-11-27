@@ -4,6 +4,17 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.153] - 2026-11-27
+
+### Changed
+
+- Run the full installed-package journey in the package-release job on sharded Ubuntu CI, keeping it off the critical core shard without skipping coverage.
+
+### Fixed
+
+- Manual releases report a verified installation with manifest findings instead of instructing operators to reinstall it.
+- Stamp the packaged default rule manifest with the same source revision as the release metadata; leave builds without a verified source revision marked uncommitted.
+
 ## [0.2.152] - 2026-11-27
 
 ### Fixed
