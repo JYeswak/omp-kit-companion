@@ -549,3 +549,6 @@ kit-probe-readable-facts	quiet	tool	write	config/paths.toml	refs = [/home/exampl
 kit-probe-readable-facts	fire	tool	write	config/paths.toml	refs = [] install_root = "/home/example/project"	FALSEREFUSE1: closing bracket ends the path exemption	
 kit-probe-readable-facts	quiet	tool	write	config/paths.toml	refs = [/Users/example/project]	FALSEREFUSE1: bracketed macOS path retains the bounded header exemption	
 kit-probe-readable-facts	fire	tool	write	config/paths.toml	refs = [] install_root = "/Users/example/project"	FALSEREFUSE1: closing bracket ends the macOS path exemption	
+kit-commit-preflight	fire	tool	bash	-	touch .ran_commit-preflight-fire; false && AGENT_NAME=x git commit -F planned-message	Real live test marker is not a preflight script.	
+kit-commit-preflight	fire	tool	bash	-	false && git commit -F commit-preflight.sh.backup	A message filename sharing the preflight script prefix does not count.	
+kit-commit-preflight	quiet	tool	bash	-	touch .ran_commit-preflight-already-near; sh scripts/commit-preflight.sh --message planned-message && git commit -F planned-message	A complete preflight script invocation still keeps this command quiet beside the live marker.	
