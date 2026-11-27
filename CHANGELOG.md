@@ -4,6 +4,17 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.154] - 2026-11-27
+
+### Changed
+
+- Added read-only `omp-kit explain [--seat S] [--last N]` with bounded seat refusals, current remedies from known fleet roots/current repo, and commit first-try; untrusted paths and unattributed DCG/rule-fire history remain explicit.
+
+### Fixed
+
+- `omp-kit verify` accepts a published export whose top level is not `scripts/` or `src/` (a `lib/` and `tests/` tree verifies). A failed or empty archive is still refused, and the refusal names the cause instead of `export failed rc 0:` with nothing after it.
+- Leave launchd-disabled jobs untouched during automatic refresh and verify that a restored job is registered before reporting it reloaded.
+
 ## [0.2.153] - 2026-11-27
 
 ### Changed

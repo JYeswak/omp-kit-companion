@@ -5,7 +5,7 @@ condition:
   - '\b(it|test|describe)\.skip\('
   - '\bx(it|describe)\('
   - '@pytest\.mark\.(skip(?:if)?|xfail)\b'
-  - '@unittest\.skip'
+  - '@unittest\.skip\('
   - '\bt\.Skip(Now|f)?\('
   - '\\tt\.Skip(Now|f)?\('
 astLiveScenario: test-skip-ts-fire

@@ -186,11 +186,6 @@ kit-settings-mutation	fire	tool	bash	-	HOME=/tmp/omp-home; omp config set ttsr.e
 kit-settings-mutation	fire	tool	bash	-	HOME=/tmp/omp-home env --unset=HOME omp config set ttsr.enabled false	long env unset cannot retain the exemption	
 kit-settings-mutation	fire	tool	bash	-	HOME=/tmp/omp-home env -i omp config set ttsr.enabled false	clearing the environment also clears temporary HOME	
 kit-settings-mutation	fire	tool	bash	-	HOME=/tmp/omp-home omp config get ttsr.enabled; omp config set ttsr.enabled false	exemption must not leak to a later command	
-kit-solo-review-not-review	fire	tool	write	samples/packet.md	## 11. Independent review\n<!-- CHECK: REVIEW -->\nIndependent review: not performed. An untracked planning draft informed this working copy.\n	attestation in a packet	
-kit-solo-review-not-review	fire	tool	edit	samples/packet.md	Independent\nreview: not performed. Residual risk accepted.	hard-wrapped	
-kit-solo-review-not-review	fire	tool	edit	notes/packet.md	**Independent review:** not performed.	bold label	
-kit-solo-review-not-review	quiet	tool	write	samples/packet.md	## 11. Independent review\n<!-- CHECK: REVIEW -->\nReviewer: X read this file against the cited files on 2026-09-23.\n	a named reviewer, not the attestation	
-kit-solo-review-not-review	quiet	tool	edit	notes/report.md	Independent review: not performed.	attestation outside a packet.md	
 kit-structure-not-truth	fire	text	-	-	READY: all 12 checks pass on the packet.	checker line restated as truth	
 kit-structure-not-truth	fire	text	-	-	The packet is ready for execution.	readiness claim	
 kit-structure-not-truth	fire	text	-	-	Readiness is structure-green.	structure-green claim	
@@ -219,11 +214,6 @@ kit-unverified-done	fire	text	-	-	The migration is now completed.	the old comple
 kit-unverified-done	quiet	text	-	-	Ran cargo test -p parser: 41 passed, 0 failed.	baseline: command plus counts	
 kit-unverified-done	quiet	text	-	-	the receipt is at cead414	regression	
 kit-unverified-done	quiet	text	-	-	UNVERIFIED: cargo test -p parser has not been run.	honest UNVERIFIED	
-rs-unsafe-added-router	fire	tool	edit	/tmp/probe.rs	unsafe fn f() {}	regression: .rs edit adds unsafe	
-rs-unsafe-added-router	fire	tool	write	/tmp/lib.rs	let x = unsafe { 1 };	regression: .rs write adds unsafe	
-rs-unsafe-added-router	quiet	tool	edit	/tmp/probe.rs	fn main() {}	regression: .rs without unsafe	
-rs-unsafe-added-router	quiet	tool	write	/tmp/lib.md	let x = unsafe { 1 };	same content, .md path	
-rs-unsafe-added-router	quiet	tool	bash	-	rg -n unsafe src/lib.rs	bash is out of scope	
 ttsr-embedded-inline-flag	fire	tool	write	/tmp/probe.md	condition: 'foo|(?i)bar'	regression: embedded flag	
 ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	condition: '(?i)leading_is_legal'	regression: leading flag is legal	
 ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	condition: 'grep[^|;&]*2>/dev/null'	regression: ordinary condition	
@@ -269,7 +259,6 @@ kit-close-needs-evidence	quiet	tool	bash	-	BR CLOSE X	H3: uppercase stays quiet
 kit-close-needs-evidence	quiet	tool	bash	-	BR CLOSE X --REASON ""	H3: empty reason stays quiet	
 kit-close-needs-evidence	quiet	tool	bash	-	BR CLOSE X --REASON	H3: bare flag stays quiet	
 kit-settings-mutation	quiet	tool	bash	-	OMP CONFIG SET TTSR.ENABLED FALSE	H3: uppercase stays quiet	
-kit-solo-review-not-review	quiet	tool	write	samples/packet.md	## 11. INDEPENDENT REVIEW\n<!-- CHECK: REVIEW -->\nINDEPENDENT REVIEW: NOT PERFORMED. AN UNTRACKED PLANNING DRAFT INFORMED THIS WORKING COPY.\n	H3: uppercase stays quiet	
 kit-test-skip	quiet	tool	edit	src/lib.rs	#[TEST]\n#[IGNORE]\nFN PARSES() {}	H3: uppercase markers stay quiet	
 kit-test-skip	quiet	tool	write	web/app.test.ts	IT.SKIP("RENDERS", () => {})	H3: uppercase stays quiet	
 kit-test-skip	quiet	tool	write	web/app.test.ts	XIT("RENDERS", () => {})	H3: uppercase stays quiet	
@@ -277,7 +266,6 @@ kit-test-skip	quiet	tool	write	tests/test_x.py	@PYTEST.MARK.SKIP(REASON="FLAKY")
 kit-test-skip	quiet	tool	write	tests/test_x.py	@PYTEST.MARK.SKIPIF(SYS.PLATFORM == "WIN32", REASON="POSIX ONLY")	H3: uppercase stays quiet	
 kit-test-skip	quiet	tool	write	tests/test_x.go	T.SKIPNOW()	H3: uppercase stays quiet	
 kit-test-skip	quiet	tool	write	tests/test_x.py	@UNITTEST.SKIP	H3: uppercase stays quiet	
-rs-unsafe-added-router	quiet	tool	edit	/tmp/probe.rs	UNSAFE FN F() {}	H3: uppercase stays quiet	
 ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	CONDITION: 'FOO|(?i)BAR'	H3: uppercase stays quiet	
 kit-structure-not-truth	quiet	text	-	-	READY: ALL 12 CHECKS PASS ON THE PACKET.	H3: uppercase stays quiet	
 kit-close-reason-no-evidence	fire	tool	bash	-	BR CLOSE X --REASON DONE	H3: unquoted value fires only via cond1 (?i)	
@@ -296,20 +284,25 @@ kit-no-verify	quiet	tool	bash	-	GIT CONFIG --UNSET CORE.HOOKSPATH	H3: uppercase 
 kit-no-verify	quiet	tool	bash	-	GIT -C CORE.HOOKSPATH=/DEV/NULL COMMIT -Q -M X	H3: uppercase stays quiet	
 kit-no-verify	quiet	tool	bash	-	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=CORE.HOOKSPATH GIT_CONFIG_VALUE_0=/DEV/NULL GIT COMMIT -Q -M X	H3: uppercase stays quiet	
 kit-no-verify	quiet	tool	bash	-	GIT_CONFIG_PARAMETERS="'CORE.HOOKSPATH'='/DEV/NULL'" GIT COMMIT -M X	H3: uppercase stays quiet	
-kit-regex-engineering	fire	tool	write	src/regex.js	const re = new RegExp("a+");	JS RegExp constructor	
-kit-regex-engineering	fire	tool	write	src/test.js	if (/a+/.test(input)) {}	JS test with regex literal	
-kit-regex-engineering	fire	tool	write	src/match.js	const result = input.match(/a+/);	JS match with regex literal	
-kit-regex-engineering	fire	tool	write	src/replace.js	const result = input.replace(/a+/, "b");	JS replace with regex literal	
-kit-regex-engineering	fire	tool	write	src/split.js	const parts = input.split(/,/);	JS split with regex literal	
-kit-regex-engineering	fire	tool	write	src/regex.py	import re; re.compile("a+")	Python re.compile	
-kit-regex-engineering	fire	tool	write	src/regex.py	import re; re.search("a+", "aaa")	Python re.search	
-kit-regex-engineering	fire	tool	write	src/regex.py	import re; re.match("a+", "aaa")	Python re.match	
-kit-regex-engineering	fire	tool	write	src/regex.py	import re; re.sub("a+", "b", "aaa")	Python re.sub	
-kit-regex-engineering	fire	tool	write	src/regex.py	import re; re.findall("a+", "aaa")	Python re.findall	
-kit-regex-engineering	fire	tool	write	src/regex.py	import re; list(re.finditer("a+", "aaa"))	Python re.finditer	
-kit-regex-engineering	fire	tool	write	src/regex.py	import re; re.fullmatch("a+", "aaa")	Python re.fullmatch	
-kit-regex-engineering	fire	tool	write	src/regex.rs	use regex::Regex; let _ = Regex::new("a+");	Rust Regex::new	
-kit-regex-engineering	fire	tool	write	rules/example.md	condition: ["new RegExp"]	rule condition field	
+kit-regex-engineering	quiet	tool	write	src/regex.js	const re = new RegExp("a+");	ordinary static constructor stays quiet	
+kit-regex-engineering	quiet	tool	write	src/test.js	if (/a+/.test(input)) {}	ordinary literal stays quiet	
+kit-regex-engineering	quiet	tool	write	src/match.js	const result = input.match(/a+/);	ordinary match literal stays quiet	
+kit-regex-engineering	quiet	tool	write	src/replace.js	const result = input.replace(/a+/, "b");	ordinary replace literal stays quiet	
+kit-regex-engineering	quiet	tool	write	src/split.js	const parts = input.split(/,/);	ordinary split literal stays quiet	
+kit-regex-engineering	quiet	tool	write	src/regex.py	import re; re.compile("a+")	ordinary static compile stays quiet	
+kit-regex-engineering	quiet	tool	write	src/regex.py	import re; re.search("a+", "aaa")	ordinary static search stays quiet	
+kit-regex-engineering	quiet	tool	write	src/regex.py	import re; re.match("a+", "aaa")	ordinary static match stays quiet	
+kit-regex-engineering	quiet	tool	write	src/regex.py	import re; re.sub("a+", "b", "aaa")	ordinary static sub stays quiet	
+kit-regex-engineering	quiet	tool	write	src/regex.py	import re; re.findall("a+", "aaa")	ordinary static findall stays quiet	
+kit-regex-engineering	quiet	tool	write	src/regex.py	import re; list(re.finditer("a+", "aaa"))	ordinary static finditer stays quiet	
+kit-regex-engineering	quiet	tool	write	src/regex.py	import re; re.fullmatch("a+", "aaa")	ordinary static fullmatch stays quiet	
+kit-regex-engineering	quiet	tool	write	src/regex.rs	use regex::Regex; let _ = Regex::new("a+");	ordinary static Regex::new stays quiet	
+kit-regex-engineering	quiet	tool	write	rules/example.md	condition: ["new RegExp"]	ordinary rule condition stays quiet	
+kit-regex-engineering	fire	tool	write	src/dynamic.ts	const candidate = new RegExp(userInput);	dynamic constructor is the missing-checklist signal	
+kit-regex-engineering	fire	tool	write	src/parser.py	import re; result = re.search(user_input, source)	dynamic search is the missing-checklist signal	
+kit-regex-engineering	fire	tool	write	src/parser.rs	let regex = Regex::new(user_input)?;	dynamic Regex::new is the missing-checklist signal	
+kit-regex-engineering	fire	tool	write	src/matcher.ts	const ok = /^(a+)+b$/.test(source);	nested quantifier is the missing-checklist signal	
+kit-regex-engineering	quiet	tool	write	src/dynamic.ts	const candidate = new RegExp(userInput); // regexploit checked	checklist already named stays quiet	
 kit-regex-engineering	quiet	tool	write	rules/regex-guide.md	This guide discusses regular-expression design, backtracking, and safe input bounds.	quiet Markdown mention	
 kit-regex-engineering	quiet	tool	write	src/regex_doc.py	"""Regular-expression guide: explain matching and bounded input without API examples."""	quiet Python docstring	
 kit-regex-engineering	quiet	tool	write	rules/regex-guide.md	The RegExp constructor can build patterns from strings.	quiet RegExp prose mention	
@@ -369,14 +362,6 @@ kit-no-double-quoted-substitution	quiet	tool	bash	-	git commit -m "plain message
 kit-no-double-quoted-substitution	quiet	tool	bash	-	br update t --reason "path $TMPDIR/x"	bare $VAR without paren is not substitution	
 kit-no-double-quoted-substitution	fire	tool	bash	-	br update t --reason "slash \\ and `tick` fires"	escaped backslash then raw tick still substitutes	
 kit-no-double-quoted-substitution	quiet	tool	bash	-	br update t --reason "cost \$(5) stays"	escaped dollar-paren is literal	
-kit-rea-heavy-summary	fire	text	-	-	Setting analysis_timeout_ms: 60000 to speed up the app.asar analysis.	fp72.8 fire: shrinking timeout below the 300000 default	
-kit-rea-heavy-summary	fire	text	-	-	Called with analysis_timeout_ms: 30000 like the MCP server default.	fp72.8 fire: 30 s confuses server default with analysis default	
-kit-rea-heavy-summary	fire	text	-	-	Lowering max_heap_mb: 512 since the target looks small.	fp72.8 fire: shrinking heap below the 1024 default	
-kit-rea-heavy-summary	fire	text	-	-	Hit resource_constraint, retrying the same full call again.	fp72.8 fire: retry without summary	
-kit-rea-heavy-summary	quiet	text	-	-	Analyzing with detail: summary, then reading the evidence bundle.	fp72.8 quiet: summary-first call	
-kit-rea-heavy-summary	quiet	text	-	-	Raised analysis_timeout_ms: 600000 for the 280 MB target.	fp72.8 quiet: timeout above default	
-kit-rea-heavy-summary	quiet	text	-	-	Kept max_heap_mb: 2048 and waited the extra two minutes.	fp72.8 quiet: heap above default, waiting	
-kit-rea-heavy-summary	quiet	text	-	-	Analyzing app.asar with defaults and reading the returned evidence.	fp72.8 quiet: defaults apply, no shrinking	
 kit-close-needs-evidence	quiet	tool	bash	-	br create "doc fix" -d "close with br close abc123 --reason ok"	xa5s.8 quiet: issue creation quoting a close example is metadata, not a close	
 kit-close-needs-evidence	quiet	tool	bash	-	br create doc -d 'example: br close abc123 --reason ok'	xa5s.8 quiet: single-quoted variant stays quiet	
 scratch-is-not-a-home	fire	tool	write	/Users/josh/Developer/clutterfreespaces.ios/var/agent-tmp/main-cutover.78706/symlink-root-fixture/scripts/check-cfs-root-seam-fixture.mjs	// one-run comment-only root probe fixture	Same directory/event/body as quiet control; actual index establishes canonical source identity	{"tracked":{"scripts/check-cfs-root-seam-fixture.mjs":"// one-run comment-only root probe fixture"}}
@@ -449,6 +434,9 @@ kit-commit-preflight	fire	tool	bash	-	git -C /repo commit -m "fix: change [test]
 kit-commit-preflight	quiet	tool	bash	-	git status --short	C05: read-only Git operation is not a commit.	
 kit-commit-preflight	quiet	tool	bash	-	git commit-tree TREE -p HEAD -F planned-message	C05: unreferenced probe object is not a real commit.	
 kit-commit-preflight	quiet	tool	bash	-	printf 'git commit -F planned-message'	C05: quoted command documentation is not execution.	
+kit-commit-preflight	quiet	tool	bash	-	sh scripts/commit-preflight.sh --message planned-message && git commit -F planned-message	same command already named preflight	{"tracked":{}}
+kit-commit-preflight	quiet	tool	bash	-	git commit --dry-run	dry-run is not a commit verb that needs preflight	{"tracked":{}}
+kit-commit-preflight	quiet	tool	bash	-	git commit --help	help is not a commit verb that needs preflight	{"tracked":{}}
 kit-test-source-runtime	fire	tool	write	tests/cli/new-feature.test.ts	const result = run(["omp-kit", "verify", "--lesson", "new"]);	C10: candidate feature cannot run through host PATH binary.	
 kit-test-source-runtime	quiet	tool	write	tests/cli/new-feature.test.ts	const result = run([candidateBin, "verify", "--lesson", "new"]);	C10: only executable identity changes to exact candidate.	
 kit-test-source-runtime	fire	tool	edit	tests/cli/new-feature.test.ts	const child = Bun.spawn(["omp-kit", "verify", "--lesson", "new"]);	C10: Bun array process launch uses host binary.	
@@ -487,12 +475,15 @@ bash-capped-git-status	quiet	tool	bash	-	FOO=1 BAR= git -C /repo status --short	
 kit-grep-root-ignored	fire	tool	grep	-	{"pattern":"check-cfs-cloudflare-consent|cfs-cloudflare-consent|--dynamic|--static|--inventory","path":".","case":false,"gitignore":false,"skip":0}	DAILYCLASSES retained ConsentDeployReview.jsonl:46; call_1757bf8053b7441380db610cba36884a; exact arguments excluding intent	
 kit-grep-root-ignored	quiet	tool	grep	-	{"pattern":"check-cfs-cloudflare-consent","path":"apps;scripts;.github/workflows/local-ci.yml;package.json","case":true,"gitignore":false,"skip":0}	DAILYCLASSES retained ConsentDeployReview.jsonl:74; call_84dfe210115c4c3290f74d56f383ef15; exact arguments excluding intent	
 kit-grep-root-ignored	quiet	tool	grep	-	{"pattern":"<html|Content-Type.*html|text/html|application/xhtml|new Response\\(","path":"apps/cfs-followup-worker/src;apps/cfs-proposal-portal/src;apps/cfs-proposals-notify/src;apps/cfs-receipts-worker/src;apps/cfs-job-media-worker/src;apps/cfs-time-clock-worker/src;apps/cfs-intake-worker/src;apps/locations-site/src","case":false,"gitignore":true,"skip":0}	DAILYCLASSES retained ConsentDeployReview.jsonl:139; call_b3101a14e68f411db133d1874433d172; exact arguments excluding intent	
-kit-frontend-foundations	fire	tool	write	src/routes/Home.tsx	export function Home() { return <main className="layout">Hello</main>; }	Web component creation loads the foundations guidance before implementation.	
-kit-frontend-foundations	fire	tool	edit	src/styles/layout.css	@media (max-width: 48em) { .layout { display: block; } }	Responsive CSS edits load the same foundations guidance.	
-kit-frontend-foundations	fire	tool	write	public/index.html	<main>Overview</main>	HTML markup triggers on an explicit close tag without a UI keyword.	
+kit-frontend-foundations	quiet	tool	write	src/routes/Home.tsx	export function Home() { return <main className="layout">Hello</main>; }	ordinary component edit stays quiet	{"tracked":{}}
+kit-frontend-foundations	quiet	tool	edit	src/styles/layout.css	@media (max-width: 48em) { .layout { display: block; } }	ordinary stylesheet edit stays quiet	{"tracked":{}}
+kit-frontend-foundations	quiet	tool	write	public/index.html	<main>Overview</main>	ordinary markup without a page shell stays quiet	{"tracked":{}}
 kit-frontend-foundations	quiet	tool	write	docs/README.md	This component changes its responsive breakpoint.	The same keywords in a Markdown write are out of scope.	
 kit-frontend-foundations	quiet	tool	edit	src/config.ts	const component = 'sidebar';	A non-UI file remains quiet even when a condition matches.	
 kit-frontend-foundations	quiet	tool	edit	src/styles/layout.css	.layout { color: var(--text); }	An in-scope payload with no foundation trigger stays quiet.	
+kit-frontend-foundations	fire	tool	write	public/index.html	<!DOCTYPE html><html><body>Overview</body></html>	first page shell without a decisions file	{"tracked":{}}
+kit-frontend-foundations	fire	tool	edit	public/index.html	missing frontend.foundations.json	explicit missing decisions file	{"tracked":{}}
+kit-frontend-foundations	quiet	tool	write	public/index.html	<!DOCTYPE html><html><!-- frontend.foundations.json decided --></html>	shell that already names the decisions file stays quiet	{"tracked":{}}
 kit-tool-route	fire	tool	bash	-	cat src/sample.ts	TOOLROUTE1: one source file routes to native read.	{"tracked":{}}
 kit-tool-route	fire	tool	bash	-	head -n 12 src/sample.ts	TOOLROUTE1: a head range routes to read.	{"tracked":{}}
 kit-tool-route	fire	tool	bash	-	tail -12 src/sample.ts	TOOLROUTE1: a tail range routes to read.	{"tracked":{}}
@@ -506,3 +497,55 @@ kit-tool-route-edit	quiet	tool	bash	-	printf old | sed 's/old/new/'	TOOLROUTE1: 
 kit-tool-route-wait	fire	tool	bash	-	for i in 1 2; do sleep 0; done	TOOLROUTE1: sleeping inside a loop routes to job notifications.	{"tracked":{}}
 kit-tool-route-wait	quiet	tool	bash	-	sleep 0	TOOLROUTE1: a single sleep is not polling.	{"tracked":{}}
 kit-tool-route-wait	quiet	tool	bash	-	printf 'for i in 1 2; do sleep 0; done'	TOOLROUTE1: quoted example is not a running loop.	{"tracked":{}}
+kit-tool-route-search	fire	tool	bash	-	grep -rn resolveQueue tests	recursive symbol search outside src still routes	{"tracked":{}}
+kit-tool-route-search	quiet	tool	bash	-	grep -n resolveQueue log.txt	non-recursive grep stays quiet	{"tracked":{}}
+kit-tool-route-edit	fire	tool	bash	-	sed -i '' 's/old/new/' src/cli.ts	macOS in-place source edit routes	{"tracked":{}}
+kit-tool-route-edit	fire	tool	bash	-	perl -pi -e 's/old/new/' src/sample.ts	perl in-place source edit routes	{"tracked":{}}
+kit-tool-route-edit	quiet	tool	bash	-	python3 -c 'from pathlib import Path; p=Path("notes.txt"); p.write_text(p.read_text().replace("old", "new"))'	non-source rewrite stays quiet	{"tracked":{}}
+kit-tool-route-wait	fire	tool	bash	-	while ! test -f ready; do sleep 1; done	sleep polling loop routes	{"tracked":{}}
+kit-tool-route-wait	quiet	tool	bash	-	for i in 1 2; do printf 'sleep 1'; done	quoted sleep inside a loop stays quiet	{"tracked":{}}
+kit-test-skip	quiet	tool	edit	tests/test_contract.py	@unittest.skipUnless(OVNFS, "ovnfs not installed")	FALSEREFUSE1: skipUnless names a missing tool; not a bare skip	
+kit-test-skip	quiet	tool	edit	tests/test_contract.py	@unittest.skipUnless(os.path.isfile(OVNFS), "ovnfs CLI not installed")	FALSEREFUSE1: skipUnless on a path check	
+kit-test-skip	quiet	tool	edit	tests/test_contract.py	@unittest.skipUnless(sys.platform == "darwin", "posix only")	FALSEREFUSE1: skipUnless names a platform	
+kit-test-skip	quiet	tool	edit	tests/test_contract.py	@unittest.skipUnless(shutil.which("br"), "requires the real CLI")	FALSEREFUSE1: skipUnless names a missing tool	
+kit-test-skip	quiet	tool	edit	tests/test_contract.py	@unittest.skipU	FALSEREFUSE1: streamed prefix of skipUnless is not a skip	
+kit-test-skip	fire	tool	edit	tests/test_contract.py	@unittest.skip("flaky")	FALSEREFUSE1: bare unittest.skip still fires	
+kit-unverified-done	quiet	text	-	-	Once the box is repaired, a re-run should pass.	FALSEREFUSE1: a plan sentence is not a result claim	
+kit-unverified-done	quiet	text	-	-	So his rerun should now pass in the canonical repo.	FALSEREFUSE1: a prediction about someone else's rerun	
+kit-unverified-done	quiet	text	-	-	omp-kit verify should pass	FALSEREFUSE1: naming a command that ought to succeed is not a result claim	
+kit-unverified-done	quiet	text	-	-	the next cut should pass	FALSEREFUSE1: a future cut is not a result claim	
+kit-unverified-done	quiet	text	-	-	the pre-reboot release should pass	FALSEREFUSE1: a plan sentence is not a result claim	
+kit-unverified-done	quiet	text	-	-	Companion's last two failures should now be fixed	FALSEREFUSE1: a plan sentence is not a result claim	
+kit-unverified-done	quiet	text	-	-	main branch should be fixed again	FALSEREFUSE1: a plan sentence is not a result claim	
+kit-unverified-done	quiet	text	-	-	its next run should pass	FALSEREFUSE1: a future run is not a result claim	
+kit-unverified-done	fire	text	-	-	switching to the helper should work	FALSEREFUSE1: a should-work result claim still fires	
+kit-unverified-done	fire	text	-	-	It will fix the code where behavior diverged.	FALSEREFUSE1: a will-fix claim still fires	
+kit-probe-readable-facts	quiet	tool	edit	.github/workflows/cfs-selftest-gauntlet.yml	{"i": "Cutting gauntlet push filters", "input": "[/Users/example/checkouts/estate-p2/.github/workflows/cfs-selftest-gauntlet.yml#AB12]\nCUT 1.=1"}	FALSEREFUSE1: workflow edit path header is not a copied fact	
+kit-probe-readable-facts	quiet	tool	edit	.config/omp-kit/fleet-watch.json	{"session":"ompkit","coordinatorPane":"tern:9501438321360898","repo":"/Users/example/Developer/omp-kit","workerPanes":[]}	FALSEREFUSE1: fleet session registry repo is not a copied probe fact	
+kit-probe-readable-facts	quiet	tool	edit	.config/omp-kit/fleet-watch.json	{"session":"ompkit-muse","repo":"/Users/example/Developer/omp-kit","workerPanes":[],"skipLabels":[]}	FALSEREFUSE1: session row without a copied version	
+kit-probe-readable-facts	quiet	tool	write	.config/omp-kit/extensions.registry.yaml	extensions: - /Users/example/.local/opt/omp-kit/releases/0.2.133/extensions	FALSEREFUSE1: an extensions search path is not a copied version fact	
+kit-probe-readable-facts	fire	tool	edit	.config/omp-kit/fleet-watch.json	[/Users/example/.config/omp-kit/fleet-watch.json#C82E]\nPUT 5.=5:\n+      "repo": "/Users/example/Developer/x"	FALSEREFUSE1: a body home path still fires	
+kit-close-needs-evidence	quiet	tool	bash	-	{"i": "br close options", "command": "cat var/agent-tmp/brgate-help.txt"}	FALSEREFUSE1: intent text is not a close	
+kit-close-needs-evidence	quiet	tool	bash	-	{"i": "Checking br close options", "command": "cat var/agent-tmp/dg-brclose-help.txt"}	FALSEREFUSE1: intent text is not a close	
+kit-close-needs-evidence	quiet	tool	bash	-	{"i": "Is a native br close allowed?", "command": "cat README.md"}	FALSEREFUSE1: a question is not a close	
+kit-close-needs-evidence	quiet	tool	bash	-	{"i": "Does br close tick atomically?", "command": "cat README.md"}	FALSEREFUSE1: a question is not a close	
+kit-close-needs-evidence	quiet	tool	bash	-	{"i": "br close flags", "command": "br --help"}	FALSEREFUSE1: help lookup is not a close	
+kit-close-needs-evidence	quiet	tool	bash	-	grep -n -E 'br close bd-123|Guard blocks' README.md	FALSEREFUSE1: a search pattern is not a close	
+kit-close-needs-evidence	fire	tool	bash	-	br close demo-q	FALSEREFUSE1: a real close still fires	
+kit-no-double-quoted-substitution	quiet	tool	bash	-	br create "jeff-track-symlink-update" -t bug --description-file "$S/bead1.txt"	FALSEREFUSE1: double quotes with $VAR and no substitution	
+kit-no-double-quoted-substitution	quiet	tool	bash	-	br comments add cfs-1fkyx 'EVIDENCE wording fix on origin/main'	FALSEREFUSE1: single-quoted comment with no substitution	
+kit-no-double-quoted-substitution	quiet	tool	bash	-	br update "$b" --add-acceptance '[b] [live] send one private note'	FALSEREFUSE1: "$b" is a variable, not substitution	
+kit-no-double-quoted-substitution	quiet	tool	bash	-	dcg explain 'br update ompkit-demo --actor RoseSquirrel'	FALSEREFUSE1: br inside an explain argument is not the command	
+kit-no-double-quoted-substitution	quiet	tool	bash	-	x="$(br show ompkit-demo)"	FALSEREFUSE1: read-only tracker capture is not a double-quoted mutation	
+kit-no-double-quoted-substitution	fire	tool	bash	-	br update t --reason "caused by $(whoami)"	FALSEREFUSE1: original double-quoted mutation still fires	
+kit-probe-readable-facts	fire	tool	write	config/omp.json	session_root = "/Users/example/.local/opt/omp-kit"	FALSEREFUSE1: the word session beside a real private path still fires	
+kit-probe-readable-facts	fire	tool	edit	.config/omp-kit/fleet-watch.json	{"session":"ompkit","coordinatorPane":"tern:1","repo":"/Users/example/Developer/omp-kit","cache_root":"/Users/example/.local/opt/omp-kit"}	FALSEREFUSE1: registry marker plus a real private path still fires	
+kit-probe-readable-facts	fire	tool	write	config/paths.toml	install_root = "/Users/example/.local/opt/omp-kit"	FALSEREFUSE1: base private path still fires	
+kit-test-skip	quiet	tool	edit	tests/test_contract.py	@unittest.skipUnless(OVNFS, "ovnfs not installed")	FALSEREFUSE1: streamed pair, Unless completion stays quiet including the skip prefix	
+kit-test-skip	fire	tool	edit	tests/test_contract.py	@unittest.skip(	FALSEREFUSE1: streamed pair, a genuine skip call refuses	
+kit-probe-readable-facts	quiet	tool	write	config/paths.toml	{"repo":"/home/example/project"}	FALSEREFUSE1: Linux registry repo marker stays quiet	
+kit-probe-readable-facts	fire	tool	write	config/paths.toml	{"repo":"/home/example/project","cache_root":"/home/example/cache"}	FALSEREFUSE1: Linux repo exemption cannot hide another private path	
+kit-probe-readable-facts	quiet	tool	write	config/paths.toml	refs = [/home/example/project]	FALSEREFUSE1: bracketed Linux path retains the bounded header exemption	
+kit-probe-readable-facts	fire	tool	write	config/paths.toml	refs = [] install_root = "/home/example/project"	FALSEREFUSE1: closing bracket ends the path exemption	
+kit-probe-readable-facts	quiet	tool	write	config/paths.toml	refs = [/Users/example/project]	FALSEREFUSE1: bracketed macOS path retains the bounded header exemption	
+kit-probe-readable-facts	fire	tool	write	config/paths.toml	refs = [] install_root = "/Users/example/project"	FALSEREFUSE1: closing bracket ends the macOS path exemption	

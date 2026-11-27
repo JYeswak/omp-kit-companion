@@ -1,7 +1,7 @@
 ---
 description: "Never pass a double-quoted argument containing command substitution to br or git commit"
 condition:
-  - '\b(?:(?:br|bd)(?:[ \t]+--\S+(?:[ \t]+[^\s"'';&|]+)?)*[ \t]+(?:comments[ \t]+add|create|update)|git[ \t]+commit\b[^\s;&|]*(?:[ \t]+--\S+)*[ \t]+-m)\b[^;&]*(?:"(?:[^"\\]|\\.)*(?<!\\)(?:\\\\\\\\)*(?:\x60|\$\()[^"]*")'
+  - '\b(?:(?:br|bd)(?:[ \t]+--\S+(?:[ \t]+[^\s"'';&|]+)?)*[ \t]+(?:comments[ \t]+add|create|update)|git[ \t]+commit\b[^\s;&|]*(?:[ \t]+--\S+)*[ \t]+-m)\b(?:(?!",")[^;&])*(?:"(?:[^"\\]|\\.)*(?<!\\)(?:\\\\\\\\)*(?:\x60|\$\()[^"]*")'
 scope: tool:bash
 interruptMode: tool-only
 ---

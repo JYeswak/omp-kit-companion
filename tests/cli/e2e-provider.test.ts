@@ -64,7 +64,7 @@ exec "$OMP_KIT_PROVIDER_NATIVE" "$@"
 	const child = Bun.spawn(["sh", "scripts/e2e-live.sh"], {
 		cwd: REPO_ROOT,
 		// Machine-readable scenario IDs must survive a caller forcing ANSI color.
-		env: { ...process.env, NO_COLOR: undefined, FORCE_COLOR: "1", ONLY: "unsafe-router-fire", OMP_KIT_TEST_NO_COVERAGE: "1",
+		env: { ...process.env, NO_COLOR: undefined, FORCE_COLOR: "1", ONLY: "glob-silenced-fire", OMP_KIT_TEST_NO_COVERAGE: "1",
 			OMP: launcher, OMP_KIT_PROVIDER_NATIVE: nativeOmp, ...extraEnv },
 		stdout: "pipe",
 		stderr: "pipe",

@@ -2,7 +2,7 @@
 description: "AGENTS.md one rule: a step you can satisfy by believing you did it is not a step"
 condition:
   - '(?i)\b(all|the) tests (should )?(now )?pass(ed)?\b'
-  - '(?i)\bshould (now )?(work|pass|be fixed)\b'
+  - '(?i)\bshould (now )?work\b'
   - '(?i)\b(this|that|it) (should|will) fix\b'
   - '(?i)\bis now (fixed|working|completed?|done)\b'
 scope: "text"

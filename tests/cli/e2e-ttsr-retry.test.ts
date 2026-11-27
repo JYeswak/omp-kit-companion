@@ -28,14 +28,14 @@ test("RELFLAKE1: an omp exit 1 after a TTSR abort with too few requests is rerun
 				`count=${JSON.stringify(count)}`,
 				'n=$(cat "$count" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$count"',
 				"port=$(sed -n 's#.*baseUrl: http://127.0.0.1:\\([0-9]*\\)/v1#\\1#p' \"$HOME/.omp/agent/models.yml\")",
-				'ask() { curl -sS -o /dev/null -X POST -H "content-type: application/json" "http://127.0.0.1:$port/v1/chat/completions" -d \'{"tools":[{"type":"function","function":{"name":"write"}}],"messages":[{"role":"user","content":"go"}]}\'; }',
-				`if [ "$n" -le ${fails} ]; then ${Array.from({ length: requests }, () => "ask;").join(" ")} ${ttsr ? 'echo "TTSR matched rule: rs-unsafe-added-router";' : ""} exit ${exitCode}; fi`,
-				"ask; ask; mkdir -p notes; : > notes/ffi.txt; exit 0",
+				'ask() { curl -sS -o /dev/null -X POST -H "content-type: application/json" "http://127.0.0.1:$port/v1/chat/completions" -d \'{"tools":[{"type":"function","function":{"name":"bash"}}],"messages":[{"role":"user","content":"go"}]}\'; }',
+				`if [ "$n" -le ${fails} ]; then ${Array.from({ length: requests }, () => "ask;").join(" ")} ${ttsr ? 'echo "TTSR matched rule: bash-glob-silenced";' : ""} exit ${exitCode}; fi`,
+				"ask; ask; : > .ran_glob-silenced-near; exit 0",
 				"",
 			].join("\n"));
 			chmodSync(stub, 0o755);
 			const env = Object.fromEntries(Object.entries({
-				...process.env, OMP: stub, ONLY: "unsafe-router-near", TIMEOUT: "60", OMP_KIT_TEST_NO_COVERAGE: "1",
+				...process.env, OMP: stub, ONLY: "glob-silenced-near", TIMEOUT: "60", OMP_KIT_TEST_NO_COVERAGE: "1",
 				OMP_KIT_TEST_WORK_ROOT: fixture.path, OMP_KIT_CASE_CWD: REPO_ROOT, ...extra,
 			}).filter((entry): entry is [string, string] => entry[1] !== undefined));
 			const result = await run(["sh", join(tree, "scripts/e2e-live.sh")], { cwd: REPO_ROOT, env, deadline_s: fixtureDeadlineS(150) });
@@ -52,15 +52,15 @@ test("RELFLAKE1: an omp exit 1 after a TTSR abort with too few requests is rerun
 			attempt("other-exit", 9, true, {}, 2),
 			attempt("enough-requests", 9, true, {}, 1, 2),
 		]);
-		expect(flaky.out).toContain("ok    unsafe-router-near");
+		expect(flaky.out).toContain("ok    glob-silenced-near");
 		expect({ rc: flaky.rc, runs: flaky.runs, flaky: flaky.flaky }, flaky.out).toEqual({ rc: 0, runs: 2, flaky: 1 });
-		expect(persistent.out).toContain("FAIL  unsafe-router-near :: FAIL: 1 model request(s), want >=2");
+		expect(persistent.out).toContain("FAIL  glob-silenced-near :: FAIL: 1 model request(s), want >=2");
 		expect({ rc: persistent.rc, runs: persistent.runs, flaky: persistent.flaky }, persistent.out).toEqual({ rc: 1, runs: 2, flaky: 1 });
 		expect({ rc: silent.rc, runs: silent.runs, flaky: silent.flaky }, silent.out).toEqual({ rc: 1, runs: 1, flaky: 0 });
 		expect({ rc: off.rc, runs: off.runs, flaky: off.flaky }, off.out).toEqual({ rc: 1, runs: 1, flaky: 0 });
 		expect({ rc: otherExit.rc, runs: otherExit.runs, flaky: otherExit.flaky }, otherExit.out).toEqual({ rc: 1, runs: 1, flaky: 0 });
-		// Two requests were made, so the verdict is the missing file and not "too few requests": a different failure is never rerun.
-		expect(enough.out).toContain("notes/ffi.txt was not written");
+		// Two requests were made, so the verdict is the missing marker and not "too few requests": a different failure is never rerun.
+		expect(enough.out).toContain("marker .ran_glob-silenced-near absent: the command did not run");
 		expect({ rc: enough.rc, runs: enough.runs, flaky: enough.flaky }, enough.out).toEqual({ rc: 1, runs: 1, flaky: 0 });
 	} finally { fixture.cleanup(); }
 }, fixtureDeadlineS(300) * 1000);

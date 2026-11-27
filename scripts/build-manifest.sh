@@ -4,7 +4,7 @@
 # Writes MANIFEST.tsv from rules/*.md (default pack) and MANIFEST.fleet.tsv from
 # rules-fleet/*.md (opt-in fleet pack): name, sha256, class, pack.
 #   class  from omp's own parse of each rule (scripts/rule-class.ts, README contract):
-#            router   rs-unsafe-added-router
+#            router   none after ompkit-gpx61.5 retired rs-unsafe-added-router
 #            always   alwaysApply true and no condition, astCondition or question
 #            reminder interruptMode never
 #            tripwire everything else (interruptMode always, tool-only, prose-only, unset)

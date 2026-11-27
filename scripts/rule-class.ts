@@ -138,9 +138,9 @@ const parseFrontmatter = utilsMod.parseFrontmatter as (
 	options?: { source?: unknown },
 ) => { frontmatter: Record<string, unknown>; body: string };
 
-/** The README contract: named unsafe router, then classification from OMP's rule object. */
+/** Classification from OMP's rule object. The named unsafe router was retired in ompkit-gpx61.5. */
 export function ruleClass(name: string, rule: Rule): RuleClass {
-	if (name === "rs-unsafe-added-router") return "router";
+	void name;
 	const hasCond = (rule.condition?.length ?? 0) > 0 || (rule.astCondition?.length ?? 0) > 0 || !!rule.question;
 	if (rule.alwaysApply && !hasCond) return "always";
 	if (rule.interruptMode === "never") return "reminder";

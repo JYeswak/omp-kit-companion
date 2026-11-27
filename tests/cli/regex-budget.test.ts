@@ -271,16 +271,101 @@ test("write/edit budget names the same 500ms ceiling as the bash stream", () => 
 	expect(failsWriteEditStreamBudget(Number.POSITIVE_INFINITY)).toBe(true);
 });
 
+test("frontend shell exclusions keep their original 4000-character boundary", async () => {
+	const loaded = loadRuleFile(join(root, "rules/kit-frontend-foundations.md"));
+	// The operator selects OMP_SRC at runtime; its version-specific module cannot be a static import.
+	const ruleModule = await import(join(OMP_SRC, "capability/rule.ts"));
+	const compile = ruleModule.compileRuleCondition as (pattern: string) => RegExp;
+	const shells = ["<!DOCTYPE html", "<html>"];
+	for (const [index, shell] of shells.entries()) {
+		const re = compile(loaded.rule.condition![index]!);
+		expect(re.test(shell)).toBe(true);
+		expect(re.test(shell.slice(0, -1))).toBe(false);
+		for (const marker of ["frontend-foundations", "frontend.foundations.json", "omp-kit frontend check"]) {
+			for (const offset of [shell.length, 3999, 4000, 4001]) {
+				const content = shell + "x".repeat(offset - shell.length) + marker;
+				expect(re.test(content)).toBe(offset > 4000);
+				expect(re.test("prefix\n" + content)).toBe(offset > 4000);
+			}
+			// An earlier, already-decided shell must not hide a later undecided shell.
+			expect(re.test(shell + marker + "x".repeat(4001) + shell)).toBe(true);
+		}
+	}
+});
+
+test("dynamic constructor prefilter preserves whitespace and checklist exclusions", async () => {
+	const loaded = loadRuleFile(join(root, "rules/kit-regex-engineering.md"));
+	// OMP_SRC is selected from the operator's runtime, not a build-time dependency.
+	const ruleModule = await import(join(OMP_SRC, "capability/rule.ts"));
+	const compile = ruleModule.compileRuleCondition as (pattern: string) => RegExp;
+	const re = compile(loaded.rule.condition![0]!);
+	for (const space of [" ", "\t", "\n", " ".repeat(100)]) {
+		for (const identifier of ["userInput", "_pattern", "$pattern"]) {
+			const constructor = "new" + space + "RegExp" + space + "(" + space + identifier + ")";
+			expect(re.test(constructor)).toBe(true);
+			expect(re.test("regex-engineering " + constructor)).toBe(false);
+			// The exclusion is measured from after "new", not after the whole constructor.
+			expect(re.test(constructor + " regexploit")).toBe(constructor.length + 1 > 83);
+		}
+	}
+	for (const text of ["new", "new RegExp", 'new RegExp("static")', "new RegExp(42)", "new RegExpression(userInput)"]) {
+		expect(re.test(text)).toBe(false);
+	}
+});
+
+test("preflight waits for a complete option before judging help and dry-run streams", async () => {
+	const loaded = loadRuleFile(join(root, "rules/kit-commit-preflight.md"));
+	// OMP_SRC is chosen at runtime, so the native compiler cannot be statically imported.
+	const ruleModule = await import(join(OMP_SRC, "capability/rule.ts"));
+	const compile = ruleModule.compileRuleCondition as (pattern: string) => RegExp;
+	const re = compile(loaded.rule.condition![0]!);
+	for (const command of ["git commit --dry-run", "git commit --help", "git commit -h"]) {
+		const wire = JSON.stringify({ command });
+		for (let end = 1; end <= wire.length; end++) expect(re.test(wire.slice(0, end))).toBe(false);
+	}
+	for (const command of ["git commit", "git commit ", "git commit -F planned-message", "git -C /repo commit --only -F message"]) {
+		expect(re.test(JSON.stringify({ command }))).toBe(true);
+	}
+});
+
+test("frontend shell conditions fit the native single-check and prefix-stream budgets", async () => {
+	const loaded = loadRuleFile(join(root, "rules/kit-frontend-foundations.md"));
+	const writeEditWire = buildWriteEditWire(readFileSync(DEFAULT_WRITE_EDIT_STREAM_FILE, "utf8"));
+	let streamMs = 0;
+	for (const [conditionIndex, pattern] of loaded.rule.condition!.slice(0, 2).entries()) {
+		const result = await measureCondition({
+			rule: loaded.name, conditionIndex, pattern, scope: loaded.rule.scope,
+			shapes: ["literal"], encodings: ["raw", "json"], writeEditWire,
+		});
+		expect(result.status).toBe("MEASURED");
+		expect(result.failures).toEqual([]);
+		expect(result.write_edit_ms).toBeGreaterThan(0);
+		streamMs += result.write_edit_ms!;
+	}
+	expect(failsWriteEditStreamBudget(streamMs)).toBe(false);
+	const constructor = loadRuleFile(join(root, "rules/kit-regex-engineering.md"));
+	const result = await measureCondition({
+		rule: constructor.name, conditionIndex: 0, pattern: constructor.rule.condition![0]!,
+		scope: constructor.rule.scope, shapes: ["literal"], encodings: ["raw", "json"], writeEditWire,
+	});
+	expect(result.status).toBe("MEASURED");
+	expect(result.failures).toEqual([]);
+	expect(result.write_edit_ms).toBeGreaterThan(0);
+	expect(failsWriteEditStreamBudget(streamMs + result.write_edit_ms!)).toBe(false);
+}, fixtureDeadlineS(30) * 1000);
+
 test("write/edit stream gives a path-scoped rule a nonzero measured budget with the bash checklist", async () => {
 	const fixture = fixtureRuleCopy("fixture-rx-write-edit", "rules/kit-regex-engineering.md");
-	const fixtureText = readFileSync(DEFAULT_WRITE_EDIT_STREAM_FILE, "utf8");
+	// Frozen rx-write-edit-stream.md is the calibrated reference wire. This checklist is the live rule's match cases.
+	const fixtureText = readFileSync(join(root, "scripts/fixtures/rx-write-edit-current.md"), "utf8");
 	try {
 		expect(fixture.scope.some(token => token.startsWith("tool:write(") || token.startsWith("tool:edit("))).toBe(true);
 		expect(appliesToWriteEditStream(fixture.scope)).toBe(true);
 		// OMP_SRC resolves from the installed build at runtime, so no static import can name it.
 		const ruleModule = await import(join(OMP_SRC, "capability/rule.ts"));
 		const compileRuleCondition = ruleModule.compileRuleCondition as (pattern: string) => RegExp;
-		const re = compileRuleCondition(fixture.pattern);
+		const patterns = loadRuleFile(join(root, "rules/kit-regex-engineering.md")).rule.condition ?? [];
+		const compiled = patterns.map(pattern => compileRuleCondition(pattern));
 		const lines = fixtureText.split("\n");
 		const matches = lines.filter(line => line.startsWith("RX-MATCH:"));
 		const rejects = lines.filter(line => line.startsWith("RX-NOMATCH:"));
@@ -288,11 +373,11 @@ test("write/edit stream gives a path-scoped rule a nonzero measured budget with 
 		expect(matches.length).toBeGreaterThan(0);
 		expect(rejects.length).toBeGreaterThan(0);
 		expect(nearMiss.length).toBeGreaterThan(0);
-		for (const line of matches) expect(re.test(line)).toBe(true);
-		for (const line of rejects) expect(re.test(line)).toBe(false);
+		for (const line of matches) expect(compiled.some(re => re.test(line))).toBe(true);
+		for (const line of rejects) expect(compiled.some(re => re.test(line))).toBe(false);
 		for (const line of nearMiss) {
 			const start = performance.now();
-			expect(re.test(line)).toBe(false);
+			expect(compiled.some(re => re.test(line))).toBe(false);
 			expect(failsSingleCheckCeiling([0, 0, performance.now() - start])).toBe(false);
 		}
 		const result = await measureCondition({

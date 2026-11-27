@@ -50,7 +50,7 @@ async function alive(pid: number): Promise<boolean> {
 test("SIGTERM stops e2e-live within 10 s with no surviving children", async () => {
 	const child = Bun.spawn(["sh", "scripts/e2e-live.sh"], {
 		cwd: REPO_ROOT,
-		env: { ...process.env, OMP_KIT_E2E_JOBS: "4", ONLY: "unsafe-router-fire unsafe-router-near pipe-exit-fire pipe-exit-near glob-silenced-fire glob-silenced-near" },
+		env: { ...process.env, OMP_KIT_E2E_JOBS: "4", ONLY: "glob-silenced-fire glob-silenced-near pipe-exit-fire pipe-exit-near bash-capped-git-status-fire bash-capped-git-status-near" },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -131,7 +131,7 @@ test("lingering scenario child is reaped and the tree removes cleanly", async ()
 	chmodSync(stub, 0o755);
 	const child = Bun.spawn(["sh", "scripts/e2e-live.sh"], {
 		cwd: REPO_ROOT,
-		env: { ...process.env, OMP: stub, STUB_OUT: stubDir, ONLY: "unsafe-router-near",
+		env: { ...process.env, OMP: stub, STUB_OUT: stubDir, ONLY: "glob-silenced-near",
 			TIMEOUT: "60", KEEP: "1", OMP_KIT_TEST_NO_COVERAGE: "1" },
 		stdout: "pipe",
 		stderr: "pipe",
@@ -175,8 +175,8 @@ test("lingering scenario child is reaped and the tree removes cleanly", async ()
 test("parallel live cases retain ordered reports, private models and read-only native bytes", async () => {
 	const fixture = workRoot("e2e-pool");
 	const reportPath = join(fixture.path, "cases.jsonl");
-	// Ordered as in tests/live/scenarios.json; the standing-law and canary scenarios retired in 906ebd0746.
-	const names = ["unsafe-router-fire", "unsafe-router-near", "glob-silenced-fire", "glob-silenced-near", "pipe-exit-fire"];
+	// Ordered as in tests/live/scenarios.json.
+	const names = ["glob-silenced-fire", "glob-silenced-near", "pipe-exit-fire", "pipe-exit-near", "bash-capped-git-status-fire"];
 	try {
 		const env = Object.fromEntries(Object.entries({
 			...process.env, OMP_KIT_E2E_JOBS: "4", ONLY: names.join(" "), KEEP: "1",
@@ -250,29 +250,29 @@ test("LIVEEVAL1: a failing scenario's transcript is copied into OMP_KIT_E2E_EVID
 		].join("\n"));
 		chmodSync(stub, 0o755);
 		const env = Object.fromEntries(Object.entries({
-			...process.env, OMP: stub, ONLY: "unsafe-router-near", TIMEOUT: "60", OMP_KIT_TEST_NO_COVERAGE: "1",
+			...process.env, OMP: stub, ONLY: "glob-silenced-near", TIMEOUT: "60", OMP_KIT_TEST_NO_COVERAGE: "1",
 			OMP_KIT_TEST_WORK_ROOT: fixture.path, OMP_KIT_CASE_CWD: REPO_ROOT, OMP_KIT_E2E_EVIDENCE_DIR: evidenceRoot,
 		}).filter((entry): entry is [string, string] => entry[1] !== undefined));
 		const result = await run(["sh", join(await liveTree(fixture.path), "scripts/e2e-live.sh")], { cwd: REPO_ROOT, env, deadline_s: fixtureDeadlineS(150) });
 		const stdout = Buffer.from(result.stdout).toString(), stderr = Buffer.from(result.stderr).toString();
 		expect(result.rc, stdout + stderr).toBe(1);
-		const failure = /^FAIL {2}unsafe-router-near :: .*transcript: (\S+)\)$/m.exec(stdout);
+		const failure = /^FAIL {2}glob-silenced-near :: .*transcript: (\S+)\)$/m.exec(stdout);
 		expect(failure, stdout + stderr).not.toBeNull();
-		expect(stderr).toContain("LIVE_FAILURE_TAIL out-unsafe-router-near.txt");
+		expect(stderr).toContain("LIVE_FAILURE_TAIL out-glob-silenced-near.txt");
 		expect(stderr).toContain("MOCK_OMP_ERROR: planted stderr tail");
-		expect(stderr).toContain("LIVE_FAILURE_TAIL log-unsafe-router-near.jsonl");
+		expect(stderr).toContain("LIVE_FAILURE_TAIL log-glob-silenced-near.jsonl");
 		expect(stderr).toContain("LIVEEVAL1 planted transcript");
 		const copy = failure![1]!;
 		const runDir = /^failure evidence kept: (\S+)$/m.exec(stdout)?.[1];
 		expect(runDir).toBe(join(evidenceRoot, readdirSync(evidenceRoot)[0]!));
-		expect(copy).toBe(join(runDir!, "log-unsafe-router-near.jsonl"));
+		expect(copy).toBe(join(runDir!, "log-glob-silenced-near.jsonl"));
 		const kept = /kept private e2e output: (\S+) \(work root (\S+)\)/.exec(stdout);
 		expect(kept, stdout).not.toBeNull();
-		const original = readFileSync(join(kept![1]!, "log-unsafe-router-near.jsonl"));
+		const original = readFileSync(join(kept![1]!, "log-glob-silenced-near.jsonl"));
 		rmSync(kept![2]!, { recursive: true, force: true });
 		expect(readFileSync(copy)).toEqual(original);
 		expect(original.toString()).toContain("LIVEEVAL1 planted transcript");
-		expect(readdirSync(runDir!).sort()).toEqual(["log-unsafe-router-near.jsonl", "mock-unsafe-router-near.txt", "out-unsafe-router-near.txt"]);
+		expect(readdirSync(runDir!).sort()).toEqual(["log-glob-silenced-near.jsonl", "mock-glob-silenced-near.txt", "out-glob-silenced-near.txt"]);
 	} finally { fixture.cleanup(); }
 }, fixtureDeadlineS(180) * 1000);
 

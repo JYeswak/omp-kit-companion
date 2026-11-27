@@ -13,7 +13,7 @@
 </div>
 
 <!-- kit-release:start -->
-Current release: v0.2.153
+Current release: v0.2.154
 <!-- kit-release:end -->
 
 A tested rule pack, 15 extensions, six skills, and a guarded CLI for an
@@ -66,7 +66,7 @@ ls rules/*.md | wc -l
 bun scripts/rule-class.ts rules/*.md
 ```
 
-The pack includes reminders, tripwires, and `rs-unsafe-added-router` for Rust.
+The pack includes reminders and tripwires. `rs-unsafe-added-router` was retired in ompkit-gpx61.5; the pack no longer ships a router class.
 Use `omp-kit doctor --scope rules` to check discovery.
 Tripwires cover unverified completion, unevidenced closes, `--no-verify`,
 secrets, config mutation, copied runtime facts, skips, and Actions polling.
