@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { Database } from "bun:sqlite";
-import { appendFileSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, opendirSync, readFileSync, readSync, realpathSync, unlinkSync, type Stats } from "node:fs";
+import { appendFileSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, opendirSync, readFileSync, realpathSync, unlinkSync, type Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { readInto } from "./kitlib/positioned-read.ts";
 
 const SESSION_STATE_SCHEMA = "omp-kit.cc.session-tail.v1";
 const SESSION_STATE_MAX_BYTES = 4 << 20;
@@ -126,13 +127,7 @@ function sha256(bytes: Buffer): string {
 
 function readRange(fd: number, start: number, end: number): Buffer | null {
 	const bytes = Buffer.alloc(end - start);
-	let offset = 0;
-	while (offset < bytes.length) {
-		const count = readSync(fd, bytes, offset, bytes.length - offset, start + offset);
-		if (count === 0) return null;
-		offset += count;
-	}
-	return bytes;
+	return readInto(fd, bytes, 0, bytes.length, start) === bytes.length ? bytes : null;
 }
 
 function titleSlot(bytes: Buffer): boolean {

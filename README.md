@@ -439,6 +439,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit undo` | `undo RUN_ID [--yes]` | Restore one verified receipt | `omp-kit undo RUN_ID --yes` |
 | `omp-kit audit` | `audit` | Receipt chronology | `omp-kit audit --json` |
 | `omp-kit why` | `why RUN_ID` | Explain one recorded run | `omp-kit why RUN_ID --json` |
+| `omp-kit explain` | `explain [--seat S] [--last N]` | Bounded gate-event history and current gate-contract forms from known fleet roots or the current repository; other repo paths are skipped; DCG is not read without a verified seat join | `omp-kit explain --seat RoseSquirrel --json` |
 | `omp-kit update` | `update [--plan\|--apply] --version X.Y.Z --index PATH --archive PATH` or `update --reconcile RECEIPT --yes [--prefix PATH]` | Guarded update from a local index + archive; never infers latest (`LOCAL_SOURCE_REQUIRED` names missing files) | `omp-kit help update` |
 | `omp-kit review` | `review rules\|reduce` | Compare two rule versions on witness unions or minimize a reproduced false fire | `omp-kit review rules --incumbent-rules /old/rules --incumbent-cases /old/cases.tsv --candidate-rules /new/rules --candidate-cases /new/cases.tsv --json` |
 | `omp-kit corpus` | `corpus --sessions ABS_DIR [--out ABS_FILE] [--plan]` | Per-rule fire rates over transcripts; never uploads; `--sessions` must exist (fresh HOMEs have none) | `omp-kit corpus --sessions /absolute/sessions --json` |

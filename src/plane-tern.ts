@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { readInto } from "./kitlib/positioned-read.ts";
 
 /** Whole-file parse cap; larger session files use progressively widened tail reads. */
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
@@ -980,13 +981,7 @@ export function parseSessionView(view: SessionJournalView): SessionJournalResult
 
 function readExactly(fd: number, position: number, length: number): Buffer | null {
 	const buffer = Buffer.allocUnsafe(length);
-	let filled = 0;
-	while (filled < length) {
-		const count = readSync(fd, buffer, filled, length - filled, position + filled);
-		if (count === 0) return null;
-		filled += count;
-	}
-	return buffer;
+	return readInto(fd, buffer, 0, length, position) === length ? buffer : null;
 }
 
 /**

@@ -152,6 +152,40 @@ const pushLatencyData: DataSchema = { type: "object", required: ["scope", "overa
 		},
 	} }, timed_rows: { type: "integer", minimum: 0 }, untimed_rows: { type: "integer", minimum: 0 }, issues: { type: "array", items: { type: "string" } }, text: { type: "string" },
 } };
+const explainData: DataSchema = { type: "object", required: ["scope", "overall", "seat", "last", "refusal_groups_omitted", "rule_fire_groups_omitted", "window", "refusals", "rule_fires", "commit_first_try", "sources", "text"], properties: {
+	scope: { enum: ["explain"] }, overall: { enum: ["PARTIAL", "UNVERIFIED"] }, seat: { type: "string" }, last: { type: "integer", minimum: 1, maximum: 500 },
+	refusal_groups_omitted: { type: "integer", minimum: 0 }, rule_fire_groups_omitted: { type: "integer", minimum: 0 },
+	window: { type: "object", required: ["attempts", "start_at", "end_at", "complete"], properties: {
+		attempts: { type: "integer", minimum: 0 }, start_at: { type: ["string", "null"] }, end_at: { type: ["string", "null"] }, complete: { type: "boolean" },
+	} },
+	refusals: { type: "array", items: { type: "object", required: ["cause", "gate", "member", "refusal", "compliant", "remedy_status", "count", "latest_at"], properties: {
+		cause: { type: "string" }, gate: { type: "string" }, member: { type: ["string", "null"] }, refusal: { type: "string" },
+		compliant: { type: ["string", "null"] }, remedy_status: { enum: ["MATCHED", "UNAVAILABLE"] }, count: { type: "integer", minimum: 1 }, latest_at: { type: "string" },
+	} } },
+	rule_fires: { type: "array", items: { type: "object", required: ["member", "count", "latest_at"], properties: {
+		member: { type: ["string", "null"] }, count: { type: "integer", minimum: 1 }, latest_at: { type: "string" },
+	} } },
+	commit_first_try: { type: "object", required: ["status", "attempts", "passed", "refused", "rate_pct"], properties: {
+		status: { enum: ["READ", "PARTIAL", "UNVERIFIED"] }, attempts: { type: "integer", minimum: 0 }, passed: { type: "integer", minimum: 0 },
+		refused: { type: "integer", minimum: 0 }, rate_pct: { type: ["number", "null"], minimum: 0, maximum: 100 },
+	} },
+	sources: { type: "object", required: ["gate_events", "gate_contracts", "dcg", "rule_fires"], properties: {
+		gate_events: { type: "object", required: ["status", "rows_read", "invalid_rows", "tail_window_bytes", "truncated_before", "incomplete_after"], properties: {
+			status: { enum: ["READ", "PARTIAL", "MISSING", "UNAVAILABLE"] }, rows_read: { type: "integer", minimum: 0 },
+			invalid_rows: { type: "integer", minimum: 0 }, tail_window_bytes: { type: "integer", minimum: 0 }, truncated_before: { type: "boolean" }, incomplete_after: { type: "boolean" },
+		} },
+		gate_contracts: { type: "object", required: ["status", "repos_read", "reason"], properties: {
+			status: { enum: ["READ", "PARTIAL", "UNAVAILABLE"] }, repos_read: { type: "integer", minimum: 0 }, reason: { type: ["string", "null"] },
+		} },
+		dcg: { type: "object", required: ["status", "records", "reason"], properties: {
+			status: { enum: ["UNATTRIBUTED"] }, records: { type: "null" }, reason: { type: "string" },
+		} },
+		rule_fires: { type: "object", required: ["status", "records", "reason"], properties: {
+			status: { enum: ["PARTIAL", "UNAVAILABLE"] }, records: { type: "null" }, reason: { type: "string" },
+		} },
+	} },
+	text: { type: "string" },
+} };
 const doctorData: DataSchema = { type: "object", required: [], properties: {}, allOf: [{ oneOf: [
 	{ ...statusData, properties: { ...statusData.properties, report: lspReportData, calibration: calibrationData, sessions: sessionData, deep_probe: { oneOf: [deepDoctorData, lspProbeData] }, mcp_sources: { type: "object" } } },
 	pushLatencyData,
@@ -971,6 +1005,10 @@ export const COMMANDS: readonly Command[] = [
 	], example: "omp-kit undo RUN_ID --yes", runnable: false, mutation: true },
 	{ name: "audit", description: "Inspect receipt chronology", usage: "audit", flags: [], example: "omp-kit audit --json", runnable: false },
 	{ name: "why", description: "Explain one recorded run", usage: "why RUN_ID", argument: "RUN_ID", flags: [], example: "omp-kit why RUN_ID --json", runnable: false },
+	{ name: "explain", description: "Explain recent seat refusals and commit first-try results; report source gaps rather than guessing", usage: "explain [--seat S] [--last N]", flags: [
+		{ name: "--seat", value: "S", description: "Seat name; defaults to AGENT_NAME" },
+		{ name: "--last", value: "N", description: "Recent seat attempts to include; 1–500, default 50" },
+	], example: "omp-kit explain --seat RoseSquirrel --json", runnable: false, dataSchema: explainData },
 	{ name: "quickstart", description: "Safe first commands and their limits", usage: "quickstart", flags: [], example: "omp-kit quickstart", runnable: true, dataSchema: textData },
 	{ name: "examples", description: "Read-only examples and versioned profile recipes; never activates a profile", usage: "examples [memory-off|mnemopi-manual|model-roles|mcp|omp-watch|skill-set --from-history DAYS [--profile NAME]]", flags: [],
 		subcommandOptional: true, subcommands: [

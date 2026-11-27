@@ -135,6 +135,7 @@ import { agentMailRetentionRoot, retainAgentMailRotations } from "./am-retain.ts
 import { retainFleetCaches } from "./cache-retain.ts";
 import { beadsMigrateCommand } from "./beads-migrate.ts";
 import { briefContract, briefCandidates, renderBrief } from "./brief.ts";
+import { buildExplainReport } from "./explain.ts";
 import { toolsVerifyCommand } from "./tools-manifest.ts";
 import { TOOL_UPDATE_LOOKUP_CODE, runToolUpdate, toolsUpdateCommand } from "./tool-update.ts";
 import { checkFrontend } from "../skills/frontend-foundations/scripts/check.mjs";
@@ -1251,7 +1252,7 @@ function receiptStateRoot(): string | null {
 
 /** Commands whose receipts live in the private state root; checked before consent so the real cause is shown. */
 const STATE_ROOT_COMMANDS: Record<string, true> = {
-	audit: true, why: true, undo: true, repair: true, update: true,
+	audit: true, explain: true, why: true, undo: true, repair: true, update: true,
 	"apply rules": true, "apply policy": true, "apply extensions": true, "apply plugin": true, "apply mcp": true,
 	"skill-mine": true, "skill-mine status": true,
 	"service install": true, "service uninstall": true, "service run": true, "project add": true, "project status": true,
@@ -1397,6 +1398,30 @@ async function fullSuiteVerdictCommand(request: ParsedCommand): Promise<CliResul
 
 registerCommandHandler("audit", receiptCommand);
 registerCommandHandler("why", receiptCommand);
+async function explainCommand(request: ParsedCommand): Promise<CliResult> {
+	const selectedSeat = request.flags.get("--seat");
+	const seat = typeof selectedSeat === "string" ? selectedSeat : process.env.AGENT_NAME ?? "";
+	if (!seat) return refusal("MISSING_SEAT", "No seat was selected.", "Pass --seat NAME or set AGENT_NAME.");
+	const selectedLast = request.flags.get("--last");
+	let last = 50;
+	if (selectedLast !== undefined) {
+		if (typeof selectedLast !== "string" || selectedLast.length === 0 || selectedLast.length > 3)
+			return refusal("INVALID_LAST", "--last must be an integer from 1 to 500.", "Pass --last N with 1 <= N <= 500.");
+		for (const character of selectedLast) if (character < "0" || character > "9")
+			return refusal("INVALID_LAST", "--last must be an integer from 1 to 500.", "Pass --last N with 1 <= N <= 500.");
+		last = Number(selectedLast);
+		if (last < 1 || last > 500)
+			return refusal("INVALID_LAST", "--last must be an integer from 1 to 500.", "Pass --last N with 1 <= N <= 500.");
+	}
+	try {
+		return { code: 0, data: await buildExplainReport(seat, last), verification: "UNVERIFIED" };
+	} catch (error) {
+		if (error instanceof Error && error.message === "invalid seat name")
+			return refusal("INVALID_SEAT", "Seat names must be 1–64 ASCII letters, digits, hyphens or underscores.", "Pass --seat NAME or set AGENT_NAME to a seat name.");
+		return refusal("EXPLAIN_UNAVAILABLE", "The local refusal history could not be read safely.", "Check the kit state root; no history was changed.");
+	}
+}
+registerCommandHandler("explain", explainCommand);
 registerCommandHandler("undo", receiptCommand);
 registerCommandHandler("land", landCommand);
 registerCommandHandler("push-check", pushCheckCommand);

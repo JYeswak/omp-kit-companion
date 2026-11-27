@@ -1,0 +1,1 @@
+- Added read-only `omp-kit explain [--seat S] [--last N]` with bounded seat refusals, current remedies from known fleet roots/current repo, and commit first-try; untrusted paths and unattributed DCG/rule-fire history remain explicit.
