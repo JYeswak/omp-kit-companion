@@ -60,6 +60,7 @@ const files = ["CHANGELOG.md", "LICENSE", "package.json", "MANIFEST.fleet.tsv", 
 	"scripts/check-flywheel-invariants.ts", "scripts/ttsr-harness.ts", "scripts/external-live.mjs", "docs/flywheel-invariants.tsv"];
 const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/fleet-guard.ts": "FLEET_GUARD_BUNDLE_FAILED",
+	"extensions/install-ancestor-prefix.ts": "INSTALL_ANCESTOR_PREFIX_BUNDLE_FAILED",
 	// GATEEVENTS1: the ledger library imports src/kitlib; shipped raw it would resolve outside the package.
 	"extensions/gate-events.ts": "GATE_EVENTS_BUNDLE_FAILED",
 	"extensions/commit-autocomplete.ts": "COMMIT_AUTOCOMPLETE_BUNDLE_FAILED",

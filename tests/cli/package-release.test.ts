@@ -1,5 +1,5 @@
 import { beforeAll, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { delimiter, dirname, join } from "node:path";
 import { parseRuleManifest } from "../../src/diagnostics.ts";
@@ -13,6 +13,7 @@ import { packageSourceRevision, packageSecretOutputGuard, checkPackagedExtension
 import { GATE_DEADLINE_MS, TIMING_SAMPLE_COUNT } from "../../scripts/regex-budget.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import type { handleToolCall as sourceHandleToolCall } from "../../extensions/fleet-guard.ts";
+import type sourceInstallAncestorPrefix from "../../extensions/install-ancestor-prefix.ts";
 import { boardScenarioSync, startBoard } from "../fleet-guard/board-fixture.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
@@ -86,6 +87,24 @@ test("FLEETROUNDPACK1 runs the installed fleet-round judge without checkout sour
 	expect(plant.rc).toBe(1);
 	expect(decoder.decode(plant.stderr)).toContain("Cannot find module");
 	expect(decoder.decode(plant.stdout)).toBe("");
+}, fixtureDeadlineS(60) * 1_000);
+
+test("NPMPREFIX1: the sealed package admits explicit project cwd and refuses an ancestor install", async () => {
+	const { staged } = await (stagedArchive ??= stagePackageArchive());
+	const project = join(output, "package-install-project");
+	const child = join(project, "child");
+	mkdirSync(child, { recursive: true });
+	writeFileSync(join(project, "package.json"), '{"name":"fixture","private":true}\n');
+	// The archive has no checkout src/. Import the extension OMP would load from its package.
+	const pkg = JSON.parse(readFileSync(join(staged.root, "package.json"), "utf8"));
+	const entry = "extensions/install-ancestor-prefix.ts";
+	expect(pkg.omp.extensions).toContain(entry);
+	const { default: register }: { default: typeof sourceInstallAncestorPrefix } = await import(join(staged.root, entry));
+	const hooks: Array<Parameters<Parameters<typeof register>[0]["on"]>[1]> = [];
+	register({ setLabel() {}, on(_name, hook) { hooks.push(hook); } });
+	const call = (cwd: string) => hooks[0]?.({ toolName: "bash", input: { cwd, command: "npm install left-pad" } }, { cwd: project });
+	expect(call(child)).toMatchObject({ block: true, reason: expect.stringContaining(`ancestor ${realpathSync(project)}`) });
+	expect(call(project)).toBeUndefined();
 }, fixtureDeadlineS(60) * 1_000);
 
 test("BOARDLAUNCH1: packaged guard checks live Board custody through its own CLI", async () => {
