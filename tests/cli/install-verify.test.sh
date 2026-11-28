@@ -41,14 +41,27 @@ expect_refuse() {
 export PATH="$ROOT/tests/fixtures/kit-release:$PATH"
 # The installer reads the tag and the bundle store from the public API anonymously; a loopback double answers for it.
 . "$ROOT/tests/fixtures/kit-release/github-api.sh"
+# shellcheck disable=SC2016 # Resolve the fixture PID when the exit hook runs.
+kitlib_tmp_atexit 'github_api_stop; [ -z "${GITHUB_API_PID:-}" ] || wait "$GITHUB_API_PID" 2>/dev/null || :'
 github_api_start "$WORK"
 # 1. tampered archive (one byte, correct filename) is refused by the hash check (planted)
 mkdir -p "$WORK/t2"
 TAMPERED="$WORK/t2/$(basename "$ARCHIVE")"
 cp "$ARCHIVE" "$TAMPERED"
-printf '\001' | dd of="$TAMPERED" bs=1 seek=100 conv=notrunc 2>/dev/null
+python3 - "$TAMPERED" <<'PY'
+import sys
+
+with open(sys.argv[1], "r+b") as archive:
+    archive.seek(100)
+    original = archive.read(1)
+    if len(original) != 1:
+        raise SystemExit("archive is too short for the tamper fixture")
+    archive.seek(100)
+    archive.write(bytes([original[0] ^ 1]))
+PY
 printf '{"fixture":true}' > "$TAMPERED.sigstore.json"
 expect_refuse tampered-refused env HOME="$WORK/home" "$INSTALL" --offline "$TAMPERED" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/pfx1" --dry-run
+grep -Fq 'archive SHA-256 mismatch or size limit' "$WORK/err.log" || { cat "$WORK/err.log" >&2; exit 1; }
 # 2. valid archive plus synthetic accepted bundle reaches the installer dry-run.
 printf '{"fixture":true}' > "$ARCHIVE.sigstore.json"
 expect_pass bundle-policy-control env HOME="$WORK/home" "$INSTALL" --offline "$ARCHIVE" --index "$WORK/assets/release-index.json" --version 1.2.3 --prefix "$WORK/pfx2" --dry-run
