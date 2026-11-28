@@ -79,6 +79,41 @@ function landPushDeadlineSeconds(): number {
 	return Number.isSafeInteger(value) ? Math.min(7200, Math.max(1, value)) : 2400;
 }
 
+const LAND_WORKTREE_DEADLINE_ENV = "OMP_KIT_LAND_WORKTREE_DEADLINE_S";
+
+/** LANDWORKTREE1: only patch-mode checkouts get extra time (14k tracked files took more than 30 s). */
+export function landWorktreeDeadlineSeconds(): number {
+	const raw = process.env[LAND_WORKTREE_DEADLINE_ENV];
+	const value = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+	return Number.isSafeInteger(value) ? Math.min(1800, Math.max(30, value)) : 300;
+}
+
+type PatchWorktree = { scratch: OwnedTmp; work: string };
+
+function newPatchWorktree(label: string): PatchWorktree {
+	const scratch = ownedTmp(label);
+	try {
+		// Git derives the administrative ID from the leaf. A new leaf prevents a parallel
+		// worktree add from recycling our ID while removal is still finishing.
+		return { scratch, work: join(realpathSync(scratch.path), `work-${randomUUID()}`) };
+	} catch (error) {
+		scratch.cleanup();
+		throw error;
+	}
+}
+
+/** An interrupted add can leave its registration locked even when the checkout path is gone. */
+function discardLandWorktree(repo: string, work: string, scratch: OwnedTmp): void {
+	try {
+		// Git also accepts suffix matches for `remove`. Only remove a registered exact path;
+		// repo-wide `worktree prune` could drop unrelated missing mounts or checkouts.
+		const listed = git(repo, ["worktree", "list", "--porcelain", "-z"]);
+		if (listed.code === 0 && !listed.interrupted && listed.out.includes(`\0worktree ${work}\0`))
+			git(repo, ["worktree", "remove", "--force", "--force", "--", work]);
+	} catch { /* best-effort Git cleanup */ }
+	try { scratch.cleanup(); } catch { /* best-effort owned directory cleanup */ }
+}
+
 const LAND_COMMIT_DEADLINE_ENV = "OMP_KIT_LAND_COMMIT_DEADLINE_S";
 
 /** The candidate commit deadline in seconds: OMP_KIT_LAND_COMMIT_DEADLINE_S (integer, clamped to 1..7200) or 2400. */
@@ -1274,16 +1309,18 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 	// judge provenance instead of bytes. The base tree is checked out in a
 	// throwaway worktree and the patch must apply there cleanly; the
 	// worktree never publishes.
+	const checkoutDeadlineS = landWorktreeDeadlineSeconds();
 	if (authoredOn !== null) {
 		const authoredBase: string = authoredOn;
-		let baseScratch = "";
-		try { baseScratch = ownedTmp("omp-kit-land-patch-base").path; }
+		let baseCheckout: PatchWorktree;
+		try { baseCheckout = newPatchWorktree("omp-kit-land-patch-base"); }
 		catch { return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", "A base-check directory could not be created", "Restore temporary-directory access and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256); }
-		const baseWork = join(baseScratch, "work");
-		const baseAdded = git(repo, ["worktree", "add", "--detach", baseWork, authoredBase]);
+		const { work: baseWork, scratch: baseScratch } = baseCheckout;
+		const baseAdded = git(repo, ["worktree", "add", "--detach", baseWork, authoredBase], undefined, checkoutDeadlineS * 1000);
 		if (baseAdded.code !== 0 || baseAdded.interrupted) {
-			try { rmSync(baseScratch, { recursive: true, force: true }); } catch { /* best-effort */ }
-			return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", "The --base tree could not be checked out for verification", "Repair the local repository and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
+			discardLandWorktree(repo, baseWork, baseScratch);
+			const timeout = baseAdded.timedOut ? ` within ${checkoutDeadlineS} s (${LAND_WORKTREE_DEADLINE_ENV})` : "";
+			return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", `The --base tree could not be checked out for verification${timeout}`, "Repair the local repository and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
 		}
 		let baseCheck: RunResult;
 		try {
@@ -1292,14 +1329,10 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 				deadline_s: 30, max_output_bytes: 8 * 1024 * 1024,
 			});
 		} catch (error) {
-			try { git(repo, ["worktree", "remove", "--force", baseWork]); } catch { /* best-effort */ }
-			try { git(repo, ["worktree", "prune"]); } catch { /* best-effort */ }
-			try { rmSync(baseScratch, { recursive: true, force: true }); } catch { /* best-effort */ }
 			return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", `Git could not verify the patch against --base: ${error instanceof Error ? error.message : String(error)}`, "Repair Git execution and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
+		} finally {
+			discardLandWorktree(repo, baseWork, baseScratch);
 		}
-		try { git(repo, ["worktree", "remove", "--force", baseWork]); } catch { /* best-effort */ }
-		try { git(repo, ["worktree", "prune"]); } catch { /* best-effort */ }
-		try { rmSync(baseScratch, { recursive: true, force: true }); } catch { /* best-effort */ }
 		if (baseCheck.rc !== 0 || baseCheck.timed_out || baseCheck.killed || baseCheck.truncated) {
 			const files = patchFailureFiles(new TextDecoder().decode(baseCheck.stderr));
 			const named = files.length > 0 ? files.join(", ") : paths.join(", ");
@@ -1308,19 +1341,16 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 	}
 	// Reconstruct the caller selection onto fresh origin/main in a detached
 	// scratch worktree. The shared worktree and index never contribute bytes.
-	let scratchBase = "";
-	try { scratchBase = ownedTmp("omp-kit-land-patch").path; }
+	let construction: PatchWorktree;
+	try { construction = newPatchWorktree("omp-kit-land-patch"); }
 	catch { return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", "A scratch construction directory could not be created", "Restore temporary-directory access and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256); }
-	const scratch = join(scratchBase, "work");
-	const cleanup = (): void => {
-		try { git(repo, ["worktree", "remove", "--force", scratch]); } catch { /* scratch removal is best-effort */ }
-		try { git(repo, ["worktree", "prune"]); } catch { /* scratch removal is best-effort */ }
-		try { rmSync(scratchBase, { recursive: true, force: true }); } catch { /* scratch removal is best-effort */ }
-	};
-	const added = git(repo, ["worktree", "add", "--detach", scratch, base]);
+	const { work: scratch, scratch: scratchBase } = construction;
+	const cleanup = (): void => discardLandWorktree(repo, scratch, scratchBase);
+	const added = git(repo, ["worktree", "add", "--detach", scratch, base], undefined, checkoutDeadlineS * 1000);
 	if (added.code !== 0 || added.interrupted) {
 		cleanup();
-		return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", "Fresh origin/main could not be checked out for reconstruction", "Repair the local repository and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
+		const timeout = added.timedOut ? ` within ${checkoutDeadlineS} s (${LAND_WORKTREE_DEADLINE_ENV})` : "";
+		return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", `Fresh origin/main could not be checked out for reconstruction${timeout}`, "Repair the local repository and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
 	}
 	let applied: RunResult;
 	try {
