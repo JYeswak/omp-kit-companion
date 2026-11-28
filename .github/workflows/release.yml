@@ -32,7 +32,7 @@ on:
         required: false
         type: string
       base_tag:
-        description: Published ancestor floor for immutable source-bound release notes
+        description: Published stable base bound to the cut; required for local-attest and production qualification
         required: false
         type: string
       certified_run_id:
@@ -204,7 +204,13 @@ jobs:
             artifact_attempt="$(jq -er '.run_attempt | select(type == "number" and . >= 1)' reuse-producer.json)"
             jq -e '.status == "completed" and .conclusion == "success"' reuse-producer.json
           fi
-          if [[ -z "$BASE_TAG" ]]; then BASE_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$SOURCE_SHA^")"; fi
+          if [[ "$REHEARSAL" == true ]]; then
+            if [[ -z "$BASE_TAG" ]]; then BASE_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$SOURCE_SHA^")"; fi
+          else
+            floor="$(sh scripts/release-preflight.sh current_product_beads "$GITHUB_REPOSITORY" . "$SOURCE_SHA" "$BASE_TAG")"
+            printf '%s\n' "$floor"
+            BASE_TAG="$(jq -er .base_tag <<<"$floor")"
+          fi
           sh scripts/release-notes.sh check --base-tag "$BASE_TAG" --head "$SOURCE_SHA"
           printf 'version=%s\nsource_sha=%s\ntrain_id=%s\nartifact_run_id=%s\nartifact_attempt=%s\nreuse_fast_ci=%s\ndeveloper_id=%s\n' \
             "$VERSION" "$SOURCE_SHA" "$TRAIN_ID" "$artifact_run_id" "$artifact_attempt" "$reuse_fast_ci" "$developer_id" >> "$GITHUB_OUTPUT"
@@ -665,6 +671,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ inputs.version }}
+      BASE_TAG: ${{ inputs.base_tag }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -676,6 +683,7 @@ jobs:
           set -euo pipefail
           [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'version must be X.Y.Z' >&2; exit 4; }
           [[ "$GITHUB_REF" == "refs/tags/v$VERSION" ]] || { echo "dispatch with --ref v$VERSION, not $GITHUB_REF" >&2; exit 4; }
+          [[ -n "$BASE_TAG" ]] || { echo 'local-attest requires the allocated base_tag' >&2; exit 4; }
           gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" > tag.json
           [[ "$(jq -r .object.type tag.json)" == commit && "$(jq -r .object.sha tag.json)" == "$GITHUB_SHA" ]] || { echo 'tag is not a lightweight tag of this commit' >&2; exit 4; }
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo 'tag commit is not on main' >&2; exit 4; }
@@ -708,6 +716,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version-file: .bun-version
+      - name: Require the ten-bead floor on the exact tag source
+        run: sh scripts/release-preflight.sh current_product_beads "$GITHUB_REPOSITORY" . "$GITHUB_SHA" "$BASE_TAG"
       - name: Generate platform SBOMs from the packaged builder inventories
         run: |
           set -euo pipefail
@@ -751,6 +761,7 @@ jobs:
       - name: Attach the SBOMs and publish the draft without regressive Latest
         run: |
           set -euo pipefail
+          sh scripts/release-preflight.sh current_product_beads "$GITHUB_REPOSITORY" . "$GITHUB_SHA" "$BASE_TAG"
           attached="$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
           for sbom in sbom/sbom-*.spdx.json; do
             grep -qxF "$(basename "$sbom")" <<<"$attached" || gh release upload "v$VERSION" --repo "$GITHUB_REPOSITORY" "$sbom"

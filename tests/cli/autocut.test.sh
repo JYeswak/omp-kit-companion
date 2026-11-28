@@ -38,6 +38,8 @@ PY
 printf 'PATH="${PINNED_DIR:+$PINNED_DIR:}$PATH"\nexport PATH\n' > "$repo/scripts/fixed-env.sh"
 # The verdict readback runs under the candidate's own scripts/pysafe.py, as in the real repo.
 cp "$REPO/scripts/pysafe.py" "$repo/scripts/pysafe.py"
+printf '# Changelog\n\n## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n\n- Base.\n' > "$repo/CHANGELOG.md"
+mkdir -p "$repo/src" "$repo/changelog.d"
 commit() { # VERSION MESSAGE -> prints the new sha
 	printf '{"name":"fixture","version":"%s"}\n' "$1" > "$repo/package.json"
 	printf '%s\n' "$2" > "$repo/note.txt"
@@ -50,6 +52,13 @@ git -C "$repo" tag v0.1.0 "$base"
 git -C "$repo" remote add origin "$origin"
 git -C "$repo" push -q origin main --tags 2>/dev/null
 commit 0.1.1 "prepare 0.1.1" >/dev/null
+for i in 1 2 3 4 5 6 7 8 9 10; do
+	printf 'fixture %s\n' "$i" > "$repo/src/product-$i.txt"
+	printf '### Added\n- Fixture %s.\n' "$i" > "$repo/changelog.d/ompkit-auto$i.md"
+	git -C "$repo" add -- "src/product-$i.txt" "changelog.d/ompkit-auto$i.md"
+	git -C "$repo" commit -qm "deliver test product $i" -m "Bead: ompkit-auto$i" --no-verify || exit 1
+	[ "$i" != 9 ] || nine=$(git -C "$repo" rev-parse HEAD)
+done
 c2=$(commit 0.1.1 "work two")
 c3=$(commit 0.1.1 "work three")
 git -C "$repo" push -q origin main 2>/dev/null
@@ -84,6 +93,12 @@ SH
 chmod +x "$TMP/ci-bin/gh"
 PATH="$TMP/ci-bin:$PATH"
 export PATH
+
+# Nine product beads plus a full-suite PASS and green CI still cannot cut,
+# including --now: that option only changes the time floor.
+tree "$nine" > "$PASS_TREES"
+out=$(sh "$AUTOCUT" plan --repo "$repo" --now 2>&1)
+if [ "$(field "$out" action)" = WAIT ] && printf '%s' "$out" | grep -q 'RELEASE_PRODUCT_FLOOR: 9/10'; then ok; else bad "nine product beads must wait: $out"; fi
 
 # A locally passing tree still cannot cut from red, absent, unreadable, or
 # input-overridable CI. A passed older candidate may be selected instead.

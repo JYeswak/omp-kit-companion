@@ -33,6 +33,20 @@ export function gitFixtureEnv(work: string): Record<string, string> {
 	return { ...env, GIT_CEILING_DIRECTORIES: work, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
 }
 
+/** Commit distinct, retained product changes under the real release-floor classifier. */
+export function seedProductBeads(repo: string, git: (args: string[]) => string): void {
+	mkdirSync(join(repo, "src"), { recursive: true });
+	mkdirSync(join(repo, "changelog.d"), { recursive: true });
+	for (let index = 1; index <= 10; index++) {
+		const source = `src/release-product-${index}.ts`;
+		const note = `changelog.d/ompkit-seed${index}.md`;
+		writeFileSync(join(repo, source), `export const behavior = ${index};\n`);
+		writeFileSync(join(repo, note), `### Added\n- Release fixture behavior ${index}.\n`);
+		git(["add", "--", source, note]);
+		git(["commit", "-qm", `Seed release product case ${index}`, "-m", `Bead: ompkit-seed${index}`]);
+	}
+}
+
 export function legacyReleaseReadme(version: string): string {
 	const readme = readFileSync(join(ROOT, "README.md"), "utf8");
 	const block = releaseBlock(readme);

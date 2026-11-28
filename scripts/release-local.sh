@@ -662,6 +662,8 @@ fi
 bounded 120 gh api --paginate --slurp "repos/$REPO/releases?per_page=100" >"$WORK/releases.json" || die "listing releases failed"
 BASE_TAG="$(bounded 30 sh "$ROOT/scripts/release-preflight.sh" releases "$VERSION" "$WORK/releases.json")" ||
 	die "release availability preflight failed"
+bounded 120 sh "$ROOT/scripts/release-preflight.sh" product_beads "$ROOT" "$BASE_TAG" "${SOURCE:-$MAIN}" ||
+	die "not enough landed product beads for a new release"
 # NEXTVERSION1: when origin/main already states this unpublished version, tag it as is; no prepare commit.
 if [ "$PREPARE" = 1 ] && git -C "$ROOT" show "$MAIN:package.json" | jq -e --arg v "$VERSION" '.version == $v' >/dev/null; then
 	PREPARE=0; SOURCE="$MAIN"
@@ -1268,6 +1270,8 @@ if [ "${RESUME_FROM_TAG:-0}" = 0 ]; then
 fi
 bounded 40 sh "$ROOT/scripts/release-preflight.sh" ci "$REPO" "$SOURCE" ||
 	die "CI_NOT_GREEN: CI changed while preparing $SOURCE; refusing tag"
+bounded 120 sh "$ROOT/scripts/release-preflight.sh" current_product_beads "$REPO" "$ROOT" "$SOURCE" "$BASE_TAG" ||
+	die "product bead floor or published base changed; refusing tag"
 if [ "${RESUME_FROM_TAG:-0}" = 0 ]; then
 # This transport includes every unchanged local pre-push hook, not just the network.
 # 360s focused selection + 180s machinery + 180s checker contracts + 60s cached
@@ -1301,10 +1305,13 @@ say "draft v$VERSION holds $(jq -r '[.assets[].name] | join(" ")' "$WORK/draft.j
 substep ''
 fi
 # -------------------------------------------------------------------------------------------------- 7. attest
+bounded 120 sh "$ROOT/scripts/release-preflight.sh" current_product_beads "$REPO" "$ROOT" "$SOURCE" "$BASE_TAG" ||
+	die "product bead floor or published base changed; draft stays unpublished"
 stage attest
 dispatched_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 substep attest.dispatch
-bounded 120 gh workflow run release.yml --repo "$REPO" --ref "v$VERSION" -f version="$VERSION" -f mode=local-attest ||
+bounded 120 gh workflow run release.yml --repo "$REPO" --ref "v$VERSION" \
+	-f version="$VERSION" -f mode=local-attest -f base_tag="$BASE_TAG" ||
 	die "dispatching release.yml (mode=local-attest) failed; is the workflow enabled?"
 substep attest.run-discovery
 RUN_ID=''

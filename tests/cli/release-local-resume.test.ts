@@ -3,6 +3,7 @@ import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, r
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixture, runFixtureAsync } from "./fixture-process.ts";
+import { seedProductBeads } from "./release-fixture.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const ROOT = join(import.meta.dir, "..", "..");
@@ -73,7 +74,7 @@ const PLATFORMS = ["darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu"] as c
 const assetName = (platform: string): string => `omp-kit-v${VERSION}-${platform}.tar.gz`;
 
 type DraftCase = "match" | "tampered" | "published" | "missing";
-function buildFixture(label: string, draft: DraftCase): {
+function buildFixture(label: string, draft: DraftCase, needsProductFloor = false): {
 	work: string; env: Record<string, string>; root: string; bin: string;
 } {
 	const work = realpathSync(ownedTmp(label, { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
@@ -94,6 +95,7 @@ function buildFixture(label: string, draft: DraftCase): {
 	mkdirSync(join(origin, "scripts"), { recursive: true });
 	mkdirSync(join(origin, "installer"), { recursive: true });
 	cpSync(join(ROOT, "scripts", "release-preflight.sh"), join(origin, "scripts", "release-preflight.sh"));
+	for (const name of ["release-notes.sh", "release-notes.ts"]) cpSync(join(ROOT, "scripts", name), join(origin, "scripts", name));
 	cpSync(join(ROOT, "scripts", "release-train.sh"), join(origin, "scripts", "release-train.sh"));
 	cpSync(join(ROOT, "scripts", "release_reuse.py"), join(origin, "scripts", "release_reuse.py"));
 	cpSync(join(ROOT, "scripts", "kitlib_io.py"), join(origin, "scripts", "kitlib_io.py"));
@@ -106,6 +108,10 @@ function buildFixture(label: string, draft: DraftCase): {
 	writeFileSync(join(origin, ".bun-version"), pinned + "\n");
 	git(origin, ["add", "-A"]);
 	git(origin, ["commit", "-qm", "fixture source"]);
+	if (needsProductFloor) {
+		git(origin, ["tag", "v0.0.0"]);
+		seedProductBeads(origin, args => git(origin, args));
+	}
 	git(origin, ["tag", `v${VERSION}`]);
 	const root = join(work, "root");
 	// --no-hardlinks: export-tree filesystems refuse the local-clone hardlink optimization.
@@ -269,7 +275,8 @@ async function recoverMissingDraft(
 	kind: "recover" | "wrong-sha" | "moved-sha" | "fresh" | "tag-unreadable" | "tag-object" | "existing-draft",
 	script = localScript,
 ) {
-	const fixture = buildFixture("tagdraft-" + kind, kind === "existing-draft" ? "match" : "missing");
+	const fixture = buildFixture("tagdraft-" + kind, kind === "existing-draft" ? "match" : "missing",
+		kind === "recover" || kind === "moved-sha" || kind === "fresh");
 	const { work, env, root, bin } = fixture;
 	try {
 		const source = new TextDecoder().decode(runFixture(["git", "-C", root, "rev-parse", "HEAD"],

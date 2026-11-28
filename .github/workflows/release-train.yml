@@ -197,6 +197,7 @@ jobs:
             --binding selection/selection.json --notes selection/release-notes.md --repository "$GITHUB_REPOSITORY" \
             --train-id "$train_id" --run-id "$RUN_ID" --phase "$phase"
           base_tag="$(jq -er .base_tag selection/selection.json)"
+          sh scripts/release-preflight.sh current_product_beads "$GITHUB_REPOSITORY" . "$sha" "$base_tag"
           sh scripts/release-notes.sh source --base-tag "$base_tag" --head "$sha" --version "$version" --output expected-notes.md
           cmp selection/release-notes.md expected-notes.md
           for platform in darwin-arm64-none linux-arm64-gnu linux-x64-gnu; do
@@ -230,10 +231,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.candidate.outputs.version }}
           SHA: ${{ steps.candidate.outputs.sha }}
+          BASE_TAG: ${{ steps.candidate.outputs.base_tag }}
         run: |
           set -euo pipefail
           git -c credential.helper= -c 'credential.helper=!gh auth git-credential' fetch origin main --tags
           [[ "$(git rev-parse "v$VERSION^{commit}")" == "$SHA" ]]
+          sh scripts/release-preflight.sh current_product_beads "$GITHUB_REPOSITORY" . "$SHA" "$BASE_TAG"
           files=(candidate-index/release-index.json)
           for platform in darwin-arm64-none linux-arm64-gnu linux-x64-gnu; do
             archive="archives/$platform/$(jq -er --arg p "$platform" '.assets[$p].filename' candidate-index/release-index.json)"
@@ -315,7 +318,10 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      # No package setup, builds, archives or candidate executables in this job.
+      # Only workflow tooling runs here, never candidate executables.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: .bun-version
       - name: Revalidate exact qualified authority immediately before tag creation
         id: authority
         env:
@@ -339,6 +345,7 @@ jobs:
           # release version in package.json (.version and .omp.version); a
           # mismatch refuses the tag (exit 4), never a silent mislabel.
           sh scripts/release-train.sh version-match --version "$VERSION" --sha "$SHA"
+          sh scripts/release-preflight.sh current_product_beads "$GITHUB_REPOSITORY" . "$SHA" "$BASE_TAG"
           python3 scripts/release_reuse.py require-attempt --repository "$GITHUB_REPOSITORY" --run producer-run.json
           # DEVID-SIGN-V1: a source whose checked-in switch says developer-id is signed by the local Developer ID
           # signer, which dispatches its signing run. Sources without the switch, and "adhoc", keep this dispatch.

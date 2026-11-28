@@ -581,7 +581,7 @@ for (const conclusion of ["success", "failure"]) {
 		mkdirSync(bin);
 		writeFileSync(join(bin, "gh"), `#!/bin/sh
 case "$*" in
-	"workflow run "*) exit 0 ;;
+	"workflow run release.yml --repo fixture/release --ref v0.0.0 -f version=0.0.0 -f mode=local-attest -f base_tag=v0.0.1") exit 0 ;;
 	"run list "*) echo 123 ;;
 	*"--log-failed"*) echo "runner failed" ;;
 	*"--log"*) echo "PUBLISHED draft=false" ;;
@@ -594,7 +594,7 @@ esac
 		writeFileSync(join(bin, "sleep"), '#!/bin/sh\nprintf "%s\\n" "$1" >>"$RELEASE_TEST_WORK/sleeps"\n');
 		chmodSync(join(bin, "gh"), 0o755); chmodSync(join(bin, "sleep"), 0o755);
 		try {
-			const result = await runFixtureAsync(["bash", "-c", stagePrelude + attestStage, "release-poll-test", work], {
+			const result = await runFixtureAsync(["bash", "-c", stagePrelude + "BASE_TAG=v0.0.1\n" + attestStage, "release-poll-test", work], {
 				cwd: ROOT, env: { ...process.env, TMPDIR: work, PATH: `${bin}:${process.env.PATH ?? ""}`, RELEASE_TEST_WORK: work, RELEASE_TEST_CONCLUSION: conclusion }, floor_s: 10,
 			});
 			const stderr = new TextDecoder().decode(result.stderr);
@@ -606,6 +606,17 @@ esac
 		}
 	}, fixtureDeadlineS(20) * 1_000);
 }
+
+test("local-attest rejects an unbound published base before GitHub access", () => {
+	const preflight = release.jobs["attest-local"]!.steps!.find(step => step.name?.startsWith("Require the tag ref"))!.run!;
+	const command = 'gh() { printf "unexpected GitHub access\\n"; return 99; }\n' + preflight;
+	const result = runFixture(["bash", "-c", command], { cwd: ROOT, env: { ...process.env,
+		VERSION: "0.2.162", GITHUB_REF: "refs/tags/v0.2.162", BASE_TAG: "" }, floor_s: 10 });
+	const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
+	expect(result.rc, output).toBe(4);
+	expect(output).toContain("allocated base_tag");
+	expect(output).not.toContain("unexpected GitHub access");
+});
 
 // CHANGELOGCATCHUP1 (ompkit-fp72.120.16.231): releases cut without a promote get their notes back one tag at a time,
 // from each tag's own bytes, and a refused install no longer skips the next-version advance.

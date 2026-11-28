@@ -16,6 +16,16 @@ This does not qualify source HEAD. `native-certification` separately qualifies
 the source-built candidate; release signing and signed-consumer gates remain
 responsible for qualifying the final signed bytes before publication.
 
+Before any new companion cut, `sh scripts/release-notes.sh product-beads --base-tag TAG --head SHA`
+must admit at least ten distinct landed product beads. Use the previous published stable tag and
+the exact candidate. The check prints both Git identities, the qualifying bead IDs, and how many
+remain. A bead must have its own in-range release note and a Git trailer on a change that survives
+in the candidate. Text additions and replacements are attributed to their surviving lines. If a
+change has no surviving lines to attribute (such as a deletion or binary replacement), only an
+exact before/after match counts. Version advances, test-only and evidence-only changes, and
+duplicate bead IDs do not count.
+Passing this check does not replace exact-source CI, independent full-suite qualification, or signing.
+
 ## End-to-end contract: published, installed, selected, and loaded are different
 
 The release environment is complete only when a substantive source change reaches

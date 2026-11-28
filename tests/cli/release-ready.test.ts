@@ -30,6 +30,7 @@ function file(path: string, body: string) {
 // Real, deliberately tiny repository: the actual suite/store produce the main PASS.
 // GitHub release-list transport alone is a fixture; source, runtime and verdict checks are real.
 let source = "";
+let belowFloor = "";
 function setup() {
 	if (source) return;
 	git("init", "-q", "--template=", "-b", "main");
@@ -58,6 +59,16 @@ function setup() {
 	for (const name of ci) file(`tests/cli/${name}.test.ts`, 'import { expect, test } from "bun:test"; test("candidate version", () => expect(JSON.parse(require("fs").readFileSync("package.json", "utf8")).version).toBe("0.2.99"));\n');
 	copyFileSync(join(ROOT, "scripts/gate-ci-only.tsv"), join(repo, "scripts/gate-ci-only.tsv"));
 	git("add", "--", "."); git("commit", "-qm", "fixture [test]");
+	git("tag", "v0.2.98");
+	for (let index = 1; index <= 10; index++) {
+		const path = `src/product-${index}.ts`;
+		const fragment = `changelog.d/ompkit-ready${index}.md`;
+		file(path, `export const behavior = ${index};\n`);
+		file(fragment, `### Added\n- Fixture ${index}.\n`);
+		git("add", "--", path, fragment);
+		git("commit", "-qm", `deliver fixture ${index}`, "-m", `Bead: ompkit-ready${index}`);
+		if (index === 9) belowFloor = git("rev-parse", "HEAD");
+	}
 	source = git("rev-parse", "HEAD");
 	git("update-ref", "refs/remotes/origin/main", source);
 	ok(["sh", join(repo, "scripts/full-suite-verdict.sh"), "--repo", repo, "--commit", source, "--judge-role", "main"]);
@@ -74,6 +85,8 @@ test("ready exact origin/main fixture reports READY; runtime-id mismatch is NOT-
 	const ready = JSON.parse(control.out);
 	expect(ready.status).toBe("READY");
 	expect(ready.commit).toBe(source);
+	const floor = ready.checks.find((row: { name: string }) => row.name === "product-bead-floor");
+	expect(JSON.parse(floor.detail)).toMatchObject({ count: 10, remaining: 0, source_sha: source });
 	const doctor = run(["bun", join(ROOT, "src/cli.ts"), "doctor", "--scope", "release", "--project", repo, "--json"]);
 	expect(doctor.rc, text(doctor.stdout) + text(doctor.stderr)).toBe(0);
 	const diagnosed = JSON.parse(text(doctor.stdout)).data;
@@ -89,6 +102,20 @@ test("ready exact origin/main fixture reports READY; runtime-id mismatch is NOT-
 	expect(dirty.line).toContain("metadata-clean: M README.md");
 	file("README.md", git("show", "HEAD:README.md") + "\n");
 }, fixtureDeadlineS(180) * 1000);
+
+test("release readiness names the exact product deficit on a nine-bead source", () => {
+	setup();
+	// The local origin advertises this exact older commit; neither revision changes release metadata.
+	git("update-ref", "refs/heads/main", belowFloor, source);
+	try {
+		const result = readiness();
+		expect(result.rc, result.out + result.err).toBe(1);
+		expect(JSON.parse(result.out).commit).toBe(belowFloor);
+		expect(JSON.parse(result.out).line).toContain("RELEASE_PRODUCT_FLOOR: 9/10");
+	} finally {
+		git("update-ref", "refs/heads/main", source, belowFloor);
+	}
+}, fixtureDeadlineS(60) * 1000);
 
 test("an unqualified source without ship signing remains NOT-READY", () => {
 	setup();

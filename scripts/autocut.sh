@@ -77,6 +77,11 @@ for sha in $(git -C "$ROOT" rev-list --first-parent --max-count="$max_candidates
 	candidate_version=$(git -C "$ROOT" show "$sha:package.json" | jq -r .version) || { skipped="$skipped ${sha%"${sha#??????????}"}:no-package"; continue; }
 	if ! newer "$candidate_version" "${base_tag#v}"; then skipped="$skipped ${sha%"${sha#??????????}"}:version-$candidate_version"; continue; fi
 	if git -C "$ROOT" rev-parse -q --verify "refs/tags/v$candidate_version" >/dev/null; then skipped="$skipped ${sha%"${sha#??????????}"}:tagged"; continue; fi
+	floor=$(sh "$(dirname -- "$0")/release-preflight.sh" product_beads "$ROOT" "$base_tag" "$sha" 2>&1) || {
+		printf '%s\n' "$floor" >&2
+		skipped="$skipped ${sha%"${sha#??????????}"}:product-bead-floor"
+		continue
+	}
 	export_dir="$WORK/export.$sha"
 	mkdir -p "$export_dir"
 	git -C "$ROOT" archive "$sha" | tar -xf - -C "$export_dir" || { skipped="$skipped ${sha%"${sha#??????????}"}:no-export"; continue; }
@@ -105,7 +110,7 @@ for sha in $(git -C "$ROOT" rev-list --first-parent --max-count="$max_candidates
 done
 
 if [ -z "$source_sha" ]; then
-	decide WAIT "no origin/main commit since $base_tag has a newer untagged version with a main-role PASS and green CI;${skipped:- no candidates}"
+	decide WAIT "no origin/main commit since $base_tag has ten product beads, a newer untagged version, a main-role PASS and green CI;${skipped:- no candidates}"
 	exit 0
 fi
 age_h=$(( ($(date +%s) - base_epoch) / 3600 ))

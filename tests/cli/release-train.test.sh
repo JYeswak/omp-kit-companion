@@ -373,5 +373,91 @@ check "version-match: missing package.json fails closed" 4 "$rc" "$out" "missing
 # 36. bad usage fails loud
 out=$(sh "$TRAIN" version-match --version 9.9.9 2>&1); rc=$?
 check "version-match: missing sha exits 2" 2 "$rc" "$out" "required"
+
+# RELEASEFLOOR1: the native producer reads committed history, not the worktree.
+NOTES="$(dirname -- "$TRAIN")/release-notes.sh"
+FLOOR="$TMP/product-floor"
+(
+	set -e
+	mkdir -p "$FLOOR"
+	cd "$FLOOR"
+	git init -q --template=
+	git config user.name 'Release Floor Fixture'
+	git config user.email 'release-floor@example.invalid'
+	printf '# Changelog\n\n## [Unreleased]\n\n## [0.2.31] - 2026-10-11\n\n- Base.\n' > CHANGELOG.md
+	mkdir -p src
+	printf 'deleted by a real product change\n' > src/remove-me.ts
+	git add CHANGELOG.md src/remove-me.ts
+	git commit -qm 'published stable base'
+	git tag v0.2.31
+	mkdir -p src changelog.d docs/evidence
+	add_product() {
+		printf 'export const fixture = %s;\n' "$2" > "src/product-$1.ts"
+		printf '### Fixed\n- Shipped fixture %s.\n' "$1" > "changelog.d/ompkit-product$1.md"
+		git add "src/product-$1.ts" "changelog.d/ompkit-product$1.md"
+		# Match the normal authored-message format: prose and own-line Bead
+		# in one paragraph, where Git's trailer formatter returns no value.
+		message=$(printf 'Verified user-visible behavior in the native fixture.\nAuthored-On: fixture\nBead: ompkit-product%s\nAgent: Fixture' "$1")
+		git commit -qm "deliver fixture $1" -m "$message"
+	}
+	for i in 1 2 3 4 5 6 7 8 9; do add_product "$i" "$i"; done
+	printf 'export const fixture = "superseded";\n' > src/product-1.ts
+	printf '### Fixed\n- Replaced before publication.\n' > changelog.d/ompkit-overwritten.md
+	git add src/product-1.ts changelog.d/ompkit-overwritten.md
+	git commit -qm 'later overwritten on the same product path' -m 'Bead: ompkit-overwritten'
+	add_product 1 19
+	printf '{"version":"0.2.32"}\n' > package.json
+	printf '### Changed\n- Prepared next version.\n' > changelog.d/ompkit-release-meta.md
+	git add package.json changelog.d/ompkit-release-meta.md
+	git commit -qm 'prepare next version' -m 'Bead: ompkit-release-meta'
+	printf '{}\n' > docs/evidence/report.json
+	printf '### Changed\n- Stored evidence.\n' > changelog.d/ompkit-report.md
+	git add docs/evidence/report.json changelog.d/ompkit-report.md
+	git commit -qm 'record evidence' -m 'Bead: ompkit-report'
+	add_product reverted 99
+	git revert --no-edit HEAD >/dev/null
+	git rev-parse HEAD > "$TMP/nine"
+	printf 'export const second = 10;\n' >> src/product-1.ts
+	printf '### Added\n- Two surviving beads share this file.\n' > changelog.d/ompkit-product10.md
+	git add src/product-1.ts changelog.d/ompkit-product10.md
+	git commit -qm 'deliver same-file product independently' -m 'Bead: ompkit-product10'
+	git rev-parse HEAD > "$TMP/ten"
+	rm src/remove-me.ts
+	printf '### Removed\n- Removed obsolete product file.\n' > changelog.d/ompkit-delete.md
+	git add -- src/remove-me.ts changelog.d/ompkit-delete.md
+	git commit -qm 'remove obsolete product file' -m 'Bead: ompkit-delete'
+	git rev-parse HEAD > "$TMP/eleven"
+	git branch v0.2.30 v0.2.31
+) || exit 1
+nine=$(cat "$TMP/nine")
+ten=$(cat "$TMP/ten")
+out=$(cd "$FLOOR" && sh "$NOTES" product-beads --base-tag v0.2.31 --head "$nine" 2>&1); rc=$?
+check "RELEASEFLOOR1: nine plus duplicate, metadata, report, revert and overwritten hunk refuse" 4 "$rc" "$out" '"count":9' '"remaining":1' 'RELEASE_PRODUCT_FLOOR' "$nine"
+out=$(cd "$FLOOR" && sh "$NOTES" product-beads --base-tag v0.2.31 --head "$ten" 2>&1); rc=$?
+check "RELEASEFLOOR1: ten admit with two surviving beads on the same path" 0 "$rc" "$out" '"count":10' '"remaining":0' '"ompkit-product1","ompkit-product10"' "$ten"
+eleven=$(cat "$TMP/eleven")
+BARE="$TMP/floor-bare"
+git init -q --bare --template= "$BARE" &&
+	git -C "$BARE" fetch -q "$FLOOR" "$eleven" 'refs/tags/v0.2.31:refs/tags/v0.2.31' || exit 1
+out=$(cd "$BARE" && sh "$NOTES" product-beads --base-tag v0.2.31 --head "$eleven" 2>&1); rc=$?
+check "RELEASEFLOOR1: bare signing mirror attributes an exact retained deletion" 0 "$rc" "$out" '"count":11' '"ompkit-delete"' "$eleven"
+out=$(cd "$FLOOR" && sh "$NOTES" product-beads --base-tag v0.2.30 --head "$ten" 2>&1); rc=$?
+check "RELEASEFLOOR1: missing base provides no false pass" 1 "$rc" "$out" 'rev-parse'
+PREFLIGHT="$(dirname -- "$TRAIN")/release-preflight.sh"
+mkdir -p "$TMP/floor-bin"
+cat > "$TMP/floor-bin/gh" <<'SH'
+#!/bin/sh
+[ "$*" = 'api --paginate --slurp repos/example/repo/releases?per_page=100' ] || exit 97
+printf '[[{"tag_name":"v0.2.31","draft":false,"prerelease":false},{"tag_name":"%s","draft":%s,"prerelease":false}]]\n' \
+	"${FLOOR_NEW_TAG:-v0.2.32}" "${FLOOR_NEW_DRAFT:-true}"
+SH
+chmod +x "$TMP/floor-bin/gh"
+out=$(PATH="$TMP/floor-bin:$PATH" sh "$PREFLIGHT" current_product_beads example/repo "$FLOOR" "$ten" v0.2.31 2>&1); rc=$?
+check "RELEASEFLOOR1: publisher admits the same ten; draft does not move base" 0 "$rc" "$out" '"count":10' "$ten"
+out=$(PATH="$TMP/floor-bin:$PATH" sh "$PREFLIGHT" current_product_beads example/repo "$FLOOR" "$nine" v0.2.31 2>&1); rc=$?
+check "RELEASEFLOOR1: prior eligible output cannot authorize another SHA" 4 "$rc" "$out" "$nine" '"count":9'
+out=$(FLOOR_NEW_DRAFT=false PATH="$TMP/floor-bin:$PATH" sh "$PREFLIGHT" current_product_beads example/repo "$FLOOR" "$ten" v0.2.31 2>&1); rc=$?
+check "RELEASEFLOOR1: a newly published base invalidates an otherwise eligible allocation" 4 "$rc" "$out" 'RELEASE_PRODUCT_BASE_MOVED' 'v0.2.32'
+
 printf '%s pass, %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

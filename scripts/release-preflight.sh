@@ -24,12 +24,31 @@ release_preflight_verdict() (
 	. ./fixed-env.sh
 	python3 -B -m full-suite-verdict-store require-pass --repo "$1" --tree "$2" --role main --judge-root "$3" --suite-root "$3"
 )
+release_preflight_published_base() {
+	jq -er '[.[][] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last'
+}
+release_preflight_product_beads() (
+	# REPO BASE_TAG SOURCE_COMMIT. Resolve both from Git, not a prior readiness report.
+	notes=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/release-notes.sh || exit 1
+	cd "$1" || exit 1
+	sh "$notes" product-beads --base-tag "$2" --head "$3"
+)
+release_preflight_current_product_beads() {
+	# REPOSITORY REPO SOURCE_COMMIT [EXPECTED_BASE_TAG]. Recheck publication state before writes.
+	releases=$(gh api --paginate --slurp "repos/$1/releases?per_page=100") || return 1
+	base=$(printf '%s\n' "$releases" | release_preflight_published_base) || return 1
+	if [ -n "${4:-}" ] && [ "$base" != "$4" ]; then
+		printf 'RELEASE_PRODUCT_BASE_MOVED: allocated %s; current published base is %s\n' "$4" "$base" >&2
+		return 4
+	fi
+	release_preflight_product_beads "$2" "$base" "$3"
+}
 release_preflight_releases() {
 	# VERSION RELEASES_JSON (gh api --paginate --slurp output).
 	[ "$(jq --arg t "v$1" '[.[][] | select(.tag_name == $t)] | length' "$2")" = 0 ] || {
 		printf 'a release or draft for v%s already exists\n' "$1"; return 1;
 	}
-	base=$(jq -er '[.[][] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last' "$2") || {
+	base=$(release_preflight_published_base < "$2") || {
 		printf 'no published base release\n'; return 1;
 	}
 	python3 -c 'import sys; a, b = (tuple(map(int, v.split("."))) for v in sys.argv[1:]); sys.exit(0 if a > b else 1)' "$1" "${base#v}" || {
@@ -85,7 +104,7 @@ release_preflight_ci() {
 check=${1:-}
 [ "$#" -eq 0 ] || shift
 case "$check" in
-	version|signing|attestation|verdict|releases|export|next_version|ci)
+	version|signing|attestation|verdict|releases|export|next_version|ci|product_beads|current_product_beads)
 		"release_preflight_$check" "$@" ;;
-	*) printf 'release-preflight: expected version|signing|attestation|verdict|releases|export|next_version|ci\n' >&2; exit 2 ;;
+	*) printf 'release-preflight: expected version|signing|attestation|verdict|releases|export|next_version|ci|product_beads|current_product_beads\n' >&2; exit 2 ;;
 esac

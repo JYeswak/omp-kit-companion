@@ -56,7 +56,7 @@ say "work directory (kept as evidence): $WORK"
 
 # 1. Preflight: tools, signing keychain, identity by SHA-1, certificate validity, notary credentials, GitHub auth.
 [ "$(uname -s)" = Darwin ] || die "the signer runs on macOS"
-for tool in codesign xcrun security spctl ditto plutil openssl unzip shasum gh git jq python3; do
+for tool in codesign xcrun security spctl ditto plutil openssl unzip shasum gh git jq python3 bun; do
 	command -v "$tool" >/dev/null || die "missing tool: $tool"
 done
 [ -f "$KEYCHAIN" ] || die "signing keychain $KEYCHAIN not found (set OMP_KIT_SIGNING_KEYCHAIN)"
@@ -151,6 +151,9 @@ mirror show "$SOURCE:scripts/omp-compat.json" >"$WORK/omp-config.json"
 	--version "$VERSION" --run "$WORK/producer-run.json" --artifacts "$WORK/producer-artifacts.json" \
 	--binding "$SELECTION_DIR/selection.json" --notes "$SELECTION_DIR/release-notes.md" --repository "$REPO" \
 	--train-id "$TRAIN" --run-id "$RUN_ID" --phase qualify) || die "the qualification does not verify"
+BASE_TAG="$(jq -er .base_tag "$SELECTION_DIR/selection.json")" || die "the selection has no published base"
+sh "$ROOT/scripts/release-preflight.sh" current_product_beads "$REPO" "$MIRROR" "$SOURCE" "$BASE_TAG" ||
+	die "the qualified source does not meet the current product bead floor"
 python3 "$ROOT/scripts/release_reuse.py" verify-archive --index "$INDEX_DIR/release-index.json" \
 	--platform "$PLATFORM" --archive-dir "$CANDIDATE_DIR" || die "the darwin candidate differs from the qualified index"
 
@@ -208,6 +211,8 @@ fi
 # release version in package.json (`gh release create --verify-tag` below
 # creates the tag); a mismatch refuses, never a silent mislabel.
 sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$SOURCE" --repo "$ROOT" || die "package.json version does not match v$VERSION at $SOURCE; refusing tag"
+sh "$ROOT/scripts/release-preflight.sh" current_product_beads "$REPO" "$MIRROR" "$SOURCE" "$BASE_TAG" ||
+	die "product bead floor or published base changed; refusing draft"
 # 9. Draft: create it or require the existing one to be this cut's draft; upload without ever clobbering.
 gh api --paginate --slurp "repos/$REPO/releases?per_page=100" |
 	jq --arg tag "v$VERSION" '[.[][] | select(.tag_name == $tag)]' >"$WORK/releases.json"

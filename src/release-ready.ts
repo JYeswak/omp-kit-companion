@@ -62,7 +62,11 @@ export function inspectReleaseReady(repo: string, kitRoot: string): ReleaseReady
 					if (releases.ok) {
 						const path = join(temp.path, "readiness-releases.json");
 						writeFileSync(path, releases.stdout);
-						probe("release-availability", ["sh", library, "releases", version, path]);
+						const available = probe("release-availability", ["sh", library, "releases", version, path]);
+						if (available.ok) {
+							const floor = probe("product-bead-floor", ["sh", library, "product_beads", repo, available.stdout, commit]);
+							if (floor.ok) checks[checks.length - 1]!.detail = floor.stdout;
+						}
 					}
 					const dirty = probe("metadata-clean", ["git", "status", "--porcelain", "--untracked-files=all", "--", "package.json", "README.md"]);
 					if (dirty.ok && dirty.stdout) checks[checks.length - 1] = { name: "metadata-clean", ok: false, detail: dirty.stdout };

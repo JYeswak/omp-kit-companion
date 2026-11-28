@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 // [Unreleased] (concurrent agents never conflict on one file): `fold` drains them into it.
 type Options =
 	| { mode: "check"; baseRef: string; head: string }
+	| { mode: "product-beads"; baseRef: string; head: string }
 	| { mode: "fold"; write: boolean }
 	| { mode: "promote"; version: string; date: string; write: boolean }
 	| { mode: "source"; baseTag: string; head: string; version: string; output: string }
@@ -56,6 +57,9 @@ const FRAGMENT_PATH = /^changelog\.d\/[a-z0-9]+(?:[.-][a-z0-9]+)*\.md$/;
 const SHIPPED_PATH = /^(?:src|rules|scripts|extensions|installer)\//;
 const STABLE_TAG = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 const BEAD_SLUG = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
+const MIN_PRODUCT_BEADS = 10;
+const PRODUCT_ROOTS: Readonly<Record<string, true>> = { src: true, rules: true, scripts: true, extensions: true, installer: true, skills: true, policy: true, docs: true };
+const EVIDENCE_DIRS: Readonly<Record<string, true>> = { tests: true, test: true, fixtures: true, fixture: true, evidence: true, reports: true };
 /** `git commit --verbose` appends the diff below this line; git drops it from the message. */
 const SCISSORS = "# ------------------------ >8 ------------------------";
 /** The commit-msg member prints this refusal; bound it (git error text can be long). */
@@ -77,13 +81,18 @@ try {
 	process.exitCode = error instanceof Refusal ? 4 : 1;
 }
 
-function run(): void {
-	const options = parseArguments(process.argv.slice(2));
+function worktreeRoot(): string {
 	const rootResult = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], {
 		cwd: process.cwd(), stdout: "pipe", stderr: "pipe",
 	});
 	if (rootResult.exitCode !== 0) fail(`not in a Git worktree: ${rootResult.stderr.toString().trim()}`);
-	const root = resolve(rootResult.stdout.toString().trim());
+	return resolve(rootResult.stdout.toString().trim());
+}
+
+function run(): void {
+	const options = parseArguments(process.argv.slice(2));
+	// The history-only floor works in bare mirrors as well as worktrees.
+	const root = options.mode === "product-beads" ? process.cwd() : worktreeRoot();
 	const gitRaw: Git = (args) => {
 		const child = Bun.spawnSync(["git", ...args], { cwd: root, stdout: "pipe", stderr: "pipe" });
 		const stdout = child.stdout.toString();
@@ -102,9 +111,18 @@ function run(): void {
 	if (options.mode === "catch-up") return runCatchUp(options, git, gitRaw, gitOk);
 	if (options.mode === "residual") return runResidual(options);
 
-	const base = git(["rev-parse", "--verify", "--end-of-options", `${options.baseRef}^{commit}`]);
+	const baseRef = options.mode === "product-beads" ? `refs/tags/${options.baseRef}` : options.baseRef;
+	const base = git(["rev-parse", "--verify", "--end-of-options", `${baseRef}^{commit}`]);
 	const head = git(["rev-parse", "--verify", "--end-of-options", `${options.head}^{commit}`]);
 	if (git(["merge-base", base, head]) !== base) fail(`base tag ${options.baseRef} is not an ancestor of ${options.head}`);
+	if (options.mode === "product-beads") {
+		const beads = collectProductBeads(git, gitRaw, gitOk, base, head);
+		const remaining = Math.max(0, MIN_PRODUCT_BEADS - beads.length);
+		console.log(JSON.stringify({ base_tag: options.baseRef, base_sha: base, source_sha: head,
+			minimum: MIN_PRODUCT_BEADS, count: beads.length, remaining, beads }));
+		if (remaining !== 0) refuse(`RELEASE_PRODUCT_FLOOR: ${beads.length}/${MIN_PRODUCT_BEADS} product beads; land ${remaining} more before cutting`);
+		return;
+	}
 	const history = collectHistory(git, gitRaw, gitOk, base, head, options.baseRef, options.head);
 	console.log(`OK: ${history.mergedPrs.length} merged PRs and ${history.directCommits.length} direct commits have release-note coverage in ${options.baseRef}..${options.head}`);
 	for (const pr of history.mergedPrs) {
@@ -128,7 +146,7 @@ function run(): void {
 }
 
 function parseArguments(args: string[]): Options {
-	const usage = "Usage: release-notes.sh check (--base-tag vX.Y.Z | --base-ref REF) --head REF | source --base-tag vX.Y.Z --head REF --version X.Y.Z --output PATH | fold [--write] | promote --version X.Y.Z --date YYYY-MM-DD [--write] | notes --version X.Y.Z [--floor X.Y.Z] [--ref REF] [--output PATH] | fragment-for (--bead ID | --message FILE) [--base REF] | catch-up --base-tag vX.Y.Z --through-tag vX.Y.Z [--head REF] [--output DIR] [--next-version X.Y.Z] | residual --released FILE --current FILE";
+	const usage = "Usage: release-notes.sh check (--base-tag vX.Y.Z | --base-ref REF) --head REF | product-beads --base-tag vX.Y.Z --head REF | source --base-tag vX.Y.Z --head REF --version X.Y.Z --output PATH | fold [--write] | promote --version X.Y.Z --date YYYY-MM-DD [--write] | notes --version X.Y.Z [--floor X.Y.Z] [--ref REF] [--output PATH] | fragment-for (--bead ID | --message FILE) [--base REF] | catch-up --base-tag vX.Y.Z --through-tag vX.Y.Z --head REF [--output DIR] [--next-version X.Y.Z] | residual --released FILE --current FILE";
 	const mode = args[0];
 	if (mode === "check") {
 		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--base-ref": "value", "--head": "value" }, usage);
@@ -138,6 +156,12 @@ function parseArguments(args: string[]): Options {
 		const head = requiredValue(values, "--head", usage);
 		if (tagged) validateBaseTag(baseRef, usage);
 		return { mode, baseRef, head };
+	}
+	if (mode === "product-beads") {
+		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--head": "value" }, usage);
+		const baseRef = requiredValue(values, "--base-tag", usage);
+		if (!STABLE_TAG.test(baseRef)) fail(usage);
+		return { mode, baseRef, head: requiredValue(values, "--head", usage) };
 	}
 	if (mode === "source") {
 		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--head": "value", "--version": "value", "--output": "value" }, usage);
@@ -400,6 +424,97 @@ function resolveBeadFragment(bead: string, fragments: Fragment[]): { expected: s
 	return { expected, fragment: fragments.find(candidate => expected.includes(candidate.path)) };
 }
 
+function productPath(path: string): boolean {
+	if (path === "README.md") return true;
+	const segments = path.split("/");
+	const name = segments.pop()!;
+	return segments.length > 0 && Object.hasOwn(PRODUCT_ROOTS, segments[0]!) &&
+		!segments.some(segment => Object.hasOwn(EVIDENCE_DIRS, segment)) &&
+		!name.includes(".test.") && !name.endsWith("_test.py");
+}
+
+function productChanges(gitRaw: Git, before: string, after: string): Map<string, string> {
+	const fields = gitRaw(["diff", "--raw", "--no-abbrev", "--no-renames", "-z", before, after]).split("\0");
+	const changes = new Map<string, string>();
+	for (let i = 0; i + 1 < fields.length; i += 2) {
+		const path = fields[i + 1]!;
+		if (productPath(path)) changes.set(path, fields[i]!);
+	}
+	return changes;
+}
+
+function retainedLineRanges(gitRaw: Git, base: string, head: string, path: string): [number, number][] {
+	const patch = gitRaw(["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+		"--no-renames", "--unified=0", base, head, "--", path]);
+	const ranges: [number, number][] = [];
+	for (const line of patch.split("\n")) {
+		if (!line.startsWith("@@ ")) continue;
+		const [, , post] = line.split(" ", 4);
+		if (!post?.startsWith("+")) fail(`unexpected Git hunk header for ${path}`);
+		const [start, count = 1] = post!.slice(1).split(",").map(Number);
+		if (count > 0) ranges.push([start!, start! + count]);
+	}
+	return ranges;
+}
+
+/** The same own-line trailer form used by the commit-message notes gate. */
+function commitBeads(body: string): string[] {
+	return [...body.matchAll(/^[ \t]*Bead:[ \t]*(\S+)[ \t]*$/gm)].map(match => match[1]!);
+}
+
+function collectProductBeads(git: Git, gitRaw: Git, gitOk: (args: string[]) => boolean, base: string, head: string): string[] {
+	const net = productChanges(gitRaw, base, head);
+	if (net.size === 0) return [];
+	const range = rangeFragments(git, gitOk, base, base, head, head);
+	const fragments = [...range.fragments, ...range.folded];
+	const fields = gitRaw([
+		"log", "--first-parent", "--format=%H%x00%B%x00", `${base}..${head}`,
+	]).split("\0");
+	const eligible = new Map<string, string>();
+	const noteOwners = new Map<string, string>();
+	const ambiguousNotes = new Set<string>();
+	const noteForBead = new Map<string, string>();
+	for (let index = 0; index + 1 < fields.length; index += 2) {
+		const hash = fields[index]!.trim();
+		const body = fields[index + 1]!;
+		const beads = commitBeads(body);
+		const bead = beads[0];
+		if (!hash || beads.length !== 1 || !bead?.startsWith("ompkit-") || !BEAD_SLUG.test(bead) ||
+			body.split("\n").some(line => line.trimStart().startsWith("[no-changelog]"))) continue;
+		const note = resolveBeadFragment(bead, fragments)?.fragment?.path;
+		if (!note) continue;
+		const owner = noteOwners.get(note);
+		if (owner && owner !== bead) ambiguousNotes.add(note);
+		else noteOwners.set(note, bead);
+		noteForBead.set(bead, note);
+		eligible.set(hash, bead);
+	}
+	for (const [hash, bead] of eligible) {
+		if (ambiguousNotes.has(noteForBead.get(bead)!)) eligible.delete(hash);
+	}
+	const beads = new Set<string>();
+	if (eligible.size === 0) return [];
+	for (const [path, netDelta] of net) {
+		const ranges = retainedLineRanges(gitRaw, base, head, path);
+		if (ranges.length === 0) {
+			// No output line to blame (deletion, mode, binary or empty file).
+			// Require the last change to prove the exact before/after transition.
+			const last = git(["--literal-pathspecs", "log", "--first-parent", "-1", "--format=%H", `${base}..${head}`, "--", path]);
+			const bead = eligible.get(last);
+			if (bead && productChanges(gitRaw, `${last}^1`, last).get(path) === netDelta) beads.add(bead);
+			continue;
+		}
+		const blame = gitRaw(["--literal-pathspecs", "blame", "--first-parent", "--no-textconv", "--incremental", `${base}..${head}`, "--", path]);
+		for (const line of blame.split("\n")) {
+			const [hash, , start, count] = line.split(" ", 4);
+			const bead = eligible.get(hash!);
+			if (bead && !beads.has(bead) && ranges.some(([lo, hi]) => Number(start) < hi && Number(start) + Number(count) > lo))
+				beads.add(bead);
+		}
+	}
+	return [...beads].sort();
+}
+
 /**
  * The one notes rule for a direct commit: release check/source apply it to every first-parent
  * commit, and the commit-msg member (scripts/check-commit-notes.sh, via `fragment-for --message`)
@@ -420,7 +535,7 @@ function judgeDirectCommit(label: string, shortHash: string | undefined, body: s
 		return { verdict: "waived", reason };
 	}
 
-	const beads = [...body.matchAll(/^[ \t]*Bead:[ \t]*(\S+)[ \t]*$/gm)].map(match => match[1]!);
+	const beads = commitBeads(body);
 	const referenced = shortHash ? fragments.find(candidate => candidate.content.includes(`(commit ${shortHash})`)) : undefined;
 	if (referenced) return { verdict: "covered", bead: beads[0] ?? "-", fragment: referenced };
 	if (beads.length !== 1) {

@@ -3,6 +3,8 @@ import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "nod
 import { join } from "node:path";
 import { YAML } from "bun";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { gitFixtureEnv, seedProductBeads } from "./release-fixture.ts";
+import { runFixture } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
 
 /** Exercise the production publication step; service stubs are not certification proof. */
@@ -19,12 +21,37 @@ test("actual publication step blocks incomplete SBOMs and failed repair before s
 		mkdirSync(join(scratch, "candidate-index"));
 		mkdirSync(join(scratch, "selection"));
 		symlinkSync(join(repo, "scripts/release-train.sh"), join(scratch, "scripts/release-train.sh"));
+		for (const name of ["release-preflight.sh", "release-notes.sh", "release-notes.ts"])
+			symlinkSync(join(repo, "scripts", name), join(scratch, "scripts", name));
+		const env = { ...gitFixtureEnv(scratch), GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+			GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid" };
+		const git = (args: string[]) => {
+			const result = runFixture(["git", ...args], { cwd: scratch, env, floor_s: 10 });
+			if (result.rc !== 0) throw new Error(new TextDecoder().decode(result.stderr));
+			return new TextDecoder().decode(result.stdout).trim();
+		};
+		git(["init", "-q", "--template="]);
+		git(["commit", "-qm", "published base", "--allow-empty"]);
+		git(["tag", "v0.2.40"]);
+		seedProductBeads(scratch, git);
+		const source = git(["rev-parse", "HEAD"]);
+		git(["tag", "v0.2.41", source]);
 		writeFileSync(join(scratch, "selection/release-notes.md"), "- Fixture notes only.\n");
-		// The workflow passes command-local "-c credential.helper=..." options before the subcommand; the stub must still dispatch on the subcommand.
-		writeFileSync(join(scratch, "bin/git"), `#!/bin/sh\nwhile [ "$1" = "-c" ]; do shift 2; done\ncase "$1" in\nfetch) exit 0;;\nrev-parse) printf '%s\\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;;\ntag) printf '%s\\n' v0.2.41;;\n*) exit 99;;\nesac\n`, { mode: 0o700 });
-		// External services are isolated only for this SBOM precondition test;
-		// their successful stubs are NOT certification or signature evidence.
-		writeFileSync(join(scratch, "bin/gh"), `#!/bin/sh\ncase "$1 $2" in\n"api "*) printf '%s\\n' '[]';;\n"release create") printf '%s\\n' DRAFT_FIXTURE_ONLY;;\n"release edit") printf '%s\\n' PUBLICATION_FIXTURE_ONLY;;\n*) exit 99;;\nesac\n`, { mode: 0o700 });
+		// No live remote is used; the fixture already contains the exact tagged Git history.
+		writeFileSync(join(scratch, "bin/git"), `#!/bin/sh\nwhile [ "$1" = "-c" ]; do shift 2; done\nif [ "$1 $2 $3" = 'fetch origin main' ]; then exit 0; fi\nexec "$RELEASE_TEST_GIT" "$@"\n`, { mode: 0o700 });
+		writeFileSync(join(scratch, "bin/gh"), `#!/bin/sh
+case "$1 $2" in
+"api --paginate")
+	if [ "$PUBLISHED_BASE_CHANGED" = 1 ]; then
+		echo '[[{"tag_name":"v0.2.41","draft":false,"prerelease":false}]]'
+	else
+		echo '[[{"tag_name":"v0.2.40","draft":false,"prerelease":false}]]'
+	fi ;;
+"release create") echo DRAFT_FIXTURE_ONLY ;;
+"release edit") echo PUBLICATION_FIXTURE_ONLY ;;
+*) exit 99 ;;
+esac
+`, { mode: 0o700 });
 		// The repair helper has independent native-shaped asset/authority tests.
 		// This executable workflow test isolates only the SBOM/finalization seam.
 		writeFileSync(join(scratch, "bin/python3"), `#!/bin/sh\ncase "$1 $2" in\n"scripts/release_reuse.py repair-release") test "\${REPAIR_FAIL:-0}" != 1;;\n"scripts/release_reuse.py latest-flag") printf '%s\\n' --latest;;\n*) exit 99;;\nesac\n`, { mode: 0o700 });
@@ -39,8 +66,9 @@ test("actual publication step blocks incomplete SBOMs and failed repair before s
 		writeFileSync(join(scratch, "candidate-index/release-index.json"), JSON.stringify({ assets }));
 		const run = (extra: Record<string, string> = {}) => Bun.spawnSync(["bash", "-c", body], {
 			cwd: scratch, stdout: "pipe", stderr: "pipe",
-			env: { ...process.env, PATH: `${join(scratch, "bin")}:${process.env.PATH}`, VERSION: "0.2.41",
-				SHA: "a".repeat(40), GITHUB_REPOSITORY: "fixture/not-a-live-release", REPAIR_FAIL: "0", ...extra },
+			env: { ...env, PATH: `${join(scratch, "bin")}:${process.env.PATH}`, VERSION: "0.2.41",
+				BASE_TAG: "v0.2.40", SHA: source, GITHUB_REPOSITORY: "fixture/not-a-live-release",
+				RELEASE_TEST_GIT: Bun.which("git")!, REPAIR_FAIL: "0", PUBLISHED_BASE_CHANGED: "0", ...extra },
 		});
 		const zero = run();
 		expect(zero.exitCode).not.toBe(0);
@@ -59,6 +87,11 @@ test("actual publication step blocks incomplete SBOMs and failed repair before s
 		const failedRepair = run({ REPAIR_FAIL: "1" });
 		expect(failedRepair.exitCode).not.toBe(0);
 		expect(failedRepair.stdout.toString()).not.toContain("PUBLICATION_FIXTURE_ONLY");
+		const moved = run({ PUBLISHED_BASE_CHANGED: "1" });
+		expect(moved.exitCode).toBe(4);
+		expect(moved.stderr.toString()).toContain("RELEASE_PRODUCT_BASE_MOVED");
+		expect(moved.stdout.toString()).not.toContain("DRAFT_FIXTURE_ONLY");
+		expect(moved.stdout.toString()).not.toContain("PUBLICATION_FIXTURE_ONLY");
 	} finally {
 		rmSync(scratch, { recursive: true, force: true });
 	}
