@@ -216,6 +216,27 @@ check("planted: dropping the Ubuntu core exclusion or sharding macOS is rejected
   const macShards = suiteLegs({ ...planned, suite_includes: JSON.stringify([1, 2, 3, 4].map(n => ({ os: "macos-15", suite: `core-${n}` }))) }, "schedule");
   assert.ok(macShards["macos-15"].length > 3, "macOS shard legs must raise the macOS leg count");
 });
+check("the real Git contracts run once per OS without adding load to the scheduled macOS core leg", () => {
+  const step = ci.jobs["cli-contracts-suites"].steps.find(step => step.name === "Exercise real Git import and hook installer contracts");
+  assert.ok(step?.run, "lost the real Git contract producer");
+  const routes = (planned, event, inputs) => Object.fromEntries(
+    Object.entries(suiteLegs(planned, event, inputs)).map(([os, suites]) => [
+      os,
+      suites.filter(suite => evaluate(step.if, {
+        matrix: { os, suite },
+        runner: { os: os.startsWith("macos-") ? "macOS" : "Linux" },
+        needs: { "resolve-omp-versions": { outputs: planned } },
+      })),
+    ]),
+  );
+  assert.deepEqual(routes(plannedOutputs({ SHARDED: "true" }), "push"), { "ubuntu-24.04": ["kit-update"] });
+  assert.deepEqual(routes(plannedOutputs({ SHARD_UBUNTU: "true" }), "schedule"),
+    { "ubuntu-24.04": ["kit-update"], "macos-15": ["kit-update"] });
+  assert.deepEqual(routes(outputs, "workflow_dispatch", { version: "1.2.3", reuse_fast_ci: false }),
+    { "ubuntu-24.04": ["core"], "macos-15": ["kit-update"] });
+  assert.deepEqual(routes(outputs, "workflow_dispatch", { version: "1.2.3", reuse_fast_ci: true }),
+    { "macos-15": ["kit-update"] });
+});
 check("signing and local-attest do not overlap qualification", () => {
   assert.ok(ceiling(ci, release, { ...qualification, signing: true }).total <= 5);
   assert.equal(ceiling(ci, release, { ...qualification, mode: "local-attest" }).total, 0);

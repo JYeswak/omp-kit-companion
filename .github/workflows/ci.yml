@@ -222,10 +222,10 @@ jobs:
     # 40 min cap (run 39073904994); the 25m41s the cap was first sized from was cut short by the older
     # 30 min cancellation. Ubuntu groups take 7.9-10.8 min (13 push runs). macOS groups are not yet
     # measured, so no speedup is claimed. Every check still runs; the cap is unchanged.
-    # On push and pull_request the core group runs as core-1..core-N (`bun test --shard`, balanced by the
-    # per-file durations in .github/core-test-timings.json, measured on push run 39185830559: 172 files,
-    # 562 s serial, largest file 107 s). Steps that run once per core group run on core-1 (or core); the
-    # cli-contracts summary proves the shards together ran every core test file exactly once.
+    # On push and pull_request the core group runs as core-1..core-N. Bun uses 438
+    # JUnit file durations from green runs 45928022285 and 45936047690. The real-Git
+    # suite runs in the kit-update lane on sharded runs so its fixed cost does not
+    # overload core-1. cli-contracts still proves exactly-once core coverage.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -249,7 +249,7 @@ jobs:
           base_tag="$(python3 scripts/release_reuse.py notes-floor --repository "$GITHUB_REPOSITORY" --source-sha "$GITHUB_SHA")"
           sh scripts/release-notes.sh check --base-tag "$base_tag" --head "$GITHUB_SHA"
       - name: Install bubblewrap for Linux integration containment
-        if: runner.os == 'Linux' && (startsWith(matrix.suite, 'core') || matrix.suite == 'package-release')
+        if: runner.os == 'Linux' && (startsWith(matrix.suite, 'core') || matrix.suite == 'package-release' || (matrix.suite == 'kit-update' && needs.resolve-omp-versions.outputs.core_shards != '1'))
         run: |
           set -euo pipefail
           # Ubuntu provides bubblewrap; third-party runner feeds are not dependencies.
@@ -295,7 +295,8 @@ jobs:
       - name: Generate ignored source manifest for CLI contracts
         run: sh scripts/build-manifest.sh
       - name: Exercise real Git import and hook installer contracts
-        if: matrix.suite == 'core' || matrix.suite == 'core-1'
+        # Scheduled macOS core hit 40m with 449s spent here; its existing kit-update leg took 754s (run 45973339035).
+        if: (matrix.suite == 'core' && runner.os == 'Linux') || (matrix.suite == 'kit-update' && (runner.os == 'macOS' || needs.resolve-omp-versions.outputs.core_shards != '1'))
         env:
           TMPDIR: ${{ github.workspace }}/var/agent-tmp
         run: |
