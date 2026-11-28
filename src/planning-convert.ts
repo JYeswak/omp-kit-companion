@@ -1199,6 +1199,83 @@ function runPlanningConvertApply(
 		return refuse("planned native dependency edges would create a cycle in the merged tracker graph");
 	}
 
+	// Reused (new) identities never amend acceptance, including terminal targets.
+	// Compare logical criteria in both directions, preserving checkbox progress.
+	for (const item of items) {
+		const target = targetBySlug.get(item.slug);
+		if (!target?.reused || !target.details) continue;
+		const planned = acceptanceBoxes(item.acceptance).map(criterionText);
+		const stored = acceptanceBoxes(target.details.acceptance_criteria).map(criterionText);
+		if (missingBoxTexts(planned, stored).length || missingBoxTexts(stored, planned).length)
+			return refuse("REUSED_CONTENT_MISMATCH: target " + target.id + " under " + data.mission + ":" + item.slug
+				+ " has different acceptance; use an explicit existing target and --amend-acceptance to append changed criteria");
+	}
+	const plannedAmendments: { details: NativeIssueDetails; amended: AmendedTarget }[] = [];
+	const amendmentGroups = new Map<string, { details: NativeIssueDetails; items: PlanItem[] }>();
+	for (const item of items) {
+		if (item.existing === "(new)") continue;
+		const target = targetBySlug.get(item.slug);
+		if (!target || target.kind !== "existing" || !target.id || !target.details || target.terminal) continue;
+		const group = amendmentGroups.get(target.id) ?? { details: target.details, items: [] };
+		group.items.push(item);
+		amendmentGroups.set(target.id, group);
+	}
+	for (const [id, group] of amendmentGroups) {
+		const noteLines = splitLines(group.details.notes).map((line) => line.trim());
+		const acceptanceAdded: string[] = [];
+		const contributionsAdded: string[] = [];
+		const storedTexts = acceptanceBoxes(group.details.acceptance_criteria).map(criterionText);
+		const pendingTexts = [...storedTexts];
+		let staleSlug: string | null = null;
+		let staleMissing: string[] = [];
+		let amendedChanged = false;
+		for (const item of group.items) {
+			const token = data.mission + ":" + item.slug;
+			if (!noteLines.includes(token)) {
+				const missing = missingBoxTexts(acceptanceBoxes(item.acceptance).map(criterionText), pendingTexts);
+				acceptanceAdded.push(...missing);
+				pendingTexts.push(...missing);
+				contributionsAdded.push(token);
+				continue;
+			}
+			const itemBoxes = acceptanceBoxes(item.acceptance);
+			const itemCriteria = itemBoxes.map(criterionText);
+			const missing = missingBoxTexts(itemCriteria, pendingTexts);
+			if (!missing.length) continue;
+			if (!amendAcceptance) {
+				staleSlug = item.slug;
+				staleMissing = missing;
+				break;
+			}
+			for (const text of missing) {
+				acceptanceAdded.push(text);
+				pendingTexts.push(text);
+			}
+			amendedChanged = true;
+		}
+		if (staleSlug !== null) {
+			data.amended_targets.push({
+				id, slugs: group.items.map((item) => item.slug), acceptance_added: [], contributions_added: [],
+				status: "STALE_ACCEPTANCE", missing_acceptance: staleMissing, stored_acceptance: storedTexts,
+			});
+			return refuse("target " + id + " has STALE_ACCEPTANCE under contribution " + data.mission + ":" + staleSlug + ": the plan changed acceptance boxes that are not stored; re-run with --amend-acceptance to append them under the native revision gate");
+		}
+		const itemCriteria = new Set(group.items.flatMap((item) => acceptanceBoxes(item.acceptance).map((box) => normalizeBoxText(criterionText(box)))));
+		const superseded = storedTexts.filter((text) => !itemCriteria.has(normalizeBoxText(text)));
+		const amended: AmendedTarget = {
+			id, slugs: group.items.map((item) => item.slug), acceptance_added: acceptanceAdded,
+			contributions_added: contributionsAdded, status: acceptanceAdded.length || contributionsAdded.length ? "AMENDED" : "UNCHANGED",
+			...(amendedChanged && superseded.length ? { superseded_acceptance: superseded } : {}),
+		};
+		if (!acceptanceAdded.length && !contributionsAdded.length) {
+			data.amended_targets.push(amended);
+			continue;
+		}
+		plannedAmendments.push({ details: group.details, amended });
+	}
+
+	// All plan validation is complete. Only the apply phase below may write.
+
 	const writeFailure = (
 		step: string,
 		result: CapturedCommand,
@@ -1291,67 +1368,9 @@ function runPlanningConvertApply(
 		data.writes_landed.push({ kind: "ITEM_CREATED", id, slug: item.slug, external_ref: created.external_ref });
 	}
 
-	const amendmentGroups = new Map<string, { details: NativeIssueDetails; items: PlanItem[] }>();
-	for (const item of items) {
-		if (item.existing === "(new)") continue;
-		const target = targetBySlug.get(item.slug);
-		if (!target || target.kind !== "existing" || !target.id || !target.details || target.terminal) continue;
-		const group = amendmentGroups.get(target.id) ?? { details: target.details, items: [] };
-		group.items.push(item);
-		amendmentGroups.set(target.id, group);
-	}
-	for (const [id, group] of amendmentGroups) {
-		const noteLines = splitLines(group.details.notes).map((line) => line.trim());
-		const acceptanceAdded: string[] = [];
-		const contributionsAdded: string[] = [];
-		const storedTexts = acceptanceBoxes(group.details.acceptance_criteria).map(criterionText);
-		const pendingTexts = [...storedTexts];
-		let staleSlug: string | null = null;
-		let staleMissing: string[] = [];
-		let amendedChanged = false;
-		for (const item of group.items) {
-			const token = data.mission + ":" + item.slug;
-			if (!noteLines.includes(token)) {
-				const missing = missingBoxTexts(acceptanceBoxes(item.acceptance).map(criterionText), pendingTexts);
-				acceptanceAdded.push(...missing);
-				pendingTexts.push(...missing);
-				contributionsAdded.push(token);
-				continue;
-			}
-			const itemBoxes = acceptanceBoxes(item.acceptance);
-			const itemCriteria = itemBoxes.map(criterionText);
-			const missing = missingBoxTexts(itemCriteria, pendingTexts);
-			if (!missing.length) continue;
-			if (!amendAcceptance) {
-				staleSlug = item.slug;
-				staleMissing = missing;
-				break;
-			}
-			for (const text of missing) {
-				acceptanceAdded.push(text);
-				pendingTexts.push(text);
-			}
-			amendedChanged = true;
-		}
-		if (staleSlug !== null) {
-			data.amended_targets.push({
-				id, slugs: group.items.map((item) => item.slug), acceptance_added: [], contributions_added: [],
-				status: "STALE_ACCEPTANCE", missing_acceptance: staleMissing, stored_acceptance: storedTexts,
-			});
-			return refuse("target " + id + " has STALE_ACCEPTANCE under contribution " + data.mission + ":" + staleSlug + ": the plan changed acceptance boxes that are not stored; re-run with --amend-acceptance to append them under the native revision gate");
-		}
-		const itemCriteria = new Set(group.items.flatMap((item) => acceptanceBoxes(item.acceptance).map((box) => normalizeBoxText(criterionText(box)))));
-		const superseded = storedTexts.filter((text) => !itemCriteria.has(normalizeBoxText(text)));
-		const amended: AmendedTarget = {
-			id, slugs: group.items.map((item) => item.slug), acceptance_added: acceptanceAdded,
-			contributions_added: contributionsAdded, status: acceptanceAdded.length || contributionsAdded.length ? "AMENDED" : "UNCHANGED",
-			...(amendedChanged && superseded.length ? { superseded_acceptance: superseded } : {}),
-		};
-		if (!acceptanceAdded.length && !contributionsAdded.length) {
-			data.amended_targets.push(amended);
-			continue;
-		}
-		const args = ["update", id, "--if-unchanged", group.details.updated_at];
+	for (const { details, amended } of plannedAmendments) {
+		const { id, acceptance_added: acceptanceAdded, contributions_added: contributionsAdded } = amended;
+		const args = ["update", id, "--if-unchanged", details.updated_at];
 		for (const criterion of acceptanceAdded) args.push("--add-acceptance", criterion);
 		for (const token of contributionsAdded) args.push("--append-notes", token);
 		const result = runApplyBr(args, tracker.database, tracker.commandCwd);
@@ -1362,7 +1381,7 @@ function runPlanningConvertApply(
 					return { writes: [], error: check.error ?? (check.stderr.trim() || "br show reconciliation failed") };
 				const after = decodeNativeShow(check.stdout, id);
 				if (after.error || !after.issue) return { writes: [], error: after.error ?? "br show reconciliation returned no issue" };
-				const beforeTexts = acceptanceBoxes(group.details.acceptance_criteria).map(criterionText);
+				const beforeTexts = acceptanceBoxes(details.acceptance_criteria).map(criterionText);
 				const afterTexts = acceptanceBoxes(after.issue.acceptance_criteria).map(criterionText);
 				const counts = new Map<string, number>();
 				for (const text of afterTexts) counts.set(text, (counts.get(text) ?? 0) + 1);
@@ -1375,7 +1394,7 @@ function runPlanningConvertApply(
 						counts.set(text, count - 1);
 					}
 				}
-				const beforeNotes = splitLines(group.details.notes).map((line) => line.trim());
+				const beforeNotes = splitLines(details.notes).map((line) => line.trim());
 				const afterNotes = splitLines(after.issue.notes).map((line) => line.trim());
 				const observedContributions = contributionsAdded.filter((token) => !beforeNotes.includes(token) && afterNotes.includes(token));
 				if (!observedAcceptance.length && !observedContributions.length) return { writes: [], error: null };

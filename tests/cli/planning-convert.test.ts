@@ -8,7 +8,7 @@ import { run as runBounded } from "../../src/kitlib/run.ts";
 import { resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 import { planningFixture, type ApplyPlanItem } from "./planning-convert.helpers.ts";
 afterAll(cleanupAllOwnedTmp);
-const { repoRoot, scratch, validPlan, negativePlan, childEnv, isolatedTest, runCli, nativeOutput, nativeJson, issueRows, median, planSource, writePlan, initializeTracker, createNativeIssue, showNativeIssue, applyResult, applyArgs, writeAmendPlan, amendAcceptanceV1, amendAcceptanceV2, concurrentWriteFixture } = planningFixture();
+const { repoRoot, scratch, validPlan, negativePlan, childEnv, isolatedTest, runCli, nativeOutput, nativeJson, issueRows, median, planSource, writePlan, initializeTracker, createNativeIssue, showNativeIssue, applyResult, applyArgs, amendPlanSource, writeAmendPlan, amendAcceptanceV1, amendAcceptanceV2, concurrentWriteFixture } = planningFixture();
 
 isolatedTest("planning dry-run skips the seat shim only for its isolated database; apply keeps actor admission", async () => {
 	const trackerRoot = join(scratch, "shim-live-tracker");
@@ -150,6 +150,96 @@ isolatedTest("planning convert refuses a changed acceptance under an existing to
 	expect(String(report.text)).toContain("STALE_ACCEPTANCE");
 });
 
+// F05: REFUSED must leave every tracker item unchanged, even when an earlier
+// group is valid. Identity reuse must compare logical acceptance, not just ids.
+isolatedTest("planning convert preflight rejects mixed new and stale acceptance groups without any writes", async () => {
+	const trackerRoot = join(scratch, "apply-mixed-stale-tracker");
+	initializeTracker(trackerRoot);
+	const staleId = createNativeIssue(trackerRoot, "Stale target");
+	const validId = createNativeIssue(trackerRoot, "Valid target");
+	const seeded = await runCli(applyArgs(writeAmendPlan("mixed-seed", "amend-target", staleId, amendAcceptanceV1), trackerRoot));
+	expect(seeded.exitCode, seeded.stdout + seeded.stderr).toBe(0);
+	const before = issueRows(trackerRoot);
+	const staleBefore = showNativeIssue(trackerRoot, staleId);
+	const validBefore = showNativeIssue(trackerRoot, validId);
+	const plan = writePlan("mixed-stale", [
+		{ slug: "fresh-target", existing: "(new)" },
+		{ slug: "valid-target", existing: validId },
+	]);
+	writeFileSync(plan, readFileSync(plan, "utf8") + "\n\n" + amendPlanSource("amend-target", staleId, amendAcceptanceV2));
+
+	const refused = await runCli(applyArgs(plan, trackerRoot));
+	expect(refused.exitCode).not.toBe(0);
+	expect(applyResult(refused)).toMatchObject({
+		overall: "REFUSED", apply_preflight_error: expect.stringContaining("STALE_ACCEPTANCE"),
+		writes_landed: [], created_items: [],
+	});
+	expect(issueRows(trackerRoot)).toEqual(before);
+	expect(showNativeIssue(trackerRoot, staleId)).toEqual(staleBefore);
+	expect(showNativeIssue(trackerRoot, validId)).toEqual(validBefore);
+
+	const allowed = await runCli(applyArgs(plan, trackerRoot, "core8", "PlanningWriter", ["--amend-acceptance"]));
+	expect(allowed.exitCode, allowed.stdout + allowed.stderr).toBe(0);
+	expect(applyResult(allowed).overall).toBe("CLEAN");
+	expect(applyResult(allowed).created_items).toHaveLength(1);
+	expect(String(showNativeIssue(trackerRoot, staleId).acceptance_criteria)).toContain("changed acceptance criterion");
+	expect(String(showNativeIssue(trackerRoot, validId).acceptance_criteria)).toContain("valid-target contributes");
+}, 60_000);
+
+isolatedTest("planning convert reused new identity refuses changed acceptance and keeps unchanged reuse CLEAN", async () => {
+	const trackerRoot = join(scratch, "apply-reused-content-tracker");
+	initializeTracker(trackerRoot);
+	const acceptanceBaseline = [...amendAcceptanceV1, "- [a] Retain this additional required outcome."];
+	const plan = writeAmendPlan("reused-content", "amend-target", "(new)", acceptanceBaseline);
+	const created = await runCli(applyArgs(plan, trackerRoot));
+	expect(created.exitCode, created.stdout + created.stderr).toBe(0);
+	const id = applyResult(created).created_items[0].id;
+	// Checkbox progress is not a content change.
+	const original = showNativeIssue(trackerRoot, id);
+	nativeOutput(["update", id, "--acceptance-criteria", String(original.acceptance_criteria).replace("- [ ]", "- [x]")], trackerRoot);
+	const before = showNativeIssue(trackerRoot, id);
+	const rowsBefore = issueRows(trackerRoot);
+	const unchanged = await runCli(applyArgs(plan, trackerRoot));
+	expect(unchanged.exitCode, unchanged.stdout + unchanged.stderr).toBe(0);
+	expect(applyResult(unchanged)).toMatchObject({ overall: "CLEAN", writes_landed: [] });
+	for (const acceptance of [
+		amendAcceptanceV2,
+		[...acceptanceBaseline, acceptanceBaseline[0]!],
+		[...acceptanceBaseline, "- [a] An additional required outcome."],
+		amendAcceptanceV1,
+	]) {
+		writeFileSync(plan, planSource([{ slug: "fresh-with-reuse", existing: "(new)" }]) + "\n\n"
+			+ amendPlanSource("amend-target", "(new)", acceptance));
+		const changed = await runCli(applyArgs(plan, trackerRoot));
+		expect(changed.exitCode).not.toBe(0);
+		expect(applyResult(changed)).toMatchObject({
+			overall: "REFUSED", apply_preflight_error: expect.stringContaining("REUSED_CONTENT_MISMATCH"),
+			writes_landed: [], created_items: [],
+		});
+		expect(showNativeIssue(trackerRoot, id)).toEqual(before);
+		expect(issueRows(trackerRoot)).toEqual(rowsBefore);
+	}
+	// Amendment opt-in does not turn identity reuse into an implicit amendment.
+	const optIn = await runCli(applyArgs(plan, trackerRoot, "core8", "PlanningWriter", ["--amend-acceptance"]));
+	expect(applyResult(optIn)).toMatchObject({
+		overall: "REFUSED", apply_preflight_error: expect.stringContaining("REUSED_CONTENT_MISMATCH"), writes_landed: [],
+	});
+	expect(optIn.exitCode).not.toBe(0);
+	expect(issueRows(trackerRoot)).toEqual(rowsBefore);
+
+	// Closed identities have the same equality boundary and remain untouched.
+	closeNative(trackerRoot, id);
+	const terminalBefore = showNativeIssue(trackerRoot, id);
+	const terminalRows = issueRows(trackerRoot);
+	const terminal = await runCli(applyArgs(plan, trackerRoot));
+	expect(terminal.exitCode).not.toBe(0);
+	expect(applyResult(terminal)).toMatchObject({
+		overall: "REFUSED", apply_preflight_error: expect.stringContaining("REUSED_CONTENT_MISMATCH"), writes_landed: [],
+	});
+	expect(showNativeIssue(trackerRoot, id)).toEqual(terminalBefore);
+	expect(issueRows(trackerRoot)).toEqual(terminalRows);
+}, 60_000);
+
 isolatedTest("planning convert --amend-acceptance appends changed boxes under the revision gate", async () => {
 	const trackerRoot = join(scratch, "apply-amend-tracker");
 	initializeTracker(trackerRoot);
@@ -227,7 +317,10 @@ isolatedTest("apply treats a closed reused target it would not change as satisfi
 	const trackerRoot = join(scratch, "apply-terminal-reused");
 	initializeTracker(trackerRoot);
 	const epicId = createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
-	const doneId = createNativeIssue(trackerRoot, "Done target", { externalRef: "core8:done-item", parent: epicId });
+	const doneId = createNativeIssue(trackerRoot, "Done target", {
+		externalRef: "core8:done-item", parent: epicId,
+		acceptance: "- [ ] [a] [build] done-item contributes its positive acceptance criterion.\n- [ ] [a] [build] Planted negative: done-item is not applied twice.",
+	});
 	closeNative(trackerRoot, doneId);
 	const plan = writePlan("apply-terminal-reused", [
 		{ slug: "done-item", existing: "(new)" },
@@ -250,7 +343,10 @@ isolatedTest("apply never adds a dependency from a closed target and reports the
 	const trackerRoot = join(scratch, "apply-terminal-source-edge");
 	initializeTracker(trackerRoot);
 	const epicId = createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
-	const doneId = createNativeIssue(trackerRoot, "Done source", { externalRef: "core8:done-source", parent: epicId });
+	const doneId = createNativeIssue(trackerRoot, "Done source", {
+		externalRef: "core8:done-source", parent: epicId,
+		acceptance: "- [ ] [a] [build] done-source contributes its positive acceptance criterion.\n- [ ] [a] [build] Planted negative: done-source is not applied twice.",
+	});
 	closeNative(trackerRoot, doneId);
 	const plan = writePlan("apply-terminal-source-edge", [
 		{ slug: "done-source", existing: "(new)", dependsOn: ["later-item"] },
