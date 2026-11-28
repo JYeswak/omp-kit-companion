@@ -193,6 +193,9 @@ export type PublishedTuple = Pick<KitUpdateInput, "indexPath" | "archivePath" | 
  * reused only when its index and archive verify; otherwise they are replaced.
  */
 export async function pollPublishedRelease(prefix: string, stateRoot: string, platform: KitUpdateInput["platform"], dependencies: KitUpdateJobDependencies = {}): Promise<PublishedTuple | null> {
+	let lock: UpdateLockToken;
+	// Current-version reads remain lock-free. Once a newer tag is observed, take
+	// the same lock as apply and recheck under it before touching the poll cache.
 	if (process.env.OMP_KIT_UPDATE_POLL !== "github") return null;
 	const repo = process.env.OMP_KIT_UPDATE_REPO;
 	if (!repo || !KIT_UPDATE_REPO_PATTERN.test(repo)) throw new Error("KIT_UPDATE_POLL_CONFIG: OMP_KIT_UPDATE_REPO must be owner/repo");
@@ -203,52 +206,57 @@ export async function pollPublishedRelease(prefix: string, stateRoot: string, pl
 	if (tag.length > 64) throw new Error("KIT_UPDATE_POLL_UNVERIFIED: latest tag over length cap");
 	const version = tag.startsWith("v") ? tag.slice(1) : tag;
 	if (!SEMVER.test(version)) throw new Error("KIT_UPDATE_POLL_UNVERIFIED: latest tag is not X.Y.Z: " + tag.slice(0, 40));
-	const current = installedVersion(prefix);
-	if (current !== null && compareSemver(version, current) <= 0) return null;
+	const observed = installedVersion(prefix);
+	if (observed !== null && compareSemver(version, observed) <= 0) return null;
 	const target = PLATFORMS[`${platform.os}/${platform.arch}/${platform.libc}`];
 	if (!target) throw new Error("KIT_UPDATE_POLL_UNVERIFIED: no published asset for this platform");
-	const dir = join(stateRoot, `poll-${version}`);
-	mkdirSync(dir, { recursive: true, mode: 0o700 });
-	const indexPath = join(dir, "release-index.json");
-	const stem = `omp-kit-v${version}-${target}`;
-	const readAsset = (): string => {
-		if (!lstatSync(indexPath).isFile()) throw new Error("index is not a regular file");
-		const index = parseReleaseIndexJson(readFileSync(indexPath, "utf8"));
-		const asset = index.assets[target]!.filename;
-		if (index.version !== version || index.source_tag !== `v${version}` ||
-			asset.length > 255 || !asset.startsWith(stem) || !/^[A-Za-z0-9_.-]+\.tar(\.gz)?$/.test(asset))
-			throw new Error("invalid asset filename");
-		return asset;
-	};
-	let asset: string | undefined;
-	try { asset = readAsset(); } catch { /* Replace incomplete indexes left by an interrupted poll. */ }
-	if (!asset || !pollTupleVerified(indexPath, join(dir, asset), version, target)) {
-		const indexDownload = await exec(["gh", "release", "download", `v${version}`, "--repo", repo,
-			"--pattern", "release-index.json", "--dir", dir, "--clobber"]);
-		if (indexDownload.exit !== 0) throw new Error("KIT_UPDATE_POLL_FAILED: " + indexDownload.stderr.trim().slice(0, 200));
-		try { asset = readAsset(); }
-		catch { throw new Error("KIT_UPDATE_POLL_UNVERIFIED: published index or asset filename is invalid"); }
-		const dl = await exec(["gh", "release", "download", `v${version}`, "--repo", repo,
-			"--pattern", asset, "--dir", dir, "--clobber"]);
-		if (dl.exit !== 0) throw new Error("KIT_UPDATE_POLL_FAILED: " + dl.stderr.trim().slice(0, 200));
+	try { lock = acquireKitUpdateLock(stateRoot); }
+	catch (error) {
+		if (error instanceof Error && error.message === "LOCK_BUSY") throw new Error("KIT_UPDATE_POLL_DEFERRED");
+		throw error;
 	}
-	const archivePath = join(dir, asset);
-	if (resolve(indexPath) !== indexPath || dirname(indexPath) !== dirname(archivePath)) throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded tuple failed the same-directory file check");
-	if (!pollTupleVerified(indexPath, archivePath, version, target))
-		throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded archive does not match published index");
-	// Bundles are published in GitHub's attestation store, not necessarily release assets. Fetch by the archive bytes'
-	// digest on every cycle through the installer's own anonymous client (no `gh auth login`); applyKitUpdate
-	// authenticates the bundle before extraction.
-	const work = join(dir, ".bundle-fetch");
-	rmSync(work, { recursive: true, force: true });
-	mkdirSync(work, { recursive: true, mode: 0o700 });
-	let bundle: Buffer;
 	try {
-		bundle = await (dependencies.fetchBundle ?? fetchAttestationBundleFor)(archivePath, version, process.env.HOME ?? work, work);
-	} finally { rmSync(work, { recursive: true, force: true }); }
-	// Replace atomically: a bundle left by an interrupted cycle must neither block nor be half-read.
-	atomicReplaceBytes(`${archivePath}.sigstore.json`, bundle, { mode: 0o600, durability: "none" });
-	return { indexPath, archivePath, version, sourceTag: `v${version}` };
+		const current = installedVersion(prefix);
+		if (current !== null && compareSemver(version, current) <= 0) return null;
+		const dir = join(stateRoot, `poll-${version}`);
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const indexPath = join(dir, "release-index.json");
+		const stem = `omp-kit-v${version}-${target}`;
+		const readAsset = (): string => {
+			if (!lstatSync(indexPath).isFile()) throw new Error("index is not a regular file");
+			const index = parseReleaseIndexJson(readFileSync(indexPath, "utf8"));
+			const asset = index.assets[target]!.filename;
+			if (index.version !== version || index.source_tag !== `v${version}` ||
+				asset.length > 255 || !asset.startsWith(stem) || !/^[A-Za-z0-9_.-]+\.tar(\.gz)?$/.test(asset))
+				throw new Error("invalid asset filename");
+			return asset;
+		};
+		let asset: string | undefined;
+		try { asset = readAsset(); } catch { /* Replace incomplete indexes left by an interrupted poll. */ }
+		if (!asset || !pollTupleVerified(indexPath, join(dir, asset), version, target)) {
+			const indexDownload = await exec(["gh", "release", "download", `v${version}`, "--repo", repo,
+				"--pattern", "release-index.json", "--dir", dir, "--clobber"]);
+			if (indexDownload.exit !== 0) throw new Error("KIT_UPDATE_POLL_FAILED: " + indexDownload.stderr.trim().slice(0, 200));
+			try { asset = readAsset(); }
+			catch { throw new Error("KIT_UPDATE_POLL_UNVERIFIED: published index or asset filename is invalid"); }
+			const dl = await exec(["gh", "release", "download", `v${version}`, "--repo", repo,
+				"--pattern", asset, "--dir", dir, "--clobber"]);
+			if (dl.exit !== 0) throw new Error("KIT_UPDATE_POLL_FAILED: " + dl.stderr.trim().slice(0, 200));
+		}
+		const archivePath = join(dir, asset);
+		if (resolve(indexPath) !== indexPath || dirname(indexPath) !== dirname(archivePath)) throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded tuple failed the same-directory file check");
+		if (!pollTupleVerified(indexPath, archivePath, version, target))
+			throw new Error("KIT_UPDATE_POLL_UNVERIFIED: downloaded archive does not match published index");
+		const work = join(dir, ".bundle-fetch");
+		rmSync(work, { recursive: true, force: true });
+		mkdirSync(work, { recursive: true, mode: 0o700 });
+		let bundle: Buffer;
+		try {
+			bundle = await (dependencies.fetchBundle ?? fetchAttestationBundleFor)(archivePath, version, process.env.HOME ?? work, work);
+		} finally { rmSync(work, { recursive: true, force: true }); }
+		atomicReplaceBytes(`${archivePath}.sigstore.json`, bundle, { mode: 0o600, durability: "none" });
+		return { indexPath, archivePath, version, sourceTag: `v${version}` };
+	} finally { lock.release(); }
 }
 
 /**
@@ -791,6 +799,8 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 			postcheck, targetVersion: source.version, runningVersion });
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
+		if (reason === "KIT_UPDATE_POLL_DEFERRED") return { status: "SKIPPED", receiptId: null,
+			activeVersion: installedVersion(config.prefix), notification: false, reason, relink: "NOT_RUN", service: "NOT_RUN" };
 		await dependencies.notify?.("omp-kit update job failed: " + reason);
 		return record(config.stateRoot, runId, { status: "FAILED", receiptId: null, activeVersion: null, notification: true, reason });
 	}

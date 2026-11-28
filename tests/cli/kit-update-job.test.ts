@@ -594,12 +594,12 @@ function installSymlink(root: string, version: string): void {
 	symlinkSync(`../releases/${version}/bin/omp-kit`, join(root, "bin", "omp-kit"));
 }
 
-function withPollEnv(repo: string | null, fn: () => Promise<void>): Promise<void> {
+async function withPollEnv(repo: string | null, fn: () => Promise<void>): Promise<void> {
 	const savedPoll = process.env.OMP_KIT_UPDATE_POLL, savedRepo = process.env.OMP_KIT_UPDATE_REPO;
 	try {
 		if (repo === null) { delete process.env.OMP_KIT_UPDATE_POLL; delete process.env.OMP_KIT_UPDATE_REPO; }
 		else { process.env.OMP_KIT_UPDATE_POLL = "github"; process.env.OMP_KIT_UPDATE_REPO = repo; }
-		return fn();
+		await fn();
 	} finally {
 		if (savedPoll === undefined) delete process.env.OMP_KIT_UPDATE_POLL; else process.env.OMP_KIT_UPDATE_POLL = savedPoll;
 		if (savedRepo === undefined) delete process.env.OMP_KIT_UPDATE_REPO; else process.env.OMP_KIT_UPDATE_REPO = savedRepo;
@@ -671,7 +671,7 @@ function publishedGh(calls: string[][], published: string): NonNullable<KitUpdat
 /** The poll directory a cycle interrupted mid-poll leaves: the published index, `archive` bytes and a stale bundle. */
 function interruptedPoll(stateRoot: string, published: string, archive: string): string {
 	const dir = join(stateRoot, "poll-1.2.4");
-	mkdirSync(dir, { recursive: true });
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	writePolledIndex(dir, published);
 	writeFileSync(join(dir, POLLED_ASSET), archive);
 	writeFileSync(join(dir, `${POLLED_ASSET}.sigstore.json`), "stale");
@@ -726,6 +726,30 @@ test("published archive without retrievable provenance refuses before planning o
 		})).rejects.toThrow("KIT_ATTESTATION_BUNDLE_UNAVAILABLE");
 	});
 });
+test("published poll defers without touching cache while updater lock is held, then proceeds after release", async () => {
+	await withPollEnv("o/r", async () => {
+		const value = config(); installSymlink(value.prefix, "1.2.3");
+		const lock = acquireKitUpdateLock(value.stateRoot);
+		const calls: string[][] = [];
+		const dependencies = { exec: publishedGh(calls, "archive"), fetchBundle: bundleFetch([], '{"fixture":true}\n') };
+		try {
+			await expect(pollPublishedRelease(value.prefix, value.stateRoot, value.platform, dependencies))
+				.rejects.toThrow("KIT_UPDATE_POLL_DEFERRED");
+			value.pollRelease = async () => { throw new Error("contended poll must not fall back to static"); };
+			expect(await runKitUpdateJob(value, dependencies)).toMatchObject({
+				status: "SKIPPED", reason: "KIT_UPDATE_POLL_DEFERRED", receiptId: null, notification: false,
+			});
+			expect(readdirSync(value.stateRoot)).toEqual([".kit-update.lock"]);
+			expect(calls.some(argv => argv[2] === "download")).toBe(false);
+		} finally { lock.release(); }
+		const tuple = await pollPublishedRelease(value.prefix, value.stateRoot, value.platform, dependencies);
+		expect(tuple?.version).toBe("1.2.4");
+		expect(calls.filter(argv => argv[2] === "download").map(argv => argv[argv.indexOf("--pattern") + 1]))
+			.toEqual(["release-index.json", POLLED_ASSET]);
+		expect(readdirSync(value.stateRoot)).toContain("poll-1.2.4");
+	});
+});
+
 
 test("planted: poll returns null when the published release is not newer (no downgrade, no download)", async () => {
 	await withPollEnv("o/r", async () => {
