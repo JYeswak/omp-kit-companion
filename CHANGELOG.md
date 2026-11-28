@@ -4,6 +4,13 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.158] - 2026-11-28
+
+### Fixed
+
+- Scratch planning and cleanup give open-file checks more time on a loaded host without changing fixed caller deadlines. A default check that times out under load retries once. If the evidence is still incomplete, cleanup preserves the directory and reports why.
+- The Bash substitution guard admits literal tracker acceptance text containing quotes and backticks in a serialized tool call. An actual double-quoted substitution is still blocked, even beside the literal text.
+
 ## [0.2.157] - 2026-11-27
 
 ### Fixed
