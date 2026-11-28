@@ -619,6 +619,9 @@ jobs:
             bun run --no-env-file --config=/dev/null src/cli.ts heavy --label stock-auto -- sh -c 'echo ran' > "$plant/auto.out"
           test "$(cat "$plant/auto.out")" = ran
       - name: Check manifest and rule behavior
+        env:
+          # Reuse G4's existing pool on stock Ubuntu. macOS keeps the harness default.
+          OMP_KIT_E2E_JOBS: ${{ runner.os == 'Linux' && '2' || '' }}
         run: sh scripts/ladder.sh
       - name: Check versioned installer against native archive
         env:

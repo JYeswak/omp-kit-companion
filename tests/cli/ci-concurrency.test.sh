@@ -237,6 +237,42 @@ check("the real Git contracts run once per OS without adding load to the schedul
   assert.deepEqual(routes(outputs, "workflow_dispatch", { version: "1.2.3", reuse_fast_ci: true }),
     { "macos-15": ["kit-update"] });
 });
+
+function assertHostedLadderPool(workflow) {
+  const ladder = workflow.jobs.ladder;
+  const step = ladder.steps.find(step => step.run?.trim() === "sh scripts/ladder.sh");
+  assert.ok(step, "lost the full ladder producer");
+  const raw = step.env?.OMP_KIT_E2E_JOBS ?? ladder.env?.OMP_KIT_E2E_JOBS ?? workflow.env?.OMP_KIT_E2E_JOBS;
+  for (const event_name of ["push", "schedule"]) {
+    const context = { inputs: { version: "", reuse_fast_ci: false }, github: { event_name },
+      needs: { "resolve-omp-versions": { outputs } }, fromJSON: JSON.parse };
+    const lanes = matrixRows(ladder, context);
+    const expectedTracks = ["certified", "minimum"];
+    assert.deepEqual(lanes.filter(row => row.os.startsWith("ubuntu-")).map(row => row.omp.track).sort(), expectedTracks);
+    assert.deepEqual(lanes.filter(row => row.os.startsWith("macos-")).map(row => row.omp.track).sort(),
+      event_name === "schedule" ? expectedTracks : []);
+    for (const matrix of lanes) {
+      const linux = matrix.os.startsWith("ubuntu-");
+      const runner = { os: linux ? "Linux" : "macOS" };
+      const width = typeof raw === "string" && raw.startsWith("${{")
+        ? evaluate(raw, { ...context, matrix, runner }) : raw ?? "";
+      assert.equal(String(width), linux ? "2" : "",
+        `G4 pool width ${event_name}/${matrix.os}/${matrix.omp.track}`);
+    }
+  }
+}
+check("CILADDERPOOL1 both stock Ubuntu tracks use two G4 workers, macOS keeps the default", () => {
+  assertHostedLadderPool(ci);
+});
+check("CILADDERPOOL1 planted missing or disabled pool override is rejected", () => {
+  for (const disabled of [undefined, "1"]) {
+    const mutant = structuredClone(ci);
+    const step = mutant.jobs.ladder.steps.find(step => step.run?.trim() === "sh scripts/ladder.sh");
+    if (disabled === undefined) delete step.env;
+    else step.env.OMP_KIT_E2E_JOBS = disabled;
+    assert.throws(() => assertHostedLadderPool(mutant), /G4 pool width push\/ubuntu-.*\/minimum/);
+  }
+});
 check("signing and local-attest do not overlap qualification", () => {
   assert.ok(ceiling(ci, release, { ...qualification, signing: true }).total <= 5);
   assert.equal(ceiling(ci, release, { ...qualification, mode: "local-attest" }).total, 0);
