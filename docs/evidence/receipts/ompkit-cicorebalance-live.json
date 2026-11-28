@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "sha": "3576f0d856c6d1c1b0ffc0780ec591945ba3d316",
+  "run_id": 46090655025,
+  "run_attempt": 1,
+  "conclusion": "success",
+  "coverage_exact": true,
+  "coverage_producer": "CORE_SHARD_COVERAGE=ok shards=4 files=441",
+  "coverage_files": 441,
+  "git_hook_passes": 1,
+  "git_hook_job": 140810598762,
+  "core_peak_s": 724,
+  "core_peak_job": 140810598787,
+  "workflow_jobs_span_s": 758,
+  "baseline": {
+    "sha": "fb9fd9d26f0aca10fa1ced6031bb4a75e1294b5f",
+    "run_id": 46085439808,
+    "core_peak_s": 866,
+    "workflow_jobs_span_s": 898
+  },
+  "claim_scope": "One observed before/after pair of successful stock Ubuntu runs, not a controlled causal effect or fleet percentile."
+}
