@@ -1,1 +1,0 @@
-- Verification, live readback and handoff no longer require a `Lesson:` line. Missing lessons warn without blocking green work; supplied lessons remain in the close record and local lesson log (LESSONOPTIONAL1).

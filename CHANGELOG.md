@@ -4,6 +4,24 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.162] - 2026-11-28
+
+### Changed
+
+- Verification, live readback and handoff no longer require a `Lesson:` line. Missing lessons warn without blocking green work; supplied lessons remain in the close record and local lesson log (LESSONOPTIONAL1).
+- Require ten distinct landed product beads before cutting a new release. Release preflight reports the exact source, counted beads, and remaining work without counting version advances or evidence-only changes.
+
+### Fixed
+
+- macOS update postchecks no longer report a partial install for concurrent self-replay receipt writes when the postcheck was fenced from those files. Unfenced, aliased, and unrelated changes still fail verification. (`ompkit-3isy`)
+- On macOS, uninstalling an installed service now keeps it off across upgrades and automatic repair. Run `omp-kit service install JOB --apply --yes` to explicitly turn it back on. (`ompkit-b8hf7`)
+- `omp-kit land --exact-parent` names the gate refusal instead of showing its final timing record. A failed gate still prevents publication. (`ompkit-land-gate-diagnostic-hmwj5`)
+- Board inbox wake now follows replies in threads that mention you or that you posted in, even when a reply does not repeat the mention. Unrelated threads stay quiet and replayed messages do not wake you again.
+- `test --repeat` starts scenarios with the installed kit's isolated OMP launcher. A launcher failure, interrupted run, or incomplete scenario report returns `UNVERIFIED` with a nonzero exit and does not count toward flake statistics.
+- Package fleet-round with its own runtime dependencies so the installed skill runs without a source checkout. (ompkit-tnqyr.10)
+- Fleet-round now reads an explicit Board thread and verifies holders with native Tern pane evidence. Missing or mismatched evidence yields `UNKNOWN`, not a successful barrier. (ompkit-tnqyr.7)
+- Planning score requires nonblank acceptance on every active executable bead. Dependency density remains visible but cannot make incomplete work pass, and a cohort with no active executable work remains unknown.
+
 ## [0.2.161] - 2026-11-28
 
 ### Changed
