@@ -126,21 +126,39 @@ test("LOADGATE1 planted deadline holds alone but the concurrent wave refuses, na
 	try {
 		writeFileSync(join(fx.dir, "tests/cli/control.test.ts"), `
 import { test } from "bun:test";
-import { readdirSync, writeFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+const wave = dirname(process.env.TMPDIR!);
+const isWave = existsSync(join(wave, ".owner"));
+if (isWave) {
+  // All copies cross the rendezvous before any test deadline begins. The
+  // producer owns this directory and removes the markers with the wave.
+  writeFileSync(join(wave, "rendezvous-" + process.pid), "ready");
+  const release = join(wave, "release");
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline && !existsSync(release)) {
+    if (readdirSync(wave).filter(name => name.startsWith("rendezvous-")).length === ${width}) {
+      mkdirSync(release, { recursive: true });
+    } else {
+      // The real child processes publish the markers; fake time cannot drive them.
+      await Bun.sleep(10);
+    }
+  }
+  if (!existsSync(release)) throw new Error("concurrent rendezvous timed out");
+}
 test("deadline-only-alone plant", async () => {
-  const active = ${JSON.stringify(join(fx.dir, "active"))};
-  const mine = join(active, String(process.pid));
-  writeFileSync(mine, "ready");
-  // Actual Bun deadlines across independent processes cannot use fake timers.
-  try { await Bun.sleep(400); await Bun.sleep(700 * readdirSync(active).length); }
-  finally { unlinkSync(mine); }
+  // Deliberately exercise Bun's actual per-test deadline; fake timers cannot verify it.
+  if (isWave) await Bun.sleep(2300);
 }, 1500);
 `);
+		// The first run_affected_tests process is the lone baseline; it must pass.
 		const result = focused(fx, ["tests/cli/control.test.ts"], ["tests/cli/control.test.ts"]);
 		expect(result.rc, result.out).toBe(1);
 		expect(result.out).toContain(" 1 pass\n 0 fail\nRan 1 test across 1 file.");
-		expect(result.out).toContain("(fail) deadline-only-alone plant");
+		expect(result.out).not.toContain("concurrent rendezvous timed out");
+		const logs = result.out.split("\n");
+		expect(logs.filter(line => line.includes("(fail) deadline-only-alone plant"))).toHaveLength(width);
+		expect(logs.filter(line => line.includes("timed out after 1500ms"))).toHaveLength(width);
 		expect(result.out).toContain(`LOADGATE1 file=tests/cli/control.test.ts concurrency=${width} load1=`);
 		expect(result.out).toContain("affected tests did not pass");
 	} finally { fx.scratch.cleanup(); }
@@ -156,9 +174,9 @@ test("LOADGATE1: no changed selected files means no copies, including deleted pa
 	} finally { fx.scratch.cleanup(); }
 });
 
-function policy(dir: string, ceiling: number) {
+function policy(dir: string, ceiling: number, defaultCap = Math.min(90, ceiling / 2)) {
 	const budget = JSON.parse(readFileSync(join(root, ".github/test-budget.json"), "utf8"));
-	budget.changed_file_budget.cap_s = ceiling > 90 ? 90 : ceiling / 2;
+	budget.changed_file_budget.cap_s = defaultCap;
 	budget.changed_file_budget.grandfathered["tests/cli/grandfather.test.sh"] = {
 		measured_s: ceiling, evidence: "load-wave regression fixture",
 	};
@@ -169,11 +187,14 @@ function policy(dir: string, ceiling: number) {
 test("LOADGATE1: canonical grandfather ceiling passes above default cap and bounds a hung copy", () => {
 	const fx = fixture();
 	try {
-		policy(fx.dir, 0.6);
-		writeFileSync(join(fx.dir, "tests/cli/grandfather.test.sh"), "sleep 0.4\nprintf 'grandfather control passed\\n'\n");
+		// Two copies multiply both caps by two. A real 0.8s workload cannot
+		// pass the 0.6s default bound, but has room for setup under 4s.
+		policy(fx.dir, 2, 0.3);
+		writeFileSync(join(fx.dir, "tests/cli/grandfather.test.sh"), "sleep 0.8\nprintf 'grandfather control passed\\n'\n");
 		const green = fx.load(["tests/cli/grandfather.test.sh"], fx.dir, 2);
 		expect(green.rc, green.out).toBe(0);
-		expect(green.out).toContain("ceiling_s=0.6 contention_allowance=2");
+		expect(green.out).toContain("grandfather control passed");
+		expect(green.out).toContain("ceiling_s=2 contention_allowance=2");
 		writeFileSync(join(fx.dir, "tests/cli/grandfather.test.sh"), "printf 'grandfather timeout plant\\n'\nsleep 5\n");
 		const red = fx.load(["tests/cli/grandfather.test.sh"], fx.dir, 2);
 		expect(red.rc, red.out).toBe(1);

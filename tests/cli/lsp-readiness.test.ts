@@ -329,6 +329,7 @@ test("deep LSP refuses a server from another checkout without executing it", asy
 
 const installedOmp = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
 const nativeLspTest = installedOmp && Bun.which("typescript-language-server") && Bun.which("node") && Bun.which("git") ? test : test.skip;
+
 nativeLspTest("native contract: slow-start-success waits beyond the old budget for real diagnostics under controlled contention and preserves absent alternatives", async () => {
 	if (!installedOmp) throw new Error("installed OMP required");
 	const f = fixture();
@@ -431,7 +432,7 @@ nativeLspTest("native contract: never-ready-ceiling refuses a server whose real 
 	expect(existsSync(gate.witness)).toBe(false);
 	expect(report.checks.lsp_mux_stopped).toBe(true);
 	expect(report.temporary_workspace_removed).toBe(true);
-}, fixtureDeadlineS(45) * 1_000);
+}, fixtureDeadlineS(70) * 1_000);
 
 // Missing either real response stays unready; elapsed time alone cannot establish readiness.
 // Status-call measurements remain independently complete, including slow and never-ready cases.

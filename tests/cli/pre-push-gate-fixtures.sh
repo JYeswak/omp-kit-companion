@@ -1203,6 +1203,12 @@ mkverdictrepo() {
 	printf '%s' "$repo"
 }
 
+# Explicit local selector for the detached-scheduling contract; the suite
+# still runs all case families when invoked with no arguments.
+if [ "${1:-}" = --relfast ]; then
+	vrepro=$(mkverdictrepo relfast)
+else
+
 # The full-suite runner itself, not only fresh-gate, comes from the candidate.
 vrepro=$(mkverdictrepo candidate-verdict-refuses "$candidate_fixture_gate" broken)
 rc=$(run_adapter "$vrepro")
@@ -1237,6 +1243,7 @@ if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "GREEN full-suite-verdict" &&
 else
 	fail=$((fail + 1)); printf 'FAIL land1a-control: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
+fi
 
 # RELFAST1 (J-2026-11-10-03): default-on for main, whether the push itself ran
 # qualification or deferred it. This fixture uses zero quiet time; the real one-second
@@ -1251,9 +1258,22 @@ printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"$RV_PUSH_LOG"\n' >"$vrepro/scripts/re
 # from the pushed repository, so this fixture carries the real starter (it imports the already carried kitlib_run.py).
 cp "$KITREPO/scripts/release-verdict-start.py" "$vrepro/scripts/release-verdict-start.py"
 chmod +x "$vrepro/scripts/release-verdict-start.py"
+# The sparse fixture judges the detached argv, not host admission. LOADSEAT1's
+# load-doctor fixture independently drives the real heavy command and ledger.
+rv_fixture_bin="$TMP/relfast-bin"
+mkdir "$rv_fixture_bin"
+cat >"$rv_fixture_bin/omp-kit" <<'HEAVY_FIXTURE'
+#!/bin/sh
+[ "${1:-}" = heavy ] || exit 2
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+[ "$#" -gt 1 ] || exit 2
+shift
+exec "$@"
+HEAVY_FIXTURE
+chmod +x "$rv_fixture_bin/omp-kit"
 for push_mode in push release; do
 	: >"$RV_PUSH_LOG"
-	rc=$(unset OMP_KIT_RELEASE_VERDICT; OMP_KIT_RELEASE_VERDICT_QUIET_S=0 PRE_PUSH_FULL_SUITE=$push_mode run_adapter "$vrepro")
+	rc=$(unset OMP_KIT_RELEASE_VERDICT; PATH="$rv_fixture_bin:$PATH" OMP_KIT_RELEASE_VERDICT_QUIET_S=0 PRE_PUSH_FULL_SUITE=$push_mode run_adapter "$vrepro")
 	expected="--commit $(git -C "$vrepro" rev-parse HEAD) --no-fetch"
 	attempt=0
 	while [ ! -s "$RV_PUSH_LOG" ] && [ "$attempt" -lt 50 ]; do sleep 0.1; attempt=$((attempt + 1)); done
@@ -1261,6 +1281,7 @@ for push_mode in push release; do
 		pass=$((pass + 1))
 	else
 		fail=$((fail + 1)); printf 'FAIL relfast1-main-push-starts-qualification mode=%s rc=%s log=%s\n' "$push_mode" "$rc" "$(cat "$RV_PUSH_LOG")"
+		if [ -f "$vrepro/.git/omp-kit/release-verdict.log" ]; then cat "$vrepro/.git/omp-kit/release-verdict.log"; fi
 	fi
 done
 # FULLONRELEASE1 now follows J-2026-11-10-03: an explicit 0 opts out.
@@ -1272,6 +1293,8 @@ else
 	fail=$((fail + 1)); printf 'FAIL relfast1-explicit-optout-schedules-nothing rc=%s log=%s\n' "$rc" "$(cat "$RV_PUSH_LOG")"
 fi
 export PRE_PUSH_FULL_SUITE=push
+
+[ "${1:-}" != --relfast ] || return 0
 
 # DEFER1 (GATESPEED1, J-2026-10-31-09): by default the push does not run the complete suite. A tree
 # whose only failure is an unselected suite is admitted at push, names the release command, and

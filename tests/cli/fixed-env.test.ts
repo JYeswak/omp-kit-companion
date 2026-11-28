@@ -170,4 +170,6 @@ test("a real stored suite PASS is reused across caller shells and retains the ju
 	const brokenLogs = readdirSync(cache).filter(name => name.endsWith(".log"))
 		.map(name => readFileSync(join(cache, name), "utf8")).join("\n");
 	expect(brokenLogs).toContain("OMP_PATH conflicts with the PATH-selected OMP launcher");
-}, fixtureDeadlineS(30) * 1000);
+	// The fixture runs five bounded verdict invocations, a separate identity
+	// lookup, and Git setup. The outer watchdog must not preempt those checks.
+}, fixtureDeadlineS(240) * 1000);
