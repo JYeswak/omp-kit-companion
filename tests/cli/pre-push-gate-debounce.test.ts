@@ -11,8 +11,13 @@ const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 async function fixture(name: string) {
 	const work = join(scratch, name), repo = join(work, "repo"), origin = join(work, "origin.git");
 	mkdirSync(join(repo, "scripts"), { recursive: true });
+	const bin = join(work, "bin");
+	mkdirSync(bin);
+	// This checks the scheduler with a bounded stub verdict, not host resource admission.
+	// LOADSEAT1's load-doctor fixture separately exercises the real heavy command.
+	writeFileSync(join(bin, "omp-kit"), '#!/bin/sh\n[ "$1" = heavy ] || exit 2\nwhile [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\n[ "$#" -gt 1 ] || exit 2\nshift\nexec "$@"\n', { mode: 0o700 });
 	const env: Record<string, string | undefined> = { ...process.env, GIT_CEILING_DIRECTORIES: work,
-		OMP_KIT_RELEASE_VERDICT_QUIET_S: "1", PRE_PUSH_FULL_SUITE: "release" };
+		PATH: `${bin}:${process.env.PATH ?? ""}`, OMP_KIT_RELEASE_VERDICT_QUIET_S: "1", PRE_PUSH_FULL_SUITE: "release" };
 	delete env.OMP_KIT_RELEASE_VERDICT;
 	for (const key of Object.keys(env)) if (key.startsWith("GIT_") && key !== "GIT_CEILING_DIRECTORIES") delete env[key];
 	async function git(...args: string[]) {
