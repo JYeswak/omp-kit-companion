@@ -1,4 +1,4 @@
-import { beforeAll, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -226,8 +226,8 @@ try {
 
 const kitRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const sdkVersion = sdkSourceVersion("pty", process.env);
-let sdkRoot: string;
-beforeAll(() => { sdkRoot = ensureOmpSource(sdkVersion, process.env); });
+// Cold source acquisition has its own bounded installer; it is not a five-second test hook.
+const sdkRoot = ensureOmpSource(sdkVersion, process.env);
 
 async function runPty(variant: "healthy" | "late-write-mutant") {
 	const scratch = ownedTmp("sdk22-pty");

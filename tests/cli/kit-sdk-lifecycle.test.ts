@@ -188,11 +188,10 @@ try {
 
 const kitRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const sdkVersion = sdkSourceVersion("lifecycle", process.env);
-let sdkRoot: string;
+// Default21 remains the original contract; the upgrade cut explicitly selects22.
+// Keep the bounded source acquisition outside Bun's default hook timeout.
+const sdkRoot = ensureOmpSource(sdkVersion, process.env);
 beforeAll(() => {
-	// Default21 remains the original contract; the upgrade cut explicitly selects22.
-	// Reuse the verified-source cache; never alter the installed OMP or profiles.
-	sdkRoot = ensureOmpSource(sdkVersion, process.env);
 	const seat = resolveSeatOmp();
 	console.error("SDKLIFECYCLE_IDENTITY", JSON.stringify({
 		launcher: seat?.launcher ?? null,
