@@ -364,3 +364,23 @@ test("GATEBUDGETHYGIENE1: classifier exhaust never becomes a refusal row; one re
 	expect(after).toHaveLength(2);
 	expect(after[1]).toMatchObject({ gate: "BR_SHIM_IDENTITY_REQUIRED", kind: "refuse" });
 });
+
+test("ERGO2: fleet override reasons retain DCG grouping without classifying successful payloads", () => {
+	for (const content of [
+		"core.git:reset-hard (fleet): Preserve uncommitted work; inspect an isolated checkout.",
+		"Error: core.git:reset-hard (fleet): Preserve uncommitted work.",
+		"dcg denied the bash tool call\ncore.git:reset-hard (fleet): Preserve uncommitted work.",
+	]) {
+		expect(classifyMineResult({ tool: "bash", result: { isError: true, content } })?.class_id).toBe("guard-friction:core.git-reset-hard");
+	}
+	for (const tool of ["grep", "read"]) {
+		expect(classifyMineResult({ tool, result: { isError: false, content: "core.git:reset-hard (fleet): quoted policy text" } })).toBeNull();
+	}
+});
+
+test("ERGO2: fleet rule prefix grammar rejects a long near miss in bounded time", () => {
+	const start = performance.now();
+	const content = "core.git:" + "x".repeat(100000) + " (fleet): not a valid bounded id";
+	expect(classifyMineResult({ tool: "bash", result: { isError: true, content } })?.class_id).toBe("tool-error:unclassified");
+	expect(performance.now() - start).toBeLessThan(1000);
+});

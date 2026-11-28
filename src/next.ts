@@ -9,7 +9,7 @@ export type Station = "dag-repair" | "finish" | "grade" | "rework" | "claim" | "
 export type Action = { station: Station; why: string; commands: string[] };
 export type Observation = { status: "KNOWN"; value: unknown; source: string } | { status: "UNKNOWN"; value: null; source: string; reason: string };
 export type AdapterName = "issues" | "cycles" | "blocked" | "ready" | "triage" | "git" | "changes" | "acks" | "scratch" | "pulse" | "sitrep";
-export type NextOptions = { role: string; repo?: string; agent?: string };
+export type NextOptions = { role: string; repo?: string; agent?: string; fullFacts?: boolean };
 export type Context = { repo: string; agent: string | null };
 export type Adapter = (context: Context) => Promise<Observation>;
 export type Adapters = Record<AdapterName, Adapter>;
@@ -93,7 +93,7 @@ const actionSchema = { type: "object", required: ["station", "why", "commands"],
 } };
 export const NEXT_DATA_SCHEMA: DataSchema = { type: "object", required: ["role", "next_action", "actions", "facts", "adapters", "applicable_skills"], properties: {
 	role: { enum: ["worker", "director"] }, next_action: { anyOf: [actionSchema, { type: "null" }] },
-	actions: { type: "array", items: actionSchema }, facts: { type: "object" },
+	actions: { type: "array", items: actionSchema }, facts: { type: "object", description: "Observation summaries (count, up to ten ids, ids_omitted, source); --full-facts returns complete observation values" },
 	applicable_skills: { type: "array", items: { type: "object", required: ["skill", "station", "mandatory", "trigger", "why"], properties: {
 		skill: { type: "string" }, station: { type: "string" }, mandatory: { type: "boolean" }, trigger: { type: "string" }, why: { type: "string" },
 	} } },
@@ -101,6 +101,28 @@ export const NEXT_DATA_SCHEMA: DataSchema = { type: "object", required: ["role",
 		name: { type: "string" }, status: { enum: ["KNOWN", "UNKNOWN"] }, source: { type: "string" }, reason: { type: "string" },
 	} } },
 } };
+
+/** Keep the decision context, not the tracker or patch bodies. Full observations remain opt-in. */
+function summarizeFact(fact: Observation): Observation {
+	if (fact.status === "UNKNOWN") return { ...fact, source: fact.source.slice(0, 1024), reason: fact.reason.slice(0, 1024) };
+	const value = fact.value;
+	const rows = Array.isArray(value) ? value
+		: object(value) && Array.isArray(value.paths) ? value.paths
+		: object(value) && object(value.data) && Array.isArray(value.data.sessions) ? value.data.sessions
+		: object(value) && object(value.triage) && Array.isArray(value.triage.recommendations) ? value.triage.recommendations
+		: null;
+	const ids: string[] = [];
+	let idCount = 0;
+	for (const row of rows ?? []) {
+		const id = typeof row === "string" ? row : object(row) && typeof row.id === "string" ? row.id : null;
+		if (id !== null) {
+			idCount++;
+			if (ids.length < 10) ids.push(id.slice(0, 256));
+		}
+	}
+	return { status: "KNOWN", source: fact.source.slice(0, 1024),
+		value: { count: rows?.length ?? (object(value) ? Object.keys(value).length : null), ids, ids_omitted: idCount - ids.length } };
+}
 
 export async function next(options: NextOptions, adapters: Adapters = realNextAdapters()) {
 	if (options.role !== "worker" && options.role !== "director") return { code: 2 as const, data: { overall: "NOT_RUN" }, verification: "NOT_RUN" as const,
@@ -120,7 +142,7 @@ export async function next(options: NextOptions, adapters: Adapters = realNextAd
 	const issues = records(value("issues")) ? value("issues") as Record<string, unknown>[] : [];
 	const sorted = [...issues].sort((a, b) => Number(a.priority ?? 4) - Number(b.priority ?? 4) || String(a.id).localeCompare(String(b.id)));
 	const actions: Action[] = [];
-	const add = (station: Station, why: string, source: string, commands: string[]) => actions.push({ station, why: `${why} (source: ${source})`, commands });
+	const add = (station: Station, why: string, source: string, commands: string[]) => actions.push({ station, why: `${why} (source: ${source.slice(0, 1024)})`, commands });
 	const inspect = (id: unknown) => `cd ${quote(context.repo)} && br show ${quote(String(id))} --no-auto-import --no-auto-flush --json`;
 	const own = (row: Record<string, unknown>) => context.agent !== null && row.assignee === context.agent;
 	const hasLabel = (row: Record<string, unknown>, label: string) => Array.isArray(row.labels) && row.labels.includes(label);
@@ -186,11 +208,12 @@ export async function next(options: NextOptions, adapters: Adapters = realNextAd
 		const map = parseSkillStations();
 		skills.warnings.push(...map.errors, ...map.warnings);
 	}
-	return { code: 0 as const, data: { role: options.role, next_action: actions[0]!, actions, applicable_skills: skills.applicable_skills, facts, adapters: names.map(name => {
-		const fact = facts[name];
+	const presentedFacts = options.fullFacts ? facts : Object.fromEntries(names.map(name => [name, summarizeFact(facts[name])])) as Record<AdapterName, Observation>;
+	return { code: 0 as const, data: { role: options.role, next_action: actions[0]!, actions, applicable_skills: skills.applicable_skills, facts: presentedFacts, adapters: names.map(name => {
+		const fact = presentedFacts[name];
 		return { name, status: fact.status, source: fact.source, ...(fact.status === "UNKNOWN" ? { reason: fact.reason } : {}) };
 	}) }, commands: actions[0]!.commands, verification: "UNVERIFIED" as const,
-		warnings: [...names.filter(name => facts[name].status === "UNKNOWN").map(name => `${name}: ${(facts[name] as Extract<Observation, { status: "UNKNOWN" }>).reason}`), ...skills.warnings] };
+		warnings: [...names.filter(name => facts[name].status === "UNKNOWN").map(name => `${name}: ${(presentedFacts[name] as Extract<Observation, { status: "UNKNOWN" }>).reason}`), ...skills.warnings] };
 }
 
 export function formatNext(data: { actions: Action[]; applicable_skills: ApplicableSkill[] }): string {

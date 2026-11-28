@@ -894,6 +894,7 @@ while IFS= read -r path; do
 	[ "$review" -eq 0 ] || exit 1
  	report=$(cat "$metadata_dir/report" 2>/dev/null)
 	printf 'stale-worktree: REFUSED: commit would revert landed lines:\n%s\n' "$report" >&2
+	printf 'stale-worktree: next, run %s in this repository to inspect affected paths; rework accidental reversions on current bytes before retrying the commit.\n' 'omp-kit doctor --scope stale-worktree --json' >&2
  	printf 'stale-worktree: declare each intended revert with a "Revert: <sha>" trailer line (or "Supersedes: <sha>" for a rewrite), or rework on a fresh worktree\n' >&2
 	# whole set is one edit, never a round per sha. Rule (a) refusals on a stale worktree are still best fixed by
 	# reworking on fresh bytes; the block is for intended rewrites.

@@ -16,6 +16,8 @@ export type Flag = {
 	readonly available?: boolean;
 	/** Repeatable value flag; repeated values are joined with a newline. */
 	readonly repeatable?: boolean;
+	/** Root-only flags are discoverable globally, never advertised in scoped help. */
+	readonly standalone?: boolean;
 };
 
 export type DataSchema = {
@@ -273,7 +275,7 @@ export const GLOBAL_FLAGS: readonly Flag[] = [
 	{ name: "--robot", description: "JSON output without interaction" },
 	{ name: "--no-color", description: "Disable terminal styling" },
 	{ name: "--help", aliases: ["-h"], description: "Display command or topic help" },
-	{ name: "--info", description: "Show executable and dependency identity", dataSchema: infoData },
+	{ name: "--info", description: "Show executable and dependency identity (standalone, root only)", standalone: true, dataSchema: infoData },
 ];
 
 const planApply: readonly Flag[] = [
@@ -618,6 +620,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--role", value: "worker|director", description: "Required loop role: worker or director" },
 		{ name: "--repo", value: "PATH", description: "Repository to inspect (default: current directory)" },
 		{ name: "--agent", value: "NAME", description: "Agent identity (default: AGENT_NAME)" },
+		{ name: "--full-facts", description: "Include complete adapter payloads instead of the default facts summary" },
 	], example: "omp-kit next --role worker --json", runnable: true, dataSchema: NEXT_DATA_SCHEMA },
 	{ name: "converge", description: "Report or owner-resolve shared-main convergence without overwriting peer state", usage: "converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...", flags: [
 		{ name: "--repo", value: "PATH", description: "Canonical Git repository to converge; required" },
@@ -1266,7 +1269,9 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "zsh", description: "Zsh completion", usage: "completion zsh", flags: [], example: "omp-kit completion zsh", runnable: true, dataSchema: completionData },
 		{ name: "fish", description: "Fish completion", usage: "completion fish", flags: [], example: "omp-kit completion fish", runnable: true, dataSchema: completionData },
 	], example: "omp-kit completion bash", runnable: true },
-	{ name: "capabilities", description: "List only presently runnable commands", usage: "capabilities", flags: [], example: "omp-kit capabilities --json", runnable: true, dataSchema: grammarData },
+	{ name: "capabilities", description: "List presently runnable commands; filter discovery with --command NAME (repeatable or comma-separated)", usage: "capabilities [--command NAME]...", flags: [
+		{ name: "--command", value: "NAME", repeatable: true, description: "Only these command names or quoted command paths; repeat or use comma-separated names" },
+	], example: "omp-kit capabilities --json --command land", runnable: true, dataSchema: grammarData },
 	{ name: "schema", description: "Describe envelope, command data and grammar", usage: "schema", flags: [], example: "omp-kit schema --json", runnable: true, dataSchema: schemaData },
 	{ name: "robot-docs", description: "Agent guidance from the live command grammar", usage: "robot-docs guide", flags: [], subcommands: [
 		{ name: "guide", description: "Safe automation guidance", usage: "robot-docs guide", flags: [], example: "omp-kit robot-docs guide", runnable: true, dataSchema: textData },
@@ -1278,5 +1283,5 @@ export function findCommand(name: string, children: readonly Command[] = COMMAND
 }
 
 export function commandFlags(command: Command): readonly Flag[] {
-	return [...GLOBAL_FLAGS, ...command.flags];
+	return [...GLOBAL_FLAGS.filter(flag => !flag.standalone), ...command.flags];
 }

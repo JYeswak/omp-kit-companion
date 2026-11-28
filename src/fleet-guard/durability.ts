@@ -17,9 +17,9 @@ const INDEX_LIMIT = 8 * LIMIT;
 const GIT_OBJECT_ID = /^[0-9a-f]{40,64}$/;
 // CFSCOPY1: a tracked-source copy is the one refusal whose next step is not "move it home": the agent wanted an
 // isolated copy of the repo to change, so the refusal names the tool that gives one (CFS hit it ~60 times a day).
-const SEPARATE_CHECKOUT = " To change tracked source in isolation, edit it in a separate checkout of the repository (for example `ovnfs new --name <x>` from the repo, which gives a full checkout outside scratch), not a copy under scratch.";
+const SEPARATE_CHECKOUT = " To change tracked source in isolation, edit it in a separate checkout of the repository (run `ovnfs new` from the repo, then edit the returned checkout), not a copy under scratch.";
 const refuse = (detail: string): FleetGuardBlock => ({ block: true,
-	reason: `fleet-guard scratch-is-not-a-home: ${detail}. Keep canonical source, reusable scripts, prompts and packets in their repository home; scratch is for disposable synthetic inputs.${detail.startsWith("tracked-source-copy") ? SEPARATE_CHECKOUT : ""}` });
+	reason: `fleet-guard scratch-is-not-a-home: ${detail}. Keep canonical source, reusable scripts, prompts and packets in their repository home; scratch is for disposable synthetic inputs.${detail.startsWith("tracked-source-copy") ? SEPARATE_CHECKOUT : " For durable work, run `ovnfs new` from its owning repository and edit the returned checkout outside scratch."}` });
 const inside = (root: string, path: string): boolean => path === root || path.startsWith(`${root}/`);
 
 /** One-line admission notice for an owned-scratch path whose written bytes cannot be read. */

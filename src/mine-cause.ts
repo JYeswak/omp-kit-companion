@@ -29,6 +29,8 @@ function rc(value: unknown): number | undefined {
 	return undefined;
 }
 
+const FLEET_DCG_RULE = /^(?:Error: )?(core\.git:[A-Za-z0-9_.+-]{1,95}) \(fleet\):/m;
+
 /** Inspect native envelopes only, never arbitrary command/search output subtrees. */
 export function classifyMineResult(input: MineResultInput): { class_id: string; summary: string } | null {
 	const layers: Record<string, unknown>[] = [];
@@ -120,8 +122,13 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 			const name = codeName(match[1]!);
 			return name ? `guard-friction:${name}` : null;
 		}],
+		[FLEET_DCG_RULE, match => {
+			const name = codeName(match[1]!);
+			return name ? `guard-friction:${name}` : null;
+		}],
 		[/^(?:Error: )?dcg denied\b(.*)$/, match => {
-			const rule = /\(([A-Za-z0-9_.-]+\.[A-Za-z0-9_.:+-]{1,95})\)/.exec(match[1]!);
+			const rule = /\(([A-Za-z0-9_.-]+\.[A-Za-z0-9_.:+-]{1,95})\)/.exec(match[1]!)
+				?? FLEET_DCG_RULE.exec(lines.join("\n"));
 			if (!rule) return "guard-friction:dcg-denied";
 			const name = codeName(rule[1]!);
 			return name ? `guard-friction:${name}` : null;

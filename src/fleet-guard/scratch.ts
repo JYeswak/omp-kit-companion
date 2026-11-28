@@ -37,7 +37,7 @@ export interface FleetGuardBlock {
 
 export type ScratchCheck = (event: FleetGuardEvent, context: FleetGuardContext) => FleetGuardBlock | undefined;
 
-const AGENTS_STORING = "This repository's enabled .omp/fleet.json policy keeps scratch in repo-local var/agent-tmp (allocate it with `omp-kit scratch new --label <x> --json`); system temp and home-root writes are refused.";
+const AGENTS_STORING = "This repository's enabled .omp/fleet.json policy keeps scratch in repo-local var/agent-tmp; system temp and home-root writes are refused. Next: run `omp-kit scratch new --label refusal-output --json` inside your repository, then write disposable output under the returned data.dir.";
 const AGENTS_SHARED_TREE = "See AGENTS.md (shared tree: stage explicit paths, never git add -A / commit -a / add .).";
 const SYSTEM_TEMP_REMEDY = "Never write to system temp: allocate owned scratch with `omp-kit scratch new --label <x> --json` (run inside your repository) and write there.";
 

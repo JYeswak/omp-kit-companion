@@ -240,7 +240,7 @@ test("fresh HOME creates default config and extension only after guarded apply",
 	expect(readdirSync(join(f.stateRoot, "receipts"))).toContain(`${receipt.receiptId}.json`);
 });
 
-test("compiled opt-in plans without writes, receipts exact changes, and never certifies a shadowed project guard", () => {
+test("compiled opt-in plans without writes, receipts exact changes, and never certifies a shadowed project guard", async () => {
 	const f = fixture(), config = f.profile("default");
 	const shippedGuard = readFileSync(resolve(import.meta.dir, "../../extensions/kit-guard-optin.ts"));
 	writeFileSync(join(f.release, "extensions", "kit-guard-optin.ts"), shippedGuard);
@@ -296,12 +296,20 @@ test("compiled opt-in plans without writes, receipts exact changes, and never ce
 	expect(readFileSync(selectedConfig, "utf8")).toContain(f.destination);
 	expect(readFileSync(config)).toEqual(appliedConfig);
 	const fleetName = "dcg-tool-bridge.ts", fleetDestination = join(f.home, ".omp", "omp-extensions", fleetName);
-	const fleetSource = readFileSync(resolve(import.meta.dir, "../../extensions", fleetName));
+	// A release ships the bridge and its kitlib runner as one module, without src/.
+	const bundle = await Bun.build({
+		entrypoints: [resolve(import.meta.dir, "../../extensions", fleetName)],
+		target: "bun", format: "esm", minify: false,
+	});
+	expect(bundle.success).toBe(true);
+	expect(bundle.outputs).toHaveLength(1);
+	const fleetSource = Buffer.from(await bundle.outputs[0]!.arrayBuffer());
 	writeFileSync(join(f.release, "policy", "extensions-fleet.json"), JSON.stringify({ extensions: [fleetName], skipProfiles: [] }));
 	writeFileSync(join(f.release, "extensions", fleetName), fleetSource);
 	expect(run(["--plan", "--fleet", "--profiles", "work"]).code).toBe(1);
 	expect(existsSync(fleetDestination)).toBe(false);
-	expect(run(["--apply", "--yes", "--fleet", "--profiles", "work"]).output.data.action).toBe("APPLIED");
+	const fleetApply = run(["--apply", "--yes", "--fleet", "--profiles", "work"]);
+	expect(fleetApply.output.data.action, JSON.stringify(fleetApply.output.errors)).toBe("APPLIED");
 	expect(readFileSync(fleetDestination)).toEqual(fleetSource);
 	expect(readFileSync(selectedConfig, "utf8")).toContain(fleetDestination);
 	const interruptedConfig = f.profile("later");

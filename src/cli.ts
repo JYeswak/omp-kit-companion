@@ -258,25 +258,39 @@ function help(command?: Command, parent?: Command): string {
 		"Use omp-kit help TOPIC for flag details. Unavailable handlers refuse without mutation."].join("\n");
 }
 
-function nearest(value: string, choices: readonly string[]): string | undefined {
-	let best: string | undefined;
+/** Adjacent transpositions preserve the intended letters, unlike a tied substitution. */
+function adjacentTransposition(value: string, candidate: string): boolean {
+	if (value.length !== candidate.length) return false;
+	let i = 0;
+	while (i < value.length && value[i] === candidate[i]) i++;
+	return i + 1 < value.length && value[i] === candidate[i + 1] && value[i + 1] === candidate[i]
+		&& value.slice(i + 2) === candidate.slice(i + 2);
+}
+
+function nearest(value: string, choices: readonly string[]): string[] {
 	let distance = 3;
+	let matches: { name: string; transposed: boolean }[] = [];
 	for (const candidate of choices) {
-		const row = Array.from({ length: candidate.length + 1 }, (_, index) => index);
+		if (Math.abs(value.length - candidate.length) >= 3) continue;
+		const rows = Array.from({ length: 3 }, () => new Array<number>(candidate.length + 1).fill(0));
+		for (let j = 0; j <= candidate.length; j++) rows[0]![j] = j;
 		for (let i = 1; i <= value.length; i++) {
-			let prior = row[0] ?? 0;
+			const row = rows[i % 3]!, previous = rows[(i - 1) % 3]!;
 			row[0] = i;
 			for (let j = 1; j <= candidate.length; j++) {
-				const previous = row[j] ?? 0;
-				row[j] = Math.min((row[j] ?? 0) + 1, (row[j - 1] ?? 0) + 1, prior + (value[i - 1] === candidate[j - 1] ? 0 : 1));
-				prior = previous;
+				row[j] = Math.min(previous[j]! + 1, row[j - 1]! + 1, previous[j - 1]! + (value[i - 1] === candidate[j - 1] ? 0 : 1));
+				if (i > 1 && j > 1 && value[i - 1] === candidate[j - 2] && value[i - 2] === candidate[j - 1])
+					row[j] = Math.min(row[j]!, rows[(i - 2) % 3]![j - 2]! + 1);
 			}
 		}
-		const score = row[candidate.length] ?? 3;
-		if (score < distance) { distance = score; best = candidate; }
-		else if (score === distance) best = undefined; // ambiguous suggestions never authorize execution
+		const score = rows[value.length % 3]![candidate.length]!;
+		if (score >= 3) continue;
+		if (score < distance) { distance = score; matches = []; }
+		if (score === distance) matches.push({ name: candidate, transposed: adjacentTransposition(value, candidate) });
 	}
-	return best;
+	const transposed = matches.filter(match => match.transposed);
+	if (transposed.length === 1) return [transposed[0]!.name, ...matches.filter(match => !match.transposed).map(match => match.name)];
+	return matches.length === 1 ? [matches[0]!.name] : [];
 }
 
 // Reviewed discovery intents; these are suggestions, never executable aliases.
@@ -369,11 +383,14 @@ function parse(args: readonly string[]): ParseResult {
 	if (!command) {
 		const candidates = parent?.subcommands ?? COMMANDS;
 		const bad = positional[parent ? 1 : 0] ?? "";
+		if (!parent && bad === "handoff") return { failure: refusal("UNKNOWN_COMMAND", "handoff is not a command; use the existing landing and verification workflow",
+			"Hand over with omp-kit land --checkout <n> --bead <id> --review auto --message <msg> --apply --yes. Preview independent verification with omp-kit verify <bead> --export <sha> --dry-run; no command was run."), json };
 		const semantic = parent ? undefined : COMMAND_INTENTS[bad];
-		const hint = semantic && candidates.some((item) => item.name === semantic)
-			? semantic
+		const hints = semantic && candidates.some((item) => item.name === semantic)
+			? [semantic]
 			: nearest(bad, candidates.map((item) => item.name));
-		return { failure: refusal(parent ? "UNKNOWN_SUBCOMMAND" : "UNKNOWN_COMMAND", `Unknown ${parent ? "subcommand" : "command"}: ${bad}`, hint ? `Try omp-kit ${parent ? `${parent.name} ` : ""}${hint} exactly; no command was run.` : "Run omp-kit --help; no command was run."), json };
+		const route = (name: string) => `omp-kit ${parent ? `${parent.name} ` : ""}${name}`;
+		return { failure: refusal(parent ? "UNKNOWN_SUBCOMMAND" : "UNKNOWN_COMMAND", `Unknown ${parent ? "subcommand" : "command"}: ${bad}`, hints.length ? `Try ${route(hints[0]!)} exactly${hints.length > 1 ? ` (or ${hints.slice(1).map(route).join(", ")})` : ""}; no command was run.` : "Run omp-kit --help; no command was run."), json };
 	}
 	const rchLease = parent?.name === "rch" && command.name === "lease";
 	if (separator >= 0 && command.name !== "heavy" && command.name !== "save" && !rchLease) return { failure: refusal("UNEXPECTED_SEPARATOR", "The `--` command separator is supported only by heavy, save or rch lease", "Pass child arguments only to heavy, save or rch lease; no child command was run."), json };
@@ -3272,7 +3289,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	if (sub === "uninstall") {
 		if (!request.flags.has("--dry-run") && !request.flags.has("--apply")) {
 			return refusal("UNINSTALL_REQUIRES_APPLY", `service uninstall ${names[0]} boots out the job and moves its plist to backup`,
-				"Re-run with --apply --yes, or add --dry-run to preview without changing anything.");
+				`Inspect with omp-kit service status ${names[0]} --json; uninstall has no preview. To request removal, run omp-kit service uninstall ${names[0]} --apply --yes.`);
 		}
 		const [name] = names;
 		const job = scoped[name!]!;
@@ -6027,6 +6044,7 @@ async function corpusReport(request: ParsedCommand): Promise<CliResult> {
 		const repo = request.flags.get("--repo");
 		const agent = request.flags.get("--agent");
 		const result = await next({ role: typeof role === "string" ? role : "",
+			fullFacts: request.flags.has("--full-facts"),
 			...(typeof repo === "string" ? { repo } : {}),
 			...(typeof agent === "string" ? { agent } : {}),
 		});
@@ -6037,10 +6055,36 @@ async function corpusReport(request: ParsedCommand): Promise<CliResult> {
 	if (command.name === "status" || command.name === "health" || command.name === "doctor") return diagnosticInventory(request);
 	if (command.name === "corpus") return corpusReport(request);
 	if (command.name === "schema") return { code: 0, data: schema(version), verification: "PERFORMED" };
-	if (command.name === "capabilities") return { code: 0, data: { schema_version: SCHEMA_VERSION, tool_version: version, commands: availableCommands(), unavailable_commands: unavailableCommands(), global_flags: GLOBAL_FLAGS, exit_codes: EXIT_CODES, proof_classes: PROOF_CLASSES }, verification: "PERFORMED" };
+	if (command.name === "capabilities") {
+		const selection = flags.get("--command");
+		let selected: readonly Command[] = COMMANDS;
+		if (typeof selection === "string") {
+			const names = new Set(selection.split(/[\n,]/).map(name => name.trim()).filter(Boolean));
+			const paths = (commands: readonly Command[], prefix = ""): string[] => commands.flatMap(item => {
+				const name = `${prefix}${item.name}`;
+				return [name, ...paths(item.subcommands ?? [], `${name} `)];
+			});
+			const known = paths(COMMANDS);
+			for (const name of names) if (!known.includes(name)) {
+				const hints = nearest(name, known);
+				const invocation = (hint: string) => `omp-kit capabilities --json --command ${hint.includes(" ") ? JSON.stringify(hint) : hint}`;
+				return refusal("UNKNOWN_COMMAND", `Unknown command in --command: ${name}`, hints.length
+					? `Did you mean ${invocation(hints[0]!)}${hints.length > 1 ? ` (or ${hints.slice(1).map(invocation).join(", ")})` : ""}? No selection was executed; no command was run.`
+					: "Run omp-kit capabilities --json to discover exact command names; no command was run.");
+			}
+			const select = (commands: readonly Command[], prefix = ""): Command[] => commands.flatMap(item => {
+				const name = `${prefix}${item.name}`;
+				if (names.has(name)) return [item];
+				const children = select(item.subcommands ?? [], `${name} `);
+				return children.length ? [{ ...item, subcommands: children }] : [];
+			});
+			selected = select(COMMANDS);
+		}
+		return { code: 0, data: { schema_version: SCHEMA_VERSION, tool_version: version, commands: availableCommands(selected), unavailable_commands: unavailableCommands(selected), global_flags: GLOBAL_FLAGS, exit_codes: EXIT_CODES, proof_classes: PROOF_CLASSES }, verification: "PERFORMED" };
+	}
 	if (parent?.name === "completion") return { code: 0, data: { shell: command.name, text: completion(command.name) }, verification: "PERFORMED" };
 	if (command.name === "examples") return { code: 0, data: { text: COMMANDS.map((item) => `${item.example}${isRunnable(item, item.name) ? "" : " # not yet available"}`).join("\n") }, verification: "PERFORMED" };
-	if (command.name === "quickstart" || parent?.name === "robot-docs") return { code: 0, data: { text: `Run omp-kit status --json to inspect presence (not effective-profile proof).\nRun omp-kit capabilities --json to discover runnable handlers.\n${COMMANDS.filter((item) => isRunnable(item, item.name)).map((item) => item.example).join("\n")}\nMCP servers from other harnesses: omp-kit doctor --scope mcp --sources --json, then omp-kit apply mcp --from claude --servers NAMES --profiles all --plan --json (--apply --yes to write; omp-kit undo RUN_ID --yes restores; --env-command SERVER:KEY=!CMD, --enable NAMES, and --timeout-ms NAME=N edit servers already present), then omp-kit test --mcp --profiles all --servers NAMES --call SERVER:TOOL:JSON --expect SERVER:REGEX --json.\nMutation never follows from --robot; unavailable handlers refuse.` }, verification: "PERFORMED" };
+	if (command.name === "quickstart" || parent?.name === "robot-docs") return { code: 0, data: { text: `Run omp-kit status --json to inspect presence (not effective-profile proof).\nRun omp-kit capabilities --json --command land for one command; repeat --command or use comma-separated names for several. Omit the filter only when the entire runnable catalog is needed.\nRun omp-kit next --role worker --json for a bounded decision and facts summary; add --full-facts only when complete adapter payloads are needed.\n${COMMANDS.filter((item) => isRunnable(item, item.name)).map((item) => item.example).join("\n")}\nMCP servers from other harnesses: omp-kit doctor --scope mcp --sources --json, then omp-kit apply mcp --from claude --servers NAMES --profiles all --plan --json (--apply --yes to write; omp-kit undo RUN_ID --yes restores; --env-command SERVER:KEY=!CMD, --enable NAMES, and --timeout-ms NAME=N edit servers already present), then omp-kit test --mcp --profiles all --servers NAMES --call SERVER:TOOL:JSON --expect SERVER:REGEX --json.\nMutation never follows from --robot; unavailable handlers refuse.` }, verification: "PERFORMED" };
 	return refusal("HANDLER_UNAVAILABLE", `${path} is documented but its safe handler is not installed`, `Run omp-kit capabilities --json to see runnable commands; no ${command.mutation ? "mutation" : "probe"} was attempted.`);
 }
 

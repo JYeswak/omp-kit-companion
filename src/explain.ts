@@ -316,6 +316,33 @@ function matchingRule(contract: BriefContract | null, member: string | null, gat
 	const matches = contract.rules.filter(rule => memberName(rule.member) === wanted);
 	return matches.length === 1 ? matches[0] : undefined;
 }
+// Kit-owned remedies never execute or repeat commands from event detail.
+// A classified external error gets a remedy only when its diagnostic gives
+// enough structured context for one safe, precise next step.
+function kitRemedy(gate: string, detail: string | null): string | null {
+	switch (gate) {
+		case "scratch-write":
+			return "In the owning repository, run `omp-kit scratch new --label refusal-output --json`, then write disposable output under the returned data.dir.";
+		case "scratch-is-not-a-home":
+			return "Keep durable source, scripts and packets in their owning repository. For an isolated edit, run `ovnfs new` from that repository and edit the returned checkout outside scratch.";
+		case "49-omp-kit-stale-worktree":
+			return "Run `omp-kit doctor --scope stale-worktree --json` in the affected repository; rework accidental reversions on current bytes. Declare Revert: or Supersedes: trailers only for intended reversions.";
+		case "REFUSED":
+			// REFUSED is shared by unrelated producers; only this header
+			// supports the stale-worktree remedy.
+			return detail?.includes("stale-worktree: REFUSED: commit would revert landed lines")
+				? kitRemedy("49-omp-kit-stale-worktree", null) : null;
+		case "validation:edit-undisplayed-anchor": {
+			const diagnostic = safeText(detail, 600);
+			const anchor = diagnostic && /^This edit anchors to lines ([0-9]+(?:-[0-9]+)?(?:, ?[0-9]+(?:-[0-9]+)?)*) of ([A-Za-z0-9_./~ -]+) that \[/.exec(diagnostic);
+			if (!anchor) return null;
+			return `Use the read tool: ${JSON.stringify({ path: `${anchor[2]}:${anchor[1]!.replaceAll(" ", "")}` })}. Rebuild the edit with the returned snapshot tag and only displayed changed lines; folded summaries are not edit anchors.`;
+		}
+		default:
+			return null;
+	}
+}
+
 
 
 function renderText(report: Omit<ExplainReport, "text">): string {
@@ -399,7 +426,7 @@ export async function buildExplainReport(seat: string, last = 50): Promise<Expla
 	}));
 	const refusalRows = displayedGroups.map(group => {
 		const rule = matchingRule(group.repo ? contracts.get(group.repo) ?? null : null, group.memberRaw, group.gate);
-		const compliant = safeText(rule?.compliant, 600);
+		const compliant = safeText(rule?.compliant, 600) ?? kitRemedy(group.gate, group.latest.detail);
 		return {
 			cause: group.cause, gate: group.gate, member: memberName(group.memberRaw),
 			refusal: safeText(group.latest.detail, 400) ?? `Refused by ${group.cause}.`,
