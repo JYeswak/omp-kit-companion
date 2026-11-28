@@ -37,6 +37,7 @@ def _load(name: str, path: Path):
 pysafe = _load("pysafe", ROOT / "scripts" / "pysafe.py")
 kitlib_run = _load("kitlib_run", ROOT / "scripts" / "kitlib_run.py")
 owned_tmp = _load("kitlib_tmp", ROOT / "scripts" / "kitlib_tmp.py").owned_tmp
+commit_preflight = _load("commit_preflight", ROOT / "scripts" / "commit-preflight.py")
 
 
 def substitute(value, marker: str, tmp: str):
@@ -104,6 +105,46 @@ class Recorder:
 
     def joined(self, stream: str) -> bytes:
         return b"".join(chunk for _, name, chunk in self.chunks if name == stream)
+
+
+class GitReadPolicy(unittest.TestCase):
+    def test_background_git_reader_preserves_index_until_plain_status_refreshes_it(self) -> None:
+        with owned_tmp("git-read-index") as scratch:
+            root = Path(scratch).resolve()
+            env = {
+                "HOME": str(root), "PATH": os.environ.get("PATH", os.defpath),
+                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+            }
+
+            def git(*args: str, read: bool = False):
+                argv = commit_preflight.git_read_argv(*args) if read else ["git", *args]
+                return kitlib_run.run(argv, cwd=root, env=env, deadline_s=10)
+
+            self.assertEqual(git("init", "-q").rc, 0)
+            file = root / "tracked.txt"
+            file.write_bytes(b"original\n")
+            self.assertEqual(git("add", "--", file.name).rc, 0)
+            before_stat = file.stat()
+            os.utime(file, ns=(before_stat.st_atime_ns, before_stat.st_mtime_ns - 7_000_000_000))
+            index = root / ".git" / "index"
+            before = index.read_bytes()
+            status = ("status", "--porcelain=v1", "--", file.name)
+            protected = git(*status, read=True)
+            self.assertEqual((protected.rc, protected.stdout, protected.stderr), (0, b"A  tracked.txt\n", b""))
+            diff = git("diff", "--cached", "--name-only", "--", file.name, read=True)
+            self.assertEqual((diff.rc, diff.stdout), (0, b"tracked.txt\n"))
+            self.assertEqual(index.read_bytes(), before)
+            lock = index.with_suffix(".lock")
+            with lock.open("xb"):
+                self.assertEqual(git(*status, read=True).rc, 0)
+                blocked_writer = git("add", "--", file.name)
+                self.assertNotEqual(blocked_writer.rc, 0)
+                self.assertIn(b"index.lock", blocked_writer.stderr)
+                self.assertEqual(index.read_bytes(), before)
+            lock.unlink()
+            plain = git(*status)
+            self.assertEqual((plain.rc, plain.stdout), (0, protected.stdout))
+            self.assertNotEqual(index.read_bytes(), before)
 
 
 class Corpus(unittest.TestCase):

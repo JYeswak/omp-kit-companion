@@ -80,12 +80,17 @@ def required(argv, env=None):
     return result.stdout
 
 
+def git_read_argv(verb: str, *args: str) -> list[str]:
+    """Build Git status/diff argv without optional index refreshes."""
+    return ["git", "--no-optional-locks", verb, *args]
+
+
 def affected_tests(root: Path, env: dict) -> list:
     """PREFLIGHTAFFECTED1: `--tests affected` selects what the push gate will run, with the gate's own
     selector (scripts/affected-tests.ts) over every staged path, so a builder sees the gate's failures
     before the land does instead of after it."""
     changed = [os.fsdecode(raw) for raw in
-               required(['git', 'diff', '--cached', '--name-only', '-z'], env).split(b'\0') if raw]
+               required(git_read_argv('diff', '--cached', '--name-only', '-z'), env).split(b'\0') if raw]
     if not changed:
         return []
     argv = ['bun', 'run', '--no-env-file', '--config=/dev/null', str(HERE / 'affected-tests.ts'), '--root', str(root)]
@@ -109,7 +114,7 @@ def note_has_added_line(stdout, env):
     fragment = verdict.get('fragment')
     if verdict.get('verdict') != 'covered' or not isinstance(fragment, str):
         raise RuntimeError('native notes judge returned no covered fragment')
-    stat = required(['git', 'diff', '--cached', '--numstat', '-z', 'HEAD', '--', fragment], env)
+    stat = required(git_read_argv('diff', '--cached', '--numstat', '-z', 'HEAD', '--', fragment), env)
     added = stat.split(b'\t', 1)[0]
     if not added.isdigit():
         raise RuntimeError('cannot read added-line count for native selected fragment ' + fragment)
@@ -252,7 +257,7 @@ def run_export_tests(tests: list, env: dict, scratch: Path, root: Path, workers:
     if command(['tar', '-xf', str(tarball), '-C', str(archive)], env).rc:
         raise RuntimeError('export extract failed')
     tarball.unlink()
-    changes = required(['git', 'diff', '--cached', '--name-status', '-z', '--no-renames', head], env).split(b'\0')
+    changes = required(git_read_argv('diff', '--cached', '--name-status', '-z', '--no-renames', head), env).split(b'\0')
     overlay, deleted = [], []
     for status, raw in zip(changes[0::2], changes[1::2]):
         (deleted if status == b'D' else overlay).append(os.fsdecode(raw))
@@ -416,7 +421,7 @@ def main():
                 print('NOT_JUDGED ' + name + ': supply --message FILE with the planned Bead/Revert/Supersedes trailers', flush=True)
         # Resolve sourced helpers from the effective INDEX, including unchanged
         # and non-.sh helpers. Cwd/source paths must never fall back to worktree.
-        paths = required(['git', 'diff', '--cached', '--name-only', '-z', '--diff-filter=ACMRT'], env).split(b'\0')
+        paths = required(git_read_argv('diff', '--cached', '--name-only', '-z', '--diff-filter=ACMRT'), env).split(b'\0')
         shell_paths = [os.fsdecode(raw) for raw in paths if raw.endswith((b'.sh', b'.bash'))]
         shell_root = scratch / 'shell'
         if shell_paths:

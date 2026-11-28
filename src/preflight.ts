@@ -15,7 +15,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync }
 import { basename, join, resolve } from "node:path";
 import { envelope, parseFindingLines, unjudged } from "./kitlib/findings.ts";
 import type { Envelope, Finding, PreflightAct } from "./kitlib/findings.ts";
-import { run } from "./kitlib/run.ts";
+import { gitReadArgv, run } from "./kitlib/run.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { validatePriorArtComment } from "./grader-next.ts";
 import { checkPublishedCommits as checkPublishedCommitShas } from "../extensions/kit-published-commit.ts";
@@ -140,9 +140,9 @@ export async function preflightCommit(repo: string, options: { message?: string;
 	// The scope and the projected script must come from the same index
 	// snapshot; a second --cached read can silently select a newer index.
 	const stagedArgv = base.rc === 1
-		? ["ls-tree", "-r", "--full-tree", "--name-only", "-z", tree.out]
-		: ["--no-optional-locks", "diff", "--name-only", "--diff-filter=ACMR", "-z", base.out, tree.out, "--"];
-	const stagedOut = await run(["git", ...stagedArgv], { cwd: repo, deadline_s: 60, max_output_bytes: 4 * 1024 * 1024 });
+		? ["git", "ls-tree", "-r", "--full-tree", "--name-only", "-z", tree.out]
+		: gitReadArgv(["diff", "--name-only", "--diff-filter=ACMR", "-z", base.out, tree.out, "--"]);
+	const stagedOut = await run(stagedArgv, { cwd: repo, deadline_s: 60, max_output_bytes: 4 * 1024 * 1024 });
 	if (stagedOut.rc !== 0 || stagedOut.killed || stagedOut.truncated) {
 		return envelope("commit", null, snapshot, [unjudged("git", stagedOut.rc, text(stagedOut.stderr).trim() || "could not enumerate the pinned staged tree")]);
 	}

@@ -328,6 +328,11 @@ function capture(stream: ReadableStream<Uint8Array>, cap: number, name: OutputSt
 	};
 }
 
+/** Git status/diff may refresh the index; request a read without optional writes. */
+export function gitReadArgv(args: readonly ["status" | "diff", ...string[]]): string[] {
+	return ["git", "--no-optional-locks", ...args];
+}
+
 export async function run(argv: readonly string[], options: RunOptions): Promise<RunResult> {
 	if (!Array.isArray(argv)) throw new TypeError("kitlib run takes an argv array, never a shell string");
 	if (argv.length === 0 || argv.some(item => typeof item !== "string")) throw new TypeError("kitlib run needs a non-empty argv of strings");

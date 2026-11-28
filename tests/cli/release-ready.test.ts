@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
@@ -98,11 +98,17 @@ function readiness(extra: Record<string, string> = {}) {
 
 test("ready exact origin/main fixture reports READY; runtime-id mismatch is NOT-READY", () => {
 	setup();
-	const control = readiness();
+	const index = join(repo, ".git", "index");
+	const readme = join(repo, "README.md");
+	const { atimeMs, mtimeMs } = statSync(readme);
+	utimesSync(readme, atimeMs / 1000, mtimeMs / 1000 - 7);
+	const before = readFileSync(index);
+	const control = readiness({ GIT_OPTIONAL_LOCKS: "1" });
 	expect(control.rc, control.out + control.err).toBe(0);
 	const ready = JSON.parse(control.out);
 	expect(ready.status).toBe("READY");
 	expect(ready.commit).toBe(source);
+	expect(readFileSync(index).equals(before), "readiness probe refreshed a shared index").toBe(true);
 	expect(ready.checks).toContainEqual({ name: "hosted-ci", ok: true, detail: `CI_GREEN sha=${source} run=42 conclusion=success` });
 	const floor = ready.checks.find((row: { name: string }) => row.name === "product-bead-floor");
 	expect(JSON.parse(floor.detail)).toMatchObject({ count: 10, remaining: 0, source_sha: source });

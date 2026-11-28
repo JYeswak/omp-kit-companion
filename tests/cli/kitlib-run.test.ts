@@ -5,11 +5,11 @@
 // a marker unique to the case run in their command lines.
 import { afterAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, existsSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { constants } from "node:os";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
-import { RLIMIT_PROLOGUE, run, runSync, type RunOptions, type RunResult, type RunSyncOptions, type RunTimings } from "../../src/kitlib/run";
+import { gitReadArgv, RLIMIT_PROLOGUE, run, runSync, type RunOptions, type RunResult, type RunSyncOptions, type RunTimings } from "../../src/kitlib/run";
 import { safePid } from "../../src/kitlib/proc";
 import { PYSAFE_SHA256, PYSAFE_SOURCE_BASE64 } from "../../src/kitlib/pysafe-source";
 import { fixtureDeadlineS } from "./fixture-process";
@@ -62,6 +62,51 @@ function judgeKl02(result: RunResult, want: Expect, rssGrowth: number, recorder:
 
 const corpus = JSON.parse(readFileSync(join(import.meta.dir, "../fixtures/kitlib-run/corpus.json"), "utf8")) as { schema: string; cases: Case[] };
 const decoder = new TextDecoder();
+
+test("background Git readers preserve an index that plain status refreshes", async () => {
+	const tmp = ownedTmp("git-read-index");
+	const options = { cwd: tmp.path, deadline_s: fixtureDeadlineS(10),
+		env: { HOME: tmp.path, PATH: process.env.PATH ?? "/usr/bin:/bin", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } };
+	const git = (...args: string[]) => run(["git", ...args], options);
+	const file = join(tmp.path, "tracked.txt");
+	const index = join(tmp.path, ".git", "index");
+	const lock = `${index}.lock`;
+	try {
+		expect((await git("init", "-q")).rc).toBe(0);
+		writeFileSync(file, "original\n");
+		expect((await git("add", "--", "tracked.txt")).rc).toBe(0);
+		const old = statSync(file);
+		utimesSync(file, old.atimeMs / 1000, old.mtimeMs / 1000 - 7);
+		const before = readFileSync(index);
+		const status = gitReadArgv(["status", "--porcelain=v1", "--", "tracked.txt"]);
+		for (const result of [await run(status, options), runSync(status, options)]) {
+			expect(result.rc).toBe(0);
+			expect(decoder.decode(result.stdout)).toBe("A  tracked.txt\n");
+			expect(decoder.decode(result.stderr)).toBe("");
+		}
+		const diff = await run(gitReadArgv(["diff", "--cached", "--name-only", "--", "tracked.txt"]), options);
+		expect(diff.rc).toBe(0);
+		expect(decoder.decode(diff.stdout)).toBe("tracked.txt\n");
+		expect(readFileSync(index).equals(before)).toBe(true);
+		const fd = openSync(lock, "wx");
+		try {
+			expect(runSync(status, options).rc).toBe(0);
+			const writer = await git("add", "--", "tracked.txt");
+			expect(writer.rc).not.toBe(0);
+			expect(decoder.decode(writer.stderr)).toContain("index.lock");
+			expect(readFileSync(index).equals(before)).toBe(true);
+		} finally {
+			closeSync(fd);
+			rmSync(lock);
+		}
+		const unprotected = await git("status", "--porcelain=v1", "--", "tracked.txt");
+		expect(unprotected.rc).toBe(0);
+		expect(decoder.decode(unprotected.stdout)).toBe("A  tracked.txt\n");
+		expect(readFileSync(index).equals(before)).toBe(false);
+	} finally {
+		tmp.cleanup();
+	}
+}, fixtureDeadlineS(45) * 1000);
 
 function substitute<T>(value: T, marker: string, tmp: string): T {
 	if (typeof value === "string") return value.replaceAll("{MARKER}", marker).replaceAll("{TMP}", tmp) as T;

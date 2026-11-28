@@ -2,7 +2,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ownedTmp } from "./kitlib/tmp.ts";
-import { runSync } from "./kitlib/run.ts";
+import { gitReadArgv, runSync } from "./kitlib/run.ts";
 import { checkReadme } from "../scripts/readme-check.ts";
 import type { Finding } from "./diagnostics.ts";
 
@@ -71,7 +71,7 @@ export function inspectReleaseReady(repo: string, kitRoot: string): ReleaseReady
 							if (floor.ok) checks[checks.length - 1]!.detail = floor.stdout;
 						}
 					}
-					const dirty = probe("metadata-clean", ["git", "status", "--porcelain", "--untracked-files=all", "--", "package.json", "README.md"]);
+					const dirty = probe("metadata-clean", gitReadArgv(["status", "--porcelain", "--untracked-files=all", "--", "package.json", "README.md"]));
 					if (dirty.ok && dirty.stdout) checks[checks.length - 1] = { name: "metadata-clean", ok: false, detail: dirty.stdout };
 					const tree = probe("source-tree", ["git", "rev-parse", `${commit}^{tree}`]);
 					if (tree.ok) {

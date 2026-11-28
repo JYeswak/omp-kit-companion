@@ -1,0 +1,1 @@
+- Stop release-readiness status and staged preflight diff probes from refreshing the Git index. Actual Git writes still require the index lock.
