@@ -5,6 +5,7 @@
 import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { isLoopbackBoardUrl, kitBoardLocalDir } from "../board-events.ts";
 import { reservationPatternCovers } from "./reservations.ts";
 
 const LEASE_MIN_S = 30;
@@ -45,11 +46,15 @@ export interface Grant { granted: Hold[]; conflicts: Hold[] }
 interface Token { epoch: number; token: string }
 
 function readToken(): string {
-	const xdg = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".local/share/omp-kit/board-trial/xdg");
-	const dir = join(xdg, "board/local");
+	const xdg = process.env.XDG_CONFIG_HOME;
+	const dir = xdg === undefined ? kitBoardLocalDir(homedir()) : join(xdg, "board", "local");
 	const file = readdirSync(dir).filter((n) => n.endsWith(".json")).sort()[0];
 	if (!file) throw new Error("no Board credential under " + dir);
-	return JSON.parse(readFileSync(join(dir, file), "utf8")).token;
+	const credential = JSON.parse(readFileSync(join(dir, file), "utf8"));
+	// Older local credential files are token-only; validate any URL the file actually supplies.
+	if (credential.url !== undefined && (typeof credential.url !== "string" || !isLoopbackBoardUrl(credential.url)))
+		throw new Error("Board credential does not name a loopback HTTP(S) URL");
+	return credential.token;
 }
 
 export class BoardReservations {
@@ -70,11 +75,13 @@ export class BoardReservations {
 	}
 
 	private async api(method: string, path: string, profile: string, body?: unknown, query?: Record<string, string>): Promise<{ status: number; body: any }> {
-		const url = new URL(this.url + path);
+		const target = this.url + path;
+		if (!isLoopbackBoardUrl(target)) throw new Error("Board reservations require a loopback HTTP(S) URL");
+		const url = new URL(target);
 		for (const [k, v] of Object.entries(query ?? {})) url.searchParams.set(k, v);
 		const headers: Record<string, string> = { authorization: "Bearer " + (this.tokenOverride ?? readToken()), "x-board-profile": profile };
 		if (body !== undefined) headers["content-type"] = "application/json";
-		const r = await this.doFetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
+		const r = await this.doFetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), redirect: "error", signal: AbortSignal.timeout(10_000) });
 		const text = await r.text();
 		let json: any;
 		try { json = JSON.parse(text); } catch { json = text; }

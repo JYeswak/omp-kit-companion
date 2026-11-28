@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { defaultMailBackend, inspectMailBackend } from "../../src/diagnostics.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -10,6 +10,7 @@ import { runFixture } from "./fixture-process.ts";
 const ROOT = resolve(import.meta.dir, "..", "..");
 const SPAWN_ENV = join(ROOT, "scripts", "agent-spawn-env.sh");
 const SEAT = "PeachLeopard";
+const TOKEN = "fixture-only";
 
 const owned: OwnedTmp[] = [];
 afterEach(() => { for (const tmp of owned.splice(0)) tmp.cleanup(); });
@@ -34,7 +35,7 @@ function launchEnv(dir: string, backend: string | undefined, agent = SEAT, extra
 /** A stand-in Board CLI that answers whoami as whatever BOARD_PROFILE it was launched with. */
 function fakeBoardCli(dir: string): string {
 	const path = join(dir, "vb");
-	writeFileSync(path, '#!/bin/sh\nif [ -z "${BOARD_PROFILE:-}" ]; then printf \'{"profile":null}\\n\'; exit 0; fi\nprintf \'{"actor":"x+%s","profile":"%s"}\\n\' "$BOARD_PROFILE" "$BOARD_PROFILE"\n');
+	writeFileSync(path, '#!/bin/sh\n[ "$BOARD_TOKEN" = "fixture-only" ] && [ "$BOARD_URL" = "http://127.0.0.1:4178/api/board" ] || exit 1\nif [ -z "${BOARD_PROFILE:-}" ]; then printf \'{"profile":null}\\n\'; exit 0; fi\nprintf \'{"actor":"x+%s","profile":"%s"}\\n\' "$BOARD_PROFILE" "$BOARD_PROFILE"\n');
 	chmodSync(path, 0o755);
 	return path;
 }
@@ -75,12 +76,37 @@ test("BOARDLIVE-S2 doctor mail_backend is ok only when the Board answers as BOAR
 	const dir = scratch("boardlive-s2-doctor");
 	const vb = fakeBoardCli(dir);
 	const carried = launchEnv(dir, "board").env;
-	const env = { PATH: process.env.PATH, HOME: dir, FLEET_MAIL_BACKEND: "board", OMP_KIT_BOARD_CLI: vb, ...carried };
+	const env = { PATH: process.env.PATH, HOME: dir, FLEET_MAIL_BACKEND: "board", OMP_KIT_BOARD_CLI: vb, BOARD_TOKEN: TOKEN, ...carried };
 	const row = inspectMailBackend(defaultMailBackend(env));
 	expect(row.status).toBe("OK");
 	expect(row.evidence?.profile).toBe(SEAT);
-	// Default backend: no Board dependency at all.
-	expect(inspectMailBackend(defaultMailBackend({ PATH: process.env.PATH })).status).toBe("OK");
+});
+
+test("BOARDLIVE1-S6 doctor checks the default Board, with AGENT_NAME as a profile fallback", () => {
+	const dir = scratch("boardlive-s6-doctor");
+	const vb = fakeBoardCli(dir);
+	const env = { PATH: process.env.PATH, HOME: dir, AGENT_NAME: SEAT, BOARD_PROFILE: "", OMP_KIT_BOARD_CLI: vb };
+	const missing = inspectMailBackend(defaultMailBackend(env));
+	expect(missing.evidence).toMatchObject({ backend: "board", reason_code: "BOARD_URL_MISSING" });
+	expect(missing.status).toBe("FAIL");
+	const missingIdentity = inspectMailBackend(defaultMailBackend({ ...env, AGENT_NAME: "" }));
+	expect(missingIdentity.evidence).toMatchObject({ backend: "board", reason_code: "BOARD_PROFILE_MISSING" });
+	expect(missingIdentity.status).toBe("FAIL");
+	const credentials = join(dir, ".local", "share", "omp-kit", "board-trial", "xdg", "board", "local");
+	mkdirSync(credentials, { recursive: true });
+	writeFileSync(join(credentials, "fixture.json"), JSON.stringify({ url: "http://127.0.0.1:4178/api/board", token: TOKEN }));
+	const resolved = inspectMailBackend(defaultMailBackend(env));
+	expect(resolved.status).toBe("OK");
+	expect(resolved.evidence).toMatchObject({ backend: "board", profile: SEAT, proof: "BOARD_WHOAMI" });
+});
+
+test("BOARDLIVE1-S6 explicit am still has no Board dependency; unknown mail backends fail", () => {
+	const am = inspectMailBackend(defaultMailBackend({ FLEET_MAIL_BACKEND: "am" }));
+	expect(am.status).toBe("OK");
+	expect(am.evidence).toMatchObject({ backend: "am", proof: "ENV_ONLY" });
+	const unknown = inspectMailBackend(defaultMailBackend({ FLEET_MAIL_BACKEND: "mattermost" }));
+	expect(unknown.status).toBe("FAIL");
+	expect(unknown.evidence?.reason_code).toBe("MAIL_BACKEND_UNKNOWN");
 });
 
 test("BOARDLIVE-S2 PLANT: profile dropped from the launch env fails the doctor check with a named reason", () => {
@@ -93,14 +119,44 @@ test("BOARDLIVE-S2 PLANT: profile dropped from the launch env fails the doctor c
 	expect(missing.evidence?.reason_code).toBe("BOARD_PROFILE_MISSING");
 	expect(missing.reason).toContain("BOARD_PROFILE");
 	// Wrong profile: the Board answers as someone else.
-	const other = inspectMailBackend({ env: { FLEET_MAIL_BACKEND: "board", BOARD_URL: "http://x", BOARD_PROFILE: SEAT }, whoami: () => ({ rc: 0, timedOut: false, stdout: '{"profile":"OtherSeat"}' }) });
+	const other = inspectMailBackend({ env: { HOME: dir, FLEET_MAIL_BACKEND: "board", BOARD_URL: "http://127.0.0.1:4178/api/board", BOARD_TOKEN: TOKEN, BOARD_PROFILE: SEAT }, whoami: () => ({ rc: 0, timedOut: false, stdout: '{"profile":"OtherSeat"}' }) });
 	expect(other.evidence?.reason_code).toBe("BOARD_PROFILE_MISMATCH");
 	// Unreachable Board, timeout, unstartable CLI, unparseable answer.
-	const base = { FLEET_MAIL_BACKEND: "board", BOARD_URL: "http://x", BOARD_PROFILE: SEAT };
+	const base = { HOME: dir, FLEET_MAIL_BACKEND: "board", BOARD_URL: "http://127.0.0.1:4178/api/board", BOARD_TOKEN: TOKEN, BOARD_PROFILE: SEAT };
 	expect(inspectMailBackend({ env: base, whoami: () => ({ rc: 1, timedOut: false, stdout: "" }) }).evidence?.reason_code).toBe("BOARD_WHOAMI_FAILED");
 	expect(inspectMailBackend({ env: base, whoami: () => ({ rc: null, timedOut: true, stdout: "" }) }).evidence?.reason_code).toBe("BOARD_WHOAMI_TIMEOUT");
 	expect(inspectMailBackend({ env: base, whoami: () => ({ rc: null, timedOut: false, stdout: "" }) }).evidence?.reason_code).toBe("BOARD_CLI_UNAVAILABLE");
 	expect(inspectMailBackend({ env: base, whoami: () => ({ rc: 0, timedOut: false, stdout: "nope" }) }).evidence?.reason_code).toBe("BOARD_WHOAMI_UNPARSEABLE");
 	// Real default whoami against a missing CLI fails closed, not open.
 	expect(inspectMailBackend(defaultMailBackend({ ...base, PATH: process.env.PATH, OMP_KIT_BOARD_CLI: join(dir, "absent") })).status).toBe("FAIL");
+});
+
+test.each([
+	["env", "http://board.invalid/api/board"],
+	["file", "http://board.invalid/api/board"],
+	["env", "http://user:fixture@127.0.0.1/api/board"],
+])("BOARDLOOP doctor refuses unsafe credentials from %s without invoking vb (%s)", (source, url) => {
+	const home = scratch("boardlive-local-only");
+	const vb = join(home, "vb");
+	const invoked = join(home, "vb-called");
+	writeFileSync(vb, '#!/bin/sh\nprintf invoked > "$HOME/vb-called"\nexit 1\n');
+	chmodSync(vb, 0o755);
+	const env = { PATH: process.env.PATH, HOME: home, AGENT_NAME: SEAT, OMP_KIT_BOARD_CLI: vb };
+	if (source === "file") {
+		const dir = join(home, ".config", "board", "local");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "fixture.json"), JSON.stringify({ url, token: TOKEN }));
+	}
+	const configured = source === "env" ? { ...env, BOARD_URL: url, BOARD_TOKEN: TOKEN } : env;
+	const finding = inspectMailBackend(defaultMailBackend(configured));
+	expect(existsSync(invoked)).toBe(false);
+	expect(finding.status).toBe("FAIL");
+	expect(finding.evidence?.reason_code).toBe("BOARD_URL_MISSING");
+});
+
+test("BOARDLOOP doctor guards the CLI sink even if credential discovery is bypassed", () => {
+	const home = scratch("boardlive-cli-local-only");
+	const vb = fakeBoardCli(home);
+	const deps = defaultMailBackend({ PATH: process.env.PATH, HOME: home, OMP_KIT_BOARD_CLI: vb });
+	expect(deps.whoami(SEAT, { url: "http://board.invalid/api/board", token: TOKEN })).toBeNull();
 });

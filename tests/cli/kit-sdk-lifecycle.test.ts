@@ -75,7 +75,7 @@ export default async function lifecycle(pi) {
   return { events: [], next_cursor: after, tail_cursor: after };
  };
  // Two real instances share the on-disk cursor, as a reload does; transport alone is controlled.
- for (let n = 0; n < 2; n++) await inbox(pi, { home: s.home, env, policyOn: async () => true, read });
+ for (let n = 0; n < 2; n++) await inbox(pi, { home: s.home, env, backend: 'am', policyOn: async () => true, read });
  pi.registerTool({ name: 'mcp__mcp_agent_mail_fetch_inbox_product', label: 'owned forbidden bulk read', description: 'Must be refused before execution', parameters: type({}),
   async execute() { s.toolExecutions++; throw new Error('guard allowed an irreversible bulk read'); } });
  pi.on('agent_end', event => {

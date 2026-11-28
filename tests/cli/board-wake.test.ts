@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { boardActor, boardClientFromEnv } from "../../src/board-events.ts";
 import kitInboxWake, { boardCursorPath, type InboxWakeDeps } from "../../extensions/kit-inbox-wake.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 
@@ -92,7 +93,7 @@ function fakeBoard(events: FakeEvent[], opts: { honorAfter?: boolean } = {}) {
 
 type Sent = { content: string; deliverAs?: string; triggerTurn?: boolean };
 
-function seat(home: string, board: { url: string }, extra: Partial<InboxWakeDeps> = {}, env: Record<string, string> = {}) {
+function seat(home: string, board: { url: string }, extra: Partial<InboxWakeDeps> = {}, env: Record<string, string | undefined> = {}) {
 	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
 	const sent: Sent[] = [];
 	const woke = Promise.withResolvers<number>();
@@ -146,6 +147,120 @@ function seedCursor(home: string, cursor: string): void {
 	mkdirSync(join(path, ".."), { recursive: true });
 	writeFileSync(path, JSON.stringify({ schema: 1, agent: AGENT, actor: ACTOR, cursor, delivered: [], at: "2026-11-24T00:00:00.000Z" }));
 }
+
+test("BOARDLIVE1-S6 an unset backend wakes once on a new Board mention", async () => {
+	const { home, board } = setup([mention(1, "old")]);
+	const s = seat(home, board, {}, { FLEET_MAIL_BACKEND: undefined });
+	await s.start();
+	expect(s.sent).toHaveLength(0);
+	board.push(mention(2, "new Board mail"));
+	await s.tick();
+	await s.tick();
+	expect(s.sent).toHaveLength(1);
+	expect(s.sent[0]).toMatchObject({ deliverAs: "followUp", triggerTurn: true });
+	expect(s.sent[0]!.content).toContain("new Board mail");
+});
+
+test("BOARDLIVE1-S6 discovers a credential in the kit Board config when it is the only source", () => {
+	const tmp = ownedTmp("board-wake-config");
+	cleanups.push(() => tmp.cleanup());
+	const credentials = join(tmp.path, ".local", "share", "omp-kit", "board-trial", "xdg", "board", "local");
+	mkdirSync(credentials, { recursive: true });
+	writeFileSync(join(credentials, "fixture.json"), JSON.stringify({ url: "http://127.0.0.1:4178/api/board/", token: TOKEN }));
+	expect(boardClientFromEnv(tmp.path, { XDG_CONFIG_HOME: join(tmp.path, "empty-xdg") }))
+		.toEqual({ url: "http://127.0.0.1:4178/api/board", token: TOKEN });
+});
+
+test("BOARDLIVE1-S6 absent Board credentials return null", () => {
+	const tmp = ownedTmp("board-wake-no-config");
+	cleanups.push(() => tmp.cleanup());
+	expect(boardClientFromEnv(tmp.path, {})).toBeNull();
+});
+
+test("BOARDLIVE1-S6 prefers explicit credentials, then XDG, then the kit Board, then home config", () => {
+	const tmp = ownedTmp("board-wake-precedence");
+	cleanups.push(() => tmp.cleanup());
+	const home = tmp.path;
+	const xdg = join(home, "xdg");
+	const env = { XDG_CONFIG_HOME: xdg };
+	const fixture = (dir: string, port: number) => {
+		const client = { url: `http://127.0.0.1:${port}/api/board`, token: `fixture-${port}` };
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "fixture.json"), JSON.stringify(client));
+		return client;
+	};
+	const standard = fixture(join(home, ".config", "board", "local"), 10001);
+	expect(boardClientFromEnv(home, env)).toEqual(standard);
+	const kit = fixture(join(home, ".local", "share", "omp-kit", "board-trial", "xdg", "board", "local"), 10002);
+	expect(boardClientFromEnv(home, env)).toEqual(kit);
+	const override = fixture(join(xdg, "board", "local"), 10003);
+	expect(boardClientFromEnv(home, env)).toEqual(override);
+	const explicit = { url: "https://localhost/api/board", token: TOKEN };
+	expect(boardClientFromEnv(home, { ...env, BOARD_URL: explicit.url, BOARD_TOKEN: explicit.token })).toEqual(explicit);
+});
+
+test.each(["env", "file"])("BOARDLOOP rejects non-loopback credentials from %s without fetching", async (source) => {
+	const { home, board } = setup([]);
+	const client = { url: "http://board.invalid/api/board", token: TOKEN };
+	const env = { AGENT_NAME: AGENT };
+	if (source === "file") {
+		const dir = join(home, ".config", "board", "local");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "fixture.json"), JSON.stringify(client));
+	}
+	const configured = source === "env" ? { ...env, BOARD_URL: client.url, BOARD_TOKEN: client.token } : env;
+	const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ actor: ACTOR }));
+	try {
+		const s = seat(home, board, { boardClient: undefined }, configured);
+		await s.start();
+		await s.tick();
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(boardClientFromEnv(home, configured)).toBeNull();
+	} finally {
+		fetchSpy.mockRestore();
+	}
+});
+
+test.each([
+	"http://board.invalid/api/board",
+	"http://user:fixture@127.0.0.1/api/board",
+	"http://@127.0.0.1/api/board",
+	"http://127.1/api/board",
+	"ftp://127.0.0.1/api/board",
+])("BOARDLOOP refuses unsafe URLs at discovery and the HTTP sink: %s", async (url) => {
+	const tmp = ownedTmp("board-wake-url");
+	cleanups.push(() => tmp.cleanup());
+	const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ actor: ACTOR }));
+	try {
+		const actor = await boardActor({ url, token: TOKEN }, AGENT);
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(actor).toBeNull();
+		expect(boardClientFromEnv(tmp.path, { BOARD_URL: url, BOARD_TOKEN: TOKEN })).toBeNull();
+	} finally {
+		fetchSpy.mockRestore();
+	}
+});
+
+test.each(["http://127.0.0.1:4178", "https://localhost:4178", "http://[::1]:4178"])(
+	"BOARDLOOP sends the token only to an accepted local URL: %s", async (origin) => {
+		const tmp = ownedTmp("board-wake-local-url");
+		cleanups.push(() => tmp.cleanup());
+		const url = `${origin}/api/board`;
+		const client = boardClientFromEnv(tmp.path, { BOARD_URL: url, BOARD_TOKEN: TOKEN });
+		expect(client).toEqual({ url, token: TOKEN });
+		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ actor: ACTOR }));
+		try {
+			expect(await boardActor(client!, AGENT)).toBe(ACTOR);
+			expect(fetchSpy).toHaveBeenCalledTimes(1);
+			expect(fetchSpy).toHaveBeenCalledWith(`${url}/me`, expect.objectContaining({
+				headers: expect.objectContaining({ authorization: `Bearer ${TOKEN}` }),
+				redirect: "error",
+			}));
+		} finally {
+			fetchSpy.mockRestore();
+		}
+	},
+);
 
 describe("BOARDLIVE-S3 board wake", () => {
 	test("BOARDLIVE-S3 a new mention wakes the named seat once, with the Board credentials and profile", async () => {

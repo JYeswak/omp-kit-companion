@@ -40,7 +40,7 @@ function fixture(reads: Array<InboxRead | null>, env: Record<string, string> = {
 	writeFileSync(config, JSON.stringify({ sessions: [{ session: "omp-test", repo: "/repo", pullEnabled: true }] }));
 	const calls: Array<number | null> = [];
 	const deps: InboxWakeDeps = {
-		home: dir.path, env, now: () => new Date("2026-10-26T17:00:00Z"), policyOn: async () => true,
+		home: dir.path, env, backend: "am", now: () => new Date("2026-10-26T17:00:00Z"), policyOn: async () => true,
 		read: async (_agent, _project, after) => { calls.push(after); return reads.shift() ?? null; },
 	};
 	return { dir: dir.path, calls, deps };

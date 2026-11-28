@@ -5,31 +5,31 @@ import { isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fleetPolicyState } from "./fleet-policy";
 import { run } from "../src/kitlib/run.ts";
-import { type BoardClient, type BoardEvent, boardActor, boardClientFromEnv, boardEventsAfter, boardHead } from "../src/board-events.ts";
+import { type BoardClient, type BoardEvent, DEFAULT_MAIL_BACKEND, boardActor, boardClientFromEnv, boardEventsAfter, boardHead } from "../src/board-events.ts";
 
 const BOARD_WAIT_S = 25;
 const BOARD_RETRY_MS = 10_000;
 const BOARD_MIN_CYCLE_MS = 1_000;
 
 /**
- * kit-inbox-wake (MAILWAKE1.2, ompkit-uk9wn.2): a seat wakes itself on its own Agent Mail.
+ * kit-inbox-wake: a fleet seat wakes itself on Board mail unless it opts out with FLEET_MAIL_BACKEND=am.
  *
  * Sender-side wakes never worked: ~/.local/state/omp-kit/mail-wake.jsonl held 0 successful wakes in 879 rows on
  * 2026-10-26 (chief seats unbound to panes; a goal-mode seat is never idle, so a busy-gated paste never ran; a pane
- * paste into a busy seat strands a draft a person must submit, J-2026-10-26-14). So the recipient wakes itself, in
- * process: every INBOX_POLL_MS it reads its durable inbox delivery events (`am inbox-events --after <cursor>`), and
- * new messages addressed to it become one `deliverAs: "followUp"` message with `triggerTurn`. While the seat works,
+ * paste into a busy seat strands a draft a person must submit, J-2026-10-26-14). So the recipient wakes itself in
+ * process: it long-polls the Board or reads legacy Agent Mail on an interval. New mail addressed to it becomes
+ * one `deliverAs: "followUp"` message with `triggerTurn`. While the seat works,
  * omp queues a follow-up until the run has no more tool calls or steering, so the wake never lands mid-turn; on an
  * idle seat `triggerTurn` starts a turn at once. (Until 2026-10-26 this was an aside, which omp injects at the next
  * step boundary inside a running turn: Joshua, J-2026-10-26-19, "the mail wake seems to interrupt your work instead
  * of just queuing it".) An Esc interrupt drops queued non-user messages, so a wake queued at that moment is lost;
  * the mail itself stays unread in the inbox.
  *
- * The cursor is kept per (agent, project) under ~/.local/state/omp-kit/inbox-wake/, so mail that arrives while the
- * seat is restarting is delivered on its next start; the first start ever takes the current tail (no backlog flood).
+ * Cursors under ~/.local/state/omp-kit/inbox-wake/ let a restarted seat resume; a first start takes the
+ * current tail rather than waking on the backlog.
  * Each delivery appends one WOKEN_INPROCESS row to mail-wake.jsonl, the ledger the sender side already writes.
- * Inert without AGENT_NAME, outside a fleet-opted-in project, when `am` is unavailable, or outside an
- * interactive TUI / RPC session (CHILDWAKE1: a finite print-mode child never polls nor wakes).
+ * Inert without AGENT_NAME, outside a fleet-opted-in project or outside an interactive TUI / RPC session
+ * (CHILDWAKE1: a finite print-mode child never polls or wakes).
  */
 
 /** `am inbox-events` costs about 2.25 s per call (5 runs, 2026-10-26); 30 s keeps the read under 8% of a seat's time. */
@@ -79,7 +79,7 @@ export interface InboxWakeDeps {
 	read?: (agent: string, project: string, after: number | null) => Promise<InboxRead | null>;
 	policyOn?: (project: string) => Promise<boolean>;
 	fleetWatchPath?: string;
-	/** FLEET_MAIL_BACKEND override: "board" reads the Board feed, anything else is Agent Mail. */
+	/** FLEET_MAIL_BACKEND override: Board by default; "am" opts out. */
 	backend?: string;
 	/** Board credentials; defaults to BOARD_URL/BOARD_TOKEN or the local board's credentials file. */
 	boardClient?: BoardClient;
@@ -229,6 +229,8 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 		return fleetWatchRepos(fleetWatchPath).includes(state.root);
 	});
 	const agent = env.AGENT_NAME;
+	const backend = deps.backend ?? env.FLEET_MAIL_BACKEND ?? DEFAULT_MAIL_BACKEND;
+	if (backend !== "board" && backend !== "am") return;
 	if (!agent || agent.length > 64 || [...agent].some(c => !((c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9")))) return;
 	// One wake per process: the extension may load twice (a profile line during rollout plus the plugin manifest).
 	if (!deps.read) {
@@ -238,7 +240,6 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 		globals[loaded] = true;
 	}
 	let timer: unknown = null;
-	const backend = deps.backend ?? env.FLEET_MAIL_BACKEND ?? "am";
 	const boardLoop = deps.boardLoop ?? true;
 	const boardWaitS = deps.boardWaitS ?? BOARD_WAIT_S;
 	const boardPath = boardCursorPath(home, agent);

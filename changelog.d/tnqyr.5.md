@@ -1,0 +1,2 @@
+- Fleet seats now wake on new Board mail by default. Set `FLEET_MAIL_BACKEND=am` to opt out and use the legacy Agent Mail watcher.
+- Board wake, its doctor check, and file reservations send credentials only to loopback HTTP(S) URLs without embedded login details.

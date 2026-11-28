@@ -67,3 +67,57 @@ test("BOARDLIVE-S4 planted negative: a hook that ignores the Board passes the ot
 	// `true` stands in for a Board-blind check: the refusal asserted above (rc 1) would fail.
 	expect((await hook("SeatB", "true")).rc).toBe(0);
 });
+
+test("BOARDLOOP reservations refuse a non-loopback credential file without making a request", async () => {
+	const tmp = ownedTmp("board-verbs-local-only");
+	const requests: string[] = [];
+	const server = Bun.serve({
+		hostname: "127.0.0.1", port: 0,
+		fetch(req) { requests.push(req.url); return Response.json({ tasks: [] }); },
+	});
+	try {
+		const xdg = join(tmp.path, "xdg");
+		const credentials = join(xdg, "board", "local");
+		mkdirSync(credentials, { recursive: true });
+		writeFileSync(join(credentials, "fixture.json"), JSON.stringify({ url: "http://board.invalid/api/board", token: "fixture-only" }));
+		const result = await runFixtureAsync(["bun", CLI, "reservations", "--project", tmp.path, "--json"], {
+			cwd: tmp.path, env: env("SeatA", {
+				HOME: tmp.path, GIT_CEILING_DIRECTORIES: tmp.path, XDG_CONFIG_HOME: xdg,
+				BOARD_URL: `http://127.0.0.1:${server.port}/api/board`, FLEET_BOARD_RES_STATE: join(tmp.path, "state"),
+			}),
+		});
+		expect(requests).toEqual([]);
+		expect(result.rc).toBe(1);
+		expect(JSON.parse(text(result.stdout))).toMatchObject({ ok: false, errors: [{ code: "BOARD_UNAVAILABLE" }] });
+	} finally {
+		server.stop(true);
+		tmp.cleanup();
+	}
+});
+
+test("BOARDLOOP reservations refuse a non-loopback BOARD_URL with a token-only credential without making a request", async () => {
+	const tmp = ownedTmp("board-verbs-local-only");
+	const requests: string[] = [];
+	const server = Bun.serve({
+		hostname: "127.0.0.1", port: 0,
+		fetch(req) { requests.push(req.url); return Response.json({ tasks: [] }); },
+	});
+	try {
+		const xdg = join(tmp.path, "xdg");
+		const credentials = join(xdg, "board", "local");
+		mkdirSync(credentials, { recursive: true });
+		writeFileSync(join(credentials, "fixture.json"), JSON.stringify({ token: "fixture-only" }));
+		const result = await runFixtureAsync(["bun", CLI, "reservations", "--project", tmp.path, "--json"], {
+			cwd: tmp.path, env: env("SeatA", {
+				HOME: tmp.path, GIT_CEILING_DIRECTORIES: tmp.path, XDG_CONFIG_HOME: xdg,
+				BOARD_URL: "https://board.example.test/api/board", FLEET_BOARD_RES_STATE: join(tmp.path, "state"),
+			}),
+		});
+		expect(requests).toEqual([]);
+		expect(result.rc).toBe(1);
+		expect(JSON.parse(text(result.stdout))).toMatchObject({ ok: false, errors: [{ code: "BOARD_UNAVAILABLE", message: expect.stringContaining("loopback") }] });
+	} finally {
+		server.stop(true);
+		tmp.cleanup();
+	}
+});

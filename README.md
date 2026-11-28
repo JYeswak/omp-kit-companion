@@ -146,7 +146,7 @@ The repo is an OMP plugin. `package.json` declares 16 extensions; guards include
 | `kit-flywheel-guard.ts` | session and native tool hooks | Re-reads held work; refuses self-closes and stranded work; records causal model/provider and bounded native attempts |
 | `kit-agent-mail-guard.ts` | `tool_call`, `tool_result` | Opt-in: refuses mail not sent as the seat, off-list subjects, untyped `ack_required`, long or secret bodies, bulk reads |
 | `kit-composer-state.ts` | session and turn hooks | Opt-in: publishes draft presence, never text, for reloads and arms |
-| `kit-inbox-wake.ts` | session start, timer | Opt-in: delivers the seat's new Agent Mail at its next step |
+| `kit-inbox-wake.ts` | session start, poll | Wakes opted-in fleet seats on new Board mail by default; `FLEET_MAIL_BACKEND=am` opts out |
 | `kit-callback.ts` | `agent_end` | Sends worker `DONE`/`BLOCKED` lines to the coordinator via `ntm send`; never blocks |
 | `secret-output-guard.ts` | `tool_call`, `tool_execution_end` | Redacts secret-shaped output; preserves safe metadata byte-identical |
 
@@ -549,7 +549,7 @@ target tracker unchanged; actual assertion failures still become `REWORK`.
 | `--scope browsers` | Browser processes and leftover automation clones | |
 | `--scope services` | launchd jobs: running, idle, failing, path mismatch; `--services FILE` checks a required-jobs list | |
 | `--scope regex-tools` | Regex engineering tools on PATH | |
-| `--scope mail_backend` | Board answers as `BOARD_PROFILE` | |
+| `--scope mail_backend` | Board answers as `BOARD_PROFILE` or, if unset or empty, `AGENT_NAME`; explicit `FLEET_MAIL_BACKEND=am` skips the Board check | |
 | `--scope test-scope` | Runner scratch exclusions; `OMP_KIT_FLEET_WATCH_CONFIG` selects input | `omp-kit doctor --scope test-scope --json` |
 | `--scope gates` | Python `br` admission on owned fixtures; no live writes | |
 | `--scope dicklesworthstone` | Installed agent tools (`ntm`, `am`, `caam`, ...) behind their latest release | |

@@ -35,29 +35,47 @@ const THREAD_PAGE = 500; // Board's largest /threads page
 /** Margin over the server-side hold for the TCP and JSON round trip. */
 const REQUEST_MARGIN_S = 10;
 
-/**
- * The board this seat talks to: BOARD_URL plus BOARD_TOKEN, else the local board's own credentials file under
- * `$XDG_CONFIG_HOME/board/local/` (or `~/.config/board/local/`), the one `vb serve` writes ({ url, token }).
- */
+export const DEFAULT_MAIL_BACKEND = "board";
+
+/** Credential directory for the kit's local Board. */
+export function kitBoardLocalDir(home: string): string {
+	return join(home, ".local", "share", "omp-kit", "board-trial", "xdg", "board", "local");
+}
+
+/** Check the literal authority before URL parsing can normalize aliases or strip empty userinfo. */
+export function isLoopbackBoardUrl(url: string): boolean {
+	return /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::[0-9]+)?(?:[/?#]|$)/i.test(url) && URL.canParse(url);
+}
+
+/** Explicit credentials win; otherwise try the XDG override, kit Board, then standard home config. */
 export function boardClientFromEnv(home: string, env: Readonly<Record<string, string | undefined>>): BoardClient | null {
 	const strip = (u: string) => { let end = u.length; while (end > 0 && u[end - 1] === "/") end--; return u.slice(0, end); };
-	if (env.BOARD_URL && env.BOARD_TOKEN) return { url: strip(env.BOARD_URL), token: env.BOARD_TOKEN };
-	const dir = join(env.XDG_CONFIG_HOME || join(home, ".config"), "board", "local");
-	try {
-		for (const name of readdirSync(dir).filter(n => n.endsWith(".json")).sort()) {
-			const doc = JSON.parse(readFileSync(join(dir, name), "utf8"));
-			if (typeof doc?.url === "string" && typeof doc?.token === "string") {
-				return { url: strip(env.BOARD_URL || doc.url), token: doc.token };
+	if (env.BOARD_URL && env.BOARD_TOKEN)
+		return isLoopbackBoardUrl(env.BOARD_URL) ? { url: strip(env.BOARD_URL), token: env.BOARD_TOKEN } : null;
+	const dirs = [
+		...(env.XDG_CONFIG_HOME ? [join(env.XDG_CONFIG_HOME, "board", "local")] : []),
+		kitBoardLocalDir(home),
+		join(home, ".config", "board", "local"),
+	];
+	for (const dir of dirs) {
+		try {
+			for (const name of readdirSync(dir).filter(n => n.endsWith(".json")).sort()) {
+				const doc = JSON.parse(readFileSync(join(dir, name), "utf8"));
+				if (typeof doc?.url === "string" && typeof doc?.token === "string") {
+					return isLoopbackBoardUrl(doc.url) ? { url: strip(doc.url), token: doc.token } : null;
+				}
 			}
-		}
-	} catch { /* no credentials: the source is unavailable */ }
+		} catch { /* This directory is unavailable; continue to the next source. */ }
+	}
 	return null;
 }
 
 async function getJson(client: BoardClient, path: string, profile: string, timeoutS: number, signal?: AbortSignal): Promise<unknown | null> {
+	const url = `${client.url}${path}`;
+	if (!isLoopbackBoardUrl(url)) return null;
 	try {
 		const signals = [AbortSignal.timeout(timeoutS * 1000), ...(signal ? [signal] : [])];
-		const res = await fetch(`${client.url}${path}`, {
+		const res = await fetch(url, {
 			headers: { authorization: `Bearer ${client.token}`, "x-board-profile": profile, accept: "application/json" },
 			redirect: "error",
 			signal: AbortSignal.any(signals),
