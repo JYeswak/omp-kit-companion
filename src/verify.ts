@@ -205,7 +205,7 @@ export interface AcceptanceRollback {
 }
 export interface VerifyResult {
 	ok: boolean;
-	code: "CLOSED" | "REWORK" | "ACT_FAILED" | "ENVIRONMENT" | "DEPENDENCIES_NOT_LOCKED" | "NON_AUTHOR_REQUIRED" | "AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "SELF_REPLAY" | "PENDING" | "NOT_PUBLISHED" | "UNKNOWN";
+	code: "CLOSED" | "REWORK" | "ACT_FAILED" | "ENVIRONMENT" | "DEPENDENCIES_NOT_LOCKED" | "NON_AUTHOR_REQUIRED" | "AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "TRACKER_UNBOUND" | "EXPORT_FAILED" | "DRY_RUN" | "SELF_REPLAY" | "PENDING" | "NOT_PUBLISHED" | "UNKNOWN";
 	bead: string;
 	export: string;
 	replays: BoxReplay[];
@@ -1440,10 +1440,13 @@ async function executeActs(acts: string[][], cwd: string, env: Record<string, st
 }
 
 /** The fields verify reads from one bead. Deferred readback candidates require an exact native withdrawal receipt before reactivation. */
-interface BeadRow { id: string; title: string; description: string; acceptance: string; status: string; assignee: string | null; createdBy: string | null; createdAt: string | null; updatedAt: string | null; labels: string[]; parent: string | null; related: string[]; readbacks: string[]; externalRef: string | null }
+interface BeadRow { id: string; title: string; description: string; acceptance: string; status: string; assignee: string | null; createdBy: string | null; createdAt: string | null; updatedAt: string | null; labels: string[]; parent: string | null; related: string[]; readbacks: string[]; externalRef: string | null; sourceRepo: string | null }
 
-async function showBead(id: string, repo: string, env: Record<string, string>): Promise<BeadRow | null> {
-	const show = await run(["br", "show", id, "--json"], { cwd: repo, deadline_s: 60, env, max_output_bytes: 4 * 1024 * 1024 });
+async function showBead(id: string, repo: string, env: Record<string, string>, readOnly = false): Promise<BeadRow | null> {
+	const args = ["br", "show", id, "--json"];
+	if (readOnly) args.push("--no-auto-import", "--no-auto-flush");
+	const show = await run(args, { cwd: repo, deadline_s: 60, env, max_output_bytes: 4 * 1024 * 1024 });
+	if (readOnly && (show.rc !== 0 || show.timed_out || show.killed || show.truncated || show.total_truncated)) return null;
 	let doc: unknown;
 	try { doc = JSON.parse(text(show.stdout)); } catch { return null; }
 	const row: unknown = Array.isArray(doc) ? doc[0] : doc;
@@ -1463,10 +1466,50 @@ async function showBead(id: string, repo: string, env: Record<string, string>): 
 			&& "status" in dep && (dep.status === "open" || dep.status === "in_progress" || dep.status === "deferred")
 			&& "id" in dep && typeof dep.id === "string" ? dep.id : "")
 		.filter(dep => dep !== "");
-	return { id: field("id") ?? id, title, description: field("description") ?? "", acceptance: field("acceptance_criteria") ?? "", status: field("status") ?? "", assignee: field("assignee"), createdBy: field("created_by"), createdAt: field("created_at"), updatedAt: field("updated_at"), labels, parent: field("parent"), related, readbacks, externalRef: field("external_ref") };
+	return { id: field("id") ?? id, title, description: field("description") ?? "", acceptance: field("acceptance_criteria") ?? "", status: field("status") ?? "", assignee: field("assignee"), createdBy: field("created_by"), createdAt: field("created_at"), updatedAt: field("updated_at"), labels, parent: field("parent"), related, readbacks, externalRef: field("external_ref"), sourceRepo: field("source_repo_path") || null };
 }
 
-export interface LiveReadbackInput { bead: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; lesson?: string }
+export interface LiveReadbackInput { bead: string; repo: string; trackerRepo?: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; lesson?: string }
+
+type LiveTracker = { cwd: string; env: Record<string, string> } | string;
+
+/** Resolve once, so bulk discovery and every act use the same tracker. */
+async function bindLiveTracker(input: Omit<LiveReadbackInput, "bead">): Promise<LiveTracker> {
+	const env = { ...process.env, ...(input.env ?? {}) } as Record<string, string>;
+	try {
+		const cwd = realpathSync(input.trackerRepo ?? input.repo);
+		const probe = await run(["git", "--no-optional-locks", "config", "--local", "--get-all", "ovnfs.checkout"], {
+			cwd, env: { PATH: env.PATH ?? "/usr/bin:/bin", HOME: env.HOME ?? homedir() }, deadline_s: 5, max_output_bytes: 4096,
+		});
+		const noGit = probe.rc === 128 && !existsSync(join(cwd, ".git"));
+		if ((probe.rc !== 1 && !noGit) || probe.timed_out || probe.killed || probe.truncated || probe.total_truncated)
+			return "An ovnfs or unreadable checkout cannot authorize live tracker acts; pass --tracker PATH naming the original repository.";
+		for (const key of ["BEADS_DB", "BEADS_DIR", "BEADS_JSONL", "BD_DB", "BD_DATABASE"]) delete env[key];
+		const beads = join(cwd, ".beads");
+		const expectedDb = join(beads, "beads.db");
+		if (realpathSync(beads) !== beads || realpathSync(expectedDb) !== expectedDb)
+			return "Live readback requires the selected repository's own physical .beads database.";
+		const info = await run(["br", "info", "--db", join(cwd, ".beads", "beads.db"), "--json", "--no-auto-import", "--no-auto-flush"], { cwd, env, deadline_s: 10, max_output_bytes: 64 * 1024 });
+		if (info.rc === 0 && !info.timed_out && !info.killed && !info.truncated && !info.total_truncated) {
+			const doc = JSON.parse(text(info.stdout)) as { database_path?: unknown; beads_dir?: unknown; jsonl_path?: unknown } | null;
+			if (typeof doc?.database_path === "string" && isAbsolute(doc.database_path)
+				&& typeof doc.beads_dir === "string" && realpathSync(doc.beads_dir) === beads
+				&& typeof doc.jsonl_path === "string" && isAbsolute(doc.jsonl_path)) {
+				const db = realpathSync(doc.database_path);
+				const jsonl = realOrLexical(doc.jsonl_path);
+				if (db === expectedDb && dirname(jsonl) === beads) {
+					env.BEADS_DB = db;
+					return { cwd, env };
+				}
+			}
+		}
+	} catch { /* Do not disclose untrusted tracker output. */ }
+	return "Cannot bind the live tracker to a readable database under its own .beads directory; pass --tracker PATH.";
+}
+
+function unboundReadbackSource(row: BeadRow, trackerCwd: string): boolean {
+	return row.sourceRepo === null || !isAbsolute(row.sourceRepo) || realOrLexical(row.sourceRepo) !== trackerCwd;
+}
 
 /**
  * `omp-kit verify <child> --live-readback` (CLOSEPASS1 ompkit-774u.52 [b]). Runs an open LIVEREADBACK child's
@@ -1476,11 +1519,16 @@ export interface LiveReadbackInput { bead: string; repo: string; actor: string; 
  * assignees are refused NON_AUTHOR_REQUIRED.
  */
 export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResult> {
-	const env = { ...process.env, ...(input.env ?? {}) } as Record<string, string>;
+	return readbackInTracker(input, await bindLiveTracker(input));
+}
+
+async function readbackInTracker(input: LiveReadbackInput, bound: LiveTracker): Promise<VerifyResult> {
 	const acts: string[][] = [];
 	const log: string[] = [`live-readback ${input.bead} actor ${input.actor} ${new Date().toISOString()}`];
 	const refuse = (code: VerifyResult["code"], why: string): VerifyResult => ({ ok: false, code, bead: input.bead, export: "installed", replays: [], log: log.concat(why).join("\n"), acts });
-	const child = await showBead(input.bead, input.repo, env);
+	if (typeof bound === "string") return refuse("TRACKER_UNBOUND", bound);
+	const { cwd: trackerCwd, env } = bound;
+	const child = await showBead(input.bead, trackerCwd, env, true);
 	if (child === null) return refuse("NOT_LIVE_READBACK", `br shows no bead ${input.bead}`);
 	const boxes = parseBoxes(child.acceptance);
 	const toRun = boxes.filter(b => b.letter !== "v" && !b.checked);
@@ -1492,8 +1540,10 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 	const inReviewLive = child.status === "in_review" && toRun.length > 0 && toRun.every(b => b.phase === "live");
 	if (child.status === "open" ? !(direct || child.labels.includes(LIVE_READBACK_LABEL)) : !inReviewLive) return refuse("NOT_LIVE_READBACK", `${input.bead} is ${child.status || "unknown"} with labels [${child.labels.join(", ")}]; only an open ${LIVE_READBACK_LABEL} child, an open bead whose every open box is [live]/[after], or an in_review bead whose every remaining box is [live], is read back`);
 	// The verified bead is the child's one `related` link (its parent-child edge points at the active home bead).
-	const parent = direct ? child : child.related.length === 1 ? await showBead(child.related[0]!, input.repo, env) : null;
+	const parent = direct ? child : child.related.length === 1 ? await showBead(child.related[0]!, trackerCwd, env, true) : null;
 	if (parent === null) return refuse("NOT_LIVE_READBACK", `${input.bead} needs exactly one readable related link to the bead it reads back; it has [${child.related.join(", ")}]`);
+	if (unboundReadbackSource(child, trackerCwd) || unboundReadbackSource(parent, trackerCwd))
+		return refuse("TRACKER_UNBOUND", "The child and related bead must both prove their original tracker matches the selected repository.");
 	if (input.actor === parent.assignee || input.actor === child.assignee) return refuse("NON_AUTHOR_REQUIRED", `refused: ${input.actor} is the assignee of ${input.actor === parent.assignee ? parent.id : child.id}`);
 	const bad = toRun.filter(b => unreplayableReason(b) !== null);
 	if (bad.length > 0) return refuse("ACCEPTANCE_NOT_REPLAYABLE", `not replayable: ${bad.map(b => `${tag(b)} ${unreplayableReason(b)}`).join("; ")}`);
@@ -1502,8 +1552,8 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 	const buildJudgements = boxes.filter(b => !b.checked && b.letter === "v" && b.phase === "build");
 	if (buildJudgements.length > 0) return refuse("PENDING", `pending: ${buildJudgements.map(tag).join(" ")} build judgement remains on the bead; it cannot be replayed or deferred as rollout debt`);
 	// A generated readback can inherit the source author's optional lesson.
-	const lesson = await closeLesson(input.lesson, child, input.repo, env)
-		?? (parent.id === child.id ? null : await closeLesson(undefined, parent, input.repo, env));
+	const lesson = await closeLesson(input.lesson, child, trackerCwd, env)
+		?? (parent.id === child.id ? null : await closeLesson(undefined, parent, trackerCwd, env));
 	if (lesson === null) log.push("WARNING: no author Lesson: comment or --lesson supplied; continuing without a lesson");
 	const harnessRoot = process.env.GRADE_WAVE_SCRATCH || undefined;
 	const scratch = ownedTmp("verify-live", { bead: input.bead, ...(harnessRoot === undefined ? {} : { root: harnessRoot }) });
@@ -1516,6 +1566,11 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 		const expected = expectedOf(box.body)!; // non-null: unreplayableReason refused every box without one
 		const started = Date.now();
 		const r = await run(["sh", "-c", command], { cwd: input.repo, deadline_s: 900, env: replayEnv, max_output_bytes: 4 * 1024 * 1024 });
+		if (r.rc === null || r.rc < 0 || r.timed_out || r.killed || r.truncated || r.total_truncated) {
+			const detail = "Incomplete live replay: command was interrupted or its output was truncated; no tracker acts ran.";
+			replays.push({ index: box.index, letter: box.letter, command, expected, rc: r.rc, pass: null, detail });
+			return { ...refuse("ENVIRONMENT", `${tag(box)} ${detail}`), replays };
+		}
 		const out = text(r.stdout) + text(r.stderr);
 		const v = judge(expected, r.rc, out);
 		const excerpt = v.pass ? "" : childExcerpt(r.rc, r.timed_out, out);
@@ -1533,31 +1588,34 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 		if (ticks.length > 0) acts.push(["br", "update", child.id, "--check-acceptance", ticks.join(","), "--actor", input.actor]);
 		// VERIFYGATE1-readback: same skip as the export path; the open -> closed edge of a gateless
 		// workflow refuses the report the same way. An unreadable answer keeps the act.
-		const gateRequired = await minReviewersRequired(input.repo, child.id, child.status, env);
+		const gateRequired = await minReviewersRequired(trackerCwd, child.id, child.status, env);
 		if (gateRequired === false) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${child.status} -> closed'; skipping gate report`);
 		else acts.push(["br", "gate", "report", child.id, "--gate", MIN_REVIEWERS_GATE, "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
 		acts.push(["br", "close", child.id, "--reason", `live readback of ${parent.id} by ${input.actor} (family: ${family}) on the installed kit: ${replays.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}`, "--transition-comment", `CLOSED ${child.id} by ${input.actor} (family: ${family})${lesson === null ? "" : `\n${lesson}`}\n${log.join("\n")}`, "--actor", input.actor]);
 	}
 	const code: VerifyResult["code"] = input.dryRun ? "DRY_RUN" : failed.length > 0 ? "REWORK" : "CLOSED";
 	if (input.dryRun) return { ok: failed.length === 0, code, bead: input.bead, export: "installed", replays, log: log.join("\n"), acts };
-	const done = await executeActs(acts, input.repo, env, failed.length > 0 ? undefined : { bead: child, actor: input.actor });
+	const done = await executeActs(acts, trackerCwd, env, failed.length > 0 ? undefined : { bead: child, actor: input.actor });
 	if (done.failure !== null) return { ok: false, code: "ACT_FAILED", bead: input.bead, export: "installed", replays, log: log.concat(done.failure).join("\n"), acts: done.acts, rollback: done.rollback };
 	if (done.skippedGate !== null) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${done.skippedGate}'; skipping gate report`);
-	if (failed.length === 0 && lesson !== null) recordCloseLesson(input.repo, child.id, lesson, "installed", log);
+	if (failed.length === 0 && lesson !== null) recordCloseLesson(trackerCwd, child.id, lesson, "installed", log);
 	return { ok: failed.length === 0, code, bead: input.bead, export: "installed", replays, log: log.join("\n"), acts: done.acts };
 }
 
 /** `omp-kit verify --live-readback --all` (CLOSEPASS1 [c]): liveReadback over every open LIVEREADBACK child, in id order. */
 export async function liveReadbackAll(input: Omit<LiveReadbackInput, "bead">): Promise<{ ok: boolean; visited: string[]; results: VerifyResult[]; log: string }> {
-	const env = { ...process.env, ...(input.env ?? {}) } as Record<string, string>;
-	const listed = await run(["br", "list", "--status", "open", "--label", LIVE_READBACK_LABEL, "--limit", "0", "--json"], { cwd: input.repo, deadline_s: 60, env, max_output_bytes: 16 * 1024 * 1024 });
+	const bound = await bindLiveTracker(input);
+	if (typeof bound === "string") return { ok: false, visited: [], results: [], log: `TRACKER_UNBOUND: ${bound}` };
+	const listed = await run(["br", "list", "--db", join(bound.cwd, ".beads", "beads.db"), "--status", "open", "--label", LIVE_READBACK_LABEL, "--limit", "0", "--json", "--no-auto-import", "--no-auto-flush"], { cwd: bound.cwd, deadline_s: 60, env: bound.env, max_output_bytes: 16 * 1024 * 1024 });
+	if (listed.timed_out || listed.killed || listed.truncated || listed.total_truncated)
+		return { ok: false, visited: [], results: [], log: "Incomplete native tracker listing; no live readback was attempted." };
 	let doc: unknown = null;
 	try { doc = JSON.parse(text(listed.stdout)); } catch { /* reported below */ }
 	const rows: unknown = doc !== null && typeof doc === "object" && "issues" in doc ? doc.issues : doc;
 	if (listed.rc !== 0 || !Array.isArray(rows)) return { ok: false, visited: [], results: [], log: `br list rc ${listed.rc}: ${text(listed.stderr).slice(0, 200)}; unmet prerequisite: readable tracker` };
 	const visited = rows.map(row => row !== null && typeof row === "object" && "id" in row && typeof row.id === "string" ? row.id : "").filter(id => id !== "").sort();
 	const results: VerifyResult[] = [];
-	for (const bead of visited) results.push(await liveReadback({ ...input, bead }));
+	for (const bead of visited) results.push(await readbackInTracker({ ...input, bead }, bound));
 	return { ok: results.every(r => r.ok), visited, results, log: results.map(r => `${r.bead} ${r.code}`).join("\n") };
 }
 

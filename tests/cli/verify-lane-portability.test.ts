@@ -57,7 +57,7 @@ test("VERIFYLANEPORT1: a foreign parentless bead retains related readback debt a
 	expect(child.dependencies).toContainEqual(expect.objectContaining({ id, dependency_type: "related" }));
 	const readback = await run([
 		"bun", "run", "--silent", cliPath, "verify", verified.child!, "--live-readback",
-		"--project", code.dir, "--actor", "Peer", "--lesson", "parentless live readback", "--json",
+		"--project", code.dir, "--tracker", t.dir, "--actor", "Peer", "--lesson", "parentless live readback", "--json",
 	], { cwd: code.dir, deadline_s: fixtureDeadlineS(30), env });
 	const result = JSON.parse(new TextDecoder().decode(readback.stdout));
 	expect(readback.rc, new TextDecoder().decode(readback.stderr)).toBe(0);
@@ -222,13 +222,13 @@ test("CLOSEPASS1.live: --live-readback runs only the child's boxes on the instal
 	const code = await repo("closepass-live");
 	const t = await policyTracker("closepass-live-t");
 	const { id, child } = await closedWithChild(t, code, "closepass live pass", "- [ ] [c] [live] on the installed kit `sh scripts/t.sh` -> 16 pass", await createBead(t, "closepass live epic"));
-	expect((await liveReadback({ bead: child, repo: code.dir, actor: "Author", env: trackerEnv(t) })).code).toBe("NON_AUTHOR_REQUIRED");
-	const res = await liveReadback({ bead: child, repo: code.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)", lesson: "installed readback fixture" });
+	expect((await liveReadback({ bead: child, repo: code.dir, trackerRepo: t.dir, actor: "Author", env: trackerEnv(t) })).code).toBe("NON_AUTHOR_REQUIRED");
+	const res = await liveReadback({ bead: child, repo: code.dir, trackerRepo: t.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)", lesson: "installed readback fixture" });
 	expect(res.code).toBe("CLOSED");
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["c", true]]);
 	expect(await row(t, child)).toMatchObject({ status: "closed", acceptance_criteria: "- [x] [c] [live] on the installed kit `sh scripts/t.sh` -> 16 pass" });
 	expect((await row(t, id)).status).toBe("closed");
-	expect((await liveReadback({ bead: child, repo: code.dir, actor: "Peer", env: trackerEnv(t) })).code).toBe("NOT_LIVE_READBACK");
+	expect((await liveReadback({ bead: child, repo: code.dir, trackerRepo: t.dir, actor: "Peer", env: trackerEnv(t) })).code).toBe("NOT_LIVE_READBACK");
 }, fixtureDeadlineS(120) * 1_000);
 
 test("CLOSEPASS1.live planted: a failing live box reopens the parent with REWORK naming the box, and the child stays open", async () => {
@@ -236,7 +236,7 @@ test("CLOSEPASS1.live planted: a failing live box reopens the parent with REWORK
 	const t = await policyTracker("closepass-livefail-t");
 	const epic = await createBead(t, "closepass livefail epic");
 	const { id, child } = await closedWithChild(t, code, "closepass live fail", "- [ ] [c] [live] on the installed kit `sh scripts/bad.sh` -> prints PASS", epic);
-	const res = await liveReadback({ bead: child, repo: code.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)", lesson: "failed readback fixture" });
+	const res = await liveReadback({ bead: child, repo: code.dir, trackerRepo: t.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)", lesson: "failed readback fixture" });
 	expect(res.code).toBe("REWORK");
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["c", false]]);
 	expect((await row(t, id)).status).toBe("open");
@@ -259,11 +259,11 @@ test("ALLLIVE1: an open bead whose every open box is live is read back directly;
 	const live = await make("alllive pass", "- [ ] [a] [live] on the installed kit `sh scripts/t.sh` -> 16 pass");
 	const mixed = await make("alllive mixed", "- [ ] [a] [build] built `sh scripts/t.sh` -> 16 pass\n- [ ] [b] [live] live `sh scripts/t.sh` -> 16 pass");
 	const failing = await make("alllive fail", "- [ ] [a] [live] on the installed kit `sh scripts/bad.sh` -> prints PASS");
-	expect((await liveReadback({ bead: mixed, repo: code.dir, actor: "Peer", env, lesson: "mixed fixture" })).code).toBe("NOT_LIVE_READBACK");
-	const res = await liveReadback({ bead: live, repo: code.dir, actor: "Peer", env, family: "same (bun)", lesson: "all-live fixture" });
+	expect((await liveReadback({ bead: mixed, repo: code.dir, trackerRepo: t.dir, actor: "Peer", env, lesson: "mixed fixture" })).code).toBe("NOT_LIVE_READBACK");
+	const res = await liveReadback({ bead: live, repo: code.dir, trackerRepo: t.dir, actor: "Peer", env, family: "same (bun)", lesson: "all-live fixture" });
 	expect(res.code).toBe("CLOSED");
 	expect(await row(t, live)).toMatchObject({ status: "closed", acceptance_criteria: "- [x] [a] [live] on the installed kit `sh scripts/t.sh` -> 16 pass" });
-	const bad = await liveReadback({ bead: failing, repo: code.dir, actor: "Peer", env, family: "same (bun)", lesson: "all-live fail fixture" });
+	const bad = await liveReadback({ bead: failing, repo: code.dir, trackerRepo: t.dir, actor: "Peer", env, family: "same (bun)", lesson: "all-live fail fixture" });
 	expect(bad.code).toBe("REWORK");
 	expect((await row(t, failing)).status).toBe("open");
 	expect((await brun(["comments", "list", failing], t.dir, env)).out).toContain(`REWORK ${failing}: live readback failed [a]`);
@@ -277,11 +277,11 @@ test("CLOSEPASS1.all: --live-readback --all visits exactly the open live-readbac
 	const epic = await createBead(t, "closepass all epic");
 	const open = await closedWithChild(t, code, "closepass all open", box, epic);
 	const done = await closedWithChild(t, code, "closepass all done", box, epic);
-	expect((await liveReadback({ bead: done.child, repo: code.dir, actor: "Peer", env, lesson: "completed readback fixture" })).code).toBe("CLOSED");
+	expect((await liveReadback({ bead: done.child, repo: code.dir, trackerRepo: t.dir, actor: "Peer", env, lesson: "completed readback fixture" })).code).toBe("CLOSED");
 	const other = await createBead(t, "closepass unlabelled open bead");
 	const labelled = await createBead(t, "closepass labelled but in progress");
 	for (const args of [["update", labelled, "--add-label", LIVE_READBACK_LABEL, "--acceptance", box], ["update", labelled, "--status", "in_progress"]]) expect((await brun(args, t.dir, env)).rc).toBe(0);
-	const res = await liveReadbackAll({ repo: code.dir, actor: "Peer", env, family: "same (bun)", lesson: "aggregate readback fixture" });
+	const res = await liveReadbackAll({ repo: code.dir, trackerRepo: t.dir, actor: "Peer", env, family: "same (bun)", lesson: "aggregate readback fixture" });
 	expect(res.visited).toEqual([open.child]);
 	expect(res.visited).not.toContain(other);
 	expect(res.results.map(r => [r.bead, r.code])).toEqual([[open.child, "CLOSED"]]);

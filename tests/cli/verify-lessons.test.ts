@@ -241,8 +241,8 @@ test("LESSONPAYLOAD1 concurrent acceptance is preserved and reported STATE_UNPRO
 test("LESSONPAYLOAD1 live readback closes with its author's lesson and preserves the verified source", async () => {
 	const { dir } = await repo("lesson-live");
 	const acceptance = "- [ ] [c] [live] `sh scripts/t.sh` -> 0 fail";
-	const br = fakeBr(liveBead(acceptance), { extraBeads: [sourceBead] });
-	const res = await liveReadback({ bead: "kit-live", repo: dir, actor: "Peer", env: br.env });
+	const br = fakeBr(liveBead(acceptance), { liveTracker: true, extraBeads: [sourceBead] });
+	const res = await liveReadback({ bead: "kit-live", repo: dir, trackerRepo: br.trackerRepo, actor: "Peer", env: br.env });
 	expect(res.code).toBe("CLOSED");
 	expect(br.state().acceptance_criteria).toBe("- [x] [c] [live] `sh scripts/t.sh` -> 0 fail");
 	expect(br.state().closed_transition).toContain("Lesson: fixture review");
@@ -253,8 +253,8 @@ test("LESSONOPTIONAL1 live no lesson replays and closes with a warning", async (
 	const marker = join(base, "live-missing-lesson");
 	const { dir } = await repo("lesson-live-missing", { "entered.sh": "#!/bin/sh\nprintf entered > \"$LESSON_REPLAY_MARKER\"\nprintf '0 fail\\n'\n" });
 	const acceptance = "- [ ] [c] [live] `sh scripts/entered.sh` -> 0 fail";
-	const br = fakeBr(liveBead(acceptance), { extraBeads: [sourceBead], comments: [] });
-	const res = await liveReadback({ bead: "kit-live", repo: dir, actor: "Peer", env: { ...br.env, LESSON_REPLAY_MARKER: marker } });
+	const br = fakeBr(liveBead(acceptance), { liveTracker: true, extraBeads: [sourceBead], comments: [] });
+	const res = await liveReadback({ bead: "kit-live", repo: dir, trackerRepo: br.trackerRepo, actor: "Peer", env: { ...br.env, LESSON_REPLAY_MARKER: marker } });
 	expect(res.code, res.log).toBe("CLOSED");
 	expect(res.replays.map(replay => replay.pass)).toEqual([true]);
 	expect(existsSync(marker)).toBe(true);
@@ -265,8 +265,8 @@ test("LESSONOPTIONAL1 live no lesson replays and closes with a warning", async (
 test("LESSONPAYLOAD1 CLI live-all refused act is nonzero ACT_FAILED with boxes unchanged", async () => {
 	const { dir } = await repo("lesson-live-act");
 	const acceptance = "- [ ] [c] [live] `sh scripts/t.sh` -> 0 fail";
-	const br = fakeBr(liveBead(acceptance), { extraBeads: [sourceBead], failOn: "close kit-live", failMessage: "readback close refused" });
-	const r = await run(["bun", "run", "--silent", cliPath, "verify", "--live-readback", "--all", "--project", dir, "--actor", "Peer", "--lesson", "readback evidence", "--json"], {
+	const br = fakeBr(liveBead(acceptance), { liveTracker: true, extraBeads: [sourceBead], failOn: "close kit-live", failMessage: "readback close refused" });
+	const r = await run(["bun", "run", "--silent", cliPath, "verify", "--live-readback", "--all", "--project", dir, "--tracker", br.trackerRepo, "--actor", "Peer", "--lesson", "readback evidence", "--json"], {
 		cwd: dir, deadline_s: fixtureDeadlineS(30), env: { ...process.env, ...br.env } as Record<string, string>,
 	});
 	const result = JSON.parse(new TextDecoder().decode(r.stdout));
@@ -378,8 +378,8 @@ test("VERIFYGATE1-readback gate: live-readback on an open bead skips the unrequi
 	const { dir, sha } = await repo("verifygate-readback-gate");
 	const noGate = `Error: Validation failed: to: workflow does not require gate 'min_reviewers' for transition 'open -> closed'`;
 	const parent = { id: "kit-parent", status: "open", assignee: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [], acceptance_criteria: "" };
-	const br = fakeBr({ id: "kit-live", status: "open", assignee: null, created_by: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [LIVE_READBACK_LABEL], acceptance_criteria: "- [ ] [c] [live] `sh scripts/t.sh` -> 16 pass", dependencies: [{ dependency_type: "related", id: "kit-parent" }] }, { failOn: ["gate list", "gate report"], failMessage: noGate, extraBeads: [parent] });
-	const res = await liveReadback({ bead: "kit-live", repo: dir, actor: "Peer", env: br.env, family: "same (bun)", lesson: "verifygate1 readback gate fixture" });
+	const br = fakeBr({ id: "kit-live", status: "open", assignee: null, created_by: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [LIVE_READBACK_LABEL], acceptance_criteria: "- [ ] [c] [live] `sh scripts/t.sh` -> 16 pass", dependencies: [{ dependency_type: "related", id: "kit-parent" }] }, { liveTracker: true, failOn: ["gate list", "gate report"], failMessage: noGate, extraBeads: [parent] });
+	const res = await liveReadback({ bead: "kit-live", repo: dir, trackerRepo: br.trackerRepo, actor: "Peer", env: br.env, family: "same (bun)", lesson: "verifygate1 readback gate fixture" });
 	expect(res.code).toBe("CLOSED");
 	expect(res.log).toContain("skipping gate report");
 	expect(res.log).toContain("open -> closed");
@@ -391,8 +391,8 @@ test("VERIFYGATE1-readback gate: live-readback on an open bead skips the unrequi
 test("VERIFYGATE1-readback in-review: live-readback accepts an in_review bead whose remaining boxes are [live]", async () => {
 	const { dir } = await repo("verifygate-readback-inreview");
 	const parent = { id: "kit-parent", status: "open", assignee: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [], acceptance_criteria: "" };
-	const br = fakeBr({ id: "kit-live", status: "in_review", assignee: null, created_by: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [LIVE_READBACK_LABEL], acceptance_criteria: "- [ ] [c] [live] `sh scripts/t.sh` -> 16 pass", dependencies: [{ dependency_type: "related", id: "kit-parent" }] }, { extraBeads: [parent] });
-	const res = await liveReadback({ bead: "kit-live", repo: dir, actor: "Peer", env: br.env, family: "same (bun)", lesson: "verifygate1 in-review readback fixture" });
+	const br = fakeBr({ id: "kit-live", status: "in_review", assignee: null, created_by: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [LIVE_READBACK_LABEL], acceptance_criteria: "- [ ] [c] [live] `sh scripts/t.sh` -> 16 pass", dependencies: [{ dependency_type: "related", id: "kit-parent" }] }, { liveTracker: true, extraBeads: [parent] });
+	const res = await liveReadback({ bead: "kit-live", repo: dir, trackerRepo: br.trackerRepo, actor: "Peer", env: br.env, family: "same (bun)", lesson: "verifygate1 in-review readback fixture" });
 	expect(res.code).toBe("CLOSED");
 	expect(res.acts.map(a => a.slice(0, 3).join(" "))).toContain("br gate report");
 	expect(res.log).not.toContain("skipping gate report");
@@ -404,8 +404,8 @@ test("VERIFYGATE1-readback in-review judgement: an unchecked [v][build] box refu
 	const { dir } = await repo("verifygate-readback-judgement");
 	const parent = { id: "kit-parent", status: "open", assignee: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [], acceptance_criteria: "" };
 	const acceptance = "- [ ] [v] [build] reviewer judgement; planted negative: a rubber stamp is refused. `echo judgement` -> judgement\n- [ ] [c] [live] `sh scripts/t.sh` -> 16 pass";
-	const br = fakeBr({ id: "kit-live", status: "in_review", assignee: null, created_by: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [LIVE_READBACK_LABEL], acceptance_criteria: acceptance, dependencies: [{ dependency_type: "related", id: "kit-parent" }] }, { extraBeads: [parent] });
-	const res = await liveReadback({ bead: "kit-live", repo: dir, actor: "Peer", env: br.env, family: "same (bun)", lesson: "verifygate1 judgement fixture" });
+	const br = fakeBr({ id: "kit-live", status: "in_review", assignee: null, created_by: "Author", updated_at: "2026-01-01T00:00:00Z", labels: [LIVE_READBACK_LABEL], acceptance_criteria: acceptance, dependencies: [{ dependency_type: "related", id: "kit-parent" }] }, { liveTracker: true, extraBeads: [parent] });
+	const res = await liveReadback({ bead: "kit-live", repo: dir, trackerRepo: br.trackerRepo, actor: "Peer", env: br.env, family: "same (bun)", lesson: "verifygate1 judgement fixture" });
 	expect(res.code).toBe("PENDING");
 	expect(res.log).toContain("build judgement remains");
 	expect(res.replays).toEqual([]);

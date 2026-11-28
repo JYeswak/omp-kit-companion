@@ -1,7 +1,7 @@
 /** Shared code-repository, fake-tracker and native-tracker helpers for verifier suites. */
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -99,7 +99,7 @@ type FixtureComment = { id: number; author: string; text: string; created_at: st
 
 /** A stateful toy tracker in its own directory; close-policy assertions use the real guard below. */
 let fakeBrCount = 0;
-export function fakeBr(bead: Record<string, unknown>, opts?: { failOn?: string | string[]; failMessage?: string; commitBeforeRefusal?: boolean; refusalAcceptance?: string; comments?: FixtureComment[]; extraBeads?: Record<string, unknown>[]; gateList?: unknown }): { env: Record<string, string>; acts: () => string[]; state: (id?: string) => Record<string, unknown> } {
+export function fakeBr(bead: Record<string, unknown>, opts?: { failOn?: string | string[]; failMessage?: string; commitBeforeRefusal?: boolean; refusalAcceptance?: string; comments?: FixtureComment[]; extraBeads?: Record<string, unknown>[]; gateList?: unknown; liveTracker?: boolean }): { env: Record<string, string>; trackerRepo: string; acts: () => string[]; state: (id?: string) => Record<string, unknown> } {
 	const home = join(base, `fake-br-${++fakeBrCount}`);
 	const bin = join(home, "bin");
 	mkdirSync(bin, { recursive: true });
@@ -107,8 +107,19 @@ export function fakeBr(bead: Record<string, unknown>, opts?: { failOn?: string |
 	const statePath = join(home, "tracker.json");
 	const views = join(home, "views");
 	mkdirSync(views);
+	const liveInfo = join(views, "live-info.json");
+	const liveOrigin = opts?.liveTracker ? realpathSync(home) : null;
+	if (liveOrigin !== null) {
+		const beads = join(liveOrigin, ".beads");
+		mkdirSync(beads);
+		const db = join(beads, "beads.db");
+		writeFileSync(db, "", { flag: "wx" });
+		writeFileSync(liveInfo, JSON.stringify({ beads_dir: beads, database_path: db, jsonl_path: join(beads, "issues.jsonl") }));
+	}
 	const comments = opts?.comments ?? [{ id: 1, author: String(bead.assignee ?? "Author"), text: "Lesson: fixture review", created_at: "2026-01-01T00:00:00Z" }];
-	const initial = { beads: Object.fromEntries([bead, ...(opts?.extraBeads ?? [])].map(row => [String(row.id), row])), comments };
+	const initial = { beads: Object.fromEntries([bead, ...(opts?.extraBeads ?? [])].map(row =>
+		[String(row.id), liveOrigin === null ? row : { ...row, source_repo_path: liveOrigin }]
+	)), comments };
 	writeFileSync(statePath, JSON.stringify(initial));
 	// Reads (show, comments list) are most of verify's br calls: a sh fast path serves them from
 	// views the writer refreshes on every save, byte-identical to the writer's own read output.
@@ -128,6 +139,7 @@ export function fakeBr(bead: Record<string, unknown>, opts?: { failOn?: string |
 		`"show "*) f=${quote(views)}/show-"$2".json; [ -f "$f" ] || exit 3; exec cat "$f" ;;`,
 		`"comments list") exec cat ${quote(join(views, "comments.json"))} ;;`,
 		`"gate list"*) f=${quote(join(views, "gate-list.json"))}; [ -f "$f" ] || exit 3; exec cat "$f" ;;`,
+		`"info "*) f=${quote(liveInfo)}; [ -f "$f" ] || exit 3; exec cat "$f" ;;`,
 		"esac",
 		`exec bun ${quote(writer)} "$@"`,
 		"",
@@ -218,6 +230,7 @@ if (a[0] === "create") process.stdout.write('{"id":"kit-1.1"}');
 	chmodSync(join(bin, "br"), 0o755);
 	return {
 		env: { PATH: `${bin}:${process.env.PATH ?? ""}` },
+		trackerRepo: home,
 		acts: () => { try { return readFileSync(log, "utf8").split("\x1e").filter(Boolean); } catch { return []; } },
 		state: (id = String(bead.id)) => {
 			const value: unknown = JSON.parse(readFileSync(statePath, "utf8"));

@@ -5356,7 +5356,6 @@ registerCommandHandler("verify", async request => {
 		return refusal("INVALID_FLAG", "--tracker requires a non-empty path", "Pass --tracker PATH naming the repo whose tracker holds the bead, or omit it to resolve the tracker from --project.");
 	const trackerRepo = typeof trackerFlag === "string" && trackerFlag.trim() ? verifyProject(trackerFlag) : undefined;
 	const dryRun = request.flags.get("--dry-run") === true;
-	if (request.flags.get("--live-readback") === true && trackerRepo !== undefined) return refusal("INVALID_FLAG", "--tracker is only valid with --export replay", "Drop --tracker, or run omp-kit verify BEAD --export SHA --tracker PATH.");
 	if (request.flags.get("--all") === true && request.flags.get("--live-readback") !== true) return refusal("INVALID_FLAG", "--all is only valid with --live-readback", "Use omp-kit verify --live-readback --all.");
 	// SELFREPLAY1 (ompkit-1elej): the assignee's own pre-handover replay of the exact published export; it stands alone.
 	const selfReplay = request.flags.get("--self-replay") === true;
@@ -5364,7 +5363,7 @@ registerCommandHandler("verify", async request => {
 	if (request.flags.get("--live-readback") === true) {
 		if (!actor) return refusal("NO_SEAT_IDENTITY", "no --actor and no AGENT_NAME", "Pass --actor NAME or export AGENT_NAME.");
 		if (request.flags.get("--all") === true) {
-			const all = await liveReadbackAll({ repo, actor, family, lesson, dryRun });
+			const all = await liveReadbackAll({ repo, trackerRepo, actor, family, lesson, dryRun });
 			const unread = all.visited.length === 0 && !all.ok;
 			let code: 0 | 1 | 2 = unread ? 2 : 0;
 			let replayed = false;
@@ -5376,7 +5375,7 @@ registerCommandHandler("verify", async request => {
 			return { code, data: { overall: unread ? "UNVERIFIED" : all.ok ? "OK" : "FINDINGS", visited: all.visited, results: all.results.map(r => ({ bead: r.bead, code: r.code, replays: r.replays, acts: r.acts, log: r.log, ...(r.rollback === undefined ? {} : { rollback: r.rollback }) })), log: all.log }, verification: dryRun || !replayed ? "NOT_RUN" : "PERFORMED" };
 		}
 		if (!request.argument) return refusal("MISSING_ARGUMENT", "A LIVEREADBACK bead id is required", "Use omp-kit verify CHILD --live-readback, or --live-readback --all.");
-		const live = await liveReadback({ bead: request.argument, repo, actor, family, lesson, dryRun });
+		const live = await liveReadback({ bead: request.argument, repo, trackerRepo, actor, family, lesson, dryRun });
 		return { code: live.code === "CLOSED" || live.code === "DRY_RUN" ? 0 : live.code === "REWORK" ? 1 : 2, data: { overall: live.code, bead: live.bead, export: live.export, replays: live.replays, acts: live.acts, log: live.log, ...(live.rollback === undefined ? {} : { rollback: live.rollback }) }, verification: live.code === "DRY_RUN" || live.replays.length === 0 ? "NOT_RUN" : "PERFORMED" };
 	}
 	if (!request.argument) return refusal("MISSING_ARGUMENT", "A bead id is required", "Use omp-kit verify BEAD --export SHA.");

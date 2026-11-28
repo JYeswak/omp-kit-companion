@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, expect, jest, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { verifyBead } from "../../src/verify.ts";
+import { liveReadback, verifyBead } from "../../src/verify.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
-import { fakeBr, inReview, installFixtureIdentity, repo, restoreFixtureIdentity } from "./verify-fixture.ts";
+import { brun, createBead, fakeBr, inReview, installFixtureIdentity, repo, restoreFixtureIdentity, row, tracker as nativeTracker, trackerEnv } from "./verify-fixture.ts";
 
 jest.setTimeout(fixtureDeadlineS(15) * 1_000);
 const scratch = ownedTmp("verify-cross-repo-test", process.env.GRADE_WAVE_SCRATCH === undefined
@@ -125,7 +126,7 @@ test("VERIFYXREPO1 mutant: swapped tracker/export refs fail; each side resolves 
 	expect(tracker.state("kit-1").status).toBe("in_review");
 });
 
-test("VERIFYXREPO1 CLI: --tracker decouples the tracker from the export repo; empty and live-readback uses are refused", async () => {
+test("VERIFYXREPO1 CLI: --tracker decouples the tracker from the export repo and rejects an empty path", async () => {
 	const trackerDir = join(base, "xrepo-tracker-cli");
 	mkdirSync(trackerDir, { recursive: true });
 	const code = await repo("xrepo-export-b");
@@ -145,7 +146,99 @@ test("VERIFYXREPO1 CLI: --tracker decouples the tracker from the export repo; em
 	const empty = await runCli(["verify", "kit-1", "--export", code.sha, "--project", code.dir, "--tracker", " ", "--actor", "Peer", "--json"]);
 	expect(empty.rc).not.toBe(0);
 	expect(JSON.parse(text(empty.stdout)).errors[0].code).toBe("INVALID_FLAG");
-	// --tracker with --live-readback is refused: readback runs on the installed kit, no export.
-	const live = await runCli(["verify", "kit-1", "--live-readback", "--tracker", trackerDir, "--actor", "Peer", "--json"]);
-	expect(JSON.parse(text(live.stdout)).errors[0].code).toBe("INVALID_FLAG");
 });
+
+test("READBACKTRACKER1: live readback runs fork code but changes only the explicitly bound real tracker", async () => {
+	const code = await repo("readback-fork", {
+		"readback.sh": "#!/bin/sh\nprintf 'fork readback observed\\n'\n",
+	});
+	const owner = await nativeTracker(base, "live-readback-owner");
+	const acceptance = "- [ ] [a] [live] `sh scripts/readback.sh` -> prints fork readback observed";
+	const fields = ["--assignee", "Author", "--acceptance", acceptance];
+	const direct = await createBead(owner, "direct readback", fields);
+	const parent = await createBead(owner, "original bead for bulk readback");
+	const child = await createBead(owner, "retained live readback", [...fields, "--labels", "live-readback", "--deps", `related:${parent}`]);
+	for (const id of [direct, parent, child]) {
+		const tagged = await brun(["update", id, "--source-repo-path", owner.dir], owner.dir, trackerEnv(owner));
+		expect(tagged.rc, tagged.out).toBe(0);
+	}
+	const copied = { dir: code.dir, db: join(code.dir, ".beads", "beads.db") };
+	cpSync(join(owner.dir, ".beads"), join(code.dir, ".beads"), { recursive: true });
+	const env = { ...process.env } as Record<string, string>;
+	for (const key of ["BEADS_DB", "BEADS_DIR", "BEADS_JSONL", "BD_DB", "BD_DATABASE"]) delete env[key];
+	const runCli = async (args: string[], bindings = env) => {
+		const report = await run(["bun", "run", "--silent", cliPath, "verify", ...args, "--live-readback", "--project", code.dir,
+			"--actor", "Peer", "--family", "fixture", "--json"], { cwd: code.dir, deadline_s: fixtureDeadlineS(45), env: bindings });
+		return { rc: report.rc, data: JSON.parse(text(report.stdout)).data };
+	};
+
+	const implicit = await runCli([direct]);
+	const canonicalAfterRefusal = await row(owner, direct);
+	const copyAfterRefusal = await row(copied, direct);
+	expect(implicit.rc, JSON.stringify({ verdict: implicit.data, canonical: canonicalAfterRefusal.status, copy: copyAfterRefusal.status })).toBe(2);
+	expect(implicit.data).toMatchObject({ overall: "TRACKER_UNBOUND", replays: [], acts: [] });
+	expect(canonicalAfterRefusal).toMatchObject({ status: "open", acceptance_criteria: acceptance });
+	expect(copyAfterRefusal).toMatchObject({ status: "open", acceptance_criteria: acceptance });
+	const conflict = { ...env, BEADS_DB: copied.db, BEADS_DIR: join(copied.dir, ".beads"), BEADS_JSONL: join(copied.dir, ".beads", "issues.jsonl") };
+	const ambient = await runCli([direct], { ...env, BEADS_DB: copied.db });
+	expect(ambient.rc).toBe(2);
+	expect(ambient.data).toMatchObject({ overall: "TRACKER_UNBOUND", replays: [], acts: [] });
+	const explicitCopy = await runCli([direct, "--tracker", code.dir]);
+	expect(explicitCopy.rc).toBe(2);
+	expect(explicitCopy.data).toMatchObject({ overall: "TRACKER_UNBOUND", replays: [], acts: [] });
+	const decoy = new Database(copied.db);
+	try { decoy.run("UPDATE issues SET source_repo_path = NULL WHERE id = ?", [direct]); }
+	finally { decoy.close(); }
+	const noOrigin = await runCli([direct, "--tracker", code.dir]);
+	expect(noOrigin.rc).toBe(2);
+	expect(noOrigin.data).toMatchObject({ overall: "TRACKER_UNBOUND", replays: [], acts: [] });
+
+	const label = await run(["git", "config", "--local", "ovnfs.checkout", "readback-fork"], {
+		cwd: code.dir, deadline_s: fixtureDeadlineS(5), env,
+	});
+	expect(label.rc).toBe(0);
+	const refused = await runCli(["--all"]);
+	expect(refused.rc).toBe(2);
+	expect(refused.data).toMatchObject({ overall: "UNVERIFIED", visited: [], results: [] });
+	expect(refused.data.log).toContain("TRACKER_UNBOUND");
+	const unbound = join(owner.dir, "not-the-tracker");
+	mkdirSync(unbound);
+	const wrong = await runCli([direct, "--tracker", unbound], conflict);
+	expect(wrong.rc).toBe(2);
+	expect(wrong.data).toMatchObject({ overall: "TRACKER_UNBOUND", replays: [], acts: [] });
+
+	// An ambient database pointing at the fork must not outrank the explicit flag.
+	const passed = await runCli([direct, "--tracker", owner.dir, "--lesson", "readback from an explicit tracker"], conflict);
+	expect(passed.rc, JSON.stringify(passed.data)).toBe(0);
+	expect(passed.data).toMatchObject({ overall: "CLOSED", replays: [{ pass: true }] });
+	const all = await runCli(["--all", "--tracker", owner.dir], conflict);
+	expect(all.rc, JSON.stringify(all.data)).toBe(0);
+	expect(all.data).toMatchObject({ overall: "OK", visited: [child], results: [{ bead: child, code: "CLOSED" }] });
+	for (const id of [direct, child]) {
+		expect(await row(owner, id)).toMatchObject({ status: "closed", acceptance_criteria: acceptance.replace("- [ ]", "- [x]") });
+		expect(await row(copied, id)).toMatchObject({ status: "open", acceptance_criteria: acceptance });
+	}
+	expect(readFileSync(join(owner.dir, ".omp", "lessons.local.jsonl"), "utf8")).toContain("readback from an explicit tracker");
+	expect(existsSync(join(code.dir, ".omp", "lessons.local.jsonl"))).toBe(false);
+});
+
+for (const [mode, command] of [
+	["truncated", "sh scripts/noisy.sh"],
+	["self-signalled", `printf 'readback observed\\n'; kill -TERM "$$"`],
+] as const) {
+	test(`READBACKTRACKER1: a matching prefix from ${mode} replay is not proof`, async () => {
+		const code = await repo(`incomplete-${mode}`, { "noisy.sh": "#!/bin/sh\nprintf 'readback observed\\n'\npython3 -c 'print(\"x\" * 4194305)'\n" });
+		const tracker = await nativeTracker(base, `incomplete-${mode}-owner`);
+		const acceptance = `- [ ] [a] [live] \`${command}\` -> prints readback observed`;
+		const bead = await createBead(tracker, "incomplete live output", ["--assignee", "Author", "--acceptance", acceptance]);
+		const owner = await brun(["update", bead, "--source-repo-path", tracker.dir], tracker.dir, trackerEnv(tracker));
+		expect(owner.rc, owner.out).toBe(0);
+		const result = await liveReadback({ bead, repo: code.dir, trackerRepo: tracker.dir, actor: "Peer", lesson: "must not record a partial observation" });
+		expect(result.code, result.log).toBe("ENVIRONMENT");
+		expect(result.replays).toMatchObject([{ pass: null }]);
+		if (mode === "self-signalled") expect(result.replays[0]?.rc).toBeLessThan(0);
+		expect(result.acts).toEqual([]);
+		expect(await row(tracker, bead)).toMatchObject({ status: "open", acceptance_criteria: acceptance });
+		expect(existsSync(join(tracker.dir, ".omp", "lessons.local.jsonl"))).toBe(false);
+	});
+}

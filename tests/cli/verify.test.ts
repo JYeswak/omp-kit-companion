@@ -997,7 +997,7 @@ assert.equal(body.data.overall, "NON_AUTHOR_REQUIRED", JSON.stringify(body));
 		const before = await row(t, live);
 		const nestedBefore = await row(t, nested);
 		const result = await liveReadback({
-			bead: live, repo: dir, actor: "Peer", lesson: "bind the explicit actor only to its read-only replay",
+			bead: live, repo: dir, trackerRepo: t.dir, actor: "Peer", lesson: "bind the explicit actor only to its read-only replay",
 			env: { ...trackerEnv(t), AGENT_NAME: ambient }, dryRun: true,
 		});
 		expect(result.ok, result.log).toBe(true);

@@ -794,7 +794,7 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--family", value: "TEXT", description: "Verifier model family, disclosed in the close reason (e.g. 'same (claude)')" },
 		{ name: "--lesson", value: "TEXT", description: "Optional close lesson; overrides the author's newest Lesson: comment. Missing both prints a warning, never blocks replay or close." },
 		{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
-		{ name: "--tracker", value: "PATH", description: "Tracker repo holding the bead; decouples bead resolution from the export repo (--project). Omit to resolve both from --project. Refused with --live-readback." },
+		{ name: "--tracker", value: "PATH", description: "Repository holding the tracker. Code replays in --project; tracker reads, close acts and lessons use --tracker. Required for live readback from an ovnfs or known foreign checkout." },
 		{ name: "--dry-run", description: "Replay and print the acts; change nothing in the tracker" },
 		{ name: "--self-replay", description: "The bead's assignee replays every box on the exact published export before handing over: runs the literal acceptance commands, prints each box's verdict and output, exits 1 when a box fails; closes nothing, ticks nothing, records no verification attempt and needs no lesson, but writes the bead's self-replay receipt under the kit state dir, which the flywheel guard requires at `br update --status in_review` (SELFREPLAYGATE1). Not the non-author verify." },
 		{ name: "--live-readback", description: "Run an open LIVEREADBACK child's boxes on the installed kit, no export: a pass ticks them and closes the child, a failure reopens the parent with REWORK naming the box" },
