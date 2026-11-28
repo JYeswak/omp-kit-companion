@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSy
 import { join } from "node:path";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 
 const base = ownedTmp("published-commit-gate-test").path;
 const cliPath = join(import.meta.dir, "..", "..", "src", "cli.ts");
@@ -13,18 +14,18 @@ async function runOk(args: string[], cwd: string): Promise<string> {
 	return new TextDecoder().decode(result.stdout).trim();
 }
 
-async function makeRepo(): Promise<{ dir: string; sha: string; env: Record<string, string>; marker: string }> {
-	const dir = join(base, "repo");
+async function makeRepo(root = base): Promise<{ dir: string; sha: string; env: Record<string, string>; marker: string }> {
+	const dir = join(root, "repo");
 	mkdirSync(dir, { recursive: true });
 	await runOk(["git", "init", "-q"], dir);
 	await runOk(["git", "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-q", "--allow-empty", "-m", "root [test]"], dir);
 
-	const origin = join(base, "origin.git");
-	await runOk(["git", "init", "--bare", "-q", origin], base);
+	const origin = join(root, "origin.git");
+	await runOk(["git", "init", "--bare", "-q", origin], root);
 	await runOk(["git", "remote", "add", "origin", origin], dir);
 	await runOk(["git", "push", "-q", "origin", "HEAD:main"], dir);
 
-	const marker = join(base, "replayed.marker");
+	const marker = join(root, "replayed.marker");
 	mkdirSync(join(dir, "scripts"), { recursive: true });
 	writeFileSync(join(dir, "scripts", "replay.sh"), "#!/bin/sh\nprintf 'replayed' > \"$PUBLICATION_REPLAY_MARKER\"\nprintf 'replay ok\\n'\n");
 	chmodSync(join(dir, "scripts", "replay.sh"), 0o755);
@@ -32,7 +33,7 @@ async function makeRepo(): Promise<{ dir: string; sha: string; env: Record<strin
 	await runOk(["git", "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-q", "-m", "unpublished replay fixture [test]"], dir);
 	const sha = await runOk(["git", "rev-parse", "HEAD"], dir);
 
-	const bin = join(base, "bin");
+	const bin = join(root, "bin");
 	mkdirSync(bin, { recursive: true });
 	const bead = {
 		id: "kit-1",
@@ -86,6 +87,58 @@ test("omp-kit verify refuses an unpublished export before replay and admits it a
 	expect(fetchUnknown.data.replays).toEqual([]);
 	expect(fetchUnknown.data.acts).toEqual([]);
 }, 60_000);
+
+test("VERIFYFETCHDIAG1 preserves UNKNOWN and classifies exact-ref lock and incomplete capture without exposing child output", async () => {
+	const root = join(base, "fetch-diagnostic");
+	const { dir, sha, env, marker } = await makeRepo(root);
+	const realGit = Bun.which("git");
+	if (realGit === null) throw new Error("Git is required for the publication fixture");
+	await runOk(["git", "push", "-q", join(root, "origin.git"), "HEAD:main"], dir);
+	expect(await runOk(["git", "rev-parse", "refs/remotes/origin/main"], dir)).not.toBe(sha);
+	const decoder = new TextDecoder();
+	const verify = async (extra: Record<string, string> = {}) => {
+		const result = await runFixtureAsync([process.execPath, "run", "--no-env-file", "--config=/dev/null", "--silent",
+			cliPath, "verify", "kit-1", "--export", sha, "--project", dir, "--actor", "Peer", "--lesson",
+			"publication diagnostic fixture", "--dry-run", "--json"],
+		{ cwd: root, env: { ...env, LC_ALL: "C", ...extra }, floor_s: 15 });
+		return { rc: result.rc, stderr: decoder.decode(result.stderr),
+			json: JSON.parse(decoder.decode(result.stdout)) as {
+				data: { overall: string; log: string; replays: { pass: boolean }[]; acts: unknown[] };
+			} };
+	};
+	const refLock = join(dir, ".git", "refs", "remotes", "origin", "main.lock");
+	writeFileSync(refLock, "");
+	try {
+		const locked = await verify();
+		expect(locked.rc).toBe(2);
+		expect(locked.json.data).toMatchObject({ overall: "UNKNOWN", replays: [], acts: [] });
+		expect(locked.json.data.log).toContain("fresh origin/main fetch failed: origin/main tracking ref could not be locked");
+		expect(existsSync(marker)).toBe(false);
+	} finally {
+		unlinkSync(refLock);
+	}
+	const admitted = await verify();
+	expect(admitted.rc).toBe(0);
+	expect(admitted.json.data).toMatchObject({ overall: "DRY_RUN", replays: [{ pass: true }] });
+	expect(readFileSync(marker, "utf8")).toBe("replayed");
+	unlinkSync(marker);
+
+	const sentinel = "fixture-credential-never-return-in-diagnostics";
+	writeFileSync(join(root, "bin", "git"), `#!/bin/sh
+if [ "$1" = -C ] && [ "$3" = fetch ] && [ "$4" = --no-tags ]; then
+	printf '%s\\n' "$FETCH_FIXTURE_SENTINEL" >&2
+	printf '%17000s\\n' '' >&2
+	exit 0
+fi
+exec "$FETCH_FIXTURE_GIT" "$@"
+`, { mode: 0o700 });
+	const incomplete = await verify({ FETCH_FIXTURE_GIT: realGit, FETCH_FIXTURE_SENTINEL: sentinel });
+	expect(incomplete.rc).toBe(2);
+	expect(incomplete.json.data).toMatchObject({ overall: "UNKNOWN", replays: [], acts: [] });
+	expect(incomplete.json.data.log).toContain("fresh origin/main fetch failed: output exceeded capture limit");
+	expect(JSON.stringify(incomplete)).not.toContain(sentinel);
+	expect(existsSync(marker)).toBe(false);
+}, fixtureDeadlineS(60) * 1_000);
 
 test("planted negative: removing the ancestry check makes the unpublished regression fail", async () => {
 	const helperPath = join(import.meta.dir, "..", "..", "extensions", "kit-published-commit.ts");

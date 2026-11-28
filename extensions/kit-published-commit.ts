@@ -4,7 +4,11 @@ export interface PublishedCommitCheck {
 	sha: string;
 	detail: string;
 }
-export type PublicationGit = (repo: string, args: string[]) => Promise<{ rc: number | null; out: string; failed: boolean }>;
+type PublicationGitFailure = "deadline exceeded" | "process interrupted" | "output exceeded capture limit" |
+	"origin/main tracking ref could not be locked" | "Git could not be started";
+export type PublicationGit = (repo: string, args: string[]) => Promise<{
+	rc: number | null; out: string; failed: boolean; failure?: PublicationGitFailure;
+}>;
 
 /** A commit citation; repo-qualified `@SHA` entries retain their source repository. */
 export interface CitedCommitReference {
@@ -53,12 +57,13 @@ export async function checkPublishedCommits(
 
 	const runPublicationGit = async (args: string[]) => {
 		try { return await execute(repo, args); }
-		catch { return { rc: null, out: "", failed: true }; }
+		catch { return { rc: null, out: "", failed: true, failure: "Git could not be started" as const }; }
 	};
 
 	const fetched = await runPublicationGit(["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"]);
 	if (fetched.failed || fetched.rc !== 0) {
-		return [...results, ...valid.map(sha => ({ status: "UNKNOWN" as const, sha, detail: "fresh origin/main fetch failed" }))];
+		const cause = fetched.failure ?? (fetched.failed || fetched.rc === null ? "process result unavailable" : `Git exited ${fetched.rc}`);
+		return [...results, ...valid.map(sha => ({ status: "UNKNOWN" as const, sha, detail: `fresh origin/main fetch failed: ${cause}` }))];
 	}
 	const tip = await runPublicationGit(["rev-parse", "--verify", "refs/remotes/origin/main^{commit}"]);
 	if (tip.failed || tip.rc !== 0 || tip.out === "") {

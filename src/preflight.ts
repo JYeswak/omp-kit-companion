@@ -33,16 +33,20 @@ async function git(repo: string, args: string[]): Promise<{ rc: number | null; o
 	return { rc: r.rc, out: text(r.stdout).trim(), err: text(r.stderr).trim() };
 }
 
-async function publicationGit(repo: string, args: string[]): Promise<{ rc: number | null; out: string; failed: boolean }> {
+const publicationGit: PublicationGit = async (repo, args) => {
 	const r = await run(["git", "-C", repo, ...args], {
 		deadline_s: 60, max_output_bytes: 16 * 1024,
 	});
-	return {
-		rc: r.rc,
-		out: text(r.stdout).trim(),
-		failed: r.timed_out || r.killed || r.truncated || r.total_truncated || r.rc === null,
-	};
-}
+	const failure = r.timed_out ? "deadline exceeded" :
+		r.killed ? "process interrupted" :
+		r.truncated || r.total_truncated ? "output exceeded capture limit" :
+		r.rc === null ? "Git could not be started" : null;
+	if (failure !== null) return { rc: r.rc, out: "", failed: true, failure };
+	// Classify the bounded diagnostic; never copy child stderr or a configured remote into a verdict.
+	if (r.rc !== 0 && args[0] === "fetch" && text(r.stderr).includes("cannot lock ref 'refs/remotes/origin/main'"))
+		return { rc: r.rc, out: "", failed: false, failure: "origin/main tracking ref could not be locked" };
+	return { rc: r.rc, out: r.rc === 0 ? text(r.stdout).trim() : "", failed: false };
+};
 
 export async function checkPublishedCommits(
 	repo: string,
