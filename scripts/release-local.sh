@@ -34,6 +34,8 @@
 # Resume only the next-version advance of a published release: --advance-only --version X.Y.Z
 # Resume a release stranded after its draft (tag and draft exist, attest failed):
 #   --resume-from-draft --version X.Y.Z (adopts the tag and draft, re-dispatches attest, then verify/install/next-version)
+# If interrupted after tagging but before draft creation, add --source <expected-full-sha>:
+#   rebuild, qualify and sign that exact source, adopt only its matching tag, then create the missing draft.
 # --caller-commit-next-version prepares the next-version paths/message without committing or pushing them.
 # It exits 3 while that caller-owned commit is pending; it does not change the bootstrap prepare step.
 # Environment:
@@ -116,6 +118,7 @@ say() { echo "== $*"; }
 DRY_RUN=0
 ADVANCE_ONLY=0
 RESUME_FROM_DRAFT=0
+RESUME_FROM_TAG=0
 CALLER_COMMIT_NEXT_VERSION=0
 NEXT_VERSION_COMMIT_PENDING=0
 VERSION=''
@@ -150,8 +153,11 @@ if [ "$ADVANCE_ONLY" = 1 ]; then
 		{ echo "release-local: use release-local --advance-only --version X.Y.Z without --next, --source or --dry-run" >&2; exit 2; }
 fi
 if [ "$RESUME_FROM_DRAFT" = 1 ]; then
-	{ [ -n "$VERSION" ] && [ "$NEXT" = 0 ] && [ -z "$SOURCE" ] && [ "$DRY_RUN" = 0 ] && [ "$ADVANCE_ONLY" = 0 ]; } ||
-		{ echo "release-local: use release-local --resume-from-draft --version X.Y.Z without --advance-only, --next, --source or --dry-run" >&2; exit 2; }
+	{ [ -n "$VERSION" ] && [ "$NEXT" = 0 ] && [ "$DRY_RUN" = 0 ] && [ "$ADVANCE_ONLY" = 0 ]; } ||
+		{ echo "release-local: use release-local --resume-from-draft --version X.Y.Z [--source SHA] without --advance-only, --next or --dry-run" >&2; exit 2; }
+	# A missing draft has no signed bytes to adopt. An explicit expected source
+	# selects the complete prepare/build/sign path, never a re-tag or a gate skip.
+	if [ -n "$SOURCE" ]; then RESUME_FROM_TAG=1; RESUME_FROM_DRAFT=0; fi
 fi
 if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]; then die "export TMPDIR to an owned scratch directory first"; fi # tempsafe: requires the caller's owned scratch, creates nothing
 
@@ -556,6 +562,14 @@ install_release() {
 	if [ -n "$manifest_findings" ]; then say "INSTALLED_WITH_FINDINGS: $manifest_findings"; fi
 }
 
+# Shared with the normal post-push readback. Recovery checks before rebuilding
+# and again immediately before creating a draft, so a moved tag never gets assets.
+verify_release_tag() {
+	bounded 60 gh api "repos/$REPO/git/ref/tags/v$VERSION" >"$WORK/tag.json" || die "tag readback failed"
+	{ [ "$(jq -r .object.type "$WORK/tag.json")" = commit ] && [ "$(jq -r .object.sha "$WORK/tag.json")" = "$SOURCE" ]; } ||
+		die "remote v$VERSION does not name $SOURCE"
+}
+
 # ---------------------------------------------------------------------------------------------- 1. preflight
 # Advance-only bypasses all prepare/build/sign/publish/verify/install stages.
 if [ "$ADVANCE_ONLY" = 0 ]; then
@@ -635,7 +649,11 @@ if [ -z "$VERSION" ]; then
 			die "release-train.sh next-version failed"
 	fi
 fi
-grep -q "refs/tags/v$VERSION\$" <<<"$remote_tags" && die "tag v$VERSION already exists on origin; never re-tag a version"
+if [ "${RESUME_FROM_TAG:-0}" = 1 ]; then
+	verify_release_tag
+else
+	if grep -q "refs/tags/v$VERSION\$" <<<"$remote_tags"; then die "tag v$VERSION already exists on origin; never re-tag a version"; fi
+fi
 bounded 120 gh api --paginate --slurp "repos/$REPO/releases?per_page=100" >"$WORK/releases.json" || die "listing releases failed"
 BASE_TAG="$(bounded 30 sh "$ROOT/scripts/release-preflight.sh" releases "$VERSION" "$WORK/releases.json")" ||
 	die "release availability preflight failed"
@@ -1184,7 +1202,8 @@ tar -xf "$WORK/source.tar" -C "$SRC" || die "cannot export the adopted source $S
 rm -f "$WORK/source.tar"
 bounded 30 sh "$ROOT/scripts/release-preflight.sh" export "$SRC" "$SOURCE" ||
 	die "source export preflight failed; retry: $resume"
-bounded 120 gh release view "v$VERSION" --repo "$REPO" --json tagName,isDraft,assets >"$WORK/draft.json" || die "draft readback failed; retry: $resume"
+bounded 120 gh release view "v$VERSION" --repo "$REPO" --json tagName,isDraft,assets >"$WORK/draft.json" ||
+	die "draft readback failed; if no draft exists, rebuild with: $resume --source $SOURCE"
 # The gate below is a local python check through a heredoc, exactly like receipt(). The refusal stays off
 # the heredoc's own command line: pysafe requires single-segment heredoc command ownership, and bounded
 # would reattach the step's stdin to /dev/null and starve the heredoc into a vacuous pass.
@@ -1237,10 +1256,13 @@ sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$S
 if [ "${RESUME_FROM_DRAFT:-0}" = 0 ]; then
 # ----------------------------------------------------------------------------------------------------- 5. tag
 stage tag
-remote_tags="$(bounded 120 git -C "$ROOT" ls-remote --tags origin "refs/tags/v$VERSION")" || die "tag lookup failed"
-[ -z "$remote_tags" ] || die "tag v$VERSION appeared during the build; never re-tagged"
+if [ "${RESUME_FROM_TAG:-0}" = 0 ]; then
+	remote_tags="$(bounded 120 git -C "$ROOT" ls-remote --tags origin "refs/tags/v$VERSION")" || die "tag lookup failed"
+	[ -z "$remote_tags" ] || die "tag v$VERSION appeared during the build; never re-tagged"
+fi
 bounded 40 sh "$ROOT/scripts/release-preflight.sh" ci "$REPO" "$SOURCE" ||
 	die "CI_NOT_GREEN: CI changed while preparing $SOURCE; refusing tag"
+if [ "${RESUME_FROM_TAG:-0}" = 0 ]; then
 # This transport includes every unchanged local pre-push hook, not just the network.
 # 360s focused selection + 180s machinery + 180s checker contracts + 60s cached
 # full-verdict readback + 120s margin = 900s. The selected pre-push fixture alone
@@ -1248,18 +1270,19 @@ bounded 40 sh "$ROOT/scripts/release-preflight.sh" ci "$REPO" "$SOURCE" ||
 tag_push_started=$(date +%s)
 bounded 900 git -C "$ROOT" -c push.followTags=false push --porcelain origin "$SOURCE:refs/tags/v$VERSION" || die "tag push failed"
 TAG_PUSH_SECONDS=$(( $(date +%s) - tag_push_started ))
-bounded 60 gh api "repos/$REPO/git/ref/tags/v$VERSION" >"$WORK/tag.json" || die "tag readback failed"
-{ [ "$(jq -r .object.type "$WORK/tag.json")" = commit ] && [ "$(jq -r .object.sha "$WORK/tag.json")" = "$SOURCE" ]; } ||
-	die "remote v$VERSION does not name $SOURCE"
+fi
+verify_release_tag
 bounded 300 git -C "$ROOT" fetch --quiet origin "tag" "v$VERSION" ||
 	die "tag published but local launch-check tag fetch failed"
-say "tagged v$VERSION -> $SOURCE"
+if [ "${RESUME_FROM_TAG:-0}" = 1 ]; then say "adopted v$VERSION -> $SOURCE (existing tag unchanged)"
+else say "tagged v$VERSION -> $SOURCE"; fi
 
 # --------------------------------------------------------------------------------------------------- 6. draft
 stage draft
 substep draft.create-and-upload
 bounded 1800 gh release create "v$VERSION" --repo "$REPO" --verify-tag --draft --title "v$VERSION" \
-	--notes-file "$WORK/release-notes.md" "$DIST"/* || die "draft creation failed (tag v$VERSION exists; resume from the draft, never re-tag)"
+	--notes-file "$WORK/release-notes.md" "$DIST"/* ||
+	die "draft creation failed (tag v$VERSION exists); if no draft exists, retry: release-local --resume-from-draft --version $VERSION --source $SOURCE; otherwise resume without --source"
 substep draft.digest-readback
 bounded 120 gh release view "v$VERSION" --repo "$REPO" --json isDraft,assets >"$WORK/draft.json" || die "draft readback failed"
 [ "$(jq -r .isDraft "$WORK/draft.json")" = true ] || die "v$VERSION is not a draft"

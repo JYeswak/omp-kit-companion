@@ -328,6 +328,16 @@ attest-local and continues through the unchanged verify, install and
 next-version stages. A draft whose assets differ, or a tag naming another
 version, refuses before anything is dispatched.
 
+If interrupted after tag push but **before the draft exists**, use
+`--resume-from-draft --version X.Y.Z --source <expected-full-sha>`. This path
+requires GitHub's tag API to name that exact commit, repeats the normal
+qualification/build/sign/notarization/checksum/rule gates, verifies the tag
+again, and creates the missing draft without pushing or moving the tag.
+It rebuilds signed assets; it does not recover the previous run's bytes.
+An existing release (including a partial draft) refuses this rebuild path:
+use the byte-verifying draft resume above for a complete draft. A mismatched
+or unreadable tag refuses before rebuilding or uploading anything.
+
 ### Former manual steps (0.2.86) and ownership
 
 | Former lead action | Current status |

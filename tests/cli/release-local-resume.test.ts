@@ -72,7 +72,7 @@ const VERSION = "0.0.1";
 const PLATFORMS = ["darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu"] as const;
 const assetName = (platform: string): string => `omp-kit-v${VERSION}-${platform}.tar.gz`;
 
-type DraftCase = "match" | "tampered" | "published";
+type DraftCase = "match" | "tampered" | "published" | "missing";
 function buildFixture(label: string, draft: DraftCase): {
 	work: string; env: Record<string, string>; root: string; bin: string;
 } {
@@ -141,10 +141,14 @@ function buildFixture(label: string, draft: DraftCase): {
 	// the file the stub reads if they were the same path.
 	writeFileSync(join(work, "releases-page.json"), JSON.stringify([[
 		{ tag_name: "v0.0.0", draft: false, prerelease: false },
-		{ tag_name: `v${VERSION}`, draft: true, prerelease: false },
+		...(draft === "missing" ? [] : [{ tag_name: `v${VERSION}`, draft: true, prerelease: false }]),
 	]]));
 	writeFileSync(join(work, "draft-page.json"), JSON.stringify({ tagName: `v${VERSION}`,
 		isDraft: draft !== "published", assets: draftAssets }));
+	writeFileSync(join(work, "tag-page.json"), JSON.stringify({
+		object: { type: "commit", sha: git(origin, ["rev-parse", `v${VERSION}^{commit}`]) },
+	}));
+	writeFileSync(join(work, "gh-calls"), "");
 	// Stubbed gh: authenticated, serves the recorded releases/draft, and
 	// materializes the draft assets. Tamper replaces one archive after the
 	// digests are recorded, so the real SHA256SUMS check must refuse.
@@ -156,6 +160,8 @@ case "$*" in
 	[ "$5 $6 $7 $8" = "--workflow ci.yml --commit ${git(origin, ["rev-parse", `v${VERSION}^{commit}`])}" ] || exit 98
 	printf '[{"headSha":"%s","event":"push","status":"completed","conclusion":"success","databaseId":1}]\\n' "$8" ;;
 "api --paginate --slurp"*) cat "$RELEASE_TEST_WORK/releases-page.json" ;;
+"api repos/fixture/release/git/ref/tags/"*) cat "$RELEASE_TEST_WORK/tag-page.json" ;;
+"release create"*) printf '%s\\n' "$*" >"$RELEASE_TEST_WORK/created-draft" ;;
 "release view"*) cat "$RELEASE_TEST_WORK/draft-page.json" ;;
 "release download"*)
 	dir=""; prev=""
@@ -227,7 +233,7 @@ test.skipIf(process.platform !== "darwin")("RELRESUME1 planted negative: an alre
 	}
 }, fixtureDeadlineS(20) * 1_000);
 
-test("RELRESUME1 resume needs --version alone, and never re-tags or recreates the draft", () => {
+test("RELRESUME1 resume needs --version, and complete-draft adoption never re-tags or recreates it", () => {
 	const script = readFileSync(join(ROOT, "scripts/release-local.sh"), "utf8");
 	// Usage refuses every conflicting mode with exit 2, before TMPDIR is required.
 	for (const args of [["--resume-from-draft"], ["--resume-from-draft", "--version", VERSION, "--dry-run"],
@@ -253,4 +259,129 @@ test("RELRESUME1 resume needs --version alone, and never re-tags or recreates th
 	expect(download).toBeGreaterThan(adoption);
 	expect(download).toBeLessThan(attestDispatch);
 	expect(runFixture(["bash", "-n", join(ROOT, "scripts/release-local.sh")], { cwd: ROOT, floor_s: 30 }).rc).toBe(0);
+});
+
+// TAGDRAFTRECOVER1: execute the real parser, release-availability gate and
+// tag/draft stages against a local origin. Only GitHub is fake; qualification,
+// build and signing are outside these stage slices. No signing or
+// attestation is claimed. The existing complete-draft byte checks stay above.
+async function recoverMissingDraft(
+	kind: "recover" | "wrong-sha" | "moved-sha" | "fresh" | "tag-unreadable" | "tag-object" | "existing-draft",
+	script = localScript,
+) {
+	const fixture = buildFixture("tagdraft-" + kind, kind === "existing-draft" ? "match" : "missing");
+	const { work, env, root, bin } = fixture;
+	try {
+		const source = new TextDecoder().decode(runFixture(["git", "-C", root, "rev-parse", "HEAD"],
+			{ cwd: ROOT, env, floor_s: 10 }).stdout).trim();
+		const pushHook = join(root, ".git", "hooks", "pre-push");
+		writeFileSync(pushHook, `#!/bin/sh\n: >"${work}/tag-pushed"\n`);
+		chmodSync(pushHook, 0o755);
+		const slice = (start: string, end: string) => {
+			const first = script.indexOf(start);
+			const last = script.indexOf(end, first + start.length);
+			if (first < 0 || last < 0) throw new Error(`release stage boundary missing: ${start} / ${end}`);
+			return script.slice(first, last);
+		};
+		if (kind === "wrong-sha") writeFileSync(join(work, "tag-page.json"),
+			JSON.stringify({ object: { type: "commit", sha: "f".repeat(40) } }));
+		if (kind === "tag-unreadable") rmSync(join(work, "tag-page.json"));
+		if (kind === "tag-object") writeFileSync(join(work, "tag-page.json"),
+			JSON.stringify({ object: { type: "tag", sha: source } }));
+		if (kind === "fresh") {
+			for (const repo of [root, join(work, "origin")]) {
+				const result = runFixture(["git", "-C", repo, "update-ref", "-d", `refs/tags/v${VERSION}`],
+					{ cwd: ROOT, env, floor_s: 10 });
+				expect(result.rc).toBe(0);
+			}
+		}
+		writeFileSync(join(work, "release-notes.md"), "Fixture release notes\n");
+		mkdirSync(join(work, "dist"));
+		for (const name of ["SHA256SUMS", "release-index.json", ...PLATFORMS.map(assetName)])
+			cpSync(join(work, "assets", name), join(work, "dist", name));
+		const parser = slice("DRY_RUN=0\n", 'if [ -z "${TMPDIR:-}" ]');
+		const availability = slice('remote_tags="$(bounded 120 git -C "$ROOT" ls-remote --tags origin)"',
+			"# NEXTVERSION1: when origin/main already states");
+		const publish = slice("# VERSIONSRC1", "# -------------------------------------------------------------------------------------------------- 7. attest");
+		const moved = kind === "moved-sha" ? `printf '%s' '{"object":{"type":"commit","sha":"${"f".repeat(40)}"}}' >"$WORK/tag-page.json"` : "";
+		const result = await runFixtureAsync(["bash", "-c", `set -euo pipefail
+die() { echo "release-local: refused: $*" >&2; exit 4; }
+say() { echo "== $*"; }
+${parser}
+WORK=${work}; ROOT=${root}; REPO=fixture/release
+STAGE_LOG="$WORK/stages"; : >"$STAGE_LOG"; DIST="$WORK/dist"
+${slice("bounded() {", "# ---------------------------------------------------------------------------------------------- 1. preflight")}
+${availability}
+${moved}
+${publish}`, "tagdraft", ...(kind === "fresh" ? [] : ["--resume-from-draft"]),
+			"--version", VERSION, "--source", source], {
+			cwd: ROOT, env: { ...env, TMPDIR: work, PATH: `${bin}:${process.env.PATH ?? ""}`,
+				RELEASE_TEST_WORK: work, RELEASE_TEST_ASSETS: join(work, "assets") }, floor_s: 10,
+		});
+		const tag = runFixture(["git", "-C", join(work, "origin"), "rev-parse", `v${VERSION}`],
+			{ cwd: ROOT, env, floor_s: 10 });
+		expect(tag.rc).toBe(0);
+		expect(new TextDecoder().decode(tag.stdout).trim()).toBe(source);
+		return {
+			rc: result.rc, stderr: new TextDecoder().decode(result.stderr), stdout: new TextDecoder().decode(result.stdout),
+			created: existsSync(join(work, "created-draft")),
+			pushed: existsSync(join(work, "tag-pushed")),
+			calls: readFileSync(join(work, "gh-calls"), "utf8"),
+		};
+	} finally {
+		rmSync(work, { recursive: true, force: true });
+	}
+}
+
+test("TAGDRAFTRECOVER1 matching existing tag and absent draft resumes into draft creation", async () => {
+	const result = await recoverMissingDraft("recover");
+	expect(result.rc, result.stderr).toBe(0);
+	expect(result.created).toBe(true);
+	expect(result.pushed).toBe(false);
+	expect(result.stdout).toContain(`adopted v${VERSION}`);
+	expect(result.stdout).toContain(`draft v${VERSION} holds`);
+	expect(result.calls.split("git/ref/tags").length - 1).toBe(2);
+	expect(result.calls).toContain("release create");
+});
+
+for (const kind of ["wrong-sha", "moved-sha"] as const) {
+	test(`TAGDRAFTRECOVER1 planted ${kind} refuses before draft creation`, async () => {
+		const result = await recoverMissingDraft(kind);
+		expect(result.rc, result.stderr).toBe(4);
+		expect(result.stderr).toContain(`remote v${VERSION} does not name`);
+		expect(result.created).toBe(false);
+		expect(result.pushed).toBe(false);
+		expect(result.calls).not.toContain("release create");
+	});
+}
+
+for (const kind of ["tag-unreadable", "tag-object", "existing-draft"] as const) {
+	test(`TAGDRAFTRECOVER1 ${kind} refuses without tag or draft writes`, async () => {
+		const result = await recoverMissingDraft(kind);
+		expect(result.rc, result.stderr).toBe(4);
+		expect(result.stderr).toContain(kind === "tag-unreadable" ? "tag readback failed"
+			: kind === "tag-object" ? `remote v${VERSION} does not name` : "release availability preflight failed");
+		expect(result.created).toBe(false);
+		expect(result.pushed).toBe(false);
+		expect(result.calls).not.toContain("release create");
+	});
+}
+
+test("TAGDRAFTRECOVER1 fresh release still pushes its tag then creates its draft", async () => {
+	const result = await recoverMissingDraft("fresh");
+	expect(result.rc, result.stderr).toBe(0);
+	expect(result.created).toBe(true);
+	expect(result.pushed).toBe(true);
+	expect(result.stdout).toContain(`tagged v${VERSION}`);
+	expect(result.stdout).toContain(`draft v${VERSION} holds`);
+});
+
+test("TAGDRAFTRECOVER1 planted old existing-tag refusal breaks missing-draft recovery", async () => {
+	const mutant = localScript.replace('if [ "${RESUME_FROM_TAG:-0}" = 1 ]; then\n\tverify_release_tag',
+		'if false; then\n\tverify_release_tag');
+	expect(mutant).not.toBe(localScript);
+	const result = await recoverMissingDraft("recover", mutant);
+	expect(result.rc, result.stderr).toBe(4);
+	expect(result.stderr).toContain("already exists on origin");
+	expect(result.created).toBe(false);
 });
