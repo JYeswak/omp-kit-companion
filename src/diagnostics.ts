@@ -406,6 +406,18 @@ function inspectProfiles(home: string): { profiles: ConfigInspection[]; issue?: 
 	} catch (error) { return { profiles, issue: `named profiles could not be listed: ${errorText(error)}` }; }
 }
 
+/** Installed package evidence, not a claim that the running OMP has loaded the module. */
+function packagedExtensions(root: string): string[] {
+	try {
+		if (directoryPath(root, ["extensions"]) !== "directory") return [];
+		const config = readJsonObject(join(root, "package.json")).omp;
+		if (!record(config) || !Array.isArray(config.extensions)) return [];
+		return config.extensions.filter((entry): entry is string =>
+			typeof entry === "string" && matchesBounded(entry, 128, /^extensions\/[a-z0-9._-]+\.ts$/)
+			&& pathState(join(root, entry)) === "file");
+	} catch { return []; }
+}
+
 function inspectPluginLinks(root: string, home: string): Finding {
 	let installedRoot: string;
 	let installedHash: string;
@@ -535,6 +547,7 @@ function inspectPluginLinks(root: string, home: string): Finding {
 		: unverifiedProfiles.length || inventoryIssue ? "Resolve the unsafe or incomplete profile-path inspection, then rerun omp-kit doctor." : "No action required.";
 	return finding("plugin_links", status, reason, recommendedAction, {
 		release_root: installedRoot, expected_package_sha256: installedHash, links: observations,
+		packaged_extensions: packagedExtensions(installedRoot),
 		stale_profiles: staleProfiles, missing_profiles: missingProfiles, unverified_profiles: unverifiedProfiles,
 		mismatch_profiles: mismatchProfiles, mismatch_detail: mismatchDetail,
 		...(inventoryIssue ? { inventory_issue: inventoryIssue } : {}),

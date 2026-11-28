@@ -814,7 +814,7 @@ function branchesOptedOut(root: string): boolean {
 }
 
 /** The bash call's own working directory (the `cwd` beside `command`), when it names one. */
-function eventWorkingDirectory(event: FleetGuardEvent): string | undefined {
+export function eventWorkingDirectory(event: FleetGuardEvent): string | undefined {
 	for (const holder of [event.arguments, event.input, event.params]) {
 		if (!holder || typeof holder !== "object") continue;
 		const value = asString((holder as Record<string, unknown>).cwd);

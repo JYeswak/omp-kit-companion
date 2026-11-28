@@ -279,7 +279,9 @@ test("CLI scopes and bare presence inventory keep explicit unperformed evidence"
 test("stale plugin symlink fails by profile and the installed release target passes", async () => {
 	const f = fixture();
 	mkdirSync(join(f.root, "extensions"));
-	writeFileSync(join(f.root, "package.json"), JSON.stringify({ name: "omp-kit-companion", version: "0.2.24" }));
+	writeFileSync(join(f.root, "package.json"), JSON.stringify({ name: "omp-kit-companion", version: "0.2.24",
+		omp: { extensions: ["extensions/install-ancestor-prefix.ts", "extensions/missing.ts"] } }));
+	writeFileSync(join(f.root, "extensions", "install-ancestor-prefix.ts"), "export default function installScope() {}\n");
 	const oldRoot = join(f.base, "old-release");
 	mkdirSync(join(oldRoot, "rules"), { recursive: true });
 	mkdirSync(join(oldRoot, "extensions"));
@@ -304,6 +306,9 @@ test("stale plugin symlink fails by profile and the installed release target pas
 	const current = finding(await diagnose({ root: f.root, home: f.home }), "plugin_links");
 	expect(current.status).toBe("OK");
 	expect(current.evidence?.stale_profiles).toEqual([]);
+	expect(current.evidence?.packaged_extensions).toEqual(["extensions/install-ancestor-prefix.ts"]);
+	const previous = finding(await diagnose({ root: oldRoot, home: f.home }), "plugin_links");
+	expect(previous.evidence?.packaged_extensions).toEqual([]);
 });
 
 test("DOCTORDEGRADED1: fresh plugin rule installation is OK and a removed rule names its file", async () => {

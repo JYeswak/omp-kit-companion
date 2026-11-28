@@ -13,6 +13,7 @@
       "extensions/kit-guard-optin.ts",
       "extensions/kit-save-guard.ts",
       "extensions/fleet-guard.ts",
+      "extensions/install-ancestor-prefix.ts",
       "extensions/kit-callback.ts",
       "extensions/kit-flywheel-guard.ts",
       "extensions/kit-loop-guard.ts",

@@ -15,7 +15,7 @@
 [Latest release](https://github.com/JYeswak/omp-kit-companion/releases/latest)
 <!-- kit-release:end -->
 
-A tested rule pack, 15 extensions, six skills, and a guarded CLI for an
+A tested rule pack, 16 extensions, six skills, and a guarded CLI for an
 existing OMP install.
 
 Install the newest release with one command. It needs `curl`, `python3` (3.9 or
@@ -135,7 +135,7 @@ command it runs.
 
 ### Guard extensions
 
-The repo is an OMP plugin. `package.json` declares 15 extensions; guards include:
+The repo is an OMP plugin. `package.json` declares 16 extensions; guards include:
 
 | Extension | Hooks | Behavior |
 |---|---|---|
