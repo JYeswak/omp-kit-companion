@@ -1,0 +1,9 @@
+# omp-kit-companion operating contract (audit F01 / HW-01, ompkit-tz1p6.5).
+#
+# Input to the fleet prompt_lint R1 gate when that gate is deployed. This file does not activate it.
+# isolation, worker_commits, landing, private_index and release_controller_exception are anchored to AGENTS.md and docs/release-procedure.md.
+isolation = "ovnfs-checkout"
+worker_commits = "own-checkout"
+landing = "lead-omp-kit-land"
+release_controller_exception = "shared-main-canonical-checkout"
+private_index = "forbidden"

@@ -253,11 +253,11 @@ OMP source cache details (fetch, verify, disable) live in [docs/omp-source-cache
 
 **Plan before apply.** Guarded writes require `--apply` and non-interactive `--yes`.
 Append-only `lessons add` and `checkin` record their explicit invocation;
-publishing those records additionally requires `--commit --bead ID`.
+only the lead uses their `--commit --bead ID` option to append and publish from the canonical checkout.
 
 **Receipts and undo.** Each mutation leaves a receipt; `undo` restores from it, refuses when a file changed since, and reports a failed restore as `PARTIAL_UNDO`.
-Lesson records are append-only, not undo receipts. If publication fails after
-a normal save, the rows and local commit remain available for convergence.
+Lesson records are append-only, not undo receipts. If the lead's lesson
+publication fails after committing, the rows and local commit remain available for convergence.
 
 **Fail closed.** Anything the CLI cannot observe is `UNVERIFIED` or `NOT_RUN`,
 never `PASS`. A fresh HOME reports `UNVERIFIED` until rules are applied; an
@@ -411,22 +411,29 @@ Without this link, `doctor` stays `DEGRADED`; its `recommended_action` names the
 JSON (`--json`): `ok`, `tool_version`, `data`, `meta`, `warnings`, `commands`,
 `errors`. `omp-kit help COMMAND` shows grammar.
 
-`lessons add`/`checkin` append `.omp/lessons.jsonl`. `--commit` needs a clean
-lesson path on shared `main`, runs normal commit/push hooks and never adopts
-peers' staged/worktree rows. Without `--done`, check-ins require complete native
-activity coverage and refuse unavailable sources, never invent zero activity.
-Use repeatable `--done` for explicit reports.
+Workers record lessons and check-ins without `--commit`. The publication option is
+for the lead: `--commit` needs a clean `.omp/lessons.jsonl` on shared `main`,
+runs normal commit/push hooks, and never adopts peers' staged or uncommitted
+rows. Without `--done`, check-ins require complete native activity coverage and
+refuse unavailable sources, never invent zero activity. Use repeatable `--done`
+for explicit reports.
+
+Source work uses an isolated checkout: `ovnfs new --name <name> --rev origin/main`
+from the canonical repo, then edit and commit inside it. Hand the candidate to
+the lead, who runs `omp-kit land --checkout <name> --bead <id> --review auto --message "<msg> [test]" --apply --yes`.
+Land takes reservations at integration, not as worker isolation. The lead's
+publication and recovery adapters below do not replace the worker checkout route.
 
 | Command | Usage | What it does | Example |
 |---|---|---|---|
 | `omp-kit full-suite verdict` | `list [TREE] [--repo PATH] \| get TREE [--repo PATH]` | Show tree, judge identity, verdict and integrity, including invalid records | `omp-kit full-suite verdict list --json` |
 | `omp-kit status` | `status` | Kit and OMP presence; runtime `effective_rules` is `NOT_RUN` (use `doctor --scope rules --json`); changes nothing | `omp-kit status --json` |
-| `omp-kit lessons` | `lessons add --class CLASS --what TEXT --evidence TEXT [--kind KIND] [--project PATH] [--commit --bead ID]` | Append an evidence-backed lesson; optionally save its clean path on shared main and fast-forward publish | `omp-kit lessons add --class MISSING_EDGE --what w --evidence e` |
+| `omp-kit lessons` | `lessons add --class CLASS --what TEXT --evidence TEXT [--kind KIND] [--project PATH] [--commit --bead ID]` | Append an evidence-backed lesson; `--commit` is for lead publication | `omp-kit lessons add --class MISSING_EDGE --what w --evidence e` |
 | `omp-kit fleet-lessons` | `fleet-lessons [--project PATH]... [--json]` | Read current lesson advice, preserved history and unresolved references without intake or service effects | `omp-kit fleet-lessons --project . --json` |
 | `omp-kit mine` | `mine --since DATE --until DATE [--project P\|--all] [--json]` | Read-only UTC-window mining of transcripts, tracker, git, hooks and command-center; ranked cited candidates; unbound events quarantined; unmeasured minutes null | `omp-kit mine --since 2026-10-01 --until 2026-11-01 --all --json` |
 | `omp-kit milestone` | `milestone pin\|unpin SESSION BEAD... --reason TEXT`; `milestone date SESSION DATE --reason TEXT`; `milestone show SESSION`; `milestone launch SESSION [--set KEY=VALUE]` | Launch READY iff 4 resolve | `omp-kit milestone launch cfsios --json` |
 | `omp-kit tools` | `verify NAME ...`; `update ovnfs [--plan\|--apply]` | Pinned hashes; update verifies and swaps with rollback | `omp-kit tools update ovnfs --apply --json` |
-| `omp-kit checkin` | `checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]` | Record verified own activity or explicit items; refuses unavailable coverage | `omp-kit checkin --done br-123 --next 'Verify the consumer' --bead br-123 --commit --json` |
+| `omp-kit checkin` | `checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]` | Record verified own activity or explicit items; refuses unavailable coverage; `--commit` is for lead publication | `omp-kit checkin --done br-123 --next 'Verify the consumer' --json` |
 | `omp-kit project` | `project add REPO --session NAME [--workers N] [--profile P] [--plan\|--apply] [--undo RECEIPT]`; `project status SESSION\|--all [--json]`; `project goal SESSION --set TEXT\|--from-file FILE\|--pause\|--drop [--apply]` | Exact IDs for every session; UNKNOWN exits nonzero, not fleet health. | `omp-kit project status --all --json` |
 | `omp-kit test` | `test [--full] [--record] [--rules DIR --cases FILE] [--integrations] [--mcp] [--metamorphic] [--mutants] [--repeat N]` | Matcher conformance, external packs, live fixtures, per-profile integration and MCP proofs, mutation and flake checks | `omp-kit test --json` |
 | `omp-kit frontend` | `frontend check [FLAGS]` | Run all project verifiers and seal build-bound evidence | `omp-kit frontend check` |
@@ -457,11 +464,11 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit next` | `next --role worker\|director [--repo PATH] [--agent NAME] [--full-facts]` | Read-only next action and applicable skills; fact summaries by default, complete payloads only with --full-facts | `omp-kit next --role worker --json` |
 | `omp-kit grader next` | `grader next [--repo PATH] [--agent NAME]` | Select one prioritized grader action (`OMP_KIT_GRADE_WAVE` = `grade_wave.py` path); unavailable sources read UNKNOWN, never empty | `OMP_KIT_GRADE_WAVE=/path/to/grade_wave.py omp-kit grader next --repo . --json` |
 | `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan; needs native `rch` on PATH with a parseable `status --json` (else `rch_status_unavailable`; no binary at all is `RCH_UNAVAILABLE`) | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
-| `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or resolve shared-main convergence; keeps peer state, refuses owner conflicts, never force-pushes | `omp-kit converge --repo . --json` |
-| `omp-kit land` | `land --paths PATH...\|land --patch FILE\|land --exact-parent SHA\|land --checkout NAME --bead ID --review auto -m MSG --apply --yes` | Land reserved paths via [push check](docs/land.md); review auto: acceptance replay, independent-session review, land | `omp-kit help land` |
+| `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report shared-main convergence; only the lead uses `--apply` or `--push` for publication recovery. Preserves peer work, refuses owner conflicts, never force-pushes | `omp-kit converge --repo . --json` |
+| `omp-kit land` | `land --paths PATH...\|land --patch FILE\|land --exact-parent SHA\|land --checkout NAME --bead ID --review auto -m MSG --apply --yes` | Lead integrates a committed checkout via [push check](docs/land.md); review auto: acceptance replay, independent-session review, integration reservations, land | `omp-kit help land` |
 | `omp-kit push-check` | `push-check --commit SHA [--repo PATH]` | Record a commit's `.omp/push-check` verdict | `omp-kit help push-check` |
 | `omp-kit ovnfs-land` | `ovnfs-land --repo PATH --checkout PATH --base SHA --apply --yes` | Serialize a committed worker checkout into main | `omp-kit help ovnfs-land` |
-| `omp-kit save` | `save -m MSG -- PATH...` | `land --apply --yes` in one step | `omp-kit save -m 'fix: x [pending]' -- README.md` |
+| `omp-kit save` | `save -m MSG -- PATH...` | Lead-only recovery adapter for already-present, authorized integration paths; not a worker save or handoff | `omp-kit help save` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |
 | `omp-kit send` | `send SESSION PANE MESSAGE [--no-bead-reason TEXT] [--drop-dir PATH]` | Tags agent text; bare slash commands; refuses forgeries | `omp-kit send s %1 "status" --json` |
 | `omp-kit brief` | `brief --repo PATH [--paths PATH...]` | Gate contract/digest; landed-line deletion candidates require author review | `omp-kit brief --repo . --json` |

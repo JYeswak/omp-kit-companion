@@ -4,9 +4,9 @@ status: current
 
 # `omp-kit land`
 
-`omp-kit land --paths PATH... --message MSG --apply --yes` commits exactly the reserved paths to shared `main` and publishes them.
+Workers create an isolated checkout from the canonical repo with `ovnfs new --name <name> --rev origin/main`, edit and commit there, then hand the candidate to the project lead. The lead runs `omp-kit land --checkout <name> --bead <id> --review auto --message "<msg> [test]" --apply --yes`. Land takes reservations at integration; they are not worker isolation.
 
-`omp-kit land` creates its commit with `git commit --only`, so configured
+The lead's lower-level `--paths PATH... --message MSG --apply --yes` integration adapter creates its commit with `git commit --only`, so configured
 `commit-msg` hooks run. Publication uses an ordinary non-force `git push`, so
 configured `pre-push` hooks remain active. An optional repo check is registered at
 `.omp/push-check`:
@@ -38,21 +38,21 @@ On `PUSHED`, land removes every matching ovnfs checkout whose whole diff was pub
 
 ## `omp-kit ovnfs-land`
 
-Commit changes inside the isolated worker checkout first, then run:
+The normal worker handoff uses review mode above. For an integration explicitly requiring per-commit replay, the lead can use the lower-level adapter after the worker commits inside its isolated checkout:
 
 ```sh
 omp-kit ovnfs-land --repo /path/to/shared --checkout /path/to/worker --base BASE --apply --yes --json
 ```
 
 `BASE` is the commit used to create the worker checkout, not its latest commit.
-The existing `ovnfs-land` verb accepts both a Worktrunk builder's linked worktree
-of the same repository (shared object store) and an independent committed Git
-checkout, including ovnfs. No daemon or Worktrunk executable is needed to land.
+Supply the worker's committed ovnfs checkout. The adapter can read other Git
+checkout layouts, but that capability does not authorize another worker
+isolation mode. It reads the checkout through Git; no Worktrunk executable is required.
 The worker must have no staged, unstaged or untracked changes.
 
 The linear commits in `BASE..worker-HEAD` are replayed in order, one normal
 commit per worker commit, preserving each message, author and author date.
-Their parent and committer change; the worker branch is never rebased or moved.
+Their parent and committer change; the worker checkout's HEAD is never rebased or moved.
 Merge commits and empty commits are refused before applying any changes.
 An explicit base prevents unrelated main history from being replayed.
 
@@ -71,7 +71,7 @@ for each landed commit, and ordinary non-force push runs publication hooks.
 No stash, rebase, restore or automatic conflict resolution runs. A hook/push
 failure after application retains the applied changes and any earlier landed
 commits on main for inspection; `applied`, `commit`, `commits` and `published`
-describe that partial state. It never discards bytes to roll back. On success land removes only the named ovnfs checkout (`--checkout NAME`, or `--patch` inside a checkout); without a name it reports matches and removes nothing, and `ovnfs rm <name>` is for abandoned ones. All files inside a removed checkout, including untracked and ignored ones, are removed with it. On refusal the worker branch and worktree remain intact for inspection; the lead removes worker branches only after verifying landing.
+describe that partial state. It never discards bytes to roll back. On success land removes only the named ovnfs checkout (`--checkout NAME`, or `--patch` inside a checkout); without a name it reports matches and removes nothing, and `ovnfs rm <name>` is for abandoned ones. All files inside a removed checkout, including untracked and ignored ones, are removed with it. On refusal the worker's ovnfs checkout remains intact for inspection.
 
 `PUSHED` requires origin main, local main, and the landed paths' index and
 working tree to agree with the captured worker tip. The lock serializes
@@ -80,8 +80,11 @@ publication protections remain required. No reservation guard is retired.
 
 ## `omp-kit save`
 
-`omp-kit save -m MSG -- PATH...` is `land --paths PATH... --message MSG` with
-`--apply --yes` implied: the same owner, reservation, hook and push checks run.
+`omp-kit save -m MSG -- PATH...` is a lead-only recovery adapter for already-present,
+authorized integration paths in the canonical checkout. It runs the same
+owner, reservation, hook and push checks as path-mode land, with apply and
+confirmation implied. Workers commit in their own ovnfs checkout and hand that
+checkout to the lead; they do not use `save`.
 It prints one line, `SAVED <sha> on origin in <n> s` or `REFUSED <code>: <remediation>`,
 keeps land's exit code, and adds a `save` object under `--json`. Each save appends
 `{ts, repo, sha, outcome, code, elapsed_s}` to `<git-common-dir>/omp-kit/save.log`.
@@ -118,9 +121,9 @@ retry or force; a constructed candidate can still exist locally.
 Patch mode leaves the caller's local `main`, shared index and worktree unchanged.
 `PUSHED` confirms the exact checked candidate on origin, not local catch-up;
 inspect `base`, `localMain`, `commit` and the phase evidence separately.
-Use path mode for ordinary shared-main saves. Patch mode supplies the selected-
-hunk construction requested by the UDS committer; it does not establish full
-UDS adoption or replace JEV's separately reviewed index/history publisher.
+Path and patch modes are lower-level integration adapters, not worker editing
+routes. Use the committed-checkout review route above for ordinary work; patch
+mode alone does not establish full UDS adoption or replace its reviewed publisher.
 
 ## Exact-parent mode (LANDSIBLING1)
 
@@ -174,18 +177,18 @@ the remote tip.
 ## Review mode (LANDPIPE1)
 
 `omp-kit land --checkout NAME --bead ID --review auto --message MSG --apply --yes`
-closes the build -> land loop without the lead: one act replays the bead's
+lets the project lead integrate a committed worker checkout in one act: it replays
 acceptance boxes in the checkout, runs one independent-session review through
-the native reviewer (`omp -p`, which runs in the author's own seat, so this is
-an independent session, never a non-author review), records the verdict as
+the native reviewer (`omp -p`, launched by the landing seat; a separate session
+alone does not establish a non-author review), records the verdict as
 `Review-Session:` / `Review-Verdict: LAND` trailers, reserves the touched
-paths as this seat through `am file_reservations reserve`, then lands through
-the single publisher. `LAND` publishes; `FIX` (or a refused land, or an
-unparseable verdict) lands nothing and routes every finding to the checkout's
-author: a `land-review-<bead>.md` file in the checkout plus best-effort
-`am mail send` to the author seat, never the lead. Foreign exclusive holders
-fail fast before any review, and the reservation is released on every non-land
-exit. The review prompt carries the bead, the checkout diff and the replay log
+paths for the landing seat on the local Board, then lands through the single
+publisher. `LAND` can publish; `FIX`, a refused land or an unparseable
+verdict lands nothing. Read `land-review-<bead>.md` in the worker checkout
+and relay actionable findings to the author on the Board. Foreign exclusive
+holders fail fast before any review, and the reservation is released on each non-land
+exit.
+The review prompt carries the bead, the checkout diff and the replay log
 as fenced untrusted data, and asks for findings plus a final line that is
 exactly `VERDICT: LAND` or exactly `VERDICT: FIX`. The non-author gate stays
 `omp-kit verify` at close.
