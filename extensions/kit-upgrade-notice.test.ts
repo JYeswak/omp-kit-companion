@@ -109,21 +109,23 @@ test("message (fleet): the three self-restart steps in order, each with its exac
 	expect(msg).toContain("omp-kit 0.2.58 is installed; this seat runs 0.2.57; upgrade now");
 	const save = msg.indexOf("Then save your work: `git commit --only");
 	const run = msg.indexOf("2. Run the self-restart helper: `python3 ~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py`");
-	const end = msg.indexOf("3. End your turn with no further tool call:");
+	const final = msg.indexOf("3. If the helper prints a `keep:` line, run that printed line as your one final tool call, then end your turn.");
 	expect(save).toBeGreaterThan(-1);
 	expect(run).toBeGreaterThan(save);
-	expect(end).toBeGreaterThan(run);
+	expect(final).toBeGreaterThan(run);
 	expect(SELF_RESTART_COMMAND).toBe("python3 ~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py");
 	expect(msg).toContain("`[pending]` commit");
 	expect(msg).toContain("it records the request and returns at once");
 	expect(msg).toContain("once this pane is idle with an empty composer");
+	expect(msg).toContain("If it prints no `keep:` line, end your turn with no further tool call.");
+	expect(msg).not.toContain("3. End your turn with no further tool call:");
 	// SELFRESTARTBUSY1 (ompkit-1ra0d.221): parking the tool call holds the turn, so the pane never
 	// idles and the watcher can never send /restart. The old "leave it running" text retired with that.
 	expect(msg).not.toContain("Leave that command running");
 	expect(msg).not.toContain("holds this tool call");
 	// SUBAGENTRESTART1 (ompkit-o2iif): a task subagent that read this notice restarted its parent seat mid-work.
 	const sub = msg.indexOf("A background task subagent is not the seat: ignore this notice and finish your task.");
-	expect(sub).toBeGreaterThan(end);
+	expect(sub).toBeGreaterThan(final);
 	expect(msg).toContain("the helper refuses a subagent (REFUSED_SUBAGENT)");
 	// Retired steps: no seat waits on the chief's sentinel, and no hand-written handoff ledger.
 	expect(msg).not.toContain("loop_sentinel");

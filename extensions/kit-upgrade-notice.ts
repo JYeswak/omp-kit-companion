@@ -130,8 +130,9 @@ export function selectChangelogBullets(loaded: string, installed: string, text: 
 
 /**
  * The notice body: the gap plus the restart steps. Fleet mode: (1) save work, (2) run the self-restart helper,
- * (3) end the turn with no further tool call. Stock mode: only how to restart omp to load the release.
- * With the installed release's changelog, both modes append the bullets newer than the seat's release.
+ * (3) run the printed `keep:` line as the final tool call only when emitted; otherwise end the turn. Stock mode:
+ * only how to restart omp to load the release. With the installed release's changelog, both modes append the
+ * bullets newer than the seat's release.
  */
 export function upgradeNoticeMessage(installed: string, loaded: string, fleet = false, notes?: ChangelogNotes): string {
 	const head = `kit-upgrade-notice ${UPGRADE_NOTICE}: omp-kit ${installed} is installed; this seat runs ${loaded}; upgrade now.\n`;
@@ -149,11 +150,12 @@ export function upgradeNoticeMessage(installed: string, loaded: string, fleet = 
 			`omp, first collect each running agent's result (or message it to wrap up and wait for its report): the ` +
 			`helper refuses while one still runs there (REFUSED_LIVE_AGENTS). Then save your work: ` +
 			`\`git commit --only -m "<msg>" -- <your reserved paths>\` and publish, or a \`[pending]\` commit.\n` +
-		`2. Run the self-restart helper: \`${SELF_RESTART_COMMAND}\` — it records the request and returns at once.\n` +
-		`3. End your turn with no further tool call: a detached watcher sends omp's own \`/restart\` once this ` +
-		`pane is idle with an empty composer (same session and launch flags) on omp-kit ${installed}, and your ` +
-		`goal resumes once if it was active. If no restart happens, read the watcher's log path the helper ` +
-		`printed and report it.\n` +
+			`2. Run the self-restart helper: \`${SELF_RESTART_COMMAND}\` — it records the request and returns at once.\n` +
+			`3. If the helper prints a \`keep:\` line, run that printed line as your one final tool call, then end your turn. ` +
+			`If it prints no \`keep:\` line, end your turn with no further tool call. A detached watcher sends omp's own ` +
+			`\`/restart\` once this pane is idle with an empty composer (same session and launch flags) on omp-kit ` +
+			`${installed}, and your goal resumes once if it was active. If no restart happens, read the watcher's log path ` +
+			`the helper printed and report it.\n` +
 			`A background task subagent is not the seat: ignore this notice and finish your task. Only the seat ` +
 			`restarts the seat, and the helper refuses a subagent (REFUSED_SUBAGENT).`;
 	}
