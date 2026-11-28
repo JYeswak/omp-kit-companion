@@ -42,6 +42,9 @@ export function inspectReleaseReady(repo: string, kitRoot: string): ReleaseReady
 					if (typeof pkg.version !== "string") throw new Error("package.json has no version");
 					version = pkg.version;
 					const library = join(kitRoot, "scripts/release-preflight.sh");
+					const repository = env.OMP_KIT_REPO ?? "JYeswak/omp-kit-companion";
+					const ci = probe("hosted-ci", ["sh", library, "ci", repository, commit]);
+					if (ci.ok) checks[checks.length - 1]!.detail = ci.stdout;
 					const tags = probe("remote-tags", ["git", "ls-remote", "--tags", "origin"]);
 					if (tags.ok) {
 						const next = probe("next-version", ["sh", library, "next_version", version, tags.stdout]);
@@ -58,7 +61,7 @@ export function inspectReleaseReady(repo: string, kitRoot: string): ReleaseReady
 						}, pkg.version, tag => names.has(`refs/tags/v${tag}`) ? "present" : "absent");
 						checks.push({ name: "readme-version", ok: findings.length === 0, detail: findings.join("; ") || "PASS" });
 					}
-					const releases = probe("release-list", ["bash", "-o", "pipefail", "-c", 'gh api --paginate --slurp "$1" | jq -c \'[[.[][] | {tag_name,draft,prerelease}]]\'', "release-ready", `repos/${process.env.OMP_KIT_REPO ?? "JYeswak/omp-kit-companion"}/releases?per_page=100`]);
+					const releases = probe("release-list", ["bash", "-o", "pipefail", "-c", 'gh api --paginate --slurp "$1" | jq -c \'[[.[][] | {tag_name,draft,prerelease}]]\'', "release-ready", `repos/${repository}/releases?per_page=100`]);
 					if (releases.ok) {
 						const path = join(temp.path, "readiness-releases.json");
 						writeFileSync(path, releases.stdout);

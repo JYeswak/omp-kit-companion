@@ -572,7 +572,7 @@ target tracker unchanged; actual assertion failures still become `REWORK`.
 | `--scope rch` | Worker gc roots and health | |
 | `--scope land` | Land guard identity: pane identity and reservations qualified against the publication parent | `omp-kit doctor --scope land --project PATH` |
 | `--scope activation` | ON, OFF-WITH-REASON, or OFF-NO-REASON for rule packs, extensions, profile links, kit services, and hook members; OFF-NO-REASON exits nonzero | |
-| `--scope release` | Exact origin/main cut readiness; no suites or signing | `omp-kit doctor --scope release --project PATH` |
+| `--scope release` | Exact origin/main cut readiness, including hosted CI for that commit; no suites or signing | `omp-kit doctor --scope release --project PATH` |
 | `--scope access` | Opens `~/Desktop`, `~/Documents` and each network or removable mount with the kit's own binary under a 5 s deadline; a blocked open is `TCC_CONSENT_PENDING` (an unanswered macOS permission prompt, which hangs every new omp start), a refused one `DENIED` | `omp-kit doctor --scope access --json` |
 `doctor` also takes rules-calibration flags (`--corpus-report`, `--labels`,
 `--seed`, `--sample-size`, `--noisy-lower-bound`) for reading an F2 corpus

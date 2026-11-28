@@ -28,7 +28,7 @@ function file(path: string, body: string) {
 	writeFileSync(join(repo, path), body);
 }
 // Real, deliberately tiny repository: the actual suite/store produce the main PASS.
-// GitHub release-list transport alone is a fixture; source, runtime and verdict checks are real.
+// GitHub transport is a fixture; source, runtime, suite and both release preflight predicates are real.
 let source = "";
 let belowFloor = "";
 function setup() {
@@ -37,7 +37,25 @@ function setup() {
 	git("remote", "add", "origin", repo);
 	const bin = join(work.path, "bin");
 	mkdirSync(bin);
-	writeFileSync(join(bin, "gh"), '#!/bin/sh\ncase "$1 $2" in "api --paginate") printf \'%s\\n\' \'[[{"tag_name":"v0.2.98","draft":false,"prerelease":false}]]\' ;; *) exit 97 ;; esac\n');
+	writeFileSync(join(bin, "gh"), `#!/bin/sh
+case "$1 $2" in
+  "api --paginate") printf '%s\\n' '[[{"tag_name":"v0.2.98","draft":false,"prerelease":false}]]' ;;
+  "run list")
+    sha=$(git rev-parse HEAD) || exit 96
+    conclusion=success
+    case "\${RELEASE_READY_FIXTURE_CI:-green}" in
+      green) ;;
+      red) conclusion=failure ;;
+      missing) printf '[]\\n'; exit 0 ;;
+      wrong-sha) sha=$(git rev-parse HEAD^) || exit 96 ;;
+      unavailable) exit 97 ;;
+      *) exit 98 ;;
+    esac
+    printf '[{"databaseId":42,"headSha":"%s","status":"completed","conclusion":"%s","event":"push"}]\\n' "$sha" "$conclusion"
+    ;;
+  *) exit 97 ;;
+esac
+`);
 	chmodSync(join(bin, "gh"), 0o755);
 	env.PATH = `${bin}:${process.env.PATH}`;
 	const closure = runFixture(["python3", "-B", join(ROOT, "scripts/suite-metrics.py"), "judging-files"], { cwd: ROOT, env, floor_s: 30 });
@@ -85,6 +103,7 @@ test("ready exact origin/main fixture reports READY; runtime-id mismatch is NOT-
 	const ready = JSON.parse(control.out);
 	expect(ready.status).toBe("READY");
 	expect(ready.commit).toBe(source);
+	expect(ready.checks).toContainEqual({ name: "hosted-ci", ok: true, detail: `CI_GREEN sha=${source} run=42 conclusion=success` });
 	const floor = ready.checks.find((row: { name: string }) => row.name === "product-bead-floor");
 	expect(JSON.parse(floor.detail)).toMatchObject({ count: 10, remaining: 0, source_sha: source });
 	const doctor = run(["bun", join(ROOT, "src/cli.ts"), "doctor", "--scope", "release", "--project", repo, "--json"]);
@@ -101,6 +120,27 @@ test("ready exact origin/main fixture reports READY; runtime-id mismatch is NOT-
 	expect(dirty.status).toBe("NOT-READY");
 	expect(dirty.line).toContain("metadata-clean: M README.md");
 	file("README.md", git("show", "HEAD:README.md") + "\n");
+}, fixtureDeadlineS(180) * 1000);
+
+test("CIGATE1: release doctor names red, missing, wrong-SHA and unavailable hosted CI", () => {
+	setup();
+	for (const [mode, reason] of [
+		["red", "run=42 status=completed conclusion=failure"],
+		["missing", "reason=no-readable-push-or-scheduled-run"],
+		["wrong-sha", "reason=no-readable-push-or-scheduled-run"],
+		["unavailable", "reason=lookup-failed"],
+	] as const) {
+		const doctor = run(["bun", join(ROOT, "src/cli.ts"), "doctor", "--scope", "release", "--project", repo, "--json"],
+			{ RELEASE_READY_FIXTURE_CI: mode });
+		// A doctor command completing is not the release verdict.
+		expect(doctor.rc, text(doctor.stdout) + text(doctor.stderr)).toBe(0);
+		const diagnosed = JSON.parse(text(doctor.stdout)).data;
+		const release = diagnosed.findings.find((row: { component: string }) => row.component === "release");
+		expect(release, mode).toMatchObject({ status: "FAIL", evidence: { status: "NOT-READY", commit: source } });
+		expect(release.evidence.checks.filter((row: { ok: boolean }) => !row.ok)).toEqual([
+			{ name: "hosted-ci", ok: false, detail: `CI_NOT_GREEN sha=${source} ${reason}` },
+		]);
+	}
 }, fixtureDeadlineS(180) * 1000);
 
 test("release readiness names the exact product deficit on a nine-bead source", () => {
