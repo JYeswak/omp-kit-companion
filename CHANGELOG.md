@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.160] - 2026-11-28
+
+### Fixed
+
+- Validate every planning-convert acceptance group before tracker writes, and refuse changed acceptance under reused `(new)` identities with `REUSED_CONTENT_MISMATCH` instead of silently reporting CLEAN.
+
 ## [0.2.159] - 2026-11-28
 
 ### Fixed
