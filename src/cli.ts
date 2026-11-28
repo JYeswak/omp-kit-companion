@@ -18,7 +18,7 @@ import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand,
 import { RELEASE_DATA } from "./release-assets.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { run as runBounded, runSync as runBoundedSync } from "./kitlib/run.ts";
-import { runtimeTempRoot } from "./runtime.ts";
+import { runIsolatedShell, runtimeTempRoot } from "./runtime.ts";
 import { listRepoCheckouts } from "./ovnfs-checkouts.ts";
 import { audit, undo, why } from "./audit.ts";
 import { LAND_GUARD_PUBLIC_IDENTITY, inspectLandGuard, landCommand } from "./land.ts";
@@ -66,11 +66,11 @@ import { inspectProjectTrust } from "./project-trust.ts";
 import { applyProjectAdd, applyProjectGoal, planProjectAdd, planProjectGoal, projectStatus, projectStatusAll, undoProjectAdd } from "./project-add.ts";
 import { PROFILE_RECIPE_KINDS, renderRecipe } from "./profile-recipes.ts";
 import { confirmMutation, renderOutput, type PresentationResult } from "./output.ts";
-import { redactFullTestCause, runFullTest, type FullTestCause, type FullTestReport } from "./full-test-runner.ts";
+import { readLiveVerdictIds, redactFullTestCause, redactFullTestText, runFullTest, type FullTestCause, type FullTestReport } from "./full-test-runner.ts";
 import { ompFingerprint, recordTestReceipt, type OmpFingerprint } from "./omp-watch.ts";
 import { inspectStateRoot, repairStateRootMode, type StateRootIssue } from "./state-root.ts";
 import { runFastTest, type FastTestReport } from "./test-runner.ts";
-import { parseRepeatReceipt, repeatVerdict, type RepeatReceipt } from "./repeat-stats.ts";
+import { parseRepeatReceipt, repeatScenarioResult, repeatVerdict, type RepeatReceipt } from "./repeat-stats.ts";
 import { runMutants, MutantsInputError } from "./mutants.ts";
 import { runMetamorphicReport } from "./metamorphic.ts";
 import { INTEGRATIONS, runIntegrations, IntegrationsInputError } from "./integrations.ts";
@@ -2570,31 +2570,23 @@ export async function repeatTestCommand(request: ParsedCommand): Promise<CliResu
 	}
 	const identity = kitIdentity();
 	const home = process.env.HOME;
-	if (!identity.release.root || !home || !isAbsolute(home)) {
+	const root = identity.release.root;
+	if (!root || !home || !isAbsolute(home)) {
 		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
 			code: "INSTALL_UNAVAILABLE", message: "Installed kit root or absolute HOME is unavailable",
 			remediation: "Run from an intact compiled release with an absolute HOME.",
 		}], verification: "UNVERIFIED" };
 	}
-	let omp: string;
-	try { omp = resolveOmpIdentity(process.env).launcher; } catch {
-		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
-			code: "OMP_UNAVAILABLE", message: "OMP launcher could not be resolved for live repeats",
-			remediation: "Install OMP and put it on PATH; no scenario was run.",
-		}], verification: "UNVERIFIED" };
-	}
 	const scenario = typeof scenarioRaw === "string" ? scenarioRaw : undefined;
-	if (scenario) {
-		let ids: unknown;
-		try { ids = JSON.parse(readFileSync(join(identity.release.root, RELEASE_DATA.liveScenarios), "utf8")); } catch {
-			return refusal("SCENARIO_INVENTORY_UNAVAILABLE", "The live scenario inventory could not be read",
-				"Run from an intact release; no scenario was run.");
-		}
-		const known = Array.isArray(ids) ? ids.filter((entry): entry is { id: string } => !!entry && typeof entry === "object" && "id" in entry && typeof entry.id === "string").map((entry) => entry.id) : [];
-		if (!known.includes(scenario)) {
-			return refusal("UNKNOWN_SCENARIO", `Scenario ${scenario} is not in the live inventory`,
-				"Name a scenario from tests/live/scenarios.json or omit --scenario.");
-		}
+	let inventory: Set<string>;
+	try { inventory = new Set(readLiveVerdictIds(root)); }
+	catch {
+		return refusal("SCENARIO_INVENTORY_UNAVAILABLE", "The shipped live scenario inventory is missing or invalid",
+			"Run from an intact release; no scenario was run.");
+	}
+	if (scenario && !inventory.has(scenario)) {
+		return refusal("UNKNOWN_SCENARIO", `Scenario ${scenario} does not produce a full-mode verdict`,
+			"Choose a non-plant, non-probe scenario from tests/live/scenarios.json or omit --scenario.");
 	}
 	let baseline: RepeatReceipt | undefined;
 	if (typeof baselineRaw === "string") {
@@ -2607,22 +2599,34 @@ export async function repeatTestCommand(request: ParsedCommand): Promise<CliResu
 		return refusal("INVALID_BASELINE", `SCENARIO_MISMATCH: current ${scenario} vs baseline ${baseline.scenario}`,
 			"Compare a scenario only against its own baseline receipt; nothing was run.");
 	}
-	const script = join(identity.release.root, "scripts", "e2e-live.sh");
-	const perRunMs = (Number(process.env.TIMEOUT) > 0 ? Number(process.env.TIMEOUT) : 120) * 1000 + 30000;
+	const expectedIds = scenario ? new Set([scenario]) : inventory;
+	const args = scenario ? ["--scenario", scenario] : [];
+	// A selected case can use its bounded retry; a full cohort needs the complete G4 window.
+	const perRunMs = scenario ? 270_000 : 900_000;
 	const results: ("pass" | "fail")[] = [];
 	let failureExcerpt: string | null = null;
+	const privateRoots = [root, home, process.env.OMP_KIT_TEST_WORK_ROOT ?? "", process.env.OMP_KIT_E2E_EVIDENCE_DIR ?? ""];
+	const safeExcerpt = (text: string) => redactFullTestText(text, privateRoots).trim().slice(-2000);
+	const unavailable = (message: string, detail: string): CliResult => ({
+		code: 3, data: { overall: "UNVERIFIED", repeat: {
+			...(scenario ? { scenario } : {}), requested_runs: runs, completed_runs: results.length, results,
+			failure_excerpt: safeExcerpt(detail),
+		} }, errors: [{ code: "REPEAT_HARNESS_UNAVAILABLE", message,
+			remediation: "Check the installed OMP launcher and isolated live harness; only complete scenarios count." }], verification: "UNVERIFIED",
+	});
 	for (let index = 0; index < runs; index += 1) {
-		const child = Bun.spawnSync(["sh", script], {
-			cwd: identity.release.root,
-			env: { ...process.env, OMP: omp, ...(scenario ? { ONLY: scenario } : {}) },
-			timeout: perRunMs, stdout: "pipe", stderr: "pipe",
-		});
-		const output = `${child.stdout ?? ""}${child.stderr ?? ""}`;
-		if (child.exitCode === 0) results.push("pass");
-		else {
-			results.push("fail");
-			failureExcerpt = String(output).slice(-2000);
+		let child;
+		try {
+			child = await runIsolatedShell("scripts/e2e-live.sh", args, root, identity.release.executable, { deadlineMs: perRunMs });
+		} catch (error) {
+			return unavailable("The isolated live harness could not complete", error instanceof Error ? error.message : String(error));
 		}
+		const verdict = repeatScenarioResult(child, expectedIds);
+		const output = child.stdout + child.stderr;
+		if (verdict === null)
+			return unavailable(`Live harness returned rc ${child.code} without complete matching scenario evidence`, output);
+		results.push(verdict);
+		if (verdict === "fail") failureExcerpt = safeExcerpt(output);
 	}
 	const failures = results.filter((entry) => entry === "fail").length;
 	const verdict = repeatVerdict({ version: 1, ...(scenario ? { scenario } : {}), runs, failures, results }, ...(baseline ? [{ baseline }] : []));

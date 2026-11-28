@@ -12,6 +12,7 @@
 # Usage: sh scripts/e2e-live.sh            full suite; exit 0 iff every scenario is ok
 #        sh scripts/e2e-live.sh --plant    baseline prefix-firing kit-close-needs-evidence;
 #                                          exit 0 iff the streamed evidenced close goes RED
+#        sh scripts/e2e-live.sh --scenario ID  run just one shipped case
 # Env:   OMP=/path/to/omp  TIMEOUT=120 (seconds per scenario)  KEEP=1 (keep the temp dir)
 #        ONLY="id id ..." (run just these scenario ids)
 #        OMP_KIT_TEST_WORK_ROOT=/repo/var/agent-tmp/<dir> (optional; requires .owner)
@@ -32,7 +33,13 @@ MODE=full
 case "${1:-}" in
   "") ;;
   --plant) MODE=plant ;;
-  *) echo "usage: sh scripts/e2e-live.sh [--plant]" >&2; exit 2 ;;
+  --scenario)
+    if [ "$#" -ne 2 ] || [ -z "$2" ]; then
+      echo "usage: sh scripts/e2e-live.sh --scenario ID" >&2
+      exit 2
+    fi
+    ONLY=$2 ;;
+  *) echo "usage: sh scripts/e2e-live.sh [--plant | --scenario ID]" >&2; exit 2 ;;
 esac
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)

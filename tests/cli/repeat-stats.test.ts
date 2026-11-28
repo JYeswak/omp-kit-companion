@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
+import { readLiveVerdictIds } from "../../src/full-test-runner.ts";
+import { resolve } from "node:path";
 import { repeatTestCommand } from "../../src/cli.ts";
 import { findCommand } from "../../src/commands.ts";
-import { clopperPearson, cohensH, fisherExact, repeatVerdict, sampleSize } from "../../src/repeat-stats.ts";
+import { clopperPearson, cohensH, fisherExact, repeatScenarioResult, repeatVerdict, sampleSize } from "../../src/repeat-stats.ts";
 
 test("Clopper-Pearson matches SciPy beta.ppf to 1e-9", () => {
 	const cases: [number, number, number, number][] = [
@@ -79,4 +81,29 @@ test("receipt results must agree with the summary counts and the scenario", () =
 	const mismatch = { version: 1, runs: 20, failures: 0, results: Array(20).fill("fail") };
 	expect(() => repeatVerdict({ version: 1, runs: 20, failures: 0 }, { baseline: JSON.parse(JSON.stringify(mismatch)) })).toThrow(/INVALID_REPEAT_RECEIPT/);
 	expect(() => repeatVerdict({ version: 1, scenario: "canary-near", runs: 20, failures: 1 }, { baseline: { version: 1, scenario: "unsafe-router-fire", runs: 20, failures: 8 } })).toThrow(/SCENARIO_MISMATCH/);
+});
+
+test("REPEAT1 counts a real scenario verdict but never a launcher failure or incomplete cohort", () => {
+	const expected = new Set(["target"]);
+	const healthy = "ok    target\ne2e-live (full): 1 passed, 0 failed\n";
+	const failed = "FAIL  target :: bad transcript (omp exit 1)\ne2e-live (full): 0 passed, 1 failed\n";
+	expect(repeatScenarioResult({ code: 0, stdout: healthy }, expected)).toBe("pass");
+	expect(repeatScenarioResult({ code: 1, stdout: failed }, expected)).toBe("fail");
+	expect(repeatScenarioResult({ code: 2, stdout: "runtime-adapter: OMP launcher identity is missing or inconsistent\n" }, expected)).toBeNull();
+	expect(repeatScenarioResult({ code: 0, stdout: "e2e-live (full): 0 passed, 0 failed\n" }, expected)).toBeNull();
+	expect(repeatScenarioResult({ code: 0, stdout: healthy }, new Set(["target", "missing"]))).toBeNull();
+	expect(repeatScenarioResult({ code: 0, stdout: healthy.replace("target", "unrelated") }, expected)).toBeNull();
+	expect(repeatScenarioResult({ code: 0, stdout: "ok    target\n" + healthy }, expected)).toBeNull();
+	expect(repeatScenarioResult({ code: 1, stdout: healthy.replace("0 failed", "1 failed") }, expected)).toBeNull();
+});
+
+test("REPEAT1 full-cohort matcher accepts verdict rows without report-only and plant scenarios", () => {
+	const ids = readLiveVerdictIds(resolve(import.meta.dir, "../.."));
+	expect(ids).toContain("settings-no-checkout-remedy");
+	expect(ids).not.toContain("omp-late-interrupt-probe");
+	const selected = new Set(ids);
+	const report = `${ids.map(id => `ok    ${id}`).join("\n")}\nPROBE omp-late-interrupt: continued\n` +
+		`e2e-live (full): ${ids.length} passed, 0 failed\n`;
+	expect(repeatScenarioResult({ code: 0, stdout: report }, selected)).toBe("pass");
+	expect(repeatScenarioResult({ code: 0, stdout: report.replace("ok    settings-no-checkout-remedy\n", "") }, selected)).toBeNull();
 });

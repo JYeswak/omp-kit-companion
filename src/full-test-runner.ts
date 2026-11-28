@@ -106,6 +106,22 @@ export function recoverInterruptedRun(error: unknown, roots: readonly string[] =
   return { cause: describeCause(error.originalCause, roots), result: error.partialResult };
  return { cause: describeCause(error, roots), result: { code: 3, stdout: "", stderr: "", in_flight_stage: null } };
 }
+
+/** The full harness reports verdicts for neither its planted cases nor its report-only probes. */
+export function readLiveVerdictIds(root: string): string[] {
+ const parsed: unknown = JSON.parse(readFileSync(join(root, RELEASE_DATA.liveScenarios), "utf8"));
+ if (!Array.isArray(parsed) || !parsed.length) throw new Error("INVALID_LIVE_SCENARIOS");
+ const seen = new Set<string>();
+ const ids: string[] = [];
+ for (const row of parsed) {
+  if (!row || typeof row !== "object" || typeof row.id !== "string" || !row.id || seen.has(row.id) ||
+   (row.plant !== undefined && typeof row.plant !== "boolean")) throw new Error("INVALID_LIVE_SCENARIOS");
+  seen.add(row.id);
+  if (row.plant !== true && row.kind !== "probe") ids.push(row.id);
+ }
+ if (!ids.length) throw new Error("INVALID_LIVE_SCENARIOS");
+ return ids;
+}
 /** `stateRoot` defaults to $XDG_STATE_HOME/omp-kit (or ~/.local/state/omp-kit) and is part of the watched operator set. */
 export type FullTestInput = FastTestInput & { stateRoot?: string; references?: unknown };
 export function currentStageReport(
@@ -589,11 +605,7 @@ export async function runFullTest(input: FullTestInput, expectedCounts?: FastTes
    live_scenarios: { expected_ids: [], observed_ids: [], status: "NOT_RUN" }, snapshots,
    producer: empty, failures, proof_scope: "ISOLATED_FIXTURE_ONLY" };
  }
- const parsed: unknown = JSON.parse(readFileSync(join(input.root, RELEASE_DATA.liveScenarios), "utf8"));
- if (!Array.isArray(parsed) || !parsed.length || !parsed.every(row =>
-  row && typeof row === "object" && typeof row.id === "string" && (row.plant === undefined || typeof row.plant === "boolean")))
-  throw new Error("INVALID_LIVE_SCENARIOS");
-const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "probe").map(row => row.id);
+ const ids = readLiveVerdictIds(input.root);
  const identity = resolveOmpIdentity(process.env);
  const ompPackage: unknown = JSON.parse(readFileSync(join(identity.packageRoot, "package.json"), "utf8"));
  const ompVersion = ompPackage && typeof ompPackage === "object" && "version" in ompPackage && typeof ompPackage.version === "string"

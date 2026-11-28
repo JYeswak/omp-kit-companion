@@ -170,7 +170,7 @@ export function sanitizedEnv(
 
 /** Run allowlisted packaged scripts under one private HOME/XDG/Bun/OMP environment. */
 /** Options for one isolated run; a write fence keeps the test off the live fleet's state (operatorWriteFence). */
-export type IsolatedRunOptions = { writeFence?: WriteFence | null };
+export type IsolatedRunOptions = { writeFence?: WriteFence | null; deadlineMs?: number };
 
 async function runIsolated(
 	script: string,
@@ -281,12 +281,28 @@ async function runIsolated(
 			// The detached group is created above, never discovered from other processes.
 			try { process.kill(ownsGroup ? -child.pid : child.pid, name); } catch { /* already exited */ }
 		};
+		const groupAlive = () => {
+			try { process.kill(-child.pid, 0); return true; }
+			catch (error) { return !(error !== null && typeof error === "object" && "code" in error && error.code === "ESRCH"); }
+		};
 		const stop = (): Promise<void> => cleanup ??= (async () => {
-			// Match bunCapExec's existing TERM/escalation/drain bounds; no stage deadline is extended.
+			let reaped = true;
 			signal("SIGTERM");
-			await Bun.sleep(100);
-			// A reaped leader can leave TERM-ignoring descendants holding the pipes.
-			signal("SIGKILL");
+			if (shell && script === "scripts/e2e-live.sh") {
+				// Its worker traps reap separately detached scenario groups: 500 ms
+				// grace plus up to 5 s to reap workers. Wait for actual exit and pipe
+				// drain, with a ceiling, before taking away those traps.
+				const grace = Promise.withResolvers<false>();
+				const graceTimer = setTimeout(() => grace.resolve(false), 6500);
+				const settled = await Promise.race([Promise.allSettled([exited, stdout, stderr]).then(() => true), grace.promise]);
+				reaped = settled;
+				clearTimeout(graceTimer);
+				if (!settled || (ownsGroup && groupAlive())) signal("SIGKILL");
+			} else {
+				// A reaped leader can leave TERM-ignoring descendants holding the pipes.
+				await Bun.sleep(100);
+				signal("SIGKILL");
+			}
 			let timer: NodeJS.Timeout | undefined;
 			try {
 				await Promise.race([
@@ -297,7 +313,7 @@ async function runIsolated(
 				clearTimeout(timer);
 				for (const stream of streams) stream.destroy();
 				// Never remove scratch beneath a child whose exit has not been observed.
-				cleanupPrivateRoot = childExited;
+				cleanupPrivateRoot = childExited && reaped;
 			}
 		})();
 		const { promise: interrupted, reject: rejectInterrupted } = Promise.withResolvers<never>();
@@ -305,14 +321,12 @@ async function runIsolated(
 		const onInt = () => rejectInterrupted(Object.assign(new Error("Isolated run interrupted by SIGINT"), { code: "SIGINT" }));
 		process.once("SIGTERM", onTerm);
 		process.once("SIGINT", onInt);
+		const timer = options.deadlineMs === undefined ? undefined :
+			setTimeout(() => rejectInterrupted(Object.assign(new Error(`Isolated run exceeded its ${options.deadlineMs} ms deadline`),
+				{ code: "ISOLATED_DEADLINE" })), options.deadlineMs);
 		try {
 			const code = await Promise.race([exited, drained.then(() => exited), interrupted]);
-			if (ownsGroup) {
-				let groupAlive = true;
-				try { process.kill(-child.pid, 0); }
-				catch (error) { groupAlive = !(error !== null && typeof error === "object" && "code" in error && error.code === "ESRCH"); }
-				if (groupAlive) await stop();
-			}
+			if (ownsGroup && groupAlive()) await stop();
 			await Promise.race([drained, interrupted]);
 			return { code, stdout: partialStdout, stderr: partialStderr, in_flight_stage: inFlight, execution: captureExecution(false),
 				...(caseReportDirectory ? { case_reports: readTestCaseReports(caseReportDirectory, startedScopes) } : {}) };
@@ -325,6 +339,7 @@ async function runIsolated(
 				...(caseReportDirectory ? { case_reports: readTestCaseReports(caseReportDirectory, startedScopes) } : {}),
 			});
 		} finally {
+			clearTimeout(timer);
 			process.off("SIGTERM", onTerm);
 			process.off("SIGINT", onInt);
 		}

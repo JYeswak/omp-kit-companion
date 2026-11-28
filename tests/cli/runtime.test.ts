@@ -10,6 +10,7 @@ import { createScratch } from "../../src/scratch.ts";
 import type { LivenessDeps } from "../../src/scratch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { installReadonlyBr, resolveRealBr } from "../../src/kitlib/readonly-br.ts";
+import { safePid } from "../../src/kitlib/proc.ts";
 import { run, runSync } from "../../src/kitlib/run.ts";
 import { verifyBead } from "../../src/verify.ts";
 import { identifyExactSource } from "../../scripts/exact-source.ts";
@@ -376,17 +377,24 @@ for (const termination of ["nonzero", "signal"] as const) {
 	expect(readFileSync(record, "utf8")).toBe('{"schema":1,"pid":1,"at":0,"empty":false}');
 }, fixtureDeadlineS(60) * 1000);
 
-for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) {
+for (const interruption of ["stream-error", "SIGTERM", "leader-exit", "live-deadline"] as const) {
 	test(`isolated ${interruption} drains real stage evidence and stops its owned descendants before scratch cleanup`, async () => {
 		const { base, admission } = ownedRuntimeFixture();
 		const release = join(base, "release");
 		const executable = join(release, "bin", "omp-kit");
 		const omp = createOmp(join(base, "omp"), "v1");
+		const liveDeadline = interruption === "live-deadline";
+		const script = liveDeadline ? "scripts/e2e-live.sh" : "scripts/ladder.sh";
 		for (const directory of ["release/bin", "release/scripts", "operator-home", "tmp"]) mkdirSync(join(base, directory), { recursive: true });
 		writeFileSync(executable, "#!/bin/sh\nexit 99\n", { mode: 0o755 });
-		writeFileSync(join(release, "scripts", "ladder.sh"), [
-			`trap 'if [ -d "$HOME" ]; then printf "scratch-present-during-stop\\n" >&2; else printf "scratch-missing-during-stop\\n" >&2; fi; exit 0' TERM`,
-			`/bin/sh -c 'trap "" TERM; printf "%s\\n" "$$" > "$1/grandchild.pid"; while :; do /bin/sleep 1; done' descendant "$1" &`,
+		const descendantScript = `trap "" TERM; printf "%s\\n" "$$" > "$1/grandchild.pid"; while :; do /bin/sleep 1; done`;
+		writeFileSync(join(release, script), [
+			liveDeadline
+				? `trap '/bin/sleep 0.5; kill -KILL "-$descendant"; wait "$descendant" 2>/dev/null; [ -d "$HOME" ] && printf "scratch-present-during-stop\\n" >&2; exit 0' TERM`
+				: `trap 'if [ -d "$HOME" ]; then printf "scratch-present-during-stop\\n" >&2; else printf "scratch-missing-during-stop\\n" >&2; fi; exit 0' TERM`,
+			liveDeadline
+				? `/usr/bin/perl -MPOSIX=setsid -e 'defined(setsid()) or die $!; exec @ARGV' /bin/sh -c '${descendantScript}' descendant "$1" &`
+				: `/bin/sh -c '${descendantScript}' descendant "$1" &`,
 			`descendant=$!`,
 			`printf '%s\\n' "$$" > "$1/child.pid"`,
 			`printf '%s\\n' "$HOME" > "$1/private-home"`,
@@ -415,7 +423,8 @@ for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) 
 				};
 			}
 			try {
-				const result = await runIsolatedShell("scripts/ladder.sh", [${JSON.stringify(base)}], ${JSON.stringify(release)}, ${JSON.stringify(executable)});
+				const result = await runIsolatedShell(${JSON.stringify(script)}, [${JSON.stringify(base)}], ${JSON.stringify(release)}, ${JSON.stringify(executable)},
+					${liveDeadline ? `{ deadlineMs: ${fixtureDeadlineS(2) * 1000} }` : "{}"});
 				process.stdout.write(JSON.stringify({ result, current_stage: currentStageReport(result.in_flight_stage ?? null) }));
 				process.exitCode = result.code;
 			} catch (error) {
@@ -460,7 +469,7 @@ for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) 
 			expect(code, diagnostic).toBe(interruption === "leader-exit" ? 7 : 3);
 			const report = JSON.parse(output);
 			expect(report.result.execution).toMatchObject({
-				argv: ["/bin/sh", realpathSync(join(release, "scripts", "ladder.sh")), base],
+				argv: ["/bin/sh", realpathSync(join(release, script)), base],
 				cwd: realpathSync(release), launched: true,
 				exit_code: interruption === "leader-exit" ? 7 : 0, signal: null,
 				interrupted: interruption !== "leader-exit",
@@ -475,7 +484,7 @@ for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) 
 				sha256: createHash("sha256").update(report.result.stderr).digest("hex"),
 			});
 			if (interruption !== "leader-exit") {
-				expect(report.cause.cause_code).toBe(interruption === "stream-error" ? "STREAM_READ_FAILED" : "SIGTERM");
+				expect(report.cause.cause_code).toBe(liveDeadline ? "ISOLATED_DEADLINE" : interruption === "stream-error" ? "STREAM_READ_FAILED" : "SIGTERM");
 				if (interruption === "stream-error") {
 					expect(report.cause.cause_message).toContain("read failed at <private-path>/operator-home");
 					expect(JSON.stringify(report.cause)).not.toContain("synthetic-reader-credential");
@@ -522,6 +531,11 @@ for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) 
 				if (Number.isSafeInteger(pid) && pid > 1) {
 					try { process.kill(-pid, "SIGKILL"); } catch { /* Only this fixture's owned process group. */ }
 				}
+			}
+			if (liveDeadline && existsSync(join(base, "grandchild.pid"))) {
+				try {
+					process.kill(-safePid(readFileSync(join(base, "grandchild.pid"), "utf8")), "SIGKILL");
+				} catch { /* Already gone, or no valid owned fixture group was recorded. */ }
 			}
 			await Promise.allSettled([child.exited, stdout, stderr]);
 		}

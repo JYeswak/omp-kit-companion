@@ -12,6 +12,30 @@ export interface RepeatVerdict {
 	n_needed_post_hoc: number | null;
 }
 
+/** An iteration contributes to the denominator only after every selected case has a verdict. */
+export function repeatScenarioResult(result: { code: number; stdout: string }, expected: ReadonlySet<string>): "pass" | "fail" | null {
+	if ((result.code !== 0 && result.code !== 1) || expected.size === 0) return null;
+	const seen = new Set<string>();
+	let passed = 0, failed = 0, summary: string | undefined;
+	for (const line of result.stdout.split("\n")) {
+		if (line.startsWith("e2e-live (full): ")) {
+			if (summary !== undefined) return null;
+			summary = line;
+			continue;
+		}
+		const pass = line.startsWith("ok    ");
+		const failure = line.startsWith("FAIL  ") ? line.indexOf(" :: ", 6) : -1;
+		if (!pass && failure === -1) continue;
+		const id = pass ? line.slice(6) : line.slice(6, failure);
+		if (!expected.has(id) || seen.has(id)) return null;
+		seen.add(id);
+		if (pass) passed++; else failed++;
+	}
+	if (seen.size !== expected.size || summary !== `e2e-live (full): ${passed} passed, ${failed} failed`
+		|| result.code !== (failed === 0 ? 0 : 1)) return null;
+	return failed === 0 ? "pass" : "fail";
+}
+
 /** Lanczos log-gamma; anchors the hypergeometric log-probabilities in Fisher's test. */
 function logGamma(value: number): number {
 	const shape = [0.9999999999998099, 676.5203681218851, -1259.1392167224028, 771.3234287776531,
