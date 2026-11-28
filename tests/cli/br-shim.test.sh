@@ -336,15 +336,15 @@ check "fresh-context-label-refused" 4 ""
 export AM_EXPECTED_PROJECT="$REPO_ROOT"
  
  printf '{"id":"X","status":"in_progress","assignee":"OtherWorker","labels":[]}' > "$TMP/bead.json"
- # LESSON1: a close whose reason carries no lesson is refused before the real br runs
+ # LESSONOPTIONAL1: closing without a Lesson line warns and still reaches the real br
  : > "$TMP/argv"
  br close X --reason "done, all green" > "$TMP/out" 2>&1
  got_rc=$?
- if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -q "no Lesson" "$TMP/out"; then
+ if [ "$got_rc" = "0" ] && [ -s "$TMP/argv" ] && grep -Fq "WARNING no Lesson:" "$TMP/out"; then
  	pass=$((pass + 1))
  else
  	fail=$((fail + 1))
- 	printf 'FAIL close-lesson-refused: rc=%s out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/out")"
+ 	printf 'FAIL close-lesson-advisory: rc=%s out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/out")"
  fi
  # LESSON1: Lesson: none passes through to the real br
  : > "$TMP/argv"

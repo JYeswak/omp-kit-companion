@@ -8,7 +8,7 @@
  * command is refused ACCEPTANCE_NOT_REPLAYABLE and the bead goes back to intake. The author's own seat is
  * refused NON_AUTHOR_REQUIRED. A box whose command fails sets REWORK naming the box. Only when every box passes
  * does it tick the boxes, report the reviewer gate under the caller's identity (family disclosed), write the
- * transition comment from the command log and close. A lesson is required before replay. Tracker acts are
+ * transition comment from the command log and close. Lessons are optional and recorded when supplied. Tracker acts are
  * separate, not atomic: a refusal returns ACT_FAILED and reports any guarded acceptance restoration.
  * Before replay, verify the exact export SHA is reachable from a freshly fetched `origin/main`; unpublished or
  * unreadable exports are refused without replay or tracker acts.
@@ -205,7 +205,7 @@ export interface AcceptanceRollback {
 }
 export interface VerifyResult {
 	ok: boolean;
-	code: "CLOSED" | "REWORK" | "ACT_FAILED" | "LESSON_MISSING" | "ENVIRONMENT" | "DEPENDENCIES_NOT_LOCKED" | "NON_AUTHOR_REQUIRED" | "AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "SELF_REPLAY" | "PENDING" | "NOT_PUBLISHED" | "UNKNOWN";
+	code: "CLOSED" | "REWORK" | "ACT_FAILED" | "ENVIRONMENT" | "DEPENDENCIES_NOT_LOCKED" | "NON_AUTHOR_REQUIRED" | "AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "SELF_REPLAY" | "PENDING" | "NOT_PUBLISHED" | "UNKNOWN";
 	bead: string;
 	export: string;
 	replays: BoxReplay[];
@@ -842,7 +842,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		log.push(`background verifier ${bg.label} of parent seat ${bg.parent} session ${bg.session} records under its label; tracker writes stay with ${input.actor}`);
 	}
 	const lesson = selfReplay ? "Lesson: self-replay closes nothing" : await closeLesson(input.lesson, row, trackerCwd, env);
-	if (lesson === null) return { ok: false, code: "LESSON_MISSING", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment; no replay or tracker act ran").join("\n"), acts };
+	if (lesson === null) log.push("WARNING: no author Lesson: comment or --lesson supplied; continuing without a lesson");
 	// VERIFYGATE1-identity: the tracker guard refuses a verifier the target project's Agent Mail does not
 	// know at the first act, after a full replay. Prove the verifier up front, before replaying anything.
 	const identity = selfReplay ? { known: true, detail: "self-replay writes nothing to the tracker" } : await verifierKnownToTargetMail(trackerCwd, input.actor, env);
@@ -1236,14 +1236,14 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const gateRequired = await minReviewersRequired(trackerCwd, input.bead, row.status, env);
 	if (gateRequired === false) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${row.status} -> closed'; skipping gate report`);
 	else acts.push(["br", "gate", "report", input.bead, "--gate", MIN_REVIEWERS_GATE, "--provider", `reviewer:${prover}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
-	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${prover} (family: ${family})${bg === undefined ? "" : ` background verifier ${bg.label} of ${bg.parent} session ${bg.session}`}\n${lesson}\n${log.join("\n")}`, "--actor", input.actor]);
+	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${prover} (family: ${family})${bg === undefined ? "" : ` background verifier ${bg.label} of ${bg.parent} session ${bg.session}`}${lesson === null ? "" : `\n${lesson}`}\n${log.join("\n")}`, "--actor", input.actor]);
 	if (homeNote) log.push(`LIVEREADBACK child placed under ${homeNote}`);
 	const child = deferred.length > 0 ? childRef : undefined;
 	if (dry) return await finishAttempt({ ok: true, code: selfReplay ? "SELF_REPLAY" : "DRY_RUN", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: selfReplay ? [] : acts, child: selfReplay ? undefined : child });
 	const done = await executeActs(acts, trackerCwd, env, { bead: row, actor: input.actor, ...(resume !== null && "revision" in resume ? { resumedChild: resume.child } : {}) });
 	if (done.failure !== null) return await finishAttempt({ ok: false, code: "ACT_FAILED", bead: input.bead, export: input.exportSha, replays, log: log.concat(done.failure).join("\n"), acts: done.acts, child: done.child ?? reuse, rollback: done.rollback });
 	if (done.skippedGate !== null) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${done.skippedGate}'; skipping gate report`);
-	recordCloseLesson(trackerCwd, input.bead, lesson, input.exportSha, log);
+	if (lesson !== null) recordCloseLesson(trackerCwd, input.bead, lesson, input.exportSha, log);
 	return await finishAttempt({ ok: true, code: "CLOSED", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: done.acts, child: done.child ?? reuse });
 	} catch (error) {
 		try { cleanupScratch(); }
@@ -1501,12 +1501,10 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 	// exactly as the export path does, before anything is replayed or ticked.
 	const buildJudgements = boxes.filter(b => !b.checked && b.letter === "v" && b.phase === "build");
 	if (buildJudgements.length > 0) return refuse("PENDING", `pending: ${buildJudgements.map(tag).join(" ")} build judgement remains on the bead; it cannot be replayed or deferred as rollout debt`);
-	// LIVELESSON1: a readback child is created by verify, so its author is the verifier, who never writes a
-	// Lesson: on it. Every one of 25 open children refused LESSON_MISSING (2026-11-12), so the daily
-	// loop-close readback closed none. The verified bead's author already recorded the lesson; use it.
+	// A generated readback can inherit the source author's optional lesson.
 	const lesson = await closeLesson(input.lesson, child, input.repo, env)
 		?? (parent.id === child.id ? null : await closeLesson(undefined, parent, input.repo, env));
-	if (lesson === null) return refuse("LESSON_MISSING", "LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment on this bead or the bead it reads back; no replay or tracker act ran");
+	if (lesson === null) log.push("WARNING: no author Lesson: comment or --lesson supplied; continuing without a lesson");
 	const harnessRoot = process.env.GRADE_WAVE_SCRATCH || undefined;
 	const scratch = ownedTmp("verify-live", { bead: input.bead, ...(harnessRoot === undefined ? {} : { root: harnessRoot }) });
 	const realBr = resolveRealBr(env.PATH);
@@ -1538,14 +1536,14 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 		const gateRequired = await minReviewersRequired(input.repo, child.id, child.status, env);
 		if (gateRequired === false) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${child.status} -> closed'; skipping gate report`);
 		else acts.push(["br", "gate", "report", child.id, "--gate", MIN_REVIEWERS_GATE, "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
-		acts.push(["br", "close", child.id, "--reason", `live readback of ${parent.id} by ${input.actor} (family: ${family}) on the installed kit: ${replays.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}`, "--transition-comment", `CLOSED ${child.id} by ${input.actor} (family: ${family})\n${lesson}\n${log.join("\n")}`, "--actor", input.actor]);
+		acts.push(["br", "close", child.id, "--reason", `live readback of ${parent.id} by ${input.actor} (family: ${family}) on the installed kit: ${replays.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}`, "--transition-comment", `CLOSED ${child.id} by ${input.actor} (family: ${family})${lesson === null ? "" : `\n${lesson}`}\n${log.join("\n")}`, "--actor", input.actor]);
 	}
 	const code: VerifyResult["code"] = input.dryRun ? "DRY_RUN" : failed.length > 0 ? "REWORK" : "CLOSED";
 	if (input.dryRun) return { ok: failed.length === 0, code, bead: input.bead, export: "installed", replays, log: log.join("\n"), acts };
 	const done = await executeActs(acts, input.repo, env, failed.length > 0 ? undefined : { bead: child, actor: input.actor });
 	if (done.failure !== null) return { ok: false, code: "ACT_FAILED", bead: input.bead, export: "installed", replays, log: log.concat(done.failure).join("\n"), acts: done.acts, rollback: done.rollback };
 	if (done.skippedGate !== null) log.push(`gate ${MIN_REVIEWERS_GATE} not required for transition '${done.skippedGate}'; skipping gate report`);
-	if (failed.length === 0) recordCloseLesson(input.repo, child.id, lesson, "installed", log);
+	if (failed.length === 0 && lesson !== null) recordCloseLesson(input.repo, child.id, lesson, "installed", log);
 	return { ok: failed.length === 0, code, bead: input.bead, export: "installed", replays, log: log.join("\n"), acts: done.acts };
 }
 

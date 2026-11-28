@@ -132,16 +132,14 @@ if [ "$SUB" = "close" ] || [ "$SUB" = "update" ]; then
 		[ "$publication_rc" -eq 0 ] || exit "$publication_rc"
 	fi
 fi
- # LESSON1 (ompkit-ok3y): a close carries its lesson in the transition comment.
- # Only the close subcommand with a non-empty comment is judged; review/grading
- # entries and reason-less invocations keep the old behavior.
+ # LESSONOPTIONAL1: routine Lesson formatting is advisory, never close admission.
  if [ "$SUB" = "close" ] && [ -n "$REASON" ]; then
  	if printf '%s\n' "$REASON" | grep -qiE '^[[:space:]]*lesson[[:space:]]*:'; then
  		:
  	elif printf '%s\n' "$REASON" | grep -qiE '^[[:space:]]*none\.?[[:space:]]*$'; then
  		:
  	else
- 		refuse "close of $BEAD carries no Lesson: line or explicit none in its transition comment"
+ 		printf 'close-guard: WARNING no Lesson: line supplied for %s; continuing without a lesson\n' "$BEAD" >&2
  	fi
  fi
 if [ "$SUB" = "update" ]; then

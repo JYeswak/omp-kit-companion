@@ -130,20 +130,22 @@ test("LESSONDIRT1 planted: today's append dirties .omp/lessons.jsonl", async () 
 	writeFileSync(join(dir, ".omp", "lessons.jsonl"), JSON.stringify({ ts: new Date().toISOString(), repo: "lessondirt-tracked", agent: null, pane: null, model: null, kind: "LESSON", class: "OTHER:verify_close", what: "Lesson: tracked close", evidence: "verify kit-1 export earlier", cost_minutes: null, applies_to: "repo", proposed_fix: null, bead: "kit-1" }) + "\n");
 	expect(porcelain(dir).includes(".omp")).toBe(true);
 }, fixtureDeadlineS(60) * 1_000);
-test("LESSONPAYLOAD1 missing lesson refuses before replay and preserves the bead", async () => {
+test("LESSONOPTIONAL1 no lesson replays green boxes and closes with a warning", async () => {
 	const marker = join(base, "lesson-missing-replay");
 	const { dir, sha } = await repo("lesson-missing", { "entered.sh": "#!/bin/sh\nprintf entered > \"$LESSON_REPLAY_MARKER\"\nprintf '0 fail\\n'\n" });
 	const acceptance = "- [ ] [a] [build] `sh scripts/entered.sh` -> 0 fail";
 	const br = fakeBr(inReview(acceptance), { comments: [] });
-	const before = br.state();
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: { ...br.env, LESSON_REPLAY_MARKER: marker } });
-	expect(res.code).toBe("LESSON_MISSING");
-	expect(res.replays).toEqual([]);
-	expect(existsSync(marker)).toBe(false);
-	expect(br.state()).toEqual(before);
+	expect(res.code, res.log).toBe("CLOSED");
+	expect(res.replays.map(replay => replay.pass)).toEqual([true]);
+	expect(existsSync(marker)).toBe(true);
+	expect(br.state().status).toBe("closed");
+	expect(res.log).toContain("WARNING: no author Lesson:");
+	expect(res.log).not.toContain("LESSON_MISSING");
+	expect(br.state().closed_transition).not.toContain("\nnull\n");
 });
 
-test("LESSONPAYLOAD1 newest author lesson reaches the real close-policy consumer", async () => {
+test("LESSONOPTIONAL1 newest author lesson reaches the real close-policy consumer", async () => {
 	const { dir, sha } = await repo("lesson-author");
 	const br = fakeBr(inReview("- [ ] [a] [build] `sh scripts/t.sh` -> 0 fail"), { comments: [
 		{ id: 3, author: "AnotherReviewer", text: "Lesson: not the author's lesson", created_at: "2026-03-01T00:00:00Z" },
@@ -164,7 +166,7 @@ test("LESSONPAYLOAD1 newest author lesson reaches the real close-policy consumer
 // DEADLINETESTS1: 3x its observed load-normalized p95 (8.3 s, n=28 full-suite runs at load1 >= 18).
 }, fixtureDeadlineS(25) * 1_000);
 
-test("LESSONPAYLOAD1 CLI explicit lesson takes precedence over author comments", async () => {
+test("LESSONOPTIONAL1 CLI supplied lesson is recorded on the close", async () => {
 	const { dir, sha } = await repo("lesson-cli");
 	const br = fakeBr(inReview("- [ ] [a] [build] `sh scripts/t.sh` -> 0 fail"));
 	const r = await run(["bun", "run", "--silent", cliPath, "verify", "kit-1", "--export", sha, "--project", dir, "--actor", "Peer", "--lesson", "explicit reviewer finding", "--json"], {
@@ -247,17 +249,17 @@ test("LESSONPAYLOAD1 live readback closes with its author's lesson and preserves
 	expect(br.state("kit-source").status).toBe("closed");
 });
 
-test("LESSONPAYLOAD1 live missing lesson refuses before replay", async () => {
+test("LESSONOPTIONAL1 live no lesson replays and closes with a warning", async () => {
 	const marker = join(base, "live-missing-lesson");
 	const { dir } = await repo("lesson-live-missing", { "entered.sh": "#!/bin/sh\nprintf entered > \"$LESSON_REPLAY_MARKER\"\nprintf '0 fail\\n'\n" });
 	const acceptance = "- [ ] [c] [live] `sh scripts/entered.sh` -> 0 fail";
 	const br = fakeBr(liveBead(acceptance), { extraBeads: [sourceBead], comments: [] });
-	const before = br.state();
 	const res = await liveReadback({ bead: "kit-live", repo: dir, actor: "Peer", env: { ...br.env, LESSON_REPLAY_MARKER: marker } });
-	expect(res.code).toBe("LESSON_MISSING");
-	expect(res.replays).toEqual([]);
-	expect(existsSync(marker)).toBe(false);
-	expect(br.state()).toEqual(before);
+	expect(res.code, res.log).toBe("CLOSED");
+	expect(res.replays.map(replay => replay.pass)).toEqual([true]);
+	expect(existsSync(marker)).toBe(true);
+	expect(br.state().status).toBe("closed");
+	expect(res.log).toContain("WARNING: no author Lesson:");
 });
 
 test("LESSONPAYLOAD1 CLI live-all refused act is nonzero ACT_FAILED with boxes unchanged", async () => {

@@ -22,12 +22,12 @@ test("LIVELESSON1 a readback child with no lesson of its own closes with the ver
 	expect(br.state().closed_transition).toContain("Lesson: the source author's lesson");
 }, fixtureDeadlineS(30) * 1000);
 
-test("LIVELESSON1 planted: with no lesson on either bead the readback still refuses LESSON_MISSING before replay", async () => {
+test("LESSONOPTIONAL1 with no lesson on either bead the readback closes without inventing one", async () => {
 	const { dir } = await repo("livelesson-none");
 	const br = fakeBr(liveBead("- [ ] [c] [live] `sh scripts/t.sh` -> 0 fail"), { extraBeads: [sourceBead], comments: [] });
-	const before = br.state();
 	const res = await liveReadback({ bead: "kit-live", repo: dir, actor: "Peer", env: br.env });
-	expect(res.code).toBe("LESSON_MISSING");
-	expect(res.replays).toEqual([]);
-	expect(br.state()).toEqual(before);
+	expect(res.code, res.log).toBe("CLOSED");
+	expect(res.replays.map(replay => replay.pass)).toEqual([true]);
+	expect(br.state().status).toBe("closed");
+	expect(res.log).toContain("WARNING: no author Lesson:");
 }, fixtureDeadlineS(30) * 1000);

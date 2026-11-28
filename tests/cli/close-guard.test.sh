@@ -83,14 +83,16 @@ else
 	fail=$((fail + 1)); printf 'FAIL other-caller: rc!=0 out<<<%s>>>\n' "$(cat "$TMP/out")"
  fi
  
- # 6. LESSON1: close without a lesson is refused
+ # 6. LESSONOPTIONAL1: close without a lesson warns and passes
  set_bead '{"id":"bead-1","status":"in_progress","assignee":"","labels":[]}'
  if (cd -- "$repo" && sh "$CHECK" "$BEAD" --db "$TMP/db" --sub close --reason "done, all green" > "$TMP/out" 2>&1); then
- 	fail=$((fail + 1)); printf 'FAIL no-lesson: rc=0\n'
- elif grep -q "no Lesson" "$TMP/out"; then
- 	pass=$((pass + 1))
+ 	if grep -q "WARNING no Lesson:" "$TMP/out"; then
+ 		pass=$((pass + 1))
+ 	else
+ 		fail=$((fail + 1)); printf 'FAIL no-lesson: missing warning\n'
+ 	fi
  else
- 	fail=$((fail + 1)); printf 'FAIL no-lesson: wrong refusal\n'
+ 	fail=$((fail + 1)); printf 'FAIL no-lesson: rc!=0\n'
  fi
  # 7. LESSON1: close with explicit none passes
  if (cd -- "$repo" && sh "$CHECK" "$BEAD" --db "$TMP/db" --sub close --reason "done, all green

@@ -46,8 +46,7 @@ async function fixture() {
 	mkdirSync(join(repo, "tests"));
 	writeFileSync(join(repo, "payload.txt"), "preserved\n");
 	writeFileSync(join(repo, "tests/replay.sh"), "#!/bin/sh\n[ -f payload.txt ]\n", { mode: 0o755 });
-	// LANDPIPE1: in_review now needs the author's `Lesson:` comment, the same predicate `omp-kit verify` applies, so every
-	// fixture bead carries one from its assignee except the planted `nolesson` and `inline` beads.
+	// Most beads carry an optional lesson; the no-lesson controls must still hand off.
 	const assigneeOf = (name: string) => name === "trailer" || name === "other" ? "OtherBuilder" : AUTHOR;
 	const records = ["owned", "trailer", "other", "nolesson", "inline", "missing"].map((name, index) => ({
 		id: `pw-${name}`, title: "Preserve the actual native fixture transition", issue_type: "task", priority: 2,
@@ -115,7 +114,7 @@ test("PWDI author handoff reaches real in_review while the claimant and Agent au
 	expect(await f.state("pw-owned")).toBe("closed");
 }, 120_000);
 
-test("PWDI actual guard preserves legacy grading ownership and non-author close Lesson controls", async () => {
+test("LESSONOPTIONAL1 actual guard preserves grading ownership and warns without refusing a missing lesson", async () => {
 	const f = await fixture();
 	for (const id of ["pw-owned", "pw-trailer"]) {
 		const legacy = await f.guard(id, AUTHOR);
@@ -125,7 +124,8 @@ test("PWDI actual guard preserves legacy grading ownership and non-author close 
 	const eligible = await f.guard("pw-owned", REVIEWER);
 	expect(eligible.rc, output(eligible)).toBe(0);
 	const missingLesson = await f.guard("pw-owned", REVIEWER, "close", `export ${f.published}`);
-	expect(missingLesson.rc, output(missingLesson)).toBe(4);
+	expect(missingLesson.rc, output(missingLesson)).toBe(0);
+	expect(output(missingLesson)).toContain("WARNING no Lesson:");
 	expect(await f.state("pw-owned")).toBe("in_progress");
 	const withLesson = await f.guard("pw-owned", REVIEWER, "close", `Lesson: none\nexport ${f.published}`);
 	expect(withLesson.rc, output(withLesson)).toBe(0);
@@ -189,26 +189,16 @@ test("LANDPIPE1 handoff unpublished: a locally GREEN source is refused with veri
 	expect(await f.state("pw-owned")).toBe("in_review");
 }, 120_000);
 
-test("LANDPIPE1 handoff lesson: a published source with no author Lesson is refused LESSON_MISSING; the author's Lesson, in the comment or earlier, admits it", async () => {
+test("LESSONOPTIONAL1 real shim handoff needs no Lesson line and retains a supplied one", async () => {
 	const f = await fixture();
-	const handoff = (id: string, comment: string, actor = AUTHOR) => f.shim(["update", id, "--status", "in_review", "--transition-comment", comment], actor);
-	const refused = await handoff("pw-nolesson", f.reason);
-	expect(refused.rc, output(refused)).toBe(4);
-	expect(output(refused)).toContain("HANDOFF_UNGATED LESSON_MISSING");
-	expect(await f.state("pw-nolesson")).toBe("in_progress");
-	// A Lesson from someone who is not the bead's author is not the author's Lesson: verify would refuse it too.
-	const stranger = await handoff("pw-nolesson", `${f.reason}\nLesson: a stranger wrote this`, "OtherBuilder");
-	expect(stranger.rc, output(stranger)).toBe(4);
-	expect(await f.state("pw-nolesson")).toBe("in_progress");
-	// An earlier comment by the author is enough: write it, then the plain handoff passes.
-	await f.br(["comments", "add", "pw-nolesson", "--author", AUTHOR, "-m", "Lesson: an earlier author comment counts"]);
-	const earlier = await handoff("pw-nolesson", f.reason);
-	expect(earlier.rc, output(earlier)).toBe(0);
+	const absent = await f.shim(["update", "pw-nolesson", "--status", "in_review", "--transition-comment", f.reason]);
+	expect(absent.rc, output(absent)).toBe(0);
+	expect(output(absent)).not.toContain("LESSON_MISSING");
 	expect(await f.state("pw-nolesson")).toBe("in_review");
-	// The Lesson in the handoff comment itself, written by the author, is the other way in.
-	const inline = await handoff("pw-inline", `${f.reason}\nLesson: the handoff comment carries it`);
+	const inline = await f.shim(["update", "pw-inline", "--status", "in_review", "--transition-comment", `${f.reason}\nLesson: the handoff comment carries it`]);
 	expect(inline.rc, output(inline)).toBe(0);
 	expect(await f.state("pw-inline")).toBe("in_review");
+	expect(await f.br(["comments", "list", "pw-inline", "--json"])).toContain("Lesson: the handoff comment carries it");
 }, TEST_TIMEOUT_MS);
 
 test("LANDPIPE1 handoff trailer: a published GREEN source with no Bead trailer is not read as unpublished, and a failing original command keeps its own exit code", async () => {
