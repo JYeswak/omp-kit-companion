@@ -2,10 +2,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * Board event source for kit-inbox-wake (BOARDLIVE1-S3, ompkit-tnqyr.2): reads the local Board's HTTP feed
- * (`GET /events`, docs/04-reference/03-http.md "Event feed") for mentions of a seat's actor. Long-poll, never
- * `vb wait` (the CLI costs 1.43 s p50 against 93 ms for the raw long-poll, BoardParity P4).
- * Cursors are opaque strings: they are compared for equality and passed back as received.
+ * Board event source for kit-inbox-wake. GET /events with `wait` and `after` is the HTTP transport for
+ * `vb wait --after` (93 ms raw versus 1.43 s p50 via the CLI, BoardParity P4). Cursors stay opaque.
  */
 
 export interface BoardClient {
@@ -20,6 +18,8 @@ export interface BoardEvent {
 	channel: string;
 	/** The message the event concerns (string id). */
 	messageId: string;
+	/** Board's `re`: the thread root for a reply. */
+	threadRoot?: string;
 	/** Who did it: actor id and handle. */
 	by: string;
 	byHandle: string;
@@ -31,6 +31,7 @@ export interface BoardRead {
 	cursor: string;
 }
 
+const THREAD_PAGE = 500; // Board's largest /threads page
 /** Margin over the server-side hold for the TCP and JSON round trip. */
 const REQUEST_MARGIN_S = 10;
 
@@ -58,6 +59,7 @@ async function getJson(client: BoardClient, path: string, profile: string, timeo
 		const signals = [AbortSignal.timeout(timeoutS * 1000), ...(signal ? [signal] : [])];
 		const res = await fetch(`${client.url}${path}`, {
 			headers: { authorization: `Bearer ${client.token}`, "x-board-profile": profile, accept: "application/json" },
+			redirect: "error",
 			signal: AbortSignal.any(signals),
 		});
 		if (!res.ok) return null;
@@ -88,6 +90,7 @@ function parseEvents(doc: unknown): BoardRead | null {
 			type: str(raw.type),
 			channel: str(raw.message?.channel ?? raw.payload?.channel),
 			messageId: str(raw.message?.id ?? raw.payload?.id),
+			threadRoot: str(raw.payload?.re ?? raw.message?.re),
 			by: str(raw.actor?.id),
 			byHandle: str(raw.actor?.handle) || str(raw.actor?.name),
 			text: str(raw.message?.text ?? raw.payload?.text),
@@ -102,10 +105,58 @@ export async function boardHead(client: BoardClient, agent: string, actor: strin
 	return parseEvents(doc)?.cursor ?? null;
 }
 
-/** Events mentioning `actor` after `after`; holds up to `waitS` seconds for the first new match. Null when unreadable. */
+/** Active thread roots matching one of `bm inbox`'s native filters. Null means the read cannot be trusted. */
+async function boardThreadRoots(client: BoardClient, agent: string, query: string, signal?: AbortSignal): Promise<Set<string> | null> {
+	const doc = await getJson(client, `/threads?${query}`, agent, 10, signal) as
+		{ threads?: Array<{ message?: { id?: unknown } }> } | null;
+	if (!Array.isArray(doc?.threads)) return null;
+	const roots = new Set<string>();
+	for (const thread of doc.threads) {
+		if (typeof thread?.message?.id !== "string" || thread.message.id === "") return null;
+		roots.add(thread.message.id);
+	}
+	return roots;
+}
+
+/** Direct mentions and replies in threads the seat was mentioned in or posted in; one checkpoint for both. */
 export async function boardEventsAfter(
 	client: BoardClient, agent: string, actor: string, after: string, waitS: number, signal?: AbortSignal,
 ): Promise<BoardRead | null> {
-	const q = `mentions=${encodeURIComponent(actor)}&after=${encodeURIComponent(after)}&wait=${Math.max(0, Math.min(300, Math.floor(waitS)))}`;
-	return parseEvents(await getJson(client, `/events?${q}`, agent, waitS + REQUEST_MARGIN_S, signal));
+	const position = `after=${encodeURIComponent(after)}`;
+	const q = `${position}&wait=${Math.max(0, Math.min(300, Math.floor(waitS)))}`;
+	const read = parseEvents(await getJson(client, `/events?${q}`, agent, waitS + REQUEST_MARGIN_S, signal));
+	if (read === null) return null;
+	// A reconnecting feed can re-emit the checkpoint with its prefix. Drop that prefix without ordering opaque cursors.
+	const checkpoint = read.events.findLastIndex(e => e.cursor === after);
+	const posts = read.events.filter((e, index) => index > checkpoint && e.type === "message.posted" && e.by !== actor && e.messageId !== "");
+	if (posts.length === 0) return { events: [], cursor: read.cursor };
+
+	// Keep Board's exact direct-mention matcher; only take results in this batch, never advance on a side read.
+	const who = encodeURIComponent(actor);
+	const direct = parseEvents(await getJson(client, `/events?mentions=${who}&${position}&wait=0`, agent, 10, signal));
+	if (direct === null) return null;
+	const addressed = new Set(direct.events.map(e => e.cursor));
+	const replies = posts.filter(e => e.threadRoot && !addressed.has(e.cursor));
+	const latest = replies.at(-1);
+	if (latest) {
+		// A point read waits for the Board's tables to index this reply. List reads alone may lag the event feed.
+		if (await getJson(client, `/messages/${encodeURIComponent(latest.messageId)}?limit=1`, agent, 10, signal) === null) return null;
+		const filters = [`mentions=${who}`, `by=${who}`];
+		const [mentioned, authored] = await Promise.all(filters.map(filter =>
+			boardThreadRoots(client, agent, `${filter}&${position}&limit=${THREAD_PAGE}`, signal)));
+		if (!mentioned || !authored) return null;
+		for (const reply of replies) {
+			const root = reply.threadRoot!;
+			if (mentioned.has(root) || authored.has(root)) {
+				addressed.add(reply.cursor);
+			} else if (mentioned.size === THREAD_PAGE || authored.size === THREAD_PAGE) {
+				// Concurrent activity can move a thread past the first page. Check just this root before ruling it out.
+				const scoped = await Promise.all(filters.map(filter =>
+					boardThreadRoots(client, agent, `${filter}&re=${encodeURIComponent(root)}&limit=1`, signal)));
+				if (scoped.some(set => set === null)) return null;
+				if (scoped.some(set => set?.has(root))) addressed.add(reply.cursor);
+			}
+		}
+	}
+	return { events: posts.filter(e => addressed.has(e.cursor)), cursor: read.cursor };
 }

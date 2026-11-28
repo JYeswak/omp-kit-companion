@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fleetPolicyState } from "./fleet-policy";
 import { run } from "../src/kitlib/run.ts";
 import { type BoardClient, type BoardEvent, boardActor, boardClientFromEnv, boardEventsAfter, boardHead } from "../src/board-events.ts";
@@ -195,8 +196,8 @@ function writeBoardState(path: string, state: BoardState, at: Date): void {
 
 export function boardWakeText(agent: string, events: BoardEvent[]): string {
 	const lines = events.map(e => `#${e.messageId} in ${e.channel} from ${e.byHandle || e.by}: ${e.text.split("\n", 1)[0].slice(0, 120)}`);
-	return `BOARD WAKE for ${agent}: ${events.length} new Board mention(s).\n${lines.join("\n")}\n` +
-		"Read the thread on the Board and act; acknowledge each directive after acting on it.";
+	return `BOARD WAKE for ${agent}: ${events.length} new Board message(s).\n${lines.join("\n")}\n` +
+		"Read the thread on the Board. A wake is not authorization to act.";
 }
 
 async function amRead(agent: string, project: string, after: number | null): Promise<InboxRead | null> {
@@ -263,9 +264,8 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 	}
 
 	/**
-	 * BOARDLIVE1-S3: the Board source. One long-poll `GET /events?mentions=<actor>&after=<cursor>` per call; a mention
-	 * at or before the cursor never wakes, and the cursor file is written after every wake, so a restart replays nothing.
-	 * The first start ever takes the feed's current end (no backlog flood). Returns false when the board was unreadable.
+	 * One Board cursor covers direct mentions and addressed replies. First start takes the current head;
+	 * failed reads leave the cursor unchanged. Persist after delivery so a crash can retry the batch.
 	 */
 	async function pollBoard(waitS: number): Promise<boolean> {
 		if (busy) return true;
@@ -284,10 +284,13 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 			}
 			const got = await boardEventsAfter(client, agent!, actor, state.cursor, waitS, abort.signal);
 			if (got === null) return false;
-			// Position AND prior delivery: a server that re-emits events at or below the cursor never wakes twice.
+			if (stopped) return false;
 			const delivered = new Set(state.delivered);
-			const fresh = got.events.filter(e => e.type === "message.posted" && e.by !== actor && e.messageId !== ""
-				&& !delivered.has(e.messageId));
+			const fresh = got.events.filter(e => {
+				if (delivered.has(e.messageId)) return false;
+				delivered.add(e.messageId); // also reject duplicates inside this batch
+				return true;
+			});
 			if (fresh.length > 0) {
 				pi.sendMessage({ customType: "kit-inbox-wake", content: boardWakeText(agent!, fresh), display: true },
 					{ deliverAs: "followUp", triggerTurn: true });
@@ -300,7 +303,6 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 						subject: e.text.split("\n", 1)[0].slice(0, 120), status: "WOKEN_INPROCESS",
 						detail: "kit-inbox-wake board followUp", cursor: e.cursor, backend: "board",
 					}) + "\n");
-					delivered.add(e.messageId);
 				}
 			}
 			if (got.cursor !== state.cursor || fresh.length > 0) {
@@ -308,7 +310,7 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 			}
 			return true;
 		} catch {
-			return false; // a failed poll keeps the cursor, so the same mentions are delivered on the next one
+			return false; // a failed poll keeps the cursor, so the same messages are delivered on the next one
 		} finally {
 			busy = false;
 		}
@@ -323,11 +325,7 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 			if (stopped) return;
 			// An unreadable board or a hold that returned at once must not spin: wait out the rest of a second, or 10 s.
 			const pause = ok ? Math.max(0, BOARD_MIN_CYCLE_MS - (Date.now() - started)) : BOARD_RETRY_MS;
-			if (pause > 0) {
-				const { promise, resolve: wake } = Promise.withResolvers<void>();
-				setTimeout(wake, pause);
-				await promise;
-			}
+			if (pause > 0) await sleep(pause, undefined, { signal: abort.signal }).catch(() => {});
 		}
 	}
 

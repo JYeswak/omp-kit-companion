@@ -1,23 +1,33 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import kitInboxWake, { boardCursorPath, type InboxWakeDeps } from "../../extensions/kit-inbox-wake.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 
 /** BOARDLIVE1-S3 (ompkit-tnqyr.2): the Board event source of kit-inbox-wake, against a local fake Board. */
 
 const AGENT = "PeachLeopard";
-const ACTOR = "local:user:josh+PeachLeopard";
+const ACTOR = "local:user:josh+peachleopard";
 const TOKEN = "fixture-token";
 
-interface FakeEvent { cursor: number; id: string; by: string; text: string; type?: string }
+interface FakeEvent { cursor: number; id: string; by: string; text: string; type?: string; re?: string }
 
 function fakeBoard(events: FakeEvent[], opts: { honorAfter?: boolean } = {}) {
 	const requests: string[] = [];
+	const deleted: string[] = [];
+	const waiting = Promise.withResolvers<void>();
+	let changed = Promise.withResolvers<void>();
+	function push(...rows: FakeEvent[]) {
+		events.push(...rows);
+		changed.resolve();
+		changed = Promise.withResolvers<void>();
+	}
 	const server = Bun.serve({
 		port: 0,
 		hostname: "127.0.0.1",
-		fetch(req) {
+		async fetch(req) {
 			const url = new URL(req.url);
 			requests.push(`${url.pathname}${url.search}`);
 			if (req.headers.get("authorization") !== `Bearer ${TOKEN}`) return Response.json({ error: { code: "unauthorized" } }, { status: 401 });
@@ -25,24 +35,59 @@ function fakeBoard(events: FakeEvent[], opts: { honorAfter?: boolean } = {}) {
 				if (req.headers.get("x-board-profile") !== AGENT) return Response.json({ error: { code: "invalid_profile" } }, { status: 400 });
 				return Response.json({ actor: ACTOR });
 			}
-			if (url.pathname !== "/api/board/events") return Response.json({ error: { code: "not_found" } }, { status: 404 });
-			if (url.searchParams.get("mentions") !== ACTOR) return Response.json({ events: [], cursor: "0" });
-			const head = String(events.reduce((m, e) => Math.max(m, e.cursor), 0));
-			if (url.searchParams.get("last")) return Response.json({ events: [], cursor: head });
+			if (req.method === "POST" && url.pathname === "/api/board/messages") {
+				const body = await req.json() as { re?: string; text: string; channel?: string; noSync?: boolean };
+				if (body.noSync !== true || (!body.re && body.channel !== "board-wake-probe") || body.text.includes("@")) {
+					return Response.json({ error: "bad probe post" }, { status: 400 });
+				}
+				const cursor = (events.at(-1)?.cursor ?? 0) + 1;
+				const id = String(cursor);
+				const createdAt = new Date().toISOString();
+				push({ cursor, id, by: "local:user:josh+board-wake-probe", text: body.text, re: body.re });
+				return Response.json({ message: { id, createdAt } }, { status: 201 });
+			}
+			const write = /^\/api\/board\/messages\/(\d+)\/(edit|delete)$/.exec(url.pathname);
+			if (req.method === "POST" && write) {
+				const original = events.find(e => e.id === write[1]);
+				if (!original || req.headers.get("x-board-profile") !== "board-wake-probe") return new Response(null, { status: 403 });
+				if (write[2] === "delete") deleted.push(original.id);
+				else {
+					const { text } = await req.json() as { text: string };
+					push({ ...original, text, cursor: (events.at(-1)?.cursor ?? 0) + 1, type: "message.edited" });
+				}
+				return Response.json({ ok: true });
+			}
+			if (url.pathname.startsWith("/api/board/messages/")) return Response.json({ message: {}, replies: [] });
+			const mentions = url.searchParams.get("mentions");
+			const by = url.searchParams.get("by");
 			const after = Number(url.searchParams.get("after"));
-			const rows = events.filter(e => opts.honorAfter === false || e.cursor > after);
+			const matches = (e: FakeEvent) => (!mentions || e.text.includes(`@[${mentions}]`)) && (!by || e.by === by);
+			if (url.pathname === "/api/board/threads") {
+				const active = new Set(events.filter(e => e.cursor > after).map(e => e.re ?? e.id));
+				const roots = new Set(events.filter(matches).map(e => e.re ?? e.id)
+					.filter(root => active.has(root) && (!url.searchParams.has("re") || url.searchParams.get("re") === root)));
+				return Response.json({ threads: [...roots].map(id => ({ message: { id } })) });
+			}
+			if (url.pathname !== "/api/board/events") return Response.json({ error: { code: "not_found" } }, { status: 404 });
+			const head = () => String(events.reduce((m, e) => Math.max(m, e.cursor), 0));
+			if (url.searchParams.get("last")) return Response.json({ events: [], cursor: head() });
+			const matchingEvents = () => events.filter(e => (opts.honorAfter === false || e.cursor > after) && matches(e));
+			if (Number(url.searchParams.get("wait")) > 0 && matchingEvents().length === 0) {
+				waiting.resolve();
+				await changed.promise;
+			}
 			return Response.json({
-				cursor: head,
-				events: rows.map(e => ({
+				cursor: head(),
+				events: matchingEvents().map(e => ({
 					cursor: String(e.cursor), type: e.type ?? "message.posted",
-					payload: { channel: "omp-kit", text: e.text },
-					message: { id: e.id, channel: "omp-kit", text: e.text },
+					payload: { channel: "omp-kit", text: e.text, re: e.re ?? null },
+					message: { id: e.id, channel: "omp-kit", text: e.text, re: e.re ?? null },
 					actor: { id: e.by, handle: e.by.split("+")[1] ?? e.by },
 				})),
 			});
 		},
 	});
-	return { events, requests, url: `http://127.0.0.1:${server.port}/api/board`, stop: () => server.stop(true) };
+	return { events, push, waiting: waiting.promise, requests, deleted, url: `http://127.0.0.1:${server.port}/api/board`, stop: () => { changed.resolve(); server.stop(true); } };
 }
 
 type Sent = { content: string; deliverAs?: string; triggerTurn?: boolean };
@@ -50,11 +95,13 @@ type Sent = { content: string; deliverAs?: string; triggerTurn?: boolean };
 function seat(home: string, board: { url: string }, extra: Partial<InboxWakeDeps> = {}, env: Record<string, string> = {}) {
 	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
 	const sent: Sent[] = [];
+	const woke = Promise.withResolvers<number>();
 	const intervals: Array<() => unknown> = [];
 	const pi = {
 		on: (event: string, handler: (event: never, ctx: never) => unknown) => handlers.set(event, handler),
 		sendMessage: (m: { content: string }, o?: { deliverAs?: string; triggerTurn?: boolean }) => {
 			sent.push({ content: m.content, deliverAs: o?.deliverAs, triggerTurn: o?.triggerTurn });
+			woke.resolve(performance.now());
 		},
 	};
 	const ctx = {
@@ -74,6 +121,8 @@ function seat(home: string, board: { url: string }, extra: Partial<InboxWakeDeps
 	};
 	return {
 		sent,
+		woke: woke.promise,
+		stop: () => handlers.get("session_shutdown")?.({} as never, ctx as never),
 		start: async () => { await kitInboxWake(pi, deps); await (handlers.get("session_start") as (e: never, c: never) => Promise<void>)({} as never, ctx as never); },
 		tick: async () => { await intervals[0]!(); },
 	};
@@ -192,3 +241,78 @@ describe("BOARDLIVE-S3 board wake", () => {
 		expect(board.requests).toHaveLength(0);
 	});
 });
+
+test("BOARDWAKE1 an addressed reply wakes once after a cursor, and an unrelated reply stays quiet", async () => {
+	const author = "local:user:josh+RosePine";
+	const { home, board } = setup([
+		mention(1, "thread addressed before this watcher started"),
+		{ cursor: 2, id: "2", by: author, text: "unrelated root" },
+		{ cursor: 3, id: "3", by: ACTOR, text: "thread I posted in" },
+	]);
+	const first = seat(home, board, { boardLoop: true, boardWaitS: 2 });
+	const deadline = new AbortController();
+	const expired = sleep(5_000, null, { signal: deadline.signal }).catch(() => null);
+	try {
+		await first.start();
+		expect(await Promise.race([board.waiting.then(() => true), expired])).toBe(true);
+		expect(first.sent).toHaveLength(0);
+		const posted = performance.now();
+		board.push(
+			{ cursor: 4, id: "reply", re: "1", by: author, text: "answer without a repeated mention" },
+			{ cursor: 5, id: "noise", re: "2", by: author, text: "not for this seat" },
+			{ cursor: 6, id: "reply", re: "1", by: author, text: "duplicate in same delivery" },
+			{ cursor: 7, id: "own", re: "3", by: ACTOR, text: "my own reply" },
+			{ cursor: 8, id: "reaction", re: "1", by: author, text: "reaction", type: "reaction.added" },
+		);
+		const woke = await Promise.race([first.woke, expired]);
+		expect(woke).not.toBeNull();
+		const latency = woke! - posted;
+		expect(latency).toBeLessThan(5_000);
+		expect(first.sent).toHaveLength(1);
+		expect(first.sent[0]).toMatchObject({ deliverAs: "followUp", triggerTurn: true });
+		expect(first.sent[0]!.content.match(/#reply /g)).toEqual(["#reply "]);
+		expect(first.sent[0]!.content).not.toMatch(/#(noise|own|reaction) /);
+		console.log(`BOARDWAKE1 fixture wake ${latency.toFixed(1)} ms`);
+	} finally {
+		deadline.abort();
+		first.stop();
+	}
+	board.push(
+		{ cursor: 9, id: "reply", re: "1", by: author, text: "duplicate after restart" },
+		{ cursor: 10, id: "participation", re: "3", by: author, text: "answer in thread I posted in" },
+	);
+	const next = seat(home, board);
+	await next.start();
+	expect(next.sent).toHaveLength(1);
+	expect(next.sent[0]!.content).toContain("#participation ");
+	expect(next.sent[0]!.content).not.toContain("#reply ");
+	const ledger = readFileSync(join(home, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim().split("\n").map(row => JSON.parse(row));
+	expect(ledger.map(row => [row.message_id, row.cursor, row.status])).toEqual([
+		["reply", "4", "WOKEN_INPROCESS"], ["participation", "10", "WOKEN_INPROCESS"],
+	]);
+}, fixtureDeadlineS(8) * 1_000);
+
+test("live wake probe reports the exact mention-free reply and deletes both synthetic posts", async () => {
+	const { home, board } = setup([]);
+	const s = seat(home, board, { boardLoop: true, boardWaitS: 2 });
+	try {
+		await s.start();
+		const { rc, stdout, stderr } = await runFixtureAsync(
+			[process.execPath, "--no-env-file", join(import.meta.dir, "../../scripts/board-wake-probe.ts"), "--seat", AGENT, "--timeout-ms", "5000", "--json"],
+			{ cwd: process.cwd(), env: { ...process.env, HOME: home, BOARD_URL: board.url, BOARD_TOKEN: TOKEN },
+				floor_s: 8, label: "Board wake probe with owned local fixture" },
+		);
+		const decoder = new TextDecoder();
+		expect(decoder.decode(stderr)).toBe("");
+		expect(rc).toBe(0);
+		const result = JSON.parse(decoder.decode(stdout));
+		expect(result).toMatchObject({ observed: true, cursor: "3" });
+		expect(result.latency_ms).toBeGreaterThanOrEqual(0);
+		expect(result.latency_ms).toBeLessThan(5_000);
+		expect(s.sent).toHaveLength(1);
+		expect(s.sent[0]!.content).toContain("#3 ");
+		expect(board.deleted).toEqual(["3", "1"]);
+	} finally {
+		s.stop();
+	}
+}, fixtureDeadlineS(9) * 1_000);
