@@ -1,0 +1,1 @@
+- Link the README to the latest published release instead of stamping a version that can go stale on the next tag.

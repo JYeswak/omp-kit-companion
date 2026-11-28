@@ -40,6 +40,7 @@ LOCAL_REQUIRED = (
     "tests/cli/operator-snapshot.test.ts",
     "tests/cli/preflight.test.ts",
     "tests/cli/release-local.test.ts",
+    "tests/cli/release-suite-lease.test.ts",  # lease family split from release-local; keep its host coverage
     "tests/cli/release-next-version.test.ts",
     "tests/cli/runtime.test.ts",
     "tests/cli/service.test.ts",

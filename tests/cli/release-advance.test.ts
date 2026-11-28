@@ -52,6 +52,22 @@ test("subject: the advance commit carries a proof level, passes every commit-msg
 	expect(member(f, "commit-msg-verification-level.sh", old)).not.toBe(0);
 }, fixtureDeadlineS(120) * 1_000);
 
+test("READMELINE1: a local advance keeps the versionless README blob while changing the package version", () => {
+	const { f, source } = publishedFixture("reladvance-versionless");
+	const readmePath = join(f.repo, "README.md");
+	const citation = readFileSync(join(ROOT, "README.md"), "utf8");
+	writeFileSync(readmePath, citation);
+	f.git(f.repo, "add", "README.md");
+	f.git(f.repo, "commit", "-qm", "use latest release link");
+	f.git(f.repo, "push", "-q", "origin", "main");
+	const readmeBlob = f.git(f.origin, "rev-parse", "main:README.md");
+	const result = advance(f, source, 1);
+	expect(result.rc, decode(result.stdout) + decode(result.stderr)).toBe(0);
+	expect(f.git(f.origin, "rev-parse", "main:README.md")).toBe(readmeBlob);
+	expect(readFileSync(readmePath, "utf8")).toBe(citation);
+	expect(JSON.parse(f.git(f.origin, "show", "main:package.json")).version).toBe("1.2.5");
+}, fixtureDeadlineS(120) * 1_000);
+
 const freshGate = readFileSync(join(ROOT, "scripts/fresh-gate.sh"), "utf8");
 function gateReadme(): string {
 	const start = freshGate.indexOf("\ngate_readme() {");

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { runFixture } from "./fixture-process.ts";
+import { releaseBlock } from "../../scripts/readme-check.ts";
 
 // NEXTVERSION1 (ompkit-d8qic): shared main always states the version it ships as. A published vX is followed by
 // one main commit to the next patch plus the vX CHANGELOG promote; a cut tags an already-green origin commit with
@@ -23,6 +24,24 @@ ROOT=$1; WORK=$2; STAGE_LOG="$WORK/stages"; : >"$STAGE_LOG"; CHILD=''
 `;
 export const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 export type Fixture = { work: string; origin: string; repo: string; git: (cwd: string, ...args: string[]) => string; env: Record<string, string | undefined> };
+
+/** Isolate fixture repositories and index state from the release checkout. */
+export function gitFixtureEnv(work: string): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const [name, value] of Object.entries(process.env)) if (value !== undefined) env[name] = value;
+	delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE;
+	return { ...env, GIT_CEILING_DIRECTORIES: work, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+}
+
+export function legacyReleaseReadme(version: string): string {
+	const readme = readFileSync(join(ROOT, "README.md"), "utf8");
+	const block = releaseBlock(readme);
+	if (block === undefined) throw new Error("fixture needs the README release block");
+	const start = readme.indexOf("<!-- kit-release:start -->");
+	const from = readme.indexOf(block, start);
+	return readme.slice(0, from) + `Current release: v${version}` + readme.slice(from + block.length);
+}
+
 /** fullTree: the README-checked inputs (src registry, rules, skills, the real package.json) so the staged README hook can judge commits. */
 export function fixture(label: string, mainVersion: string, fullTree = false): Fixture {
 	const work = realpathSync(ownedTmp(label, { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
@@ -46,7 +65,7 @@ export function fixture(label: string, mainVersion: string, fullTree = false): F
 	writeFileSync(join(repo, "scripts/commit-preflight.sh"),
 		`#!/bin/sh\nexec sh ${JSON.stringify(join(ROOT, "scripts/commit-preflight.sh"))} "$@"\n`);
 	// README states the latest published release (v1.2.3) while main states the next version.
-	writeFileSync(join(repo, "README.md"), readFileSync(join(ROOT, "README.md"), "utf8").replace(/^Current release: v\d+\.\d+\.\d+$/m, "Current release: v1.2.3"));
+	writeFileSync(join(repo, "README.md"), legacyReleaseReadme("1.2.3"));
 	const pkg = (version: string) => `{\n  "name": "fixture",\n  "version": "${version}",\n  "omp": {\n    "version": "${version}"\n  }\n}\n`;
 	writeFileSync(join(repo, "package.json"), fullTree
 		? readFileSync(join(ROOT, "package.json"), "utf8").replace(/^([ \t]*"version": )"[^"\n]*"/gm, `$1"${mainVersion}"`)

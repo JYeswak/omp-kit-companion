@@ -1,10 +1,8 @@
 #!/bin/sh
 # stamp-release-line.sh -- rewrite the generated release line in README.md.
 #
-# The release train (release-train.sh `bump`) stamps the bump version here so
-# every tag carries `Current release: vX.Y.Z` in README.md; readme-check.ts
-# exempts this block from the version-literal rule and verifies it equals the
-# package.json version.
+# A versionless latest-release link already points to the published release;
+# never overwrite it. Historical source trees still carry numeric blocks.
 #
 # Usage: sh scripts/stamp-release-line.sh --version X.Y.Z [--readme PATH]
 # Exit 0 stamped (or already exact), 1 misuse/missing markers, 2 bad version.
@@ -35,6 +33,16 @@ END="<!-- kit-release:end -->"
 LINE="Current release: v$VERSION"
 if ! grep -qF "$START" "$README"; then echo "stamp-release-line: start marker missing in $README; re-add the $START / $END block (Bead: ompkit-fp72.135.1.6) and retry" >&2; exit 1; fi
 if ! grep -qF "$END" "$README"; then echo "stamp-release-line: end marker missing in $README; re-add the $START / $END block (Bead: ompkit-fp72.135.1.6) and retry" >&2; exit 1; fi
+
+# Check the block itself, not a copy of the link elsewhere in the document.
+if [ "$(awk -v start="$START" -v end="$END" '
+	$0 == end   { inblock = 0 }
+	inblock && NF { print }
+	$0 == start { inblock = 1 }
+' "$README")" = '[Latest release](https://github.com/JYeswak/omp-kit-companion/releases/latest)' ]; then
+	echo "stamp-release-line: latest release link stays unchanged in $README"
+	exit 0
+fi
 
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$(dirname -- "$0")/kitlib-tmp.sh"

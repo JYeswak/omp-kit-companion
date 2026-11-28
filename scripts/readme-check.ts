@@ -6,11 +6,9 @@
 //      as `omp-kit <command>` / `--scope <value>`.
 //   2. README.md pins no release version: no `vX.Y.Z` / `X.Y.Z` / `KIT_VERSION=X.Y.Z` outside the
 //      generated OMP footer (scripts/docs-footer.sh owns that block) and the generated release
-//      line (`<!-- kit-release:start -->` … `Current release: vX.Y.Z`, stamped via
-//      scripts/stamp-release-line.sh). The line states the latest published release: it equals the
-//      package.json version, or (NEXTVERSION1, ompkit-d8qic: main states the version it will ship
-//      as) package.json is exactly its next patch and tag vX.Y.Z exists in the repo (--repo, default
-//      the working directory); unreadable tags fail closed with a named finding.
+//      block. Current releases use a versionless link. Historical numbered
+//      blocks may match package.json or name an existing previous release
+//      before the next tag exists; missing or unreadable Git evidence is RED.
 //      Install snippets resolve the latest release at run time.
 //   3. The readme-update gate (skill readme-update, --profile product) passes when it is installed;
 //      the repo's own structural checks always run (CI has no skills directory).
@@ -356,10 +354,11 @@ export function checkReadme(readme: string, scope: ReadmeScope, releaseVersion?:
 	// is exempt from the version-literal rule (stripping it would misnumber every finding below).
 	const body = withoutBlock(readme, FOOTER_START, FOOTER_END);
 	const block = releaseBlock(readme);
-	if (!scope.release) {
-		// Rule 2 is not applicable: no release train stamps this README.
+	const latestRelease = "[Latest release](https://github.com/JYeswak/omp-kit-companion/releases/latest)";
+	if (!scope.release || block === latestRelease) {
+		// A versionless link needs no repository or package version lookup here.
 	} else if (block === undefined) {
-		findings.push(`README.md has no generated release line (${RELEASE_START} … ${RELEASE_END}); the release train stamps it at tag time with sh scripts/stamp-release-line.sh`);
+		findings.push(`README.md has no generated release line (${RELEASE_START} … ${RELEASE_END}); restore ${latestRelease} in that block`);
 	} else if (releaseVersion === undefined) {
 		findings.push("README.md release line is unverifiable: no package.json version supplied to checkReadme");
 	} else if (block !== `Current release: v${releaseVersion}`) {
@@ -374,6 +373,13 @@ export function checkReadme(readme: string, scope: ReadmeScope, releaseVersion?:
 				findings.push(`README.md release line says v${stated} and package.json is its next patch ${releaseVersion}, but tag v${stated} does not exist; the line must state a published release`);
 			else if (tag === "unreadable")
 				findings.push(`README.md release line says v${stated} and package.json is its next patch ${releaseVersion}, but the repository tags cannot be read to prove v${stated} is published (pass --repo DIR); failing closed`);
+			else {
+				const cut = releaseTag?.(releaseVersion) ?? "unreadable";
+				if (cut === "present")
+					findings.push(`README.md release line says v${stated} but tag v${releaseVersion} already exists; use ${latestRelease}`);
+				else if (cut === "unreadable")
+					findings.push(`README.md cannot prove tag v${releaseVersion} is absent; use ${latestRelease} or pass --repo DIR`);
+			}
 		}
 	}
 	const releaseStart = body.indexOf(RELEASE_START);

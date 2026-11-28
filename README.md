@@ -5,7 +5,6 @@
 ![Yuzu testing omp rule behavior](visual/hero.jpg)
 
 [![CI](https://github.com/JYeswak/omp-kit-companion/actions/workflows/ci.yml/badge.svg)](https://github.com/JYeswak/omp-kit-companion/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/JYeswak/omp-kit-companion)](https://github.com/JYeswak/omp-kit-companion/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **Test OMP rules, preview every change, apply with receipts.**
@@ -13,7 +12,7 @@
 </div>
 
 <!-- kit-release:start -->
-Current release: v0.2.160
+[Latest release](https://github.com/JYeswak/omp-kit-companion/releases/latest)
 <!-- kit-release:end -->
 
 A tested rule pack, 15 extensions, six skills, and a guarded CLI for an

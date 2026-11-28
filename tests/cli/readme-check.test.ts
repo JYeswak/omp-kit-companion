@@ -41,11 +41,7 @@ function plantedReadme(name: string, text: string): string {
 }
 
 test("the shipped README covers every registry command and doctor scope and pins no version", () => {
-	// Tags are environment, not tree: between releases (NEXTVERSION1) the line names the published release, so a
-	// fixture repo carries that tag; this test then runs the same in a git-less export and in a checkout.
-	const stated = /^Current release: v(\d+\.\d+\.\d+)$/m.exec(readme)?.[1];
-	if (stated === undefined) throw new Error("README.md has no generated release line");
-	const result = check(["--repo", taggedRepo("shipped-tags", [stated])], script, ceilingEnv);
+	const result = check([]);
 	expect(result.out).toContain("README-CHECK: GREEN");
 	expect(result.code).toBe(0);
 });
@@ -132,12 +128,12 @@ if (!pkgManifest || typeof pkgManifest !== "object" || !("version" in pkgManifes
 	throw new Error("package.json must carry a string version for the release-line tests");
 }
 const pkgVersion = pkgManifest.version;
-/** Fixture README whose generated release line equals package.json however the live tree looks (NEXTVERSION1:
- *  between releases the shipped line names the published release, one patch behind package.json). */
+/** Historical numeric shape: keep this input explicit after README stops pinning a release. */
 function baseReadme(): string {
-	if (readme.includes("<!-- kit-release:start -->"))
-		return readme.replace(/^Current release: v\d+\.\d+\.\d+$/m, `Current release: v${pkgVersion}`);
-	return readme.replace("</div>\n", `</div>\n\n<!-- kit-release:start -->\nCurrent release: v${pkgVersion}\n<!-- kit-release:end -->\n`);
+	const start = "<!-- kit-release:start -->", end = "<!-- kit-release:end -->";
+	const from = readme.indexOf(start) + start.length;
+	const to = readme.indexOf(end, from);
+	return `${readme.slice(0, from)}\nCurrent release: v${pkgVersion}\n${readme.slice(to)}`;
 }
 test("a stale generated release line is RED naming both versions, without a literal finding", () => {
 	const base = baseReadme();
@@ -238,6 +234,22 @@ test("next patch fails closed when tags cannot be read", () => {
 	const result = check(["--readme", plantedReadme("README.next-unreadable.md", releaseLine(published)), "--repo", notRepo], script, ceilingEnv);
 	expect(result.code).toBe(1);
 	expect(result.out).toContain(`tags cannot be read to prove v${published} is published (pass --repo DIR); failing closed`);
+});
+
+test("READMELINE1: a cut may not name the previous release; the latest link does not need Git tags", () => {
+	const releaseRepo = taggedRepo("tags-cut", [published, pkgVersion]);
+	const stale = plantedReadme("README.cut-stale.md", releaseLine(published));
+	const rejected = check(["--readme", stale, "--repo", releaseRepo], script, ceilingEnv);
+	expect(rejected.code, rejected.out).toBe(1);
+	expect(rejected.out).toContain(`tag v${pkgVersion} already exists`);
+	const live = plantedReadme("README.cut-link.md", releaseLine(published).replace(
+		`Current release: v${published}`, "[Latest release](https://github.com/JYeswak/omp-kit-companion/releases/latest)"));
+	const accepted = check(["--readme", live, "--repo", workspace], script, ceilingEnv);
+	expect(accepted.code, accepted.out).toBe(0);
+	const stamp = runFixture(["sh", join(repo, "scripts/stamp-release-line.sh"), "--version", pkgVersion, "--readme", live],
+		{ cwd: workspace, env: ceilingEnv, floor_s: 30 });
+	expect(stamp.rc).toBe(0);
+	expect(readFileSync(live, "utf8")).toContain("[Latest release](https://github.com/JYeswak/omp-kit-companion/releases/latest)");
 });
 
 test("a two-patch gap is RED even with the older tag present; an equal line needs no tag (control)", () => {

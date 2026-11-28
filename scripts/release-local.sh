@@ -297,9 +297,13 @@ updated, count = re.subn(r'("version"\s*:\s*)"' + re.escape(old) + '"',
 if count != 2:
     raise SystemExit("release-local: expected exactly two version fields")
 readme = root / "README.md"
+readme_text = readme.read_text()
+_, marker, tail = readme_text.partition("<!-- kit-release:start -->")
+block, end, _ = tail.partition("<!-- kit-release:end -->")
+versionless = marker and end and block.strip() == "[Latest release](https://github.com/JYeswak/omp-kit-companion/releases/latest)"
 stamp, count = re.subn(r"(?m)^Current release: v[0-9]+\.[0-9]+\.[0-9]+$",
-                      "Current release: v" + version, readme.read_text())
-if count != 1:
+                      "Current release: v" + version, readme_text)
+if not versionless and count != 1:
     raise SystemExit("release-local: expected exactly one README release stamp")
 fragment = root / "changelog.d/774u.md"
 notes = fragment.read_text() if fragment.exists() else "### Changed\n"
@@ -307,7 +311,8 @@ entry = (f"- Set CLI and OMP plugin version metadata to {version}. "
          "The release is qualified on this prepare commit's exact exported tree before signing.\n")
 # Validate every input before changing any of them.
 package.write_text(updated)
-readme.write_text(stamp)
+if not versionless:
+    readme.write_text(stamp)
 # git keeps no empty directory: an advance that folded every fragment leaves no changelog.d/.
 fragment.parent.mkdir(exist_ok=True)
 fragment.write_text(notes.rstrip() + "\n" + entry)
@@ -1056,11 +1061,12 @@ if count != 2 or doc["version"] != version or doc["omp"]["version"] != version:
     raise SystemExit("release-local: package.json must carry exactly .version and .omp.version")
 open(path, "w", encoding="utf-8").write(updated)
 PY
-	# README states the latest published release (vVERSION); readme-check accepts it beside package.json's next patch
-	# only while tag vVERSION exists, which the tag stage of this run created.
+	# Current README links to the latest release; only historical numbered blocks are restamped.
 	bounded 60 sh "$export/scripts/stamp-release-line.sh" --version "$VERSION" --readme "$export/README.md" >/dev/null ||
 		die "v$VERSION is published; cannot stamp the README release line"
-	for path in package.json README.md CHANGELOG.md; do cp "$export/$path" "$ROOT/$path"; done
+	for path in package.json README.md CHANGELOG.md; do
+		cmp -s "$export/$path" "$ROOT/$path" || cp "$export/$path" "$ROOT/$path"
+	done
 	for path in ${fragments[@]+"${fragments[@]}"}; do
 		if [ -s "$WORK/next-residual/$path" ]; then cp "$WORK/next-residual/$path" "$ROOT/$path"; else rm -f "$ROOT/$path"; fi
 	done
@@ -1069,7 +1075,7 @@ PY
 	local message="$WORK/next-version-commit-message"
 	printf '%s\n\n%s\n\n%s\n\n%s\n\n%s\n' \
 		"chore(release): next version $next after v$VERSION ompkit-d8qic [pending]" \
-		"NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE; README states v$VERSION, the latest published release." \
+		"NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE." \
 		"[no-changelog] release next-version commit; its notes are the promoted CHANGELOG section" \
 		"$supersedes" \
 		"Gap-Bead: none (release metadata)

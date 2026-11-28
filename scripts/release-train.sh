@@ -33,8 +33,8 @@
 #   bump --version V --date YYYY-MM-DD [--repo DIR]
 #     The upstream oh-my-pi release commit (scripts/release.ts): fold
 #     changelog.d/ into CHANGELOG.md [Unreleased], promote it to
-#     `## [V] - DATE`, set both package.json versions, stamp the generated
-#     README release line to `Current release: vV` (scripts/stamp-release-line.sh),
+#     `## [V] - DATE`, set both package.json versions, preserve the latest
+#     release link (restamp only a historical numeric README block),
 #     and commit `chore: bump version to V` on the checked-out SHA. Nothing to
 #     release (no Unreleased entries, no fragments) is a refusal: no commit, no
 #     tag, never an empty release body.
@@ -293,7 +293,7 @@ bump)
 	# The tree was clean, and promote+stamp only rewrite tracked files, so -u stages exactly their result.
 	git -C "$repo" add -u -- .
 	git -C "$repo" commit -q -m "chore: bump version to $version" \
-		-m "Release train: changelog.d/ folded into CHANGELOG.md, [Unreleased] promoted to $version, package.json version set, README release line stamped." \
+		-m "Release train: changelog.d/ folded into CHANGELOG.md, [Unreleased] promoted to $version, package.json version set, README release description checked." \
 		-m "Bead: ompkit-v66l" \
 		-m "[no-changelog] release bump commit; its notes are the promoted CHANGELOG section" || { echo "bump: commit failed" >&2; exit 1; }
 	printf 'BUMP=committed version=%s sha=%s\n' "$version" "$(git -C "$repo" rev-parse HEAD)"; exit 0
