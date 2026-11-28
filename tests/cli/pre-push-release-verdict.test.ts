@@ -30,6 +30,9 @@ function fixture(): { work: string; sha: string; marker: string; log: string } {
 	const marker = join(dir, "verdict-argv.txt");
 	writeFileSync(join(work, "scripts/release-verdict.sh"), `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(marker)}\necho "stub verdict ran"\nexit 0\n`);
 	writeFileSync(join(work, "src/release-ready.ts"), 'console.log("stub release-ready");\n');
+	// Only this fixture checks the scheduler/argv contract. The real LOAD1 end-to-end fixture lives in load-doctor.test.ts.
+	mkdirSync(join(work, "bin"));
+	writeFileSync(join(work, "bin", "omp-kit"), '#!/bin/sh\nwhile [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n', { mode: 0o700 });
 	git(work, ["add", "-A"]);
 	git(work, ["commit", "-q", "-m", "fixture head"]);
 	git(work, ["remote", "add", "origin", origin]);
@@ -40,7 +43,7 @@ function fixture(): { work: string; sha: string; marker: string; log: string } {
 /** Start the child the way both callers do: output to a log file, so no pipe stays open for the detached child. */
 function start(work: string, sha: string, log: string, quiet: string): number {
 	const result = runSync(["sh", "-c", '"$1" "$2" "$3" </dev/null >>"$4" 2>&1', "sh", join(work, "scripts/release-verdict-start.py"), work, sha, log], {
-		env: { ...process.env, OMP_KIT_RELEASE_VERDICT_QUIET_S: quiet } as Record<string, string>,
+		env: { ...process.env, PATH: `${join(work, "bin")}:${process.env.PATH}`, OMP_KIT_RELEASE_VERDICT_QUIET_S: quiet } as Record<string, string>,
 		deadline_s: fixtureDeadlineS(30),
 	});
 	return result.rc ?? -1;

@@ -4,23 +4,27 @@ import process from "node:process";
 import { join } from "node:path";
 import { RUN_TIME_CAPS_MS } from "./service-run.ts";
 import { runSync } from "./kitlib/run.ts";
+import { normalizeStart } from "./kitlib/proc.ts";
+import { readTernForegroundSync } from "./plane-tern.ts";
+import { listPaneSessionRows } from "./seat-from-session.ts";
 
 export type LoadVerdict = "OK" | "CONTENDED";
 export type MemoryPressureLevel = "normal" | "warn" | "critical" | "unknown";
 export interface MemoryPressure { level: MemoryPressureLevel; free_pct: number | null }
 export interface LoadProcess { pid: number; ppid: number; cpu_pct: number; rss_bytes: number; command: string; cwd?: string; start_time?: string; stat?: string }
-export interface LoadPane { session: string; pane: string; pid: number; cwd?: string }
+export interface LoadPane { session: string; pane: string; pid: number; cwd?: string; agent?: string }
 export interface LoadJob { id: string; pid: number; process_start?: string; label: string; repo: string; cwd: string; agent: string; tmux_pane: string; state: "queued" | "running"; queued_at?: string; started_at?: string; max_runtime_s?: number }
 export interface LoadMachine { load1: number; load5: number; load15: number; ncpu: number; cpu_user_pct: number | null; cpu_sys_pct: number | null; cpu_idle_pct: number | null; memory_pressure: MemoryPressure; disk_iops: number | null }
 export interface LoadConsumer { session: string; pane: string; agent: string; repo: string; cpu_pct: number; rss_bytes: number; pids: number[] }
 export interface LoadSystemGroup { group: string; cpu_pct: number; rss_bytes: number; pids: number[] }
 export interface LoadProcessFinding extends LoadProcess { owner: string; elapsed_s: number | null; cause_class: "active" | "over-budget" | "suspended-work" | "orphaned-work" | "aged-session-mcp" | "zombie" | "unreaped-children"; zombie_children: number; job_id?: string }
 export interface LoadCensus { schema_version: 1; sampled_at: string; verdict: LoadVerdict; reason: string; machine: LoadMachine; consumers: LoadConsumer[]; system_groups: LoadSystemGroup[]; processes: LoadProcessFinding[]; cause_classes: string[]; lsp_counts: { total: number; by_session: Record<string, number> }; heavy_jobs: LoadJob[]; stale_jobs_reaped: string[]; contention_streak: number; sample_cost_ms: number; text: string }
-export interface LoadDoctorInput { processes?: readonly LoadProcess[]; panes?: readonly LoadPane[]; jobs?: readonly LoadJob[]; stateRoot?: string; machine?: Partial<LoadMachine>; now?: Date }
+export interface LoadDoctorInput { processes?: readonly LoadProcess[]; panes?: readonly LoadPane[]; jobs?: readonly LoadJob[]; stateRoot?: string; machine?: Partial<LoadMachine>; now?: Date; ternProbe?: TernLoadProbe }
+type TernLoadProbe = (argv: readonly string[], deadlineS: number) => string;
 
-function runText(args: readonly string[]): string {
+function runText(args: readonly string[], deadlineS = 10): string {
 	try {
-		const child = runSync(args, { deadline_s: 10, max_output_bytes: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
+		const child = runSync(args, { deadline_s: deadlineS, max_output_bytes: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
 		return child.rc === 0 && !child.truncated ? new TextDecoder().decode(child.stdout) : "";
 	} catch {
 		return "";
@@ -65,6 +69,30 @@ export function parseTmuxSnapshot(output: string): LoadPane[] {
 		const pid = Number(fields[2]);
 		if (fields.length < 3 || !fields[0] || !fields[1] || !Number.isInteger(pid)) continue;
 		panes.push({ session: fields[0]!, pane: `${fields[0]} ${fields[1]}`, pid, cwd: fields[3] });
+	}
+	return panes;
+}
+
+function collectTernPanes(processes: readonly LoadProcess[], probe: TernLoadProbe): LoadPane[] {
+	const deadline = performance.now() + 2_000;
+	const query = (argv: readonly string[]): string => {
+		const remainingS = (deadline - performance.now()) / 1_000;
+		return remainingS > 0 ? probe(argv, Math.min(remainingS, 0.4)) : "";
+	};
+	const rows = listPaneSessionRows(query(["tern", "inspect", "--json"]));
+	const startedByPid = new Map(processes.map(item => [item.pid, item.start_time]));
+	const panes: LoadPane[] = [];
+	for (const { paneId } of rows) {
+		if (performance.now() >= deadline) break;
+		const result = readTernForegroundSync({ run(argv) {
+			const out = query(argv);
+			return { code: out ? 0 : 1, out };
+		} }, paneId);
+		if (result.status !== "FOUND") continue;
+		const { pid, cwd, agentName, started } = result.foreground;
+		const sampled = startedByPid.get(pid);
+		if (!sampled || !agentName || !started || normalizeStart(sampled) !== started) continue;
+		panes.push({ session: agentName, pane: `tern:${paneId}`, pid, cwd, agent: agentName });
 	}
 	return panes;
 }
@@ -136,6 +164,7 @@ function isDescendantOf(pid: number, ancestor: number, parent: ReadonlyMap<numbe
 }
 
 function paneAgent(pane: LoadPane, processes: readonly LoadProcess[], parent: ReadonlyMap<number, number>, jobs: readonly LoadJob[]): string {
+	if (pane.agent) return pane.agent;
 	const commands = processes.filter(item => isDescendantOf(item.pid, pane.pid, parent)).map(item => item.command);
 	for (const command of commands) {
 		const agent = agentFromCommand(command);
@@ -169,12 +198,14 @@ function readJobs(stateRoot: string, processes: readonly LoadProcess[]): { jobs:
 			try {
 				const job = JSON.parse(readFileSync(path, "utf8")) as LoadJob;
 				const current = processByPid.get(job.pid);
-				if (!current || !alive(job.pid) || (job.process_start && current.start_time && job.process_start !== current.start_time)) {
+				if (!alive(job.pid) || (job.process_start && current?.start_time
+					&& normalizeStart(job.process_start) !== normalizeStart(current.start_time))) {
 					stale.push(job.id);
 					try { unlinkSync(path); } catch {}
-				} else {
+				} else if (current) {
 					jobs.push(job);
 				}
+				// A live owner absent from this sample may have started after `ps`; do not remove its lease.
 			} catch {
 				stale.push(file);
 				try { unlinkSync(path); } catch {}
@@ -233,7 +264,8 @@ function processFindings(processes: readonly LoadProcess[], panes: readonly Load
 		else if (item.stat?.includes("T") && workload) cause_class = "suspended-work";
 		else if (item.ppid === 1 && workload) cause_class = "orphaned-work";
 		else if (mcp && elapsed_s !== null && elapsed_s >= 86400 && (age(byPid.get(item.ppid) ?? item) ?? 0) >= 86400) cause_class = "aged-session-mcp";
-		const owner = job ? `${job.agent}; pane=${job.tmux_pane || "none"}; job=${job.label}` : pane?.pane ?? service ?? session ?? "unattributed";
+		const owner = job ? `${job.agent}; pane=${job.tmux_pane || pane?.pane || "none"}; job=${job.label}`
+			: pane?.agent ? `${pane.agent}; pane=${pane.pane}` : pane?.pane ?? service ?? session ?? "unattributed";
 		return { ...item, owner, elapsed_s, cause_class, zombie_children, ...(job ? { job_id: job.id } : {}) };
 	}).sort((a, b) => Number(b.cause_class !== "active") - Number(a.cause_class !== "active") || b.cpu_pct - a.cpu_pct);
 }
@@ -241,11 +273,15 @@ function processFindings(processes: readonly LoadProcess[], panes: readonly Load
 export function censusLoad(input: LoadDoctorInput = {}): LoadCensus {
 	const startedCpu = process.cpuUsage();
 	const processes = [...(input.processes ?? parsePsSnapshot(runText(["ps", "-axo", "pid=,ppid=,%cpu=,rss=,lstart=,stat=,command="]), true))];
-	const panes = [...(input.panes ?? parseTmuxSnapshot(runText(["tmux", "list-panes", "-a", "-F", "#{session_name}|#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}"])))];
+	const panes = input.panes ?? [
+		...parseTmuxSnapshot(runText(["tmux", "list-panes", "-a", "-F", "#{session_name}|#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}"])),
+		...collectTernPanes(processes, input.ternProbe ?? runText),
+	];
 	const ledger = input.jobs ? { jobs: [...input.jobs], stale: [] as string[] } : readJobs(input.stateRoot ?? defaultStateRoot(), processes);
 	const parent = new Map(processes.map(item => [item.pid, item.ppid]));
 	const paneByPid = new Map(panes.map(item => [item.pid, item]));
-	const paneByCwd = new Map(panes.filter(item => item.cwd).map(item => [item.cwd!, item]));
+	// Tern ownership is by ancestry only; unrelated processes may share the checkout.
+	const paneByCwd = new Map(panes.filter(item => item.cwd && !item.agent).map(item => [item.cwd!, item]));
 	const jobByPid = new Map(ledger.jobs.map(job => [job.pid, job]));
 	const paneIdentity = new Map(panes.map(pane => [pane.pid, { agent: paneAgent(pane, processes, parent, ledger.jobs), repo: pane.cwd ?? ledger.jobs.find(job => job.tmux_pane === pane.pane)?.repo ?? "unattributed" }]));
 	const consumers = new Map<string, LoadConsumer>();

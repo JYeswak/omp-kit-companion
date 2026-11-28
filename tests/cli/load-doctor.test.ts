@@ -1,8 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { afterAll, expect, test } from "bun:test";
 import { censusLoad, loadAlert, measureCpuMs, parseDiskIops, parseMemoryPressure, parsePsSnapshot, parseTmuxSnapshot, writeCensus } from "../../src/load-doctor.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { runSync } from "../../src/kitlib/run.ts";
+import { configure, entry, fixture, forgeHealthyStatfs, heavyEnv } from "./heavy-fixtures.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 afterAll(cleanupAllOwnedTmp);
 // RELFLAKE1 (ompkit-1ra0d.109): both state-root tests shared one fixed var/agent-tmp/load2-fixture, so overlapping
@@ -20,6 +23,101 @@ test("maps process ancestry to pane and ledger job", () => {
 	expect(report.lsp_counts).toEqual({ total: 1, by_session: { system: 1 } });
 	expect(report.heavy_jobs[0]?.id).toBe("j1");
 });
+
+test("LOADSEAT1: attributes Tern descendants to the nearest verified AGENT_NAME, not shared cwd or a reused PID", () => {
+	const start = "Sun Oct  4 00:00:00 2026";
+	const processes = parsePsSnapshot(`10 1 0 10 ${start} /bin/omp\n20 10 10 100 ${start} /bin/omp\n21 20 75 100 ${start} bun worker\n30 1 60 100 ${start} /bin/omp\n99 1 30 100 ${start} another-worker`);
+	const input = { processes: processes.map(row => ({ ...row, cwd: "/checkout" })), jobs: [], machine: {} };
+	const report = censusLoad({ ...input, ternProbe: (argv) => {
+		if (argv[1] === "inspect") return JSON.stringify({ panes: [10, 20, 30].map(pane => ({ pane, omp_session_file: `/sessions/${pane}.jsonl` })) });
+		if (argv[1] === "process") return JSON.stringify({ pane: argv[2], foreground: { pid: Number(argv[2]), cwd: "/checkout", name: "omp", argv: ["/bin/omp"] } });
+		const pid = argv[3];
+		return `${pid === "30" ? start.replace("00:00:00", "00:00:01") : start} /bin/omp AGENT_NAME=${pid === "20" ? "NestedSeat" : "ParentSeat"}`;
+	} });
+	expect(report.consumers).toEqual([
+		expect.objectContaining({ agent: "NestedSeat", pane: "tern:20", pids: [20, 21], cpu_pct: 85 }),
+		expect.objectContaining({ agent: "ParentSeat", pane: "tern:10", pids: [10], cpu_pct: 0 }),
+	]);
+	expect(report.processes.find(row => row.pid === 21)?.owner).toBe("NestedSeat; pane=tern:20");
+	expect(report.processes.find(row => row.pid === 30)?.owner).toBe("unattributed");
+	expect(report.processes.find(row => row.pid === 99)?.owner).toBe("unattributed");
+	// The same sample without Tern discovery has only the legacy tmux fallback.
+	expect(censusLoad({ ...input, panes: [] }).consumers).toEqual([]);
+});
+
+test("LOADSEAT1: a settled detached verdict is listed while it runs and releases its heavy row after exit", async () => {
+	const root = fixture();
+	const marker = join(root, "verdict.pid");
+	const log = join(root, "release-verdict.log");
+	configure(root, { slots: 1, max_wait_s: fixtureDeadlineS(30) });
+	mkdirSync(join(root, "scripts"));
+	mkdirSync(join(root, "src"));
+	mkdirSync(join(root, "bin"));
+	writeFileSync(join(root, "bin", "omp-kit"), '#!/bin/sh\nexec "$LOAD_FIXTURE_BUN" --preload "$LOAD_FIXTURE_PRELOAD" "$LOAD_FIXTURE_ENTRY" "$@"\n', { mode: 0o700 });
+	writeFileSync(join(root, "scripts", "release-verdict.sh"),
+		`printf '%s\\n' "$$" >> verdict.pid\nfor i in $(seq 1 ${fixtureDeadlineS(30) * 10}); do [ ! -f release ] || exit 0; sleep 0.1; done\nexit 1\n`);
+	writeFileSync(join(root, "src", "release-ready.ts"), 'console.log("release-ready-observed");\n');
+	const fixtureEnv = heavyEnv(root, { AGENT_NAME: "FixtureSeat", LOAD_FIXTURE_ENTRY: entry, LOAD_FIXTURE_PRELOAD: forgeHealthyStatfs,
+		LOAD_FIXTURE_BUN: process.execPath, OMP_KIT_RELEASE_VERDICT_QUIET_S: "0", OMP_KIT_HEAVY_MAX_WAIT_S: "" });
+	const env: Record<string, string> = Object.fromEntries(Object.entries(fixtureEnv)
+		.filter((pair): pair is [string, string] => pair[1] !== undefined));
+	env.PATH = `${join(root, "bin")}:${env.PATH}`;
+	const git = (...args: string[]) => {
+		const result = runSync(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+			"-c", "commit.gpgsign=false", ...args], { cwd: root, env, deadline_s: fixtureDeadlineS(15) });
+		expect(result.rc).toBe(0);
+		return Buffer.from(result.stdout).toString().trim();
+	};
+	git("init", "-q", "-b", "main");
+	git("commit", "-q", "--allow-empty", "-m", "fixture head");
+	git("remote", "add", "origin", ".");
+	const sha = git("rev-parse", "HEAD");
+	const launcher = resolve(import.meta.dir, "../../scripts/release-verdict-start.py");
+	const start = (overrides: Record<string, string> = {}) => {
+		const result = runSync(["sh", "-c", '"$1" "$2" "$3" </dev/null >"$4" 2>&1', "sh", launcher, root, sha, log],
+			{ env: { ...env, ...overrides }, cwd: root, deadline_s: fixtureDeadlineS(15) });
+		expect(result.rc).toBe(0);
+	};
+	start();
+	const stateRoot = join(root, "state", "omp-kit", "load");
+	const observe = () => censusLoad({ stateRoot, panes: [], machine: {} });
+	// Completion and the PID are emitted by real detached processes; fake timers cannot drive them.
+	const waitFor = async (predicate: () => boolean) => {
+		const end = Date.now() + fixtureDeadlineS(20) * 1_000;
+		while (Date.now() < end) {
+			if (predicate()) return;
+			await Bun.sleep(50);
+		}
+		throw new Error(`release fixture did not reach the expected state: ${readFileSync(log, "utf8")}`);
+	};
+	try {
+		await waitFor(() => existsSync(marker) && readFileSync(marker, "utf8").trim() !== "");
+		const pid = Number(readFileSync(marker, "utf8").trim());
+		const job = join(stateRoot, "jobs");
+		await waitFor(() => existsSync(job) && readdirSync(job).filter(name => name.endsWith(".json")).some(name => {
+			try { return JSON.parse(readFileSync(join(job, name), "utf8")).pid === pid; }
+			catch { return false; }
+		}));
+		const report = observe();
+		expect(report.heavy_jobs).toEqual([expect.objectContaining({ pid, label: "release-verdict", agent: "FixtureSeat", state: "running" })]);
+		expect(report.processes.find(row => row.pid === pid)?.job_id).toBe(report.heavy_jobs[0]?.id);
+	} finally {
+		writeFileSync(join(root, "release"), "");
+		await waitFor(() => readFileSync(log, "utf8").includes(`qualification finished for ${sha} rc=0`));
+	}
+	expect(observe().heavy_jobs).toEqual([]);
+	expect(readFileSync(log, "utf8")).toContain("release-ready-observed");
+
+	// Plant high load in the native admission path, not in an alternate launcher.
+	const ran = readFileSync(marker, "utf8");
+	start({ OMP_KIT_HEAVY_MAX_WAIT_S: "1", OMP_KIT_HEAVY_FAKE_LOAD1: "1000000" });
+	await waitFor(() => readFileSync(log, "utf8").includes(`qualification did not complete for ${sha} rc=75`));
+	const refused = readFileSync(log, "utf8");
+	expect(refused).toContain("RESOURCE_DEFERRED");
+	expect(refused).not.toContain("qualification finished");
+	expect(refused).not.toContain("release-ready-observed");
+	expect(readFileSync(marker, "utf8")).toBe(ran);
+}, fixtureDeadlineS(60) * 1_000);
 
 test("parses memory pressure level/free percentage and disk transfers per second", () => {
 	expect(parseMemoryPressure("System-wide memory free percentage: 92%\n")).toEqual({ level: "normal", free_pct: 92 });

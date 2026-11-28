@@ -1151,7 +1151,7 @@ function sameRuntime(left: TernRuntimeBinding, right: TernRuntimeBinding): boole
 
 
 function runCommand(
-	io: TernObserverIo,
+	io: Pick<TernObserverIo, "run">,
 	argv: string[],
 	operation: string,
 	env?: Record<string, string>,
@@ -1167,7 +1167,7 @@ function runCommand(
 }
 
 function runTextCommand(
-	io: TernObserverIo,
+	io: Pick<TernObserverIo, "run">,
 	argv: string[],
 	operation: string,
 	env?: Record<string, string>,
@@ -1213,7 +1213,7 @@ function parseProcessStart(text: string, expectedArgv: readonly string[]): { sta
 	return { started, agentName };
 }
 
-function addProcessStart(io: TernObserverIo, process: TernProcessResult): TernProcessResult {
+function addProcessStart(io: Pick<TernObserverIo, "run">, process: TernProcessResult): TernProcessResult {
 	if (process.status !== "FOUND") return process;
 	const result = runTextCommand(io, ["/bin/ps", "eww", "-p", String(process.foreground.pid), "-o", "lstart=", "-o", "command="],
 		"process_start", { LC_ALL: "C" });
@@ -1221,6 +1221,13 @@ function addProcessStart(io: TernObserverIo, process: TernProcessResult): TernPr
 	const identity = parseProcessStart(result.value, process.foreground.argv);
 	if (identity === null) return { status: "UNKNOWN", reason: "FOREGROUND_INCARNATION_UNAVAILABLE" };
 	return { status: "FOUND", foreground: { ...process.foreground, started: identity.started, agentName: identity.agentName } };
+}
+
+/** Observe only the foreground OMP incarnation, without returning its environment. */
+export function readTernForegroundSync(io: Pick<TernObserverIo, "run">, paneId: string): TernProcessResult {
+	const result = runCommand(io, ["tern", "process", paneId, "--json"], "process");
+	return "error" in result ? { status: "UNKNOWN", reason: result.error }
+		: addProcessStart(io, parseTernProcess(result.value, "/", paneId));
 }
 
 

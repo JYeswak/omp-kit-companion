@@ -22,7 +22,8 @@ SOURCE_IDENTITY=$(bun "$KITREPO/scripts/exact-source.ts" --root "$SOURCE_ROOT") 
 SOURCE="$TMP/exact-source"
 mkdir -p "$SOURCE"
 judging_files=$(PYTHONPATH="$SOURCE_ROOT/scripts" python3 -m suite-metrics judging-files) || exit 1
-# Heavy's load census imports load-doctor -> service-run -> infra and service-launcher; carry the same closure in both source modes.
+# Heavy's load census uses the service and Tern readers; keep the real imports in both source modes.
+load_extensions='extensions/tern-json.ts extensions/kit-seat-identity.ts'
 if [ "$SOURCE_IDENTITY" = "GIT" ]; then
 	git -C "$SOURCE_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || {
 		printf 'FAIL SAVEFIRST1 fixture: no Git source checkout at %s\n' "$SOURCE_ROOT" >&2
@@ -34,6 +35,7 @@ if [ "$SOURCE_IDENTITY" = "GIT" ]; then
 		$judging_files scripts/pre-push-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts \
 		src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib src/mutations.ts src/regex-guards.ts \
 		src/load-doctor.ts src/service-run.ts src/service-launcher.ts src/infra.ts \
+		src/plane-tern.ts src/seat-from-session.ts $load_extensions \
 		config/heavy-labels.json \
 		> "$TMP/exact-source.tar"
 else
@@ -44,12 +46,13 @@ else
 			$judging_files scripts/pre-push-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts \
 			src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib src/mutations.ts src/regex-guards.ts \
 			src/load-doctor.ts src/service-run.ts src/service-launcher.ts src/infra.ts \
+			src/plane-tern.ts src/seat-from-session.ts $load_extensions \
 			config/heavy-labels.json
 	)
 fi
 tar -xf "$TMP/exact-source.tar" -C "$SOURCE"
 # shellcheck disable=SC2086 # Include every canonical repository-relative judged path as an operand.
-tar -cf "$TMP/source-subset.tar" -C "$SOURCE" scripts src config/heavy-labels.json $judging_files
+tar -cf "$TMP/source-subset.tar" -C "$SOURCE" scripts src config/heavy-labels.json $load_extensions $judging_files
 
 make_checker_controls() {
 	repo=$1
@@ -136,7 +139,7 @@ CLI
 	git -C "$sf_repo" config user.email "test@example.invalid"
 	git -C "$sf_repo" config user.name "SaveFirstFixture"
 	git -C "$sf_repo" config core.hooksPath "$sf_repo/.git/hooks"
-	git -C "$sf_repo" add -- scripts src tests/cli rules MANIFEST.tsv config/omp-kit/load.json config/heavy-labels.json .github/test-budget.json
+	git -C "$sf_repo" add -- scripts src extensions tests/cli rules MANIFEST.tsv config/omp-kit/load.json config/heavy-labels.json .github/test-budget.json
 	git -C "$sf_repo" commit -qm "[test] SaveFirst minimal gate base"
 	git init -q --bare --initial-branch=main "$sf_remote"
 	git -C "$sf_repo" remote add origin "$sf_remote"

@@ -1,0 +1,1 @@
+- `omp-kit doctor --scope load` and `load-watch` attribute Tern descendants to their seat's `AGENT_NAME`, falling back to tmux. Settled release qualification now appears in the existing heavy-job ledger while it runs.

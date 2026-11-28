@@ -52,15 +52,20 @@ def main(argv: list[str]) -> int:
     if newer != sha:
         print(f"release-verdict: {sha} superseded by {newer}", flush=True)
         return 0
-    result = run(["sh", os.path.join(root, "scripts/release-verdict.sh"), "--commit", sha, "--no-fetch"],
+    # Use the LOAD1 owner/lease path for this job and its local runner descendants.
+    result = run(["omp-kit", "heavy", "--label", "release-verdict", "--max-runtime", "7200", "--",
+                  "sh", os.path.join(root, "scripts/release-verdict.sh"), "--commit", sha, "--no-fetch"],
                  cwd=root, deadline_s=7200, max_output_bytes=16 << 20)
     sys.stdout.buffer.write(result.stdout)
     sys.stderr.buffer.write(result.stderr)
+    if result.timed_out or result.rc != 0:
+        print(f"release-verdict: qualification did not complete for {sha} rc={result.rc} timed_out={result.timed_out}", flush=True)
+        return result.rc if result.rc is not None and result.rc > 0 else 1
     ready = run(["bun", os.path.join(root, "src/release-ready.ts"), "--repo", root], cwd=root, deadline_s=120)
     sys.stdout.buffer.write(ready.stdout)
     sys.stderr.buffer.write(ready.stderr)
     print(f"release-verdict: qualification finished for {sha} rc={result.rc}", flush=True)
-    return result.rc if result.rc is not None and result.rc >= 0 else 1
+    return 0
 
 
 if __name__ == "__main__":
