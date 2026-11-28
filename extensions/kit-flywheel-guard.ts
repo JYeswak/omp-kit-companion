@@ -2442,6 +2442,9 @@ const VERIFY_RECORD_EXPORT = /\bexport(?:ed)?[ \t]+(?:sha[ \t]+)?([0-9a-f]{7,40}
 /** Comment and reason texts are tracker data; matching reads at most this many UTF-16 units of each. */
 const VERIFY_RECORD_MAX_TEXT = 65_536;
 const VERIFY_RECORD_NOT_PASS = /\b(?:FAIL(?:ED)?|REWORK|PENDING|ENVIRONMENT|UNVERIFIED)\b/;
+// GUARDPLANTED1: a known specimen's quote is not a verdict. Its entire labeled
+// clause is also not authority. The incident used shell-escaped apostrophes.
+const VERIFY_PLANT_RESULT = /(^|;)([ \t]*(?:planted|mutant)(?:[ \t]+(?:defect|negative|output))?(?:[ \t]*:[ \t]*|[ \t][^;\r\n]{0,256}?[ \t]+->[ \t]+))(?:'(?:[^'\r\n]|'"'"')*'|"(?:[^"\\\r\n]|\\[^\r\n])*")(?=$|[ \t,;.])/gim;
 /** `by [lowercase descriptors] <Name>`: an agent name starts uppercase, so "by the lead" names no one. */
 const VERIFY_RECORD_BY = /\bby[ \t]+(?:[a-z][a-z-]{0,31}[ \t]+){0,3}([A-Z][A-Za-z0-9_-]{0,63})/g;
 const ACCEPTANCE_CHECKLIST_LINE = /^- \[[ xX]\] +\S/;
@@ -2471,12 +2474,16 @@ function verifierRecord(authorship: NonNullable<BeadStateWithAuthorship["authors
 		const label = `The newest verification comment (by ${comment.author})`;
 		// An oversize comment cannot be judged, so it cannot be passed over either.
 		if (comment.text.length > VERIFY_RECORD_MAX_TEXT) return { ok: false, why: `${label} is too long to judge.` };
-		const text = comment.text.trimStart();
+		const raw = comment.text.trimStart();
+		const verdictText = raw.replace(VERIFY_PLANT_RESULT, "$1$2<quoted fixture output>");
+		const text = verdictText === raw ? raw : raw.replace(VERIFY_PLANT_RESULT, "$1<fixture evidence>");
 		const sha = VERIFY_RECORD_EXPORT.exec(text)?.[1];
-		const negative = VERIFY_RECORD_NOT_PASS.exec(text)?.[0];
+		const negative = VERIFY_RECORD_NOT_PASS.exec(verdictText)?.[0];
 		const positive = VERIFY_RECORD_HEAD.test(text);
-		if (!positive && (negative === undefined || (sha === undefined && !tags.some(tag => text.includes(tag))))) continue;
-		if (negative !== undefined) return { ok: false, why: `${label} reports ${negative}: ${JSON.stringify(text.slice(0, 120))}; it withdraws any older PASS.` };
+		// A genuine negative still withdraws the previous PASS when the raw comment
+		// associates it with this verification. Specimen data can never grant authority.
+		if (!positive && (negative === undefined || (!VERIFY_RECORD_EXPORT.test(raw) && !tags.some(tag => raw.includes(tag))))) continue;
+		if (negative !== undefined) return { ok: false, why: `${label} reports ${negative}: ${JSON.stringify(verdictText.slice(0, 120))}; it withdraws any older PASS.` };
 		if (sha === undefined || !tags.every(tag => text.includes(tag))) return { ok: false, why: `${label} does not name \`export <sha>\` and every box ${tags.join(" ")}.` };
 		let verifier: string | undefined = comment.author;
 		if (closerSet.has(comment.author.toLowerCase())) {

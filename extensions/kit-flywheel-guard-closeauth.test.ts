@@ -152,6 +152,56 @@ test("AGENTCLOSE1 planted: the filer closing a bead with no assignee and no clai
 // A newer negative verification comment, or a rework transition after the PASS, withdraws the PASS.
 const pass = { author: "PeachLeopard", text: RECORD };
 
+const PLANT = `Planted defect (scratch copy only, guard condition changed): selftest -> 'FAIL audit: an Agent Mail '"'"'Project not found'"'"' reservation read is UNKNOWN, never zero unaccounted' and 'selftest fails=5'.`;
+const CLOSED_HEAD = "CLOSED k-16 by Jev96Verify (family: Claude)\nexported a9998f478ee0 to /scratch/export";
+const BOX_A = "[a] PASS bun test a.test.ts -> rc 0 (12 ms)";
+const BOX_B = "[b] PASS bun test b.test.ts -> rc 0 (9 ms)";
+
+test("GUARDPLANTED1: explicit quoted planted FAIL is evidence, never the verifier's verdict", async () => {
+	const records = [
+		[{ author: "Jev96Verify", text: `${CLOSED_HEAD}\n${BOX_A}; ${PLANT}\n${BOX_B}` }],
+		[pass, { author: "Jev96Verify", text: `[a] selftest -> 'selftest fails=0'; ${PLANT} PASS.` }],
+		[{ author: "Jev96Verify", text: `${CLOSED_HEAD}\n${BOX_A}\nmutant output: "FAIL expected in planted control"\n${BOX_B}` }],
+	];
+	for (const comments of records) {
+		const h = await createFlywheelHost(base, { env: { AGENT_NAME: "PeachLeopard" }, respond: table({ "k-16": row("k-16", "RubyMeadow", [done, ...comments]) }) });
+		const result = await toolCall(h, project(), `br close k-16 --reason '${REASON}'`);
+		expect(result?.block, result?.reason).not.toBe(true);
+		expect(result?.additionalContext).toContain("export a9998f478ee0");
+	}
+});
+
+test("GUARDPLANTED1: a real failed box and malformed or unlabelled quotations still withdraw PASS", async () => {
+	for (const text of [
+		`${CLOSED_HEAD}\n${BOX_A}; ${PLANT}\n[b] FAIL bun test b.test.ts -> rc 1`,
+		`${CLOSED_HEAD}\n${BOX_A}\nmutant: 'FAIL missing closing quote\n${BOX_B}`,
+		`${CLOSED_HEAD}\n${BOX_A}\n[b] observed 'FAIL real result'\n${BOX_B}`,
+		`[b] audit; mutant planned follow-up [b] FAIL -> 'FAIL expected specimen'`,
+	]) {
+		const h = await createFlywheelHost(base, { env: { AGENT_NAME: "PeachLeopard" }, respond: table({ "k-16": row("k-16", "RubyMeadow", [done, pass, { author: "Jev96Verify", text }]) }) });
+		const result = await toolCall(h, project(), `br close k-16 --reason '${REASON}'`);
+		expect(result?.reason).toContain("reports FAIL");
+		expect(result?.reason).toContain("withdraws any older PASS");
+	}
+});
+
+test("GUARDPLANTED1: neither plant descriptions nor quoted output can supply a box, export or distinct reviewer", async () => {
+	const records = [
+		`${CLOSED_HEAD}\n${BOX_A}\nmutant: 'FAIL expected fixture output [b]'`,
+		`PASS [a] [b] by Jev96Verify\nmutant: 'FAIL expected on export a9998f478ee0'`,
+		`PASS [a] [b] on export a9998f478ee0\nmutant: 'FAIL fixture output by Jev96Verify'`,
+		`${CLOSED_HEAD}\n${BOX_A}\nmutant for [b] -> 'FAIL expected specimen'`,
+		`PASS [a] [b] by Jev96Verify\nmutant on export a9998f478ee0 -> 'FAIL expected specimen'`,
+		`PASS [a] [b] on export a9998f478ee0\nmutant described by Jev96Verify -> 'FAIL expected specimen'`,
+	];
+	for (const text of records) {
+		const h = await createFlywheelHost(base, { env: { AGENT_NAME: "PeachLeopard" }, respond: table({ "k-16": row("k-16", "RubyMeadow", [done, { author: "PeachLeopard", text }]) }) });
+		const result = await toolCall(h, project(), `br close k-16 --reason '${REASON}'`);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("SELF_CLOSE_REFUSED");
+	}
+});
+
 test("AGENTCLOSE1 planted: PASS at t1, then `REWORK [b] fails on export <sha>` at t2, is refused", async () => {
 	for (const text of ["REWORK [b] fails on export a9998f478ee0", "[b] FAIL on export a9998f478ee0 by Jev96Verify", "PENDING [b] live readback"]) {
 		const h = await createFlywheelHost(base, { env: { AGENT_NAME: "PeachLeopard" }, respond: table({ "k-10": row("k-10", "RubyMeadow", [done, pass, { author: "PeachLeopard", text }]) }) });
