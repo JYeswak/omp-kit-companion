@@ -30,7 +30,7 @@ import { applyExtensions, planExtensions } from "./apply-extensions.ts";
 import { profilePluginRuleStatus, readManifest } from "./diagnostics.ts";
 import { extractImportSpecifiers } from "./extensions.ts";
 import { censusHookFreshness, liveHookFreshnessIo, liveHookRefreshIo, refreshFleetHooks, type HookRefreshIo, type HookRefreshReport, type HookRepoRefresh, type HookRepoRow } from "./hook-refresh.ts";
-import { domain, installedJobs, KNOWN_JOBS } from "./service.ts";
+import { domain, installedJobs, KNOWN_JOBS, parseLaunchctlDisabled } from "./service.ts";
 import { livePluginReleaseIo, type PluginLink } from "./plugin-release.ts";
 import { defaultInventoryDeps, inventoryServices, type ServiceRow } from "./services.ts";
 
@@ -537,16 +537,12 @@ export async function applyActivationManifest(input: { root: string; home: strin
 	const installedNames = new Set(installedJobs(home, platform).map(job => job.name));
 	// launchd's persistent override is separate from kit opt-outs. Never
 	// attempt to refresh labels confirmed disabled by the host.
-	const disabled = new Set<string>();
+	let disabled: ReadonlySet<string> | null = null;
 	if (platform === "darwin") {
 		try {
 			const ran = await exec(["/bin/launchctl", "print-disabled", domain()]);
-			if (ran.exit === 0) {
-				for (const match of ran.stdout.matchAll(/^\s*"([^"\r\n]+)"\s*=>\s*(?:disabled|true)\s*$/gm)) {
-					disabled.add(match[1]!);
-				}
-			}
-		} catch { /* Unavailable is not evidence that a service is disabled. */ }
+			if (ran.exit === 0) disabled = parseLaunchctlDisabled(ran.stdout);
+		} catch { /* The install command also checks overrides and refuses if unreadable. */ }
 	}
 	for (const [name, job] of Object.entries(KNOWN_JOBS)) {
 		const item = `service:${name}`;
@@ -554,17 +550,19 @@ export async function applyActivationManifest(input: { root: string; home: strin
 			skipped.push({ item, reason: "opted out" });
 			continue;
 		}
-		if (disabled.has(job.label)) {
+		if (disabled?.has(job.label)) {
 			skipped.push({ item, reason: "disabled by launchd; left untouched" });
 			continue;
 		}
 		try {
-			const ran = await exec([binary, "service", "install", name, "--apply", "--yes", "--json"]);
-			let applied = false, detail = "";
+			const ran = await exec([binary, "service", "install", name, "--apply", "--yes", "--json",
+				...(platform === "darwin" ? ["--preserve-disabled"] : [])]);
+			let applied = false, skippedDisabled = false, detail = "";
 			try {
 				// The CLI's --json output is {ok, tool_version, data, errors, ...}: `ok` is the verdict; the internal exit `code` is never printed.
-				const parsed = JSON.parse(ran.stdout) as { ok?: unknown; errors?: unknown };
+				const parsed = JSON.parse(ran.stdout) as { ok?: unknown; data?: { skipped?: unknown }; errors?: unknown };
 				applied = parsed.ok === true;
+				skippedDisabled = applied && parsed.data?.skipped === "disabled";
 				const firstError = Array.isArray(parsed.errors) ? parsed.errors[0] as { code?: unknown; message?: unknown } | undefined : undefined;
 				if (firstError && (typeof firstError.code === "string" || typeof firstError.message === "string")) {
 					detail = `${String(firstError.code ?? "ERROR")}: ${String(firstError.message ?? "")}`.trim();
@@ -577,6 +575,8 @@ export async function applyActivationManifest(input: { root: string; home: strin
 				} else {
 					failed.push({ item, detail: reason });
 				}
+			} else if (skippedDisabled) {
+				skipped.push({ item, reason: "disabled by launchd; left untouched" });
 			} else {
 				servicesApplied.push(name);
 			}

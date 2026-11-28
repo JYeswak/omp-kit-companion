@@ -883,6 +883,33 @@ export function parseLaunchctlPrint(stdout: string): LaunchctlPrint {
 		lastExit: lastExit ? Number(lastExit[1]) : null, query_ok: true, query_error: null };
 }
 
+/** Unreadable overrides are unknown, never evidence that a label is enabled. */
+export function parseLaunchctlDisabled(stdout: string): ReadonlySet<string> | null {
+	const block = /^[ \t\r\n]*disabled services = \{[ \t]*(?:\r?\n([\s\S]*?))?[ \t]*\}\s*$/.exec(stdout);
+	if (!block) return null;
+	const body = block[1]?.trimEnd() ?? "";
+	// launchd can print a literal newline inside a quoted foreign label.
+	const row = /[ \t\r\n]*"([^"]+)"[ \t]*=>[ \t]*(disabled|true|enabled|false)[ \t]*(?:\r?\n|$)/y;
+	const disabled = new Set<string>();
+	const seen = new Set<string>();
+	let cursor = 0;
+	while (cursor < body.length) {
+		row.lastIndex = cursor;
+		const match = row.exec(body);
+		if (!match || seen.has(match[1]!)) return null;
+		const label = match[1]!;
+		seen.add(label);
+		if (match[2] === "disabled" || match[2] === "true") disabled.add(label);
+		cursor = row.lastIndex;
+	}
+	return disabled;
+}
+
+function launchctlDisabled(run: ServiceRunner): ReadonlySet<string> | null {
+	const result = run(["launchctl", "print-disabled", domain()]);
+	return result.code === 0 ? parseLaunchctlDisabled(result.stdout) : null;
+}
+
 function serviceOutputText(result: ServiceRunResult): string {
 	return `${result.stdout}\n${result.stderr}`;
 }
@@ -1235,7 +1262,7 @@ export function reconcileRetiredServices(home: string, platform: "darwin" | "lin
 			const stopped = run(["launchctl", "bootout", target]);
 			if (stopped.code !== 0 && !isAbsentService(stopped)) return { ok: false, changed, backup: null, detail: `Cannot unload retired ${job.label}: ${stopped.stderr}`, error: "RETIRED_JOB_STOP_FAILED" };
 			if (!isAbsentService(run(["launchctl", "print", target]))) return { ok: false, changed, backup: null, detail: `Retired ${job.label} remains loaded after bootout.`, error: "RETIRED_JOB_STILL_LOADED" };
-			uninstallService(home, job, run, false);
+			archiveUninstalledPlist(home, job, false);
 		} else {
 			const loaded = systemctlState(job, run);
 			if (loaded.fragmentPath !== null && loaded.fragmentPath !== file) return { ok: false, changed, backup: null, detail: `Retired unit is loaded from ${loaded.fragmentPath}, not ${file}.`, error: "LABEL_LOADED_ELSEWHERE" };
@@ -1344,7 +1371,7 @@ export function planInstall(home: string, job: ServiceJobDef, launcher: string, 
 		alreadyInstalled: false };
 }
 
-export interface LifecycleResult { ok: boolean; changed: boolean; backup: string | null; detail: string; error?: string }
+export interface LifecycleResult { ok: boolean; changed: boolean; backup: string | null; detail: string; error?: string; skipped?: "disabled" }
 
 export function ensureLogDir(home: string, jobName: string): void {
 	const dir = join(home, "Library", "Logs", "omp-kit");
@@ -1357,15 +1384,25 @@ export function ensureLogDir(home: string, jobName: string): void {
 }
 
 export function installService(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null,
-	installed: InstalledPlist | null, print: LaunchctlPrint, run: ServiceRunner, replace = false): LifecycleResult {
+	installed: InstalledPlist | null, print: LaunchctlPrint, run: ServiceRunner, replace = false, preserveDisabled = false): LifecycleResult {
 	const dest = plistPath(home, job.label);
-	if (print.loaded && print.path !== dest && !replace) {
+	const loaded = launchdLoaded(print);
+	if (loaded && print.path !== dest && !replace) {
 		// An isolated HOME does not isolate the per-uid launchd domain: replacing a label
 		// loaded from anywhere else would silently take over (or shadow) a foreign job.
 		return { ok: false, changed: false, backup: null,
 			detail: `Label ${job.label} is already loaded from ${print.path ?? "an unknown plist"}, not ${dest}. Re-run with --replace to take it over (a backup is kept).`,
 			error: "LABEL_LOADED_ELSEWHERE" };
 	}
+	if (loaded === null) return { ok: false, changed: false, backup: null,
+		detail: `Cannot inspect registration for ${job.label}.`, error: "SERVICE_QUERY_FAILED" };
+	const needsOverrides = preserveDisabled || !loaded || installed === null;
+	const overrides = needsOverrides ? launchctlDisabled(run) : null;
+	if (needsOverrides && overrides === null) return { ok: false, changed: false, backup: null,
+		detail: "Cannot read launchd disabled state; no service was changed.", error: "SERVICE_DISABLED_STATE_UNREADABLE" };
+	const disabled = overrides?.has(job.label) === true;
+	if (disabled && preserveDisabled) return { ok: true, changed: false, backup: null,
+		detail: "Disabled by launchd; left untouched.", skipped: "disabled" };
 	const retired = reconcileRetiredServices(home, "darwin", run);
 	if (!retired.ok) return retired;
 	try {
@@ -1375,7 +1412,7 @@ export function installService(home: string, job: ServiceJobDef, launcher: strin
 		return { ok: false, changed: false, backup: null, detail: `Cannot prepare private service TMPDIR: ${detail}`, error: "TMPDIR_SETUP_FAILED" };
 	}
 	const plan = planInstall(home, job, launcher, watchPath, installed);
-	if (plan.alreadyInstalled && print.loaded && print.path === dest) {
+	if (plan.alreadyInstalled && loaded && print.path === dest) {
 		return { ok: true, changed: false, backup: null, detail: "Identical bytes and loaded; no-op." };
 	}
 	if (plan.backup && installed) {
@@ -1386,9 +1423,21 @@ export function installService(home: string, job: ServiceJobDef, launcher: strin
 	// definition. bootout takes a single domain/label target; separate domain
 	// and label arguments fail with exit 5.
 	const target = `${domain()}/${job.label}`;
+	let enableAttempted = false;
 	// INSTALLROLLBACK1 (ompkit-fp72.120.16.84): restore the prior plist and
 	// verify actual registration before saying it was reloaded.
 	const rollBack = (why: string): LifecycleResult => {
+		if (enableAttempted) {
+			const restored = run(["launchctl", "disable", target]);
+			const stopped = run(["launchctl", "bootout", target]);
+			const stillDisabled = restored.code === 0 && launchctlDisabled(run)?.has(job.label) === true;
+			const unloaded = (stopped.code === 0 || isAbsentService(stopped)) && confirmUnloaded(job.label, run);
+			if (installed) writeFileSync(dest, installed.text, { mode: 0o644 });
+			else if (existsSync(dest)) unlinkSync(dest);
+			return { ok: false, changed: true, backup: plan.backup, detail: `${why}; previous disabled state ${
+				unloaded && stillDisabled ? "restored" : "not verified"
+			}.` };
+		}
 		if (!installed) return { ok: false, changed: true, backup: plan.backup, detail: why };
 		writeFileSync(dest, installed.text, { mode: 0o644 });
 		waitUnloaded();
@@ -1426,6 +1475,13 @@ export function installService(home: string, job: ServiceJobDef, launcher: strin
 	}
 	renameSync(temp, dest);
 	chmodSync(dest, 0o644);
+	if (disabled) {
+		enableAttempted = true;
+		const enable = run(["launchctl", "enable", target]);
+		if (enable.code !== 0 || launchctlDisabled(run)?.has(job.label) !== false) {
+			return rollBack(`launchctl enable did not verify: ${enable.stderr.trim() || enable.stdout.trim()}`);
+		}
+	}
 	const bootOne = run(["launchctl", "bootstrap", domain(), dest]);
 	let boot = bootOne;
 	if (boot.code !== 0 && !isAlreadyLoaded(boot)) {
@@ -1451,6 +1507,7 @@ export function installService(home: string, job: ServiceJobDef, launcher: strin
 	const verify = run(["launchctl", "print", `${domain()}/${job.label}`]);
 	const parsed = parseLaunchctlPrint(verify.stdout);
 	if (verify.code !== 0 || !parsed.loaded || parsed.path !== dest) {
+		if (enableAttempted) return rollBack(`verify print failed for ${job.label}`);
 		return { ok: false, changed: true, backup: plan.backup, detail: `verify print failed or points elsewhere: ${verify.stdout.trim().slice(0, 200) || verify.stderr.trim().slice(0, 200)}` };
 	}
 	return { ok: true, changed: true, backup: plan.backup, detail: plan.backup ? `Replaced with backup at ${plan.backup}.` : "Installed and verified." };
@@ -1458,10 +1515,43 @@ export function installService(home: string, job: ServiceJobDef, launcher: strin
 
 export function uninstallService(home: string, job: ServiceJobDef, run: ServiceRunner, purgeLogs: boolean): LifecycleResult & { alreadyAbsent: boolean } {
 	const dest = plistPath(home, job.label);
-	const present = existsSync(dest);
-	run(["launchctl", "bootout", `${domain()}/${job.label}`]);
-	if (!present) {
-		return { ok: true, changed: false, backup: null, alreadyAbsent: true, detail: "Already absent." };
+	const target = `${domain()}/${job.label}`;
+	const before = queryPrint(job.label, run);
+	const loaded = launchdLoaded(before);
+	if (loaded === null || (loaded && before.path !== dest)) return {
+		ok: false, changed: false, backup: null, alreadyAbsent: false, detail: `Cannot prove this install owns ${job.label}.`,
+		error: loaded ? "LABEL_LOADED_ELSEWHERE" : "SERVICE_QUERY_FAILED",
+	};
+	if (!existsSync(dest) && !loaded) return {
+		ok: true, changed: false, backup: null, alreadyAbsent: true, detail: "Already absent.",
+	};
+	const off = run(["launchctl", "disable", target]);
+	if (off.code !== 0 || launchctlDisabled(run)?.has(job.label) !== true) return {
+		ok: false, changed: off.code === 0, backup: null, alreadyAbsent: false,
+		detail: `Disabled state for ${job.label} could not be verified.`, error: "SERVICE_DISABLE_FAILED",
+	};
+	const stopped = run(["launchctl", "bootout", target]);
+	if ((stopped.code !== 0 && !isAbsentService(stopped)) || !confirmUnloaded(job.label, run)) return {
+		ok: false, changed: true, backup: null, alreadyAbsent: false,
+		detail: `Disabled ${job.label}, but could not prove it unloaded. Plist left unchanged.`, error: "SERVICE_BOOTOUT_FAILED",
+	};
+	return archiveUninstalledPlist(home, job, purgeLogs);
+}
+
+/** bootout returns before launchd has necessarily removed the registration. */
+function confirmUnloaded(label: string, run: ServiceRunner): boolean {
+	for (let attempt = 0; attempt < 8; attempt++) {
+		const loaded = launchdLoaded(queryPrint(label, run));
+		if (loaded !== true) return loaded === false;
+		if (attempt < 7) sleepMs(250);
+	}
+	return false;
+}
+
+function archiveUninstalledPlist(home: string, job: ServiceJobDef, purgeLogs: boolean): LifecycleResult & { alreadyAbsent: boolean } {
+	const dest = plistPath(home, job.label);
+	if (!existsSync(dest)) {
+		return { ok: true, changed: true, backup: null, alreadyAbsent: false, detail: "Disabled and unloaded." };
 	}
 	const backup = join(backupDir(home), `${job.label}.${new Date().toISOString().replace(/[:.]/g, "-")}.plist`);
 	mkdirSync(dirname(backup), { recursive: true, mode: 0o700 });

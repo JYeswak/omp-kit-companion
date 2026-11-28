@@ -219,11 +219,15 @@ test("SVCDISABLED1: manifest refresh leaves the host-disabled job untouched", as
 	const result = await applyActivationManifest({
 		root, home, stateRoot, platform: "darwin", binary: "/nonexistent/omp-kit", hookIo: hookIo([]),
 		exec: async (argv) => {
-			if (argv[1] === "print-disabled") return { exit: 0, stderr: "", stdout: `disabled services = {
+			if (argv[1] === "print-disabled") return { exit: 0, stderr: "", stdout: `
+			disabled services = {
+				"fixture foreign label line one
+fixture foreign label line two" => enabled
 				"${serviceLabel("claude-save")}" => disabled
 				"${serviceLabel("kit-update")}" => enabled
 			}` };
 			if (argv[3] === "claude-save") throw new Error("the disabled job must not be installed");
+			expect(argv).toContain("--preserve-disabled");
 			return { exit: 0, stdout: serviceEnvelope(true), stderr: "" };
 		},
 	});
@@ -231,6 +235,23 @@ test("SVCDISABLED1: manifest refresh leaves the host-disabled job untouched", as
 	expect(result.skipped).toContainEqual({ item: "service:claude-save", reason: "disabled by launchd; left untouched" });
 	expect(result.servicesApplied).toContain("kit-update");
 	expect(readFileSync(disabled, "utf8")).toBe("existing disabled plist\n");
+});
+
+test("SVCUNINSTALLSTICKY1 refresh leaves a job disabled after the initial launchd scan", async () => {
+	const { root, home, stateRoot } = fixtureDirs("launchd-late-disable");
+	const result = await applyActivationManifest({
+		root, home, stateRoot, platform: "darwin", binary: "/nonexistent/omp-kit", hookIo: hookIo([]),
+		exec: async (argv) => {
+			if (argv[1] === "print-disabled") return { exit: 0, stdout: "disabled services = {}\n", stderr: "" };
+			if (argv[3] === "claude-save" && argv.includes("--preserve-disabled")) {
+				return { exit: 0, stdout: JSON.stringify({ ok: true, data: { skipped: "disabled" } }), stderr: "" };
+			}
+			return { exit: 0, stdout: serviceEnvelope(true), stderr: "" };
+		},
+	});
+	expect(result.failed).toEqual([]);
+	expect(result.skipped).toContainEqual({ item: "service:claude-save", reason: "disabled by launchd; left untouched" });
+	expect(result.servicesApplied).not.toContain("claude-save");
 });
 
 // RULESKEEP1: an edited managed rule is kept; the update that installed the release reports it as skipped, not as a failure.

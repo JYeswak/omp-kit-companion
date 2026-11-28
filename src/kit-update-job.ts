@@ -35,7 +35,7 @@ export type KitUpdateJobDependencies = {
 	relink?: (binary: string, store: string) => Promise<PluginRelinkResult>;
 	/** Test seam for the attestation-bundle fetch; production runs the installer's anonymous fetch (fetchAttestationBundleFor). */
 	fetchBundle?: (archivePath: string, version: string, home: string, tmpdir: string) => Promise<Buffer>;
-	/** Test seam for the new binary's `service install kit-update --apply --yes`. Production uses spawnSync. */
+	/** Test seam for the new binary's unattended refresh of the kit-update job. Production uses spawnSync. */
 	reconcile?: (binary: string) => Promise<{ ok: boolean; detail: string }>;
 	/**
 	 * HOOKREFRESH1 test seam for the post-install fleet hook refresh.
@@ -481,7 +481,7 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 	const relink = dependencies.relink ?? ((binary: string, store: string) =>
 		relinkKitPlugin(binary, store, dependencies.exec ?? defaultExec));
 	const reconcile = dependencies.reconcile ?? (async (binary: string) => {
-		const ran = await defaultExec([binary, "service", "install", "kit-update", "--apply", "--yes"]);
+		const ran = await defaultExec([binary, "service", "install", "kit-update", "--apply", "--yes", "--preserve-disabled"]);
 		const out = (ran.stdout + ran.stderr).trim().slice(-500);
 		return ran.exit === 0 ? { ok: true, detail: out } : { ok: false, detail: `exit ${ran.exit}: ${out}` };
 	});

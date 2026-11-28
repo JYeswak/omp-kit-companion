@@ -80,7 +80,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { matchesBounded } from "./regex-guards.ts";
 import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, waitForCi, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
-import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
+import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
 import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, jobCodePrefix, launchdLoaded, resolveOperatorCommand, type OperatorCommand, type ServiceProgram } from "./service.ts";
 import { ccStateDir } from "./service.ts";
 import { retainOmpSessions } from "./session-retain.ts";
@@ -3260,8 +3260,8 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			const rendered = planInstall(home, job, launcher, watch, installed);
 			return { code: 0, data: { overall: "UNVERIFIED", job: job.name, label: job.label, plan: true, changed: !rendered.alreadyInstalled, backup: rendered.backup, diff: rendered.diff, plist: rendered.plist, ...(job.program ? { program: job.program } : {}) }, verification: "UNVERIFIED" };
 		}
-		const print = parseLaunchctlPrint(defaultRunner(["launchctl", "print", `${domain()}/${job.label}`]).stdout);
-		const result = installService(home, job, launcher, watch, installed, print, defaultRunner, request.flags.has("--replace"));
+		const result = installService(home, job, launcher, watch, installed, queryPrint(job.label), defaultRunner,
+			request.flags.has("--replace"), request.flags.has("--preserve-disabled"));
 		return { code: result.ok ? 0 : 1, data: { overall: result.ok ? (result.changed ? "CHANGED" : "OK") : "FINDINGS", job: job.name, label: job.label, program: launcher, ...result }, verification: "UNVERIFIED",
 			errors: result.ok ? [] : [{ code: result.error ?? "INSTALL_FAILED", message: result.detail, remediation: "Check launchctl output and rerun; a backup was kept when a plist was replaced." }] };
 	}
@@ -3284,7 +3284,10 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			return { code: 0, data: { overall: "UNVERIFIED", job: job.name, label: job.label, dry_run: true, already_absent: installed === null }, verification: "UNVERIFIED" };
 		}
 		const result = uninstallService(home, job, defaultRunner, request.flags.has("--purge-logs"));
-		return { code: 0, data: { overall: result.changed ? "CHANGED" : "OK", job: job.name, label: job.label, changed: result.changed, backup: result.backup, detail: result.detail, already_absent: result.alreadyAbsent }, verification: "UNVERIFIED" };
+		return { code: result.ok ? 0 : 1, data: { overall: result.ok ? (result.changed ? "CHANGED" : "OK") : "FINDINGS",
+			job: job.name, label: job.label, changed: result.changed, backup: result.backup, detail: result.detail, already_absent: result.alreadyAbsent },
+			errors: result.ok ? [] : [{ code: result.error ?? "UNINSTALL_FAILED", message: result.detail, remediation: "Check launchd registration before retrying." }],
+			verification: "UNVERIFIED" };
 	}
 	if (sub === "status") {
 		const rows = names.map(name => {
@@ -3384,8 +3387,8 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 					if (!linux) { try { ensureServiceLauncher(installPrefix(home)); } catch { /* installService below reports a launcher that is still missing */ } }
 					const result = linux
 						? installSystemd(home, job, renderSystemdUnits(home, job, launcher, watch), defaultRunner)
-						: installService(home, job, launcher, watch, installed, queryPrint(job.label), defaultRunner);
-					if (result.ok) fixed++;
+						: installService(home, job, launcher, watch, installed, queryPrint(job.label), defaultRunner, false, true);
+					if (result.ok && !result.skipped) fixed++;
 				}
 				for (const path of oversizedOwnLogs(home, job)) {
 					try {

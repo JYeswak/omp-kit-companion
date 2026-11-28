@@ -31,6 +31,13 @@ contract; `service doctor` enforces it item by item.
 | 16 | one schedule owner per machine; doctor flags double scheduling | MISSING | MISSING: `contract-double-schedule` (runtime; holder wires) |
 | 17 | fleet view: `status --all` / `list` report loaded, last exit, run age, run count, matching `launchctl print` | FIXED: parser accepts declared `--all`; rows carry loaded/lastExit/runs/last_run_at (box-2 commit) | `service status --all`, `service list` |
 
+On macOS, uninstalling an installed job verifies a persistent launchd disable
+and unload before moving its current plist to backup. A release refresh or
+`service doctor --fix` leaves a disabled job alone. To restore a previously
+uninstalled job, explicitly run `omp-kit service install JOB --apply --yes`;
+the installer verifies that the label is enabled and loaded from the expected
+plist. An unreadable disabled-state query does not authorize an automatic install.
+
 ## Agent Mail retention
 
 The hourly `am-retain` job keeps the newest

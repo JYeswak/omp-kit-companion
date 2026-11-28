@@ -74,13 +74,20 @@ function fixture(): { home: string; launcher: string; watch: string } {
 }
 
 function runner(calls: string[][], behavior?: (args: readonly string[]) => ServiceRunResult) {
+  let disabledLabel: string | undefined;
   return (args: readonly string[]): ServiceRunResult => {
     calls.push([...args]);
+    if (args[1] === "disable") {
+      disabledLabel = args[2]?.split("/").at(-1);
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (args[1] === "print-disabled") return { code: 0,
+      stdout: `disabled services = {\n${disabledLabel ? `"${disabledLabel}" => disabled\n` : ""}}\n`, stderr: "" };
     if (behavior) return behavior(args);
     if (args[0] === "plutil") return { code: 0, stdout: "OK", stderr: "" };
     if (args[1] === "bootout") return { code: 0, stdout: "", stderr: "" };
     if (args[1] === "bootstrap") return { code: 0, stdout: "", stderr: "" };
-    if (args[1] === "print") return { code: 0, stdout: "", stderr: "" };
+    if (args[1] === "print") return { code: 113, stdout: "", stderr: "Could not find service" };
     return { code: 0, stdout: "", stderr: "" };
   };
 }
@@ -302,7 +309,7 @@ test("install backs up replaced bytes and runs bootout, bootstrap and verify in 
   expect(result.changed).toBe(true);
   expect(result.backup).toContain("service-backups");
   expect(readFileSync(result.backup!, "utf8")).toBe(old);
-	expect(calls.map(call => call[1])).toEqual(["bootout", "-lint", "bootstrap", "print"]);
+	expect(calls.map(call => call[1])).toEqual(["print-disabled", "bootout", "-lint", "bootstrap", "print"]);
 });
 
 test("install boots out with a single domain/label target", () => {
@@ -458,12 +465,12 @@ test("INSTALLROLLBACK1: the retry bootstrap waits until the old label reads abse
   expect(printsBeforeRetry).toBe(3);
 });
 
-test("uninstall on an absent job reports already_absent and still bootouts", () => {
+test("uninstall on an absent job reports already_absent without a write", () => {
   const { home } = fixture();
   const calls: string[][] = [];
   const result = uninstallService(home, job, runner(calls), false);
   expect(result).toMatchObject({ ok: true, changed: false, alreadyAbsent: true });
-  expect(calls.map(call => call[1])).toEqual(["bootout"]);
+  expect(calls.map(call => call[1])).toEqual(["print"]);
 });
 
 test("uninstall moves the plist into the backup dir outside LaunchAgents", () => {
@@ -481,6 +488,77 @@ test("uninstall moves the plist into the backup dir outside LaunchAgents", () =>
   expect(removed.backup).toContain("service-backups");
   expect(() => readFileSync(dest, "utf8")).toThrow();
   expect(readFileSync(removed.backup!, "utf8")).toContain(job.label);
+  expect(calls.some(call => call[1] === "disable" && call[2]?.endsWith(`/${job.label}`))).toBe(true);
+});
+
+const stickyScenarios = ["reinstall clears disabled label", "uninstall survives refresh with the label disabled"] as const;
+test.each(stickyScenarios)("SVCUNINSTALLSTICKY1 %s", (scenario: typeof stickyScenarios[number]) => {
+  const { home, launcher, watch } = fixture();
+  const dest = join(home, "Library", "LaunchAgents", `${testLabel}.plist`);
+  const candidate = { ...job, label: testLabel };
+  const uninstallFirst = scenario === "uninstall survives refresh with the label disabled";
+  let disabled = !uninstallFirst;
+  let loaded = uninstallFirst;
+  if (uninstallFirst) {
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, renderLaunchdPlist(home, candidate, launcher, watch).text);
+  }
+  const run = (argv: readonly string[]): ServiceRunResult => {
+    switch (argv[1]) {
+      case "print-disabled":
+        return { code: 0, stdout: `disabled services = {\n "${testLabel}" => ${disabled ? "disabled" : "enabled"}\n}\n`, stderr: "" };
+      case "disable":
+        expect(argv[2]?.endsWith(`/${testLabel}`)).toBe(true);
+        disabled = true;
+        return { code: 0, stdout: "", stderr: "" };
+      case "enable":
+        expect(argv[2]?.endsWith(`/${testLabel}`)).toBe(true);
+        disabled = false;
+        return { code: 0, stdout: "", stderr: "" };
+      case "bootout":
+        loaded = false;
+        return { code: 113, stdout: "", stderr: "Could not find service" };
+      case "bootstrap":
+        if (disabled) return { code: 1, stdout: "", stderr: "Service is disabled" };
+        expect(argv[3]).toBe(dest);
+        loaded = true;
+        return { code: 0, stdout: "", stderr: "" };
+      case "print":
+        return loaded ? { code: 0, stdout: healthyPrint(dest), stderr: "" }
+          : { code: 113, stdout: "", stderr: "Could not find service" };
+      default:
+        return { code: 0, stdout: "", stderr: "" };
+    }
+  };
+  if (uninstallFirst) {
+    const removed = uninstallService(home, candidate, run, false);
+    expect(removed).toMatchObject({ ok: true, changed: true, alreadyAbsent: false });
+    expect(readFileSync(removed.backup!, "utf8")).toContain(testLabel);
+    const refresh = installService(home, candidate, launcher, watch, null, parseLaunchctlPrint(""), run, false, true);
+    expect(refresh).toMatchObject({ ok: true, changed: false, skipped: "disabled" });
+    expect(disabled).toBe(true);
+    expect(loaded).toBe(false);
+    expect(existsSync(dest)).toBe(false);
+    return;
+  }
+  const result = installService(home, candidate, launcher, watch, null, parseLaunchctlPrint(""), run);
+  expect(result.ok, result.detail).toBe(true);
+  expect(disabled).toBe(false);
+  expect(loaded).toBe(true);
+  expect(readFileSync(dest, "utf8")).toContain(testLabel);
+});
+
+test("SVCUNINSTALLSTICKY1 unreadable override leaves a queued refresh untouched", () => {
+  const { home, launcher, watch } = fixture();
+  const dest = join(home, "Library", "LaunchAgents", `${testLabel}.plist`);
+  const attempted: string[] = [];
+  const result = installService(home, { ...job, label: testLabel }, launcher, watch, null, parseLaunchctlPrint(""), argv => {
+    attempted.push(argv[1]!);
+    return { code: 0, stdout: "incomplete overrides", stderr: "" };
+  }, false, true);
+  expect(result).toMatchObject({ ok: false, changed: false, error: "SERVICE_DISABLED_STATE_UNREADABLE" });
+  expect(attempted).toEqual(["print-disabled"]);
+  expect(existsSync(dest)).toBe(false);
 });
 
 test("a healthy install passes every doctor check", () => {
@@ -1230,12 +1308,28 @@ test("service uninstall moves a stale install to backup through the CLI wire", (
     mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
     const dest = join(home, "Library", "LaunchAgents", `${testLabel}.plist`);
     writeFileSync(dest, "stale-bytes\n");
-    const result = cli(["service", "uninstall", "omp-watch", "--apply", "--yes"], home);
+    // The real CLI runs against a fixture-owned launchctl transport; do not leave
+    // persistent overrides behind in the host's per-user launchd database.
+    const bin = join(home, "fixture-bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "launchctl"), `#!/bin/sh
+case "$1" in
+  print|bootout) echo 'Could not find service' >&2; exit 113 ;;
+  disable) [ "\${2##*/}" = '${testLabel}' ] || exit 71; touch "$HOME/fixture-disabled" ;;
+  print-disabled)
+    printf 'disabled services = {\\n'
+    if [ -f "$HOME/fixture-disabled" ]; then printf '"%s" => disabled\\n' '${testLabel}'; fi
+    printf '}\\n' ;;
+  *) exit 72 ;;
+esac
+`, { mode: 0o755 });
+    const result = cli(["service", "uninstall", "omp-watch", "--apply", "--yes"], home, { PATH: `${bin}:${process.env.PATH ?? ""}` });
     expect(result.code).toBe(0);
     expect(result.envelope.data.label).toBe(testLabel);
     expect(result.envelope.data.backup).toContain("service-backups");
     expect(() => readFileSync(dest, "utf8")).toThrow();
     expect(readFileSync(result.envelope.data.backup, "utf8")).toBe("stale-bytes\n");
+    expect(existsSync(join(home, "fixture-disabled"))).toBe(true);
     return;
   }
   const dir = join(home, ".config", "systemd", "user");
@@ -1439,7 +1533,7 @@ test("a fixture install never takes over a foreign label, and --replace does it 
   try {
     const installed = cli(["service", "install", "omp-watch", "--apply", "--yes"], first.home);
     expect(installed.envelope.data.label).toBe(testLabel);
-    expect(installed.code).toBe(0);
+    expect(installed.code, JSON.stringify(installed.envelope.errors)).toBe(0);
     expect(realLaunchctlPath(testLabel).path).toContain(join(first.home, "Library", "LaunchAgents", `${testLabel}.plist`));
     const refused = cli(["service", "install", "omp-watch", "--apply", "--yes"], second.home);
     expect(refused.code).toBe(1);
