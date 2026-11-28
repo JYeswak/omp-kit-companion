@@ -527,7 +527,27 @@ check_commit() {
 
 # Installed as a pre-commit sibling: kitlib-tmp.sh sits beside this file there and in scripts/.
 kitlib_here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
-[ -f "$kitlib_here/kitlib-tmp.sh" ] || { printf 'check-commit-imports: kitlib-tmp.sh missing beside %s; rerun scripts/install-commit-msg-bead.sh\n' "$0" >&2; exit 2; }
+if [ ! -f "$kitlib_here/kitlib-tmp.sh" ]; then
+	# This recovery path cannot source the missing helper or run the detected binary.
+	kit_command=$(command -v omp-kit) || kit_command=''
+	repair_repo=$(git -C "$REPO" rev-parse --show-toplevel) || repair_repo=''
+	repair=''
+	if [ -n "$kit_command" ] && [ -n "$repair_repo" ] && command -v python3 >/dev/null 2>&1; then
+		repair=$(python3 -c '
+import os, shlex, sys
+binary = os.path.realpath(sys.argv[1])
+bin_dir = os.path.dirname(binary)
+installer = os.path.join(os.path.dirname(bin_dir), "scripts", "install-commit-msg-bead.sh")
+if (os.path.basename(bin_dir) != "bin" or os.path.basename(binary) != "omp-kit"
+        or not os.path.isfile(binary) or not os.access(binary, os.X_OK) or not os.path.isfile(installer)):
+    sys.exit(1)
+print("Run: sh " + shlex.quote(installer) + " " + shlex.quote(os.path.abspath(sys.argv[2])))
+' "$kit_command" "$repair_repo") || repair=''
+	fi
+	printf 'check-commit-imports: kitlib-tmp.sh missing beside %s; %s\n' "$0" \
+		"${repair:-Locate the active kit release with omp-kit --info, then run its hook installer for this repository.}" >&2
+	exit 2
+fi
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$kitlib_here/kitlib-tmp.sh"
 KITLIB_TMP_ROOT=${TMPDIR:-$REPO/var/agent-tmp} # tempsafe: picks the kitlib root only, kitlib_tmp below owns the dir

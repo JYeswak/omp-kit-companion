@@ -308,6 +308,9 @@ export async function censusHookFreshness(io: HookFreshnessIo): Promise<HookRepo
 	return rows;
 }
 
+// A doctor suggestion is a command for the operator, never executed by the census.
+const quoteHookPath = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+
 export async function inspectHooks(io: HookFreshnessIo): Promise<Finding[]> {
 	const rows = await censusHookFreshness(io);
 	const staleRepos = rows.filter((row) => row.state === "STALE");
@@ -319,14 +322,22 @@ export async function inspectHooks(io: HookFreshnessIo): Promise<Finding[]> {
 			+ (staleRepos.length ? `; STALE: ${staleRepos.map((row) => `${basename(row.repo)} (${row.stale.join(", ")})`).join("; ")}` : "")
 			+ (unreadable.length ? `; ${unreadable.length} repo path(s) unreadable` : "");
 	const trackedPending = staleRepos.filter((row) => row.tracked).map((row) => row.repo);
+	const missingMembers = staleRepos.flatMap(row => row.members.filter(member => member.status === "MISSING")
+		.map(member => ({ repo: row.repo, member: member.member })));
+	const helperRepos = new Set(missingMembers.filter(({ member }) =>
+		member.endsWith("/kitlib-tmp.sh") || member.endsWith("/kitlib-findings.sh")).map(({ repo }) => repo));
+	const install = join(io.kitRoot(), "scripts", "install-commit-msg-bead.sh");
+	const repair = staleRepos.map(({ repo }) => helperRepos.has(repo)
+		? `sh ${quoteHookPath(install)} ${quoteHookPath(repo)}`
+		: `omp-kit doctor --scope hooks --project ${quoteHookPath(repo)}`).join("\n");
 	return [{
 		component: "hooks",
 		status,
 		reason,
 		recommended_action: staleRepos.length > 0
-			? (trackedPending.length > 0
-				? `Rerun the hook installer in each stale repo (sh <release>/scripts/install-commit-msg-bead.sh <repo>); ${trackedPending.map((repo) => basename(repo)).join(", ")} track(s) files in its hooks path: the installer git-ignores the members it writes, and its director commits or untracks any refreshed member it still tracks, with a Bead: trailer under a reservation — kit-update never commits them.`
-				: "Rerun the hook installer in each stale repo: sh <release>/scripts/install-commit-msg-bead.sh <repo>.")
+			? `Repair missing kitlib helpers or diagnose other hook drift:\n${repair}` + (trackedPending.length > 0
+				? `\n${trackedPending.map(repo => basename(repo)).join(", ")} track(s) files in its hooks path: its director commits or untracks refreshed tracked members with a Bead: trailer under a reservation — kit-update never commits them.`
+				: "")
 			: rows.length === 0 ? "Register the fleet repos in fleet-watch.json." : "No action required.",
 		evidence: {
 			source: "fleet-watch.json repos vs active release scripts/",
@@ -335,21 +346,21 @@ export async function inspectHooks(io: HookFreshnessIo): Promise<Finding[]> {
 			tracked_pending_commit: trackedPending,
 			unreadable: unreadable.map((row) => row.repo),
 			stale_members: staleRepos.map((row) => ({ repo: row.repo, hooks_dir: row.hooks_dir, tracked: row.tracked, members: row.stale })),
+			missing_members: missingMembers,
 		},
 	}];
 }
 
 /** Use the installers' complete manifests, not the fleet census's mirrored subset. */
 export async function inspectHookInstallers(repo: string, kitRoot: string): Promise<Finding[]> {
-	const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 	const findings: Finding[] = [];
 	for (const installer of ["install-pre-push-gate.sh", "install-commit-msg-bead.sh"]) {
 		const script = join(kitRoot, "scripts", installer);
 		// The fresh-gate installer installs its own checkout; the bead installer
 		// explicitly accepts a target repo. Never suggest passing it to the former.
 		const repair = installer === "install-pre-push-gate.sh"
-			? `cd ${quote(repo)} && sh scripts/install-pre-push-gate.sh`
-			: `sh ${quote(script)} ${quote(repo)}`;
+			? `cd ${quoteHookPath(repo)} && sh scripts/install-pre-push-gate.sh`
+			: `sh ${quoteHookPath(script)} ${quoteHookPath(repo)}`;
 		try {
 			const result = await run(["sh", script, "--check", repo], { deadline_s: 30, max_output_bytes: 64 * 1024 });
 			const complete = !result.timed_out && !result.killed && !result.truncated;
@@ -358,7 +369,7 @@ export async function inspectHookInstallers(repo: string, kitRoot: string): Prom
 			findings.push({
 				component: "hooks", status,
 				reason: `${repo}: ${installer} --check: ${status}\n${output}`,
-				recommended_action: status === "OK" ? "No action required." : `Reinstall: ${repair}; then rerun omp-kit doctor --scope hooks --project ${quote(repo)}.`,
+				recommended_action: status === "OK" ? "No action required." : `Reinstall: ${repair}; then rerun omp-kit doctor --scope hooks --project ${quoteHookPath(repo)}.`,
 				evidence: { repo, installer: script, rc: result.rc, timed_out: result.timed_out, truncated: result.truncated, output, reinstall_command: repair },
 			});
 		} catch (error) {
