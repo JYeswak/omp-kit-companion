@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { delimiter, join, sep } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 
@@ -111,26 +111,26 @@ test("PREFLIGHTNFS1: export tests use registered source scratch and refuse missi
 	const { checkout, source, withOvnfs, withoutOvnfs } = await setupPair(name);
 	const testPath = "tests/cli/placement.test.py";
 	mkdirSync(join(checkout, "tests/cli"), { recursive: true });
-	const specimen = (repo: string) => [
+	// Assert the actual child cwd in the host test. Its staged Python must not
+	// inject the runner's temporary path as an executable source literal.
+	const specimen = [
 		"import os",
 		"from pathlib import Path",
-		`expected = Path(${JSON.stringify(join(repo, "var/agent-tmp"))}).resolve()`,
-		"assert Path.cwd().resolve().is_relative_to(expected), 'export scratch is on the checkout instead of the registered source'",
 		"assert Path(os.environ['TMPDIR']).resolve().is_relative_to(Path.cwd()), 'TMPDIR escaped the export'",
-		"print('preflight export and test scratch on selected source')",
+		"print('PREFLIGHT_EXPORT_CWD ' + str(Path.cwd().resolve()))",
 		"",
 	].join("\n");
 	const args = ["--files", testPath, "--tests", testPath];
-	writeFileSync(join(checkout, testPath), specimen(checkout));
+	writeFileSync(join(checkout, testPath), specimen);
 	const local = await runPreflight(checkout, withoutOvnfs, args);
 	expect(local.rc, local.text).toBe(0);
 	expect(local.text).toContain(`PASS export-test:${testPath}`);
+	expect(local.text).toContain(`PREFLIGHT_EXPORT_CWD ${join(realpathSync(checkout), "var", "agent-tmp")}${sep}`);
 	await git(checkout, ["config", "--local", "ovnfs.checkout", `${name}-checkout`], withOvnfs);
-	writeFileSync(join(checkout, testPath), specimen(source));
 	const resolved = await runPreflight(checkout, withOvnfs, args);
 	expect(resolved.rc, resolved.text).toBe(0);
 	expect(resolved.text).toContain(`PASS export-test:${testPath}`);
-	expect(resolved.text).toContain("preflight export and test scratch on selected source");
+	expect(resolved.text).toContain(`PREFLIGHT_EXPORT_CWD ${join(realpathSync(source), "var", "agent-tmp")}${sep}`);
 	const refuses = async (env: Record<string, string>) => {
 		const unresolved = await runPreflight(checkout, env, args);
 		expect(unresolved.rc, unresolved.text).toBe(1);
