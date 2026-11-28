@@ -75,6 +75,7 @@ const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/slb-guard-fail-closed.ts": "SLB_GUARD_BUNDLE_FAILED",
 	// UPGRADEHOLD1: the notice reads the fleet upgrade hold through src/upgrade-hold.ts, which the kit-update job shares; shipped raw it would resolve outside the package.
 	"extensions/kit-upgrade-notice.ts": "UPGRADE_NOTICE_BUNDLE_FAILED",
+	"skills/fleet-round/scripts/fleet-round.ts": "FLEET_ROUND_BUNDLE_FAILED",
 	"scripts/ttsr-harness.ts": "HARNESS_BUNDLE_FAILED",
 	"scripts/external-live.mjs": "EXTERNAL_LIVE_BUNDLE_FAILED",
 	// REPLAYABLE1: bead_lint's box grammar is src/verify.ts's own; bundled, the installed lint needs no checkout src/.

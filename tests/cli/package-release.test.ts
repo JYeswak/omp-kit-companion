@@ -51,6 +51,43 @@ async function stagePackageArchive(): Promise<PackageArchiveStage> {
 
 let stagedArchive: Promise<PackageArchiveStage> | undefined;
 
+test("FLEETROUNDPACK1 runs the installed fleet-round judge without checkout sources", async () => {
+	const { staged } = await (stagedArchive ??= stagePackageArchive());
+	const entry = "skills/fleet-round/scripts/fleet-round.ts";
+	const work = join(output, "fleet-round-package");
+	mkdirSync(work);
+	const config = join(work, "fleet.json");
+	writeFileSync(config, JSON.stringify({
+		schema: "fleet-round.config/v1",
+		projects: { demo: { root: work } },
+		barrier: { board_channel: "fleet", hours: { INSIGHT: 2, AGREE: 1, SORT: 8 } },
+	}));
+	const barrier = (program: string) => runBounded(
+		[process.execPath, "run", "--no-env-file", "--config=/dev/null", program,
+			"barrier", "--config", config, "--round", "0", "--phase", "INSIGHT",
+			"--opened-at", "2026-10-12T09:00:00Z", "--state", work],
+		{ cwd: work, env: { HOME: work, PATH: "/usr/bin:/bin", NO_COLOR: "1" }, deadline_s: fixtureDeadlineS(10) },
+	);
+	const decoder = new TextDecoder();
+	const ready = await barrier(join(staged.root, entry));
+	expect(ready.rc, decoder.decode(ready.stderr)).toBe(3);
+	expect(JSON.parse(decoder.decode(ready.stdout))).toMatchObject({
+		schema: "fleet-round.barrier/v2", state: "UNKNOWN", board: { available: false },
+		projects: [{ project: "demo", verdict: "UNKNOWN" }],
+	});
+
+	// Restore the unbundled entry in a disposable copy with its sibling modules,
+	// but no checkout src/: this is how the previous installed archive failed.
+	const raw = join(work, "unbundled", entry);
+	mkdirSync(dirname(raw), { recursive: true });
+	cpSync(join(staged.root, dirname(entry), "lib"), join(dirname(raw), "lib"), { recursive: true });
+	writeFileSync(raw, readFileSync(join(output, "archived-source", entry)));
+	const plant = await barrier(raw);
+	expect(plant.rc).toBe(1);
+	expect(decoder.decode(plant.stderr)).toContain("Cannot find module");
+	expect(decoder.decode(plant.stdout)).toBe("");
+}, fixtureDeadlineS(60) * 1_000);
+
 test("BOARDLAUNCH1: packaged guard checks live Board custody through its own CLI", async () => {
 	const { staged } = await (stagedArchive ??= stagePackageArchive());
 	// Only the runtime-staged package has the bundled extension and sibling native CLI.
