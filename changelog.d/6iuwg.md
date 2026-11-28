@@ -1,1 +1,0 @@
-- Bash tool calls refuse npm, pnpm, Yarn, and Bun installs that would modify an ancestor project from a manifest-free child directory. The refusal names the ancestor and how to select the intended project or an owned scratch prefix. `omp-kit doctor --json` lists extension files present in the installed package, separately from live activation.

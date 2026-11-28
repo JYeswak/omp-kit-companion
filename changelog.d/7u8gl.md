@@ -1,1 +1,0 @@
-- The bead close guard no longer treats explicitly labeled, quoted planted output as a verifier’s own failure. The quote cannot supply a box, export SHA, or verifier identity; real failed and pending verdicts still block closure.

@@ -4,6 +4,25 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.163] - 2026-11-28
+
+### Changed
+
+- `omp-kit verify --live-readback` accepts `--tracker PATH`. It runs the box in `--project`, but finds, updates, and closes the bead and records its lesson in the named tracker. A known fork requires the explicit tracker instead of silently closing its copied bead.
+- Bash tool calls refuse npm, pnpm, Yarn, and Bun installs that would modify an ancestor project from a manifest-free child directory. The refusal names the ancestor and how to select the intended project or an owned scratch prefix. `omp-kit doctor --json` lists extension files present in the installed package, separately from live activation.
+- Commit preflight runs affected test exports for ovnfs checkouts under the registered source repository’s scratch directory, while still judging the checkout’s staged bytes. Missing checkout provenance refuses the export instead of trying the mounted filesystem.
+- The bead close guard no longer treats explicitly labeled, quoted planted output as a verifier’s own failure. The quote cannot supply a box, export SHA, or verifier identity; real failed and pending verdicts still block closure.
+- Stop release-readiness status and staged preflight diff probes from refreshing the Git index. Actual Git writes still require the index lock.
+- Run the existing G4 live pool with two workers on the hosted Ubuntu ladder, preserving its macOS default and required cases. (ompkit-kup44.16)
+- `omp-kit land --patch` gives detached checkouts 300 seconds by default, with `OMP_KIT_LAND_WORKTREE_DEADLINE_S` clamped to 30–1800 seconds. It removes its own locked worktree registration when checkout fails, without pruning unrelated worktrees.
+- `omp-kit doctor --scope load` and `load-watch` attribute Tern descendants to their seat's `AGENT_NAME`, falling back to tmux. Settled release qualification now appears in the existing heavy-job ledger while it runs.
+
+### Fixed
+
+- Verifier publication refusals now distinguish exact-ref locks from incomplete Git process results without exposing child output or admitting a cached ref. (ompkit-1ra0d.218.4)
+- `omp-kit doctor --scope release` reports `NOT-READY` when hosted CI has not succeeded on the exact published commit, using the same check as the release cutter.
+- When the installed import hook is missing its Git helper, it still blocks the commit and now prints a runnable repair command from the active omp-kit release. Hooks doctor names the missing helper and the affected repository.
+
 ## [0.2.162] - 2026-11-28
 
 ### Changed

@@ -1,1 +1,0 @@
-- `omp-kit land --patch` gives detached checkouts 300 seconds by default, with `OMP_KIT_LAND_WORKTREE_DEADLINE_S` clamped to 30–1800 seconds. It removes its own locked worktree registration when checkout fails, without pruning unrelated worktrees.

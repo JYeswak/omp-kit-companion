@@ -1,1 +1,0 @@
-- `omp-kit verify --live-readback` accepts `--tracker PATH`. It runs the box in `--project`, but finds, updates, and closes the bead and records its lesson in the named tracker. A known fork requires the explicit tracker instead of silently closing its copied bead.
