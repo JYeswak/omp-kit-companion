@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.161] - 2026-11-28
+
+### Changed
+
+- Link the README to the latest published release instead of stamping a version that can go stale on the next tag.
+
 ## [0.2.160] - 2026-11-28
 
 ### Fixed
