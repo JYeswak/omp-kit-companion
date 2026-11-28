@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- fleet-round barrier timer, one round phase. Template: render the @...@ placeholders and load it
-     as SKILL.md "Barrier timer" says; never installed by the kit. Reads Agent Mail's store and the
-     project trackers read-only; writes only into @ROUND_DIR@. -->
+     as SKILL.md "Barrier timer" says; never installed by the kit. Reads the configured Board thread
+     and project trackers; writes its state and output into @ROUND_DIR@. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
@@ -17,6 +17,8 @@
 		<string>barrier</string>
 		<string>--config</string>
 		<string>@CONFIG@</string>
+		<string>--board-root</string>
+		<string>@BOARD_ROOT@</string>
 		<string>--round</string>
 		<string>@ROUND@</string>
 		<string>--phase</string>
@@ -40,6 +42,12 @@
 	<dict>
 		<key>PATH</key>
 		<string>@PATH@</string>
+		<key>BOARD_URL</key>
+		<string>@BOARD_URL@</string>
+		<key>BOARD_PROFILE</key>
+		<string>@BOARD_PROFILE@</string>
+		<key>OMP_KIT_BOARD_CLI</key>
+		<string>@BOARD_CLI@</string>
 		<key>NO_COLOR</key>
 		<string>1</string>
 	</dict>

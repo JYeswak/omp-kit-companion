@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-// fleet-round validator CLI. A director's round report is a claim; this recomputes it from br, git,
-// tmux, ps and Agent Mail identity files, all read-only. See ../SKILL.md.
+// fleet-round validator CLI. Recompute reports from br, git, pane-bound Tern
+// observations, and explicit Board threads. See ../SKILL.md.
 //
 //   collect    --config C --project P --out RAW.json
 //   check      --config C --project P [--raw RAW.json] [--focus a,b,c] [--snapshot S.json] [--now ISO] [--out-json F] [--out-md F]
@@ -8,12 +8,12 @@
 //   snapshot   --config C --project P --out S.json [--raw RAW.json] [--round-start ISO]
 //   spot-check --config C --project P --since ISO --seed SEED [--rate 0.1] [--raw RAW.json] [--now ISO]
 //   score      --measured M.json --predictions DOC.md [--predictions DOC.md ...]
-//   barrier    --config C --round N --phase INSIGHT|AGREE|SORT --opened-at ISO --state ROUND_DIR [--raw PROJECT=RAW.json ...] [--now ISO] [--out-json F] [--out-md F]
+//   barrier    --config C --board-root ID --round N --phase INSIGHT|AGREE|SORT --opened-at ISO --state ROUND_DIR [--raw PROJECT=RAW.json ...] [--now ISO] [--out-json F] [--out-md F]
 //
 // Exit: 0 PASS/ACCEPTED, 1 FAIL/REJECTED, 3 UNKNOWN/UNVERIFIED, 2 usage or unreadable input.
 // barrier: 0 MET, 1 MISSED, 3 any source unavailable (never MET on unknown), 4 OPEN, 2 usage.
 import { readFileSync, statSync, writeFileSync } from "node:fs";
-import { barrierExit, barrierMarkdown, loadState, planDelivery, readThread, runBarrier, saveState, type Validation, writeAtomic } from "./lib/barrier.ts";
+import { barrierExit, barrierMarkdown, loadState, planDelivery, readBoardThread, runBarrier, saveState, type Validation, writeAtomic } from "./lib/barrier.ts";
 import { type CheckOptions, type CheckResult, checkDag, checkFocus, checkFrontier, checkMission, checkPile, findMissions, metrics, overall, type Snapshot, spotCheck } from "./lib/checks.ts";
 import { BARRIER_PHASES, type BarrierPhase, collect, type Config, loadConfig } from "./lib/collect.ts";
 import { proveSend } from "../../../src/send.ts";
@@ -90,7 +90,7 @@ type Verdict = {
 
 function evaluate(bundle: RawBundle, config: Config, options: CheckOptions): Verdict {
 	const tracker = parseTracker(bundle);
-	const seats = parseSeats(bundle);
+	const seats = parseSeats(bundle, config.projects[bundle.project]);
 	const results = [checkMission(bundle.docs, options.approver), checkPile(tracker, seats, options), checkDag(tracker), checkFrontier(tracker, options), checkFocus(tracker, options)];
 	return {
 		schema: "fleet-round.verdict/v1",
@@ -110,7 +110,8 @@ function evaluate(bundle: RawBundle, config: Config, options: CheckOptions): Ver
 			seat_reasons: seats.reasons,
 			panes: seats.panes.length,
 			agent_panes: seats.panes.filter(p => p.agent !== null).length,
-			identity_dirs: bundle.seats.identity.map(d => ({ key: d.key, dir: d.dir, files: d.files === null ? null : Object.keys(d.files).length })),
+			tern_capture: typeof bundle.seats.tern === "string",
+			configured_bindings: bundle.seats.bindings?.length ?? 0,
 			config_stale_hours: config.stale_hours,
 		},
 		pass_bar: overall(results),
@@ -166,7 +167,7 @@ const FLAGS: Record<string, string[]> = {
 	snapshot: ["config", "project", "out", "raw", "round-start"],
 	"spot-check": ["config", "project", "since", "seed", "rate", "raw", "now"],
 	score: ["measured", "predictions"],
-	barrier: ["config", "round", "phase", "opened-at", "state", "raw", "now", "out-json", "out-md"],
+	barrier: ["config", "board-root", "round", "phase", "opened-at", "state", "raw", "now", "out-json", "out-md"],
 };
 
 /** The report validator: claims recomputed against the bundle, focus taken from the report's own FOCUS line, MISSION checked against the validator's mission. */
@@ -189,7 +190,7 @@ function validateWith(report: string, bundle: RawBundle, config: Config, options
 
 async function barrier(args: Map<string, string[]>, config: Config, configPath: string): Promise<number> {
 	const settings = config.barrier;
-	if (settings === null) throw new Usage(`${configPath}: barrier needs a "barrier" section (agent_mail_db, mail_project, hours)`);
+	if (settings === null) throw new Usage(`${configPath}: barrier needs a "barrier" section (board_channel, hours)`);
 	const roundText = need(args, "round");
 	if (!matchLine(ROUND_NUMBER, roundText)) throw new Usage(`--round ${JSON.stringify(roundText)} is not a round number`);
 	const phaseText = need(args, "phase");
@@ -213,7 +214,8 @@ async function barrier(args: Map<string, string[]>, config: Config, configPath: 
 			const bundle = raws.has(project) ? loadRaw(raws.get(project)!, project) : collect(config, project);
 			const report = validateWith(body, bundle, config, options).report;
 			if (report.status === "ACCEPTED") return { status: "ACCEPTED", reasons: [] };
-			return { status: "REJECTED", reasons: report.status === "REJECTED" ? report.errors : report.unverified.map(note => `unverified: ${note}`) };
+			return report.status === "REJECTED" ? { status: "REJECTED", reasons: report.errors } :
+				{ status: "UNKNOWN", reasons: report.unverified };
 		} catch (error) {
 			if (error instanceof Usage) throw error;
 			return { status: "UNKNOWN", reasons: [`${project}: sources unavailable: ${(error as Error).message}`] };
@@ -221,10 +223,13 @@ async function barrier(args: Map<string, string[]>, config: Config, configPath: 
 	};
 	const round = Number(roundText);
 	const state = loadState(dir);
-	const mail = readThread(settings.database, settings.mail_project, `fleet-round-${round}`);
-	const input = { round, phase, reportPhase: BARRIER_PHASES[phase], projects: Object.keys(config.projects), openedAt, timeboxHours: settings.hours[phase], now, database: settings.database, mailProject: settings.mail_project };
-	const result = runBarrier(input, mail, validate, state);
-	saveState(dir, state);
+	const boardRoot = one(args, "board-root");
+	const boardChannel = settings.board_channel;
+	const board = readBoardThread(boardRoot, boardChannel, process.cwd());
+	const input = { round, phase, reportPhase: BARRIER_PHASES[phase], projects: Object.keys(config.projects), openedAt,
+		timeboxHours: settings.hours[phase], now, boardRoot, boardChannel };
+	const result = runBarrier(input, board, validate, state);
+	if (board.available) saveState(dir, state);
 	const json = `${JSON.stringify(result, null, 2)}\n`;
 	const jsonOut = one(args, "out-json");
 	const mdOut = one(args, "out-md");
@@ -241,7 +246,6 @@ async function barrier(args: Map<string, string[]>, config: Config, configPath: 
 		(state.notified ??= {})[delivery.key] = result.now;
 		saveState(dir, state);
 	}
-	saveState(dir, state);
 	process.stdout.write(jsonOut || mdOut ? barrierMarkdown(result) : json);
 	return barrierExit(result);
 }

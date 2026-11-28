@@ -4,17 +4,17 @@
 // reads as PASS. Each planted negative below must go RED; the clean bundle must go GREEN so a
 // reject-everything validator also fails. Barrier timer: a missing, rejected or late report, or an
 // unreadable source, must keep the barrier from MET, and a repeated blocker must escalate.
-import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { type BarrierResult, type BarrierStateFile, planDelivery, type ProjectResult } from "../../skills/fleet-round/scripts/lib/barrier.ts";
+import { type BarrierResult, type BarrierStateFile, planDelivery, type ProjectResult, STATE_FILE } from "../../skills/fleet-round/scripts/lib/barrier.ts";
 import { loadConfig } from "../../skills/fleet-round/scripts/lib/collect.ts";
 import { type CheckOptions, checkDag, checkFocus, checkFrontier, checkMission, checkPile, findMissions, metrics, spotCheck } from "../../skills/fleet-round/scripts/lib/checks.ts";
-import { identityDirName, parseSeats, parseTracker, type RawBundle, sanitizePaneKey, ShapeError } from "../../skills/fleet-round/scripts/lib/model.ts";
+import { holderStatus, parseSeats, parseTracker, type RawBundle, ShapeError } from "../../skills/fleet-round/scripts/lib/model.ts";
 import { CITATION, CLAIM_VALUE, DONE_CALLBACK, LABEL_LINE, MAX_LINE, matchLine, NO_EPIC, PATTERNS, ROUND_NUMBER, SEAT } from "../../skills/fleet-round/scripts/lib/patterns.ts";
 import { loadMeasured, loadPredictionDoc, scoreAll } from "../../skills/fleet-round/scripts/lib/predictions.ts";
 import { validateReport } from "../../skills/fleet-round/scripts/lib/report.ts";
+import { runFixture } from "./fixture-process.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const fixtures = join(repo, "tests/fixtures/fleet-round");
@@ -30,11 +30,25 @@ beforeAll(() => {
 });
 afterAll(() => rmSync(workspace, { recursive: true, force: true }));
 
-// ---- a clean bundle in the exact shapes br/tmux/ps/identity files emit (references/evidence.md) ----
+// ---- replayable tracker and Tern process observations -------------------------------------------
 
 type Spec = { id: string; status: string; type?: string; assignee?: string; parent?: string; deps?: [string, string][]; comments?: [string, string, number][]; updated?: number; closed?: number };
 
-function bundle(specs: Spec[], ready: string[], extra: Partial<{ docs: Record<string, string>; identity: Record<string, string> | null; tmux: string | null; ps: string | null }> = {}): RawBundle {
+const LIVE_PANE = "9007199254740997";
+const EXITED_PANE = "102";
+const TERN_RAW = JSON.stringify({
+	sessions: [{ id: "1", name: "demo", tabs: [{ id: "2", name: "work", blocks: [{ id: LIVE_PANE }, { id: EXITED_PANE }] }] }],
+	panes: [{ pane: LIVE_PANE, cwd: "/home/user/demo", exited: null, working: false },
+		{ pane: EXITED_PANE, cwd: "/home/user/demo", exited: 0, working: false }],
+});
+const TERN_BINDINGS = [
+	{ name: "LiveAgent", session: "demo", pane: `tern:${LIVE_PANE}`,
+		process: JSON.stringify({ pane: LIVE_PANE, foreground: { argv: ["omp"], pid: 101, name: "omp", cwd: "/home/user/demo" } }) },
+	{ name: "GoneAgent", session: "demo", pane: `tern:${EXITED_PANE}`, process: null },
+];
+const HOLDERS = Object.fromEntries(TERN_BINDINGS.map(({ name, session, pane }) => [name, { session, pane }]));
+
+function bundle(specs: Spec[], ready: string[], extra: Partial<{ docs: Record<string, string>; tern: string | null; bindings: typeof TERN_BINDINGS }> = {}): RawBundle {
 	const byId = new Map(specs.map(s => [s.id, s]));
 	const show = specs.map(s => {
 		const row: Record<string, unknown> = { id: s.id, title: "t", status: s.status, priority: 1, issue_type: s.type ?? "task", labels: [], created_at: iso(NOW - 200 * HOUR), created_by: "op", updated_at: iso(s.updated ?? NOW - HOUR) };
@@ -56,13 +70,8 @@ function bundle(specs: Spec[], ready: string[], extra: Partial<{ docs: Record<st
 		br: { version: "br 0.7.4", list: JSON.stringify({ issues: list, total: list.length, limit: 0, offset: 0, has_more: false }), show: JSON.stringify(show), ready: JSON.stringify(ready.map(id => ({ id, title: "t", status: "open", issue_type: "task", priority: 1 }))), policy_yaml: "workflow:\n  statuses: [open, in_progress, in_review, rework, blocked, deferred, closed]\n" },
 		git: { repo: "/home/user/demo", ref: "HEAD", head: "0".repeat(40), ls_files: Object.keys(extra.docs ?? CLEAN_DOCS).join("\n") },
 		docs: extra.docs ?? CLEAN_DOCS,
-		seats: {
-			tmux: [{ socket: "/tmp/tmux-test/default", output: extra.tmux === undefined ? "demo:0.1\t%7\t100\tdemo\t0\t1\n" : extra.tmux, error: extra.tmux === null ? "socket does not exist" : null }], // tempsafe: fake path value in fixture, nothing created
-			ps: extra.ps === undefined ? "  100     1 -zsh\n  101   100 bun /home/user/.bun/bin/omp --profile x\n" : extra.ps,
-			identity_root: "/home/user/.config/agent-mail/identity",
-			identity: [{ key: "/home/user/demo", dir: `/home/user/.config/agent-mail/identity/${identityDirName("/home/user/demo")}`, files: extra.identity === undefined ? { "7": '{"name":"LiveAgent","session_name":"demo","pane_id":"%7","pane_pid":100,"socket_path":"/tmp/tmux-test/default","written_at":"2026-10-12T00:00:00Z"}' } : extra.identity }],
-			agent_markers: ["/.bun/bin/omp", "/pi-coding-agent/dist/cli.js"],
-		},
+		seats: { tern: extra.tern === undefined ? TERN_RAW : extra.tern, tern_error: extra.tern === null ? "Tern unavailable" : null,
+			bindings: extra.bindings ?? TERN_BINDINGS },
 	};
 }
 
@@ -185,37 +194,36 @@ test("planted: in_progress 30h old with a dead assignee -> pile FAIL naming the 
 	const pile = results.find(r => r.name === "pile")!;
 	expect(pile.status).toBe("FAIL");
 	expect(pile.findings.filter(f => f.kind === "stale-no-holder").map(f => f.id)).toEqual(["demo-e1.3"]);
-	expect(pile.findings[0]!.detail).toContain("no agent pane binds GoneAgent");
+	expect(pile.findings[0]!.detail).toContain("GoneAgent");
 });
 
-test("planted: holder liveness unobservable (no identity dir) -> UNKNOWN, not PASS", () => {
+test("planted: Tern pane inventory unobservable -> UNKNOWN, not PASS", () => {
 	const specs = [...CLEAN, { id: "demo-e1.3", status: "in_progress", parent: "demo-e1", assignee: "LiveAgent", updated: NOW - 30 * HOUR }];
-	const pile = allChecks(bundle(specs, ["demo-e1.1"], { identity: null }), options({ snapshot: null })).results.find(r => r.name === "pile")!;
+	const pile = allChecks(bundle(specs, ["demo-e1.1"], { tern: null }), options({ snapshot: null })).results.find(r => r.name === "pile")!;
 	expect(pile.status).toBe("UNKNOWN");
 	expect(pile.findings.map(f => [f.kind, f.id])).toContainEqual(["stale-holder-unknown", "demo-e1.3"]);
 });
 
-test("planted: tmux unavailable -> UNKNOWN, not PASS", () => {
+test("BOARDIDENTITY1 legacy identity and Board whoami are not pane proof; exact Tern binding reports the holder", () => {
 	const specs = [...CLEAN, { id: "demo-e1.3", status: "in_progress", parent: "demo-e1", assignee: "LiveAgent", updated: NOW - 30 * HOUR }];
-	const pile = allChecks(bundle(specs, ["demo-e1.1"], { tmux: null }), options({ snapshot: null })).results.find(r => r.name === "pile")!;
-	expect(pile.status).toBe("UNKNOWN");
-});
-
-test("legacy identity file without pane_pid is unverified -> UNKNOWN; pid mismatch is stale -> DEAD", () => {
-	const specs = [...CLEAN, { id: "demo-e1.3", status: "in_progress", parent: "demo-e1", assignee: "LiveAgent", updated: NOW - 30 * HOUR }];
-	const legacy = allChecks(bundle(specs, ["demo-e1.1"], { identity: { "7": "LiveAgent\n" } }), options({ snapshot: null })).results.find(r => r.name === "pile")!;
-	expect(legacy.status).toBe("UNKNOWN");
-	const stale = allChecks(bundle(specs, ["demo-e1.1"], { identity: { "7": '{"name":"LiveAgent","pane_id":"%7","pane_pid":999}' } }), options({ snapshot: null })).results.find(r => r.name === "pile")!;
-	expect(stale.status).toBe("FAIL");
-	expect(stale.findings.find(f => f.id === "demo-e1.3")!.detail).toContain("earlier pane_pid");
-});
-
-test("composite pane key binds too (session:window:pane sanitized to session-window-pane)", () => {
-	expect(sanitizePaneKey("omp-test:0:1")).toBe("omp-test-0-1");
-	expect(sanitizePaneKey("%38")).toBe("38");
-	const specs = [...CLEAN, { id: "demo-e1.3", status: "in_progress", parent: "demo-e1", assignee: "LiveAgent", updated: NOW - 30 * HOUR }];
-	const view = parseSeats(bundle(specs, [], { identity: { "demo-0-1": '{"name":"LiveAgent","pane_id":"%7","pane_pid":100}' } }));
-	expect(view.bindings.get("demo:0.1")).toEqual([{ name: "LiveAgent", verified: true, stale: false, file: `/home/user/.config/agent-mail/identity/${identityDirName("/home/user/demo")}/demo-0-1` }]);
+	const legacy = bundle(specs, ["demo-e1.1"], { tern: null, bindings: [] });
+	Object.assign(legacy.seats, { identity: [{ key: "demo", files: { [LIVE_PANE]: '{"name":"LiveAgent","pane_pid":101}' } }],
+		board_whoami: { profile: "liveagent" } });
+	expect(holderStatus("LiveAgent", parseSeats(legacy)).status).toBe("UNKNOWN");
+	const otherPane = bundle(specs, ["demo-e1.1"], { bindings: [{ ...TERN_BINDINGS[0]!, pane: "tern:404" }] });
+	expect(holderStatus("LiveAgent", parseSeats(otherPane)).status).toBe("UNKNOWN");
+	const unrelated = bundle(specs, ["demo-e1.1"], { bindings: [{ ...TERN_BINDINGS[0]!,
+		process: JSON.stringify({ pane: LIVE_PANE, foreground: { argv: ["omp"], pid: 101, name: "omp", cwd: "/elsewhere" } }) }] });
+	expect(holderStatus("LiveAgent", parseSeats(unrelated)).status).toBe("UNKNOWN");
+	const mismatch = parseSeats(bundle(specs, ["demo-e1.1"]), {
+		repo: "/home/user/demo", holders: { LiveAgent: { session: "demo", pane: "tern:404" } },
+	});
+	expect(holderStatus("LiveAgent", mismatch).status).toBe("UNKNOWN");
+	const pile = allChecks(legacy, options({ snapshot: null }));
+	expect(metrics(pile.tracker, pile.results, 0)).not.toHaveProperty("stale_no_holder");
+	const view = parseSeats(bundle(specs, ["demo-e1.1"]));
+	expect(holderStatus("LiveAgent", view)).toMatchObject({ status: "LIVE", seat: `tern:${LIVE_PANE}` });
+	expect(holderStatus("GoneAgent", view).status).toBe("DEAD");
 });
 
 test("planted: snapshot bead still in_progress under a dead holder is unsorted; outcome without a comment is unevidenced", () => {
@@ -309,7 +317,7 @@ test("real omp-kit capture parses and reproduces the probe's findings", () => {
 	expect(dag.data!.blocked_on_closed).toEqual(["ompkit-rc-epic-land-fix-release-dogfood-rz5.45->ompkit-jdeq", "ompkit-rc-epic-land-fix-release-dogfood-rz5.45->ompkit-rc-epic-land-fix-release-dogfood-rz5.36"]);
 	expect(dag.data!.orphans).toContain("ompkit-2w7h");
 	const pile = results.find(r => r.name === "pile")!;
-	expect(pile.findings.find(f => f.id === "ompkit-2w7h")).toMatchObject({ kind: "stale-no-holder", status: "FAIL" });
+	expect(pile.findings.find(f => f.id === "ompkit-2w7h")).toMatchObject({ kind: "stale-holder-unknown", status: "UNKNOWN" });
 	expect(pile.findings.find(f => f.id === "ompkit-x5iv.2")).toMatchObject({ kind: "stale-holder-unknown", status: "UNKNOWN" });
 	expect(results.find(r => r.name === "mission")!.findings.map(f => f.kind)).toEqual(["mission-state"]);
 });
@@ -354,14 +362,16 @@ test("spot check: seeded, reproducible, ceil(10%) of beads closed in the window"
 
 // ---- CLI end to end ------------------------------------------------------------------------------
 
-function run(args: string[]): { code: number | null; out: string } {
-	const child = Bun.spawnSync(["bun", "run", "--no-env-file", "--config=/dev/null", cli, ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" });
-	return { code: child.exitCode, out: `${child.stdout.toString()}${child.stderr.toString()}` };
+function run(args: string[], env: Record<string, string | undefined> = {}): { code: number | null; out: string } {
+	const child = runFixture([process.execPath, "run", "--no-env-file", "--config=/dev/null", cli, ...args],
+		{ cwd: repo, env: { ...process.env, ...env }, floor_s: 30 });
+	const decoder = new TextDecoder();
+	return { code: child.rc, out: `${decoder.decode(child.stdout)}${decoder.decode(child.stderr)}` };
 }
 
 test("CLI validate: clean report exits 0, planted report exits 1, unknown holder exits 3", () => {
 	const config = join(workspace, "config.json");
-	writeFileSync(config, JSON.stringify({ schema: "fleet-round.config/v1", projects: { demo: { root: "/home/user/demo" } }, approver: "Op" }));
+	writeFileSync(config, JSON.stringify({ schema: "fleet-round.config/v1", projects: { demo: { root: "/home/user/demo", holders: HOLDERS } }, approver: "Op" }));
 	const raw = join(workspace, "raw.json");
 	writeFileSync(raw, JSON.stringify(bundle(CLEAN, ["demo-e1.1", "demo-e2.2"])));
 	const snapshot = join(workspace, "snapshot.json");
@@ -377,7 +387,7 @@ test("CLI validate: clean report exits 0, planted report exits 1, unknown holder
 	expect(rejected.code).toBe(1);
 	expect(JSON.parse(rejected.out).report.errors).toEqual(["field mission: report cites README.md:9, validator found README.md:3"]);
 	const unknownRaw = join(workspace, "unknown.json");
-	writeFileSync(unknownRaw, JSON.stringify(bundle([...CLEAN, { id: "demo-e1.3", status: "in_progress", parent: "demo-e1", assignee: "LiveAgent", updated: NOW - 30 * HOUR }], ["demo-e1.1"], { identity: null })));
+	writeFileSync(unknownRaw, JSON.stringify(bundle([...CLEAN, { id: "demo-e1.3", status: "in_progress", parent: "demo-e1", assignee: "LiveAgent", updated: NOW - 30 * HOUR }], ["demo-e1.1"], { tern: null })));
 	const unknown = run(["check", "--config", config, "--project", "demo", "--raw", unknownRaw, "--snapshot", snapshot, "--focus", "demo-e1,demo-e2,demo-e3", "--now", iso(NOW)]);
 	expect(unknown.code).toBe(3);
 	expect(JSON.parse(unknown.out).pass_bar).toBe("UNKNOWN");
@@ -471,40 +481,35 @@ test("regexes: CPU growth gate rejects a genuine superlinear matcher", () => {
 
 // ---- barrier timer -------------------------------------------------------------------------------
 
-// Agent Mail's three tables exactly as `.schema` printed them on the reference host (REA
-// ev_245b51e8..., references/evidence.md), minus triggers and indexes the timer never touches.
-const MAIL_DDL = `
-CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL UNIQUE, human_key TEXT NOT NULL, created_at INTEGER NOT NULL);
-CREATE TABLE agents (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id), name TEXT NOT NULL, program TEXT NOT NULL, model TEXT NOT NULL, task_description TEXT NOT NULL DEFAULT '', inception_ts INTEGER NOT NULL, last_active_ts INTEGER NOT NULL, attachments_policy TEXT NOT NULL DEFAULT 'auto', contact_policy TEXT NOT NULL DEFAULT 'auto', reaper_exempt INTEGER NOT NULL DEFAULT 0, registration_token TEXT, retired_at INTEGER, UNIQUE(project_id, name));
-CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id), sender_id INTEGER NOT NULL REFERENCES agents(id), thread_id TEXT, topic TEXT COLLATE NOCASE, subject TEXT NOT NULL, body_md TEXT NOT NULL, importance TEXT NOT NULL DEFAULT 'normal', ack_required INTEGER NOT NULL DEFAULT 0, created_ts INTEGER NOT NULL, recipients_json TEXT NOT NULL DEFAULT '{}', attachments TEXT NOT NULL DEFAULT '[]');
-`;
-const FLEET_KEY = "/home/user/fleet";
+const BOARD_ROOT = "3001";
+const BOARD_CHANNEL = "fleet";
+const BOARD_THREAD = "c140d989-3baf-45b3-9971-834ebac1e22c";
 const MINUTE = 60_000;
-const T0 = NOW - 3 * HOUR; // INSIGHT opens; 2 h timebox, so its deadline is NOW - 1 h
+const T0 = NOW - 3 * HOUR;
 const DEADLINE = T0 + 2 * HOUR;
-type Mail = { from: string; body: string; at: number; thread?: string; key?: string };
+type BoardReplyFixture = { from: string; body: string; at: number; editedAt?: number; thread?: string; channel?: string; revision?: number };
 
-/** A store with the observed schema; created_ts in integer microseconds as observed. */
-function mailDb(name: string, mails: Mail[], ddl = MAIL_DDL): string {
-	const path = join(workspace, `${name}.sqlite3`);
-	rmSync(path, { force: true });
-	const db = new Database(path);
-	db.exec(ddl);
-	const projects = new Map<string, number>();
-	const agents = new Map<string, number>();
-	const projectId = (key: string): number => {
-		if (!projects.has(key)) projects.set(key, Number(db.query("INSERT INTO projects (slug, human_key, created_at) VALUES (?, ?, ?)").run(key.slice(1).split("/").join("-"), key, T0 * 1000).lastInsertRowid));
-		return projects.get(key)!;
-	};
-	projectId(FLEET_KEY);
-	for (const mail of mails) {
-		const project = projectId(mail.key ?? FLEET_KEY);
-		const who = `${project}:${mail.from}`;
-		if (!agents.has(who)) agents.set(who, Number(db.query("INSERT INTO agents (project_id, name, program, model, inception_ts, last_active_ts) VALUES (?, ?, 'omp', 'm', ?, ?)").run(project, mail.from, T0 * 1000, T0 * 1000).lastInsertRowid));
-		db.query("INSERT INTO messages (project_id, sender_id, thread_id, subject, body_md, created_ts) VALUES (?, ?, ?, 'round report', ?, ?)").run(project, agents.get(who)!, mail.thread ?? "fleet-round-0", mail.body, mail.at * 1000 + 123);
-	}
-	db.close();
+/** Simulate only the Board CLI transport; the real driver and parser judge the returned frame. */
+function boardFixture(name: string, replies: BoardReplyFixture[], root?: Record<string, unknown>): string {
+	const path = join(workspace, `${name}.board.json`);
+	const message = { id: BOARD_ROOT, channel: BOARD_CHANNEL, thread: BOARD_THREAD, replyTo: null, re: null,
+		createdAt: iso(T0), editedAt: null, text: "The round is open.", deleted: false, revision: 1,
+		by: { actor: "local:chief", profile: "chief" }, ...root };
+	writeFileSync(path, JSON.stringify({ message, cursor: "4000", schedules: [], replies: replies.map((reply, i) => ({
+		id: String(BOARD_ROOT.length + 4000 + i), channel: reply.channel ?? BOARD_CHANNEL, thread: reply.thread ?? BOARD_THREAD,
+		replyTo: null, re: BOARD_ROOT, createdAt: iso(reply.at), editedAt: reply.editedAt === undefined ? null : iso(reply.editedAt),
+		text: reply.body, deleted: false, revision: reply.revision ?? 1,
+		by: { actor: `local:${reply.from}`, profile: reply.from },
+	})) }));
 	return path;
+}
+
+function boardEnvironment(frame: string): Record<string, string> {
+	const bin = join(workspace, "board-bin");
+	mkdirSync(bin, { recursive: true });
+	const client = join(bin, "vb");
+	writeFileSync(client, "#!/bin/sh\n[ \"$#\" -eq 3 ] && [ \"$1\" = read ] && [ \"$2\" = 3001 ] && [ \"$3\" = --json ] || exit 2\n[ -r \"$FLEET_ROUND_TEST_FRAME\" ] || exit 1\nexec /bin/cat \"$FLEET_ROUND_TEST_FRAME\"\n", { mode: 0o755 });
+	return { OMP_KIT_BOARD_CLI: client, BOARD_URL: "http://127.0.0.1:1/api/board", BOARD_PROFILE: "fixture-chief", FLEET_ROUND_TEST_FRAME: frame };
 }
 
 function reportFor(project: string, { phase = "insight", round = 0, inProgress = 1 } = {}): string {
@@ -527,39 +532,38 @@ function roundDir(name: string): string {
 	return dir;
 }
 
-type BarrierJson = { state: string; projects: { project: string; verdict: string; reasons: string[]; cached: boolean; consecutive_misses: number; escalate: boolean }[]; escalate: string[]; unavailable: string[]; mail: { available: boolean; reason: string | null; other_messages: number } };
-function barrier(db: string, opts: { state: string; phase?: string; opened?: number; now?: number; raw?: string[]; outMd?: string }): { code: number | null; json: BarrierJson; out: string } {
+function barrier(frame: string, opts: { state: string; phase?: string; opened?: number; now?: number; raw?: string[]; outMd?: string; root?: string | null; channel?: string | null }): { code: number | null; json: BarrierResult; out: string } {
 	const config = join(workspace, "barrier-config.json");
-	writeFileSync(config, JSON.stringify({ schema: "fleet-round.config/v1", projects: { demo: { root: "/home/user/demo" }, kit: { root: join(workspace, "no-such-kit-root") } }, approver: "Op", barrier: { agent_mail_db: db, mail_project: FLEET_KEY, hours: { INSIGHT: 2, AGREE: 1, SORT: 8 } } }));
-	const args = ["barrier", "--config", config, "--round", "0", "--phase", opts.phase ?? "INSIGHT", "--opened-at", iso(opts.opened ?? T0), "--state", opts.state, "--now", iso(opts.now ?? NOW), ...(opts.raw ?? raws()).flatMap(spec => ["--raw", spec])];
-	const result = run(opts.outMd ? [...args, "--out-json", join(opts.state, "barrier.json"), "--out-md", opts.outMd] : args);
-	const json = JSON.parse(opts.outMd ? readFileSync(join(opts.state, "barrier.json"), "utf8") : result.out) as BarrierJson;
+	const root = opts.root === undefined ? BOARD_ROOT : opts.root;
+	const channel = opts.channel === undefined ? BOARD_CHANNEL : opts.channel;
+	writeFileSync(config, JSON.stringify({ schema: "fleet-round.config/v1", projects: { demo: { root: "/home/user/demo" }, kit: { root: join(workspace, "no-such-kit-root") } }, approver: "Op", barrier: { board_channel: channel, hours: { INSIGHT: 2, AGREE: 1, SORT: 8 } } }));
+	const args = ["barrier", "--config", config, ...(root === null ? [] : ["--board-root", root]), "--round", "0", "--phase", opts.phase ?? "INSIGHT", "--opened-at", iso(opts.opened ?? T0), "--state", opts.state, "--now", iso(opts.now ?? NOW), ...(opts.raw ?? raws()).flatMap(spec => ["--raw", spec])];
+	const result = run(opts.outMd ? [...args, "--out-json", join(opts.state, "barrier.json"), "--out-md", opts.outMd] : args, boardEnvironment(frame));
+	const json = JSON.parse(opts.outMd ? readFileSync(join(opts.state, "barrier.json"), "utf8") : result.out) as BarrierResult;
 	return { code: result.code, json, out: result.out };
 }
-const verdicts = (json: BarrierJson): Record<string, string> => Object.fromEntries(json.projects.map(p => [p.project, p.verdict]));
-const projectOf = (json: BarrierJson, name: string) => json.projects.find(p => p.project === name)!;
+const verdicts = (json: BarrierResult): Record<string, string> => Object.fromEntries(json.projects.map(p => [p.project, p.verdict]));
+const projectOf = (json: BarrierResult, name: string) => json.projects.find(p => p.project === name)!;
 
-test("barrier: every report accepted before the deadline -> MET, exit 0 (positive control)", () => {
-	const db = mailDb("met", [
-		{ from: "Chief", body: "Round 0 is open.\n\nPHASE: insight\n", at: T0 + MINUTE },
+test("BOARDTHREAD1 exact Board root and channel accept on-time reports -> MET with real validator", () => {
+	const db = boardFixture("met", [
 		{ from: "DemoDirector", body: reportFor("demo"), at: T0 + 20 * MINUTE },
 		{ from: "KitDirector", body: reportFor("kit"), at: T0 + 40 * MINUTE },
 		{ from: "KitDirector", body: reportFor("kit", { round: 1, inProgress: 9 }), at: T0 + 50 * MINUTE },
-		{ from: "KitDirector", body: reportFor("kit", { inProgress: 9 }), at: T0 + 55 * MINUTE, thread: "fleet-round-1" },
 	]);
 	const early = barrier(db, { state: roundDir("met"), now: T0 + HOUR });
 	expect(early.code).toBe(0);
 	expect(early.json.state).toBe("MET");
 	expect(verdicts(early.json)).toEqual({ demo: "ACCEPTED", kit: "ACCEPTED" });
-	expect(early.json.mail.other_messages).toBe(2);
+	expect(early.json.board.other_messages).toBe(2);
 	const after = barrier(db, { state: roundDir("met-after") });
 	expect([after.code, after.json.state]).toEqual([0, "MET"]);
-	const sort = barrier(mailDb("sort", [{ from: "D", body: reportFor("demo", { phase: "execute" }), at: T0 + HOUR }, { from: "K", body: reportFor("kit", { phase: "execute" }), at: T0 + HOUR }]), { state: roundDir("sort"), phase: "SORT" });
+	const sort = barrier(boardFixture("sort", [{ from: "D", body: reportFor("demo", { phase: "execute" }), at: T0 + HOUR }, { from: "K", body: reportFor("kit", { phase: "execute" }), at: T0 + HOUR }]), { state: roundDir("sort"), phase: "SORT" });
 	expect([sort.code, sort.json.state]).toEqual([0, "MET"]);
 });
 
 test("planted: a project with no report -> MISSING; OPEN before the deadline (exit 4), MISSED after (exit 1)", () => {
-	const db = mailDb("missing", [
+	const db = boardFixture("missing", [
 		{ from: "DemoDirector", body: reportFor("demo"), at: T0 + 20 * MINUTE },
 		{ from: "KitDirector", body: reportFor("kit", { phase: "agree" }), at: T0 + 30 * MINUTE },
 	]);
@@ -568,11 +572,11 @@ test("planted: a project with no report -> MISSING; OPEN before the deadline (ex
 	expect(verdicts(open.json)).toEqual({ demo: "ACCEPTED", kit: "MISSING" });
 	const missed = barrier(db, { state: roundDir("missing") });
 	expect([missed.code, missed.json.state]).toEqual([1, "MISSED"]);
-	expect(projectOf(missed.json, "kit")).toMatchObject({ verdict: "MISSING", reasons: ["no insight report for round 0 in fleet-round-0"] });
+	expect(projectOf(missed.json, "kit")).toMatchObject({ verdict: "MISSING", reasons: ["no insight report for round 0 in Board #3001"] });
 });
 
 test("planted: a report whose claim differs from br -> REJECTED naming the claim; barrier MISSED", () => {
-	const db = mailDb("rejected", [
+	const db = boardFixture("rejected", [
 		{ from: "DemoDirector", body: reportFor("demo"), at: T0 + 20 * MINUTE },
 		{ from: "KitDirector", body: reportFor("kit", { inProgress: 5 }), at: T0 + 30 * MINUTE },
 	]);
@@ -583,45 +587,58 @@ test("planted: a report whose claim differs from br -> REJECTED naming the claim
 });
 
 test("planted: a report after the deadline -> LATE; one exactly at the deadline is on time", () => {
-	const late = barrier(mailDb("late", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: DEADLINE + MINUTE }]), { state: roundDir("late") });
+	const late = barrier(boardFixture("late", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: DEADLINE + MINUTE }]), { state: roundDir("late") });
 	expect([late.code, late.json.state]).toEqual([1, "MISSED"]);
 	expect(projectOf(late.json, "kit").verdict).toBe("LATE");
 	expect(projectOf(late.json, "kit").reasons[0]).toContain("after the deadline 2026-10-12T11:00:00.000Z");
-	const edge = barrier(mailDb("edge", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: DEADLINE }]), { state: roundDir("edge") });
+	const edge = barrier(boardFixture("edge", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: DEADLINE }]), { state: roundDir("edge") });
 	expect([edge.code, edge.json.state]).toEqual([0, "MET"]);
+	const edited = barrier(boardFixture("edited-late", [
+		{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE },
+		{ from: "K", body: reportFor("kit"), at: T0 + 25 * MINUTE, editedAt: DEADLINE + MINUTE },
+	]), { state: roundDir("edited-late") });
+	expect([edited.code, projectOf(edited.json, "kit").verdict]).toEqual([1, "LATE"]);
 });
 
-test("planted: an unreadable source -> exit 3, never MET", () => {
+test("BOARDTHREAD1 missing, unavailable, malformed or mismatched Board evidence is UNKNOWN, even before deadline", () => {
 	const both = [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: T0 + 30 * MINUTE }];
-	const noDb = barrier(join(workspace, "absent.sqlite3"), { state: roundDir("no-db") });
-	expect(noDb.code).toBe(3);
-	expect(noDb.json.state).toBe("UNKNOWN");
-	expect(verdicts(noDb.json)).toEqual({ demo: "UNKNOWN", kit: "UNKNOWN" });
-	// Every report is on time and would be ACCEPTED, but kit's tracker cannot be read: not MET.
-	const noTracker = barrier(mailDb("no-tracker", both), { state: roundDir("no-tracker"), now: T0 + HOUR, raw: [raws()[0]!] });
+	const valid = boardFixture("valid-for-negative", both);
+	const malformed = join(workspace, "malformed-board.json");
+	writeFileSync(malformed, "not a Board response");
+	for (const [name, frame, root, channel] of [
+		["unavailable", join(workspace, "absent.board.json"), BOARD_ROOT, BOARD_CHANNEL],
+		["malformed", malformed, BOARD_ROOT, BOARD_CHANNEL],
+		["missing-root", valid, null, BOARD_CHANNEL],
+		["missing-channel", valid, BOARD_ROOT, null],
+		["wrong-root", boardFixture("other-root", both, { id: "3002" }), BOARD_ROOT, BOARD_CHANNEL],
+		["wrong-channel", boardFixture("other-channel", both, { channel: "another-channel" }), BOARD_ROOT, BOARD_CHANNEL],
+		["wrong-thread", boardFixture("other-thread", [{ ...both[0]!, thread: "another-thread" }, both[1]!]), BOARD_ROOT, BOARD_CHANNEL],
+		["wrong-reply-channel", boardFixture("other-reply-channel", [{ ...both[0]!, channel: "another-channel" }, both[1]!]), BOARD_ROOT, BOARD_CHANNEL],
+	] as const) {
+		const result = barrier(frame, { state: roundDir(name), now: T0 + HOUR, root, channel });
+		expect([result.code, result.json.state]).toEqual([3, "UNKNOWN"]);
+		expect(result.json.board.available).toBe(false);
+		expect(verdicts(result.json)).toEqual({ demo: "UNKNOWN", kit: "UNKNOWN" });
+		expect(existsSync(join(roundDir(name), STATE_FILE))).toBe(false);
+	}
+	const noTracker = barrier(valid, { state: roundDir("no-tracker"), now: T0 + HOUR, raw: [raws()[0]!] });
 	expect(noTracker.code).toBe(3);
-	expect(noTracker.json.state).toBe("OPEN");
 	expect(verdicts(noTracker.json)).toEqual({ demo: "ACCEPTED", kit: "UNKNOWN" });
 	expect(noTracker.json.unavailable).toEqual(["kit"]);
-	const drift = barrier(mailDb("drift", [], MAIL_DDL.replace("created_ts INTEGER", "created_at INTEGER")), { state: roundDir("drift") });
-	expect(drift.code).toBe(3);
-	expect(drift.json.mail.reason).toContain("lacks created_ts");
-	const otherKey = barrier(mailDb("other-key", both.map(m => ({ ...m, key: "/home/user/elsewhere" }))), { state: roundDir("other-key") });
-	expect(otherKey.code).toBe(1); // the configured key exists with no reports: a definite miss, not unknown
-	const unregistered = join(workspace, "unregistered.sqlite3");
-	rmSync(unregistered, { force: true });
-	const bare = new Database(unregistered);
-	bare.exec(MAIL_DDL);
-	bare.close();
-	const noProject = barrier(unregistered, { state: roundDir("no-project") });
-	expect([noProject.code, noProject.json.state]).toEqual([3, "UNKNOWN"]);
-	expect(noProject.json.mail.reason).toContain("0 projects with key /home/user/fleet");
+	const legacyConfig = join(workspace, "legacy-mail-config.json");
+	writeFileSync(legacyConfig, JSON.stringify({ schema: "fleet-round.config/v1", identity_root: workspace,
+		projects: { demo: { root: "/home/user/demo", identity_projects: [workspace] } },
+		barrier: { agent_mail_db: valid, mail_project: BOARD_CHANNEL, hours: { INSIGHT: 2, AGREE: 1, SORT: 8 } } }));
+	const gone = run(["barrier", "--config", legacyConfig, "--board-root", BOARD_ROOT, "--round", "0", "--phase", "INSIGHT",
+		"--opened-at", iso(T0), "--state", roundDir("legacy-mail")], boardEnvironment(valid));
+	expect(gone.code).toBe(3);
+	expect(JSON.parse(gone.out)).toMatchObject({ state: "UNKNOWN", board: { available: false } });
 });
 
 test("planted: the same blocker at two consecutive barriers -> ESCALATE; a different blocker does not", () => {
 	const agreeOpen = DEADLINE + 5 * MINUTE;
 	const agreeNow = agreeOpen + HOUR + 5 * MINUTE;
-	const db = mailDb("escalate", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "D", body: reportFor("demo", { phase: "agree" }), at: agreeOpen + 10 * MINUTE }]);
+	const db = boardFixture("escalate", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "D", body: reportFor("demo", { phase: "agree" }), at: agreeOpen + 10 * MINUTE }]);
 	const dir = roundDir("escalate");
 	const first = barrier(db, { state: dir, now: DEADLINE + MINUTE });
 	expect([first.code, first.json.state]).toEqual([1, "MISSED"]);
@@ -636,7 +653,7 @@ test("planted: the same blocker at two consecutive barriers -> ESCALATE; a diffe
 	const rerun = barrier(db, { state: dir, phase: "AGREE", opened: agreeOpen, now: agreeNow + 10 * MINUTE });
 	expect(projectOf(rerun.json, "kit")).toMatchObject({ consecutive_misses: 2, escalate: true }); // re-running a barrier records it once
 
-	const mixed = mailDb("mixed", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "D", body: reportFor("demo", { phase: "agree" }), at: agreeOpen + 10 * MINUTE }, { from: "K", body: reportFor("kit", { phase: "agree", inProgress: 5 }), at: agreeOpen + 10 * MINUTE }]);
+	const mixed = boardFixture("mixed", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "D", body: reportFor("demo", { phase: "agree" }), at: agreeOpen + 10 * MINUTE }, { from: "K", body: reportFor("kit", { phase: "agree", inProgress: 5 }), at: agreeOpen + 10 * MINUTE }]);
 	const other = roundDir("mixed");
 	barrier(mixed, { state: other, now: DEADLINE + MINUTE });
 	const changed = barrier(mixed, { state: other, phase: "AGREE", opened: agreeOpen, now: agreeNow });
@@ -644,7 +661,7 @@ test("planted: the same blocker at two consecutive barriers -> ESCALATE; a diffe
 });
 
 test("a report is judged once, when first seen: later tracker work cannot flip it", () => {
-	const db = mailDb("cache", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: T0 + 30 * MINUTE }]);
+	const db = boardFixture("cache", [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: T0 + 30 * MINUTE }]);
 	const moved = [raws()[0]!, `kit=${rawFile("kit-moved", { ...bundle([...CLEAN, { id: "demo-e1.3", status: "in_progress", parent: "demo-e1", assignee: "LiveAgent" }], READY), project: "kit" })}`];
 	const dir = roundDir("cache");
 	expect(barrier(db, { state: dir, now: T0 + 40 * MINUTE }).json.state).toBe("MET");
@@ -652,6 +669,11 @@ test("a report is judged once, when first seen: later tracker work cannot flip i
 	expect(projectOf(later.json, "kit")).toMatchObject({ verdict: "ACCEPTED", cached: true });
 	const fresh = barrier(db, { state: roundDir("cache-fresh"), raw: moved });
 	expect(projectOf(fresh.json, "kit")).toMatchObject({ verdict: "REJECTED", cached: false });
+	const edited = boardFixture("cache-edited", [
+		{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE },
+		{ from: "K", body: reportFor("kit", { inProgress: 7 }), at: T0 + 30 * MINUTE, editedAt: T0 + 45 * MINUTE, revision: 2 },
+	]);
+	expect(projectOf(barrier(edited, { state: dir }).json, "kit")).toMatchObject({ verdict: "REJECTED", cached: false });
 });
 
 test("barrier usage: missing barrier config, bad phase or round, missing state dir exit 2", () => {
@@ -660,7 +682,7 @@ test("barrier usage: missing barrier config, bad phase or round, missing state d
 	const dir = roundDir("usage");
 	const base = ["--round", "0", "--phase", "INSIGHT", "--opened-at", iso(T0), "--state", dir];
 	expect(run(["barrier", "--config", config, ...base]).out).toContain('needs a "barrier" section');
-	const db = mailDb("usage", []);
+	const db = boardFixture("usage", []);
 	barrier(db, { state: dir });
 	const configured = join(workspace, "barrier-config.json");
 	for (const bad of [["--phase", "MEASURE"], ["--round", "01"], ["--state", join(workspace, "absent-dir")]]) {
@@ -680,12 +702,14 @@ function deliveryProject(over: Partial<ProjectResult> & { project: string }): Pr
 	return { verdict: "ACCEPTED", reasons: [], message: null, reports: 0, cached: false, blocker: null, consecutive_misses: 0, escalate: false, ...over };
 }
 function deliveryResult(over: Partial<BarrierResult> & { projects: ProjectResult[] }): BarrierResult {
-	return { schema: "fleet-round.barrier/v1", round: 0, phase: "INSIGHT", report_phase: "insight", thread: "fleet-round-0", mail_project: FLEET_KEY, database: "db", opened_at: iso(T0), timebox_hours: 2, deadline: iso(DEADLINE), now: iso(NOW), state: "OPEN", mail: { available: true, reason: null, messages: 0, other_messages: 0 }, escalate: [], unavailable: [], ...over };
+	return { schema: "fleet-round.barrier/v2", round: 0, phase: "INSIGHT", report_phase: "insight", thread: BOARD_THREAD,
+		board_root: BOARD_ROOT, board_channel: BOARD_CHANNEL, opened_at: iso(T0), timebox_hours: 2, deadline: iso(DEADLINE),
+		now: iso(NOW), state: "OPEN", board: { available: true, reason: null, messages: 0, other_messages: 0 }, escalate: [], unavailable: [], ...over };
 }
 function deliveryState(notified: Record<string, string> = {}): BarrierStateFile {
 	return { schema: "fleet-round.barrier-state/v1", barriers: {}, validated: {}, notified };
 }
-const rejectedDemo = (cached: boolean): ProjectResult => deliveryProject({ project: "demo", verdict: "REJECTED", reasons: ["claim in_progress differs: line 1, json 3"], message: { id: 7, sender: "D", created_at: iso(T0 + 20 * MINUTE) }, reports: 1, cached, blocker: "rejected" });
+const rejectedDemo = (cached: boolean): ProjectResult => deliveryProject({ project: "demo", verdict: "REJECTED", reasons: ["claim in_progress differs: line 1, json 3"], message: { id: "7", sender: "D", created_at: iso(T0 + 20 * MINUTE) }, reports: 1, cached, blocker: "rejected" });
 
 test("delivery: a fresh REJECTED wakes that project's director only, never the chief", () => {
 	const result = deliveryResult({ projects: [rejectedDemo(false), deliveryProject({ project: "kit" })] });
@@ -693,7 +717,7 @@ test("delivery: a fresh REJECTED wakes that project's director only, never the c
 	expect(got).toHaveLength(1);
 	expect(got[0]).toMatchObject({ key: "rejected:0:INSIGHT:demo:7", session: "demo-sess", pane: "%2" });
 	expect(got[0]!.text).toContain("report 7 REJECTED");
-	expect(got[0]!.text).toContain("Fix and resend to thread fleet-round-0");
+	expect(got[0]!.text).toContain("Fix and resend to Board #3001 (fleet)");
 	expect(got.every(d => d.session !== "chief-sess")).toBe(true);
 });
 
@@ -726,7 +750,7 @@ test("delivery: deliver false plans nothing; OPEN plans nothing; cached REJECTED
 });
 
 test("delivery: a newly escalated project wakes the chief; seats without an address are skipped", () => {
-	const result = deliveryResult({ state: "MISSED", escalate: ["kit"], projects: [rejectedDemo(false), deliveryProject({ project: "kit", verdict: "MISSING", reasons: ["no insight report for round 0 in fleet-round-0"], blocker: "missing", consecutive_misses: 2, escalate: true })] });
+	const result = deliveryResult({ state: "MISSED", escalate: ["kit"], projects: [rejectedDemo(false), deliveryProject({ project: "kit", verdict: "MISSING", reasons: ["no insight report for round 0 in Board #3001"], blocker: "missing", consecutive_misses: 2, escalate: true })] });
 	const got = planDelivery(result, deliveryState(), true, CHIEF_SEAT, {}, null);
 	expect(got.map(d => d.key).sort()).toEqual(["barrier:0:INSIGHT:MISSED", "escalated:0:INSIGHT:kit"]);
 	expect(got.every(d => d.session === "chief-sess")).toBe(true);
@@ -736,7 +760,7 @@ test("delivery: a newly escalated project wakes the chief; seats without an addr
 });
 
 test("config: barrier deliver and project director parse, chief lives at top level; bad seats rejected", () => {
-	const base = { schema: "fleet-round.config/v1", projects: { demo: { root: "/home/user/demo" } }, barrier: { agent_mail_db: "db", mail_project: "k", hours: { INSIGHT: 2, AGREE: 1, SORT: 8 } } };
+	const base = { schema: "fleet-round.config/v1", projects: { demo: { root: "/home/user/demo" } }, barrier: { board_channel: BOARD_CHANNEL, hours: { INSIGHT: 2, AGREE: 1, SORT: 8 } } };
 	const good = loadConfig(JSON.stringify({ ...base, chief: { session: "c", pane: "%2" }, projects: { demo: { root: "/home/user/demo", director: { session: "s", pane: "%1" } } }, barrier: { ...base.barrier, deliver: true } }), "good");
 	expect(good.barrier).toMatchObject({ deliver: true });
 	expect(good.chief).toEqual({ session: "c", pane: "%2" });
@@ -756,11 +780,11 @@ test("config: barrier deliver and project director parse, chief lives at top lev
 });
 
 function deliverCli(name: string, deliver: boolean): { code: number | null; out: string; dir: string } {
-	const db = mailDb(name, [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: T0 + 30 * MINUTE }]);
+	const frame = boardFixture(name, [{ from: "D", body: reportFor("demo"), at: T0 + 20 * MINUTE }, { from: "K", body: reportFor("kit"), at: T0 + 30 * MINUTE }]);
 	const dir = roundDir(name);
 	const config = join(workspace, `${name}-config.json`);
-	writeFileSync(config, JSON.stringify({ schema: "fleet-round.config/v1", chief: { session: "no-such-axpa", pane: "%999" }, projects: { demo: { root: "/home/user/demo" }, kit: { root: join(workspace, "no-such-kit-root") } }, approver: "Op", barrier: { agent_mail_db: db, mail_project: FLEET_KEY, hours: { INSIGHT: 2, AGREE: 1, SORT: 8 }, deliver } }));
-	const result = run(["barrier", "--config", config, "--round", "0", "--phase", "INSIGHT", "--opened-at", iso(T0), "--state", dir, "--now", iso(T0 + HOUR), ...raws().flatMap(spec => ["--raw", spec])]);
+	writeFileSync(config, JSON.stringify({ schema: "fleet-round.config/v1", chief: { session: "no-such-axpa", pane: "tern:999" }, projects: { demo: { root: "/home/user/demo" }, kit: { root: join(workspace, "no-such-kit-root") } }, approver: "Op", barrier: { board_channel: BOARD_CHANNEL, hours: { INSIGHT: 2, AGREE: 1, SORT: 8 }, deliver } }));
+	const result = run(["barrier", "--config", config, "--board-root", BOARD_ROOT, "--round", "0", "--phase", "INSIGHT", "--opened-at", iso(T0), "--state", dir, "--now", iso(T0 + HOUR), ...raws().flatMap(spec => ["--raw", spec])], boardEnvironment(frame));
 	return { code: result.code, out: result.out, dir };
 }
 
@@ -774,7 +798,7 @@ test("CLI barrier with deliver:true and undeliverable seats fails loudly and rec
 	const result = deliverCli("deliver-loud", true);
 	expect(result.code).toBe(2);
 	expect(result.out).toContain("not proved");
-	const state = JSON.parse(readFileSync(join(result.dir, "barrier-state.json"), "utf8")) as BarrierStateFile;
+	const state = JSON.parse(readFileSync(join(result.dir, STATE_FILE), "utf8")) as BarrierStateFile;
 	expect(state.notified ?? {}).toEqual({});
 });
 

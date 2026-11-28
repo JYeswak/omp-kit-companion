@@ -1,6 +1,6 @@
 ---
 name: fleet-round
-description: "Runs a lock-step fleet round across several projects and validates each director's round report by recomputing it from br, git, tmux, ps and Agent Mail identity files. Use for 'run a fleet round', 'validate the round report', 'round 0 pass bar', 'is the barrier met', 'barrier timer', 'score the predictions', 'spot-check closes'. Covers phases and barriers, report format, the round-0 pass bar (mission, pile, dag, frontier, focus), holder liveness, the barrier timer, close spot-checks and prediction scoring."
+description: "Runs a lock-step fleet round across several projects and validates directors' reports against br, git, native Tern pane evidence and an explicit Board thread. Use for 'run a fleet round', 'validate the round report', 'round 0 pass bar', 'is the barrier met', 'barrier timer', 'score the predictions', 'spot-check closes'. Covers phases, report format, the pass bar, holder liveness and prediction scoring."
 license: MIT
 distribution: subscribers
 ---
@@ -78,7 +78,7 @@ Each check recomputes from sources; none reads the report except for its declare
 4. **frontier**: `br ready` is non-empty and its top `frontier_top` (3) items sit under a focus epic.
 5. **focus**: exactly three distinct ids, each existing, not closed or deferred, and an epic (type `epic` or has children).
 
-**Live holder.** A seat (`session:window.pane`) whose process tree runs an agent and whose Agent Mail identity file binds the assignee with the live `pane_pid`. Plain-text or pid-less identity files are unverified: a match on one is UNKNOWN. No identity directory, no tmux, or no `ps` makes every holder UNKNOWN. Field shapes and their REA evidence: `references/evidence.md`.
+**Live holder.** Configure the assignee's exact `session` and `tern:<block-id>` under `projects.<project>.holders`. LIVE requires an exact Tern block in that session or tab, a project-local pane cwd, and a foreground OMP process for that same block and repository. An observed exit on that exact block is DEAD; an unassigned bead has no holder. Missing, mismatched or legacy-only evidence is UNKNOWN. `vb whoami` identifies the Board read profile, not the seat in the pane. See `references/evidence.md`.
 
 The pass bar is FAIL if any check fails, else UNKNOWN if any is unknown, else PASS.
 
@@ -92,10 +92,10 @@ $FR check      --config fleet.json --project app --raw raw.json --snapshot start
 $FR validate   --config fleet.json --project app --report report.md --snapshot start.json --out-json v.json
 $FR spot-check --config fleet.json --project app --since <round start> --seed <round id>     # 10% of the round's closes, reproducible
 $FR score      --measured measured.json --predictions chief.md --predictions app-report.md
-$FR barrier    --config fleet.json --round 0 --phase INSIGHT --opened-at <phase open> --state <round dir> --out-json b.json --out-md b.md
+$FR barrier    --config fleet.json --board-root <Board root message ID> --round 0 --phase INSIGHT --opened-at <phase open> --state <round dir> --out-json b.json --out-md b.md
 ```
 
-Exit codes: 0 PASS/ACCEPTED, 1 FAIL/REJECTED, 3 UNKNOWN/UNVERIFIED, 2 usage or unreadable input (`barrier` has its own, below). Without `--raw` every command captures live. The config (`config.example.json`) names each project's tracker `root`, the `repo` and `doc_ref` its mission docs are read at, the identity project keys, tmux sockets and agent markers, and for `barrier` the Agent Mail store, the round's mail project key and the timebox per barrier phase; nothing host-specific is built in.
+Exit codes: 0 PASS/ACCEPTED, 1 FAIL/REJECTED, 3 UNKNOWN/UNVERIFIED, 2 usage or unreadable input (`barrier` has its own, below). Commands that need a tracker capture it live unless given `--raw`. The config example names each project's tracker `root`, the `repo` and `doc_ref` for mission docs, the expected Tern holder bindings, and the barrier's Board `board_channel` and timeboxes. Only replay raw files from your own trusted capture; they are not signed records.
 
 **Spot-check.** Beads closed between `--since` and now, ordered by `sha256(seed:id)`, first `ceil(rate × n)` (rate 0.1). The same seed and tracker give the same sample; the chief re-runs each sampled close.
 
@@ -103,32 +103,35 @@ Exit codes: 0 PASS/ACCEPTED, 1 FAIL/REJECTED, 3 UNKNOWN/UNVERIFIED, 2 usage or u
 
 ## Barrier timer
 
-`barrier` replaces watching the round thread. Directors post their report (the format above) to Agent Mail thread `fleet-round-<N>` in the project key `barrier.mail_project`; any sender may post, and the report's own `ROUND`, `PROJECT` and `PHASE` lines say whose report it is. Barrier phases close these report phases: `INSIGHT` → `insight`, `AGREE` → `agree`, `SORT` → `execute`. The deadline is `--opened-at` plus `barrier.hours[PHASE]`.
+Set `BOARD_URL` and `BOARD_PROFILE` for the configured Board; run its authenticated `vb` client (on `PATH`, or set `OMP_KIT_BOARD_CLI` to its path). Open a Board thread in `barrier.board_channel`, then pass its root message ID as `--board-root`. Directors reply in that thread. The report's `ROUND`, `PROJECT` and `PHASE` select the report; neither the Board reader's own profile nor a report's `SEAT` proves holder liveness. Barrier phases: `INSIGHT` → `insight`, `AGREE` → `agree`, `SORT` → `execute`. The deadline is `--opened-at` plus `barrier.hours[PHASE]`. An edited message is judged at its edit time, not backdated to its original post.
 
 Per configured project, from the thread's messages whose first `ROUND`/`PROJECT`/`PHASE` lines match:
 
 | Verdict | When |
 |---|---|
 | `ACCEPTED` | The latest report sent by the deadline is ACCEPTED by `validate` (claims recomputed from the project's tracker). |
-| `REJECTED` | That report is REJECTED or UNVERIFIED; the reasons are the validator's. |
+| `REJECTED` | That report contradicts the validator; the reasons are the validator's. |
 | `LATE` | No on-time report was accepted, and one arrived after the deadline. |
 | `MISSING` | No report. |
-| `UNKNOWN` | Agent Mail's store or the project's tracker could not be read. |
+| `UNKNOWN` | Board root/channel/reply evidence cannot be verified, the tracker could not be read, or a report claim cannot be recomputed. |
 
-Barrier state: **MET** when every project is ACCEPTED (it can be met early), **OPEN** before the deadline otherwise, **MISSED** after the deadline when any project missed, **UNKNOWN** when only unreadable projects stand between it and MET. Exit: 0 MET, 1 MISSED, 3 any source unavailable (whatever else holds; never MET on unknown), 4 OPEN, 2 usage.
+Barrier state: **MET** when every project is ACCEPTED (it can be met early), **OPEN** before the deadline otherwise, **MISSED** after the deadline when any project missed, **UNKNOWN** when any required source or claim is unverified. Exit: 0 MET, 1 MISSED, 3 UNKNOWN, 4 OPEN, 2 usage.
 
-**State.** `--state` is the private round dir (`chmod 700`). `barrier-state.json` there records each report's validation once, when first seen, so later tracker work cannot flip it, and each decided barrier's per-project outcome. `misses in a row` counts a project's consecutive missed barriers; the same blocker (verdict, plus the rejection reasons with numbers ignored) at two consecutive barriers reports the project as **ESCALATE**. Re-running a barrier updates its record, never adds a second one.
+**State.** Use a private round dir (`chmod 700`) dedicated to this Board. `barrier-state.json` records validation by root, message and revision so later tracker work cannot flip it; a revision is evaluated separately. It also records decided outcomes. The same blocker (verdict plus the rejection reasons with numbers ignored) at two consecutive barriers reports **ESCALATE**. Re-running a barrier replaces its outcome, not adds a second one. An unreadable Board changes no state and wakes nobody.
 
-**Waking seats (ompkit-axpa).** The timer writes files but wakes nobody unless the config opts in: `barrier.deliver: true` (default false), a top-level `chief: {session, pane}`, and per project `director: {session, pane}` (see `config.example.json`). After judging, the timer sends via `omp-kit send`: a report newly REJECTED (first seen, not from the validation cache) wakes that project's director only — never the chief — with the reasons and `fix and resend to thread fleet-round-<N>`; a barrier first seen MET or MISSED, or a project newly ESCALATE, wakes the chief exactly once with the one-line state and the barrier md path (`--out-md`, or "no barrier md written"). Dedup keys live in `barrier-state.json` under `notified`, so a rerun on unchanged state sends nothing; only `OK`/`DELIVERED` counts as proved — anything else throws, records nothing, and exits 2, so the next run retries it.
+**Waking seats (ompkit-axpa).** Opt in with `barrier.deliver: true`, a top-level `chief: {session, pane}`, and per-project `director: {session, pane}`. A fresh REJECTED report wakes only its director to correct it at the explicit Board root. A newly MET or MISSED barrier or a newly escalated project wakes the chief. Successful deliveries persist dedup keys under `notified`; a failed delivery stays unsent.
 
-**Sources.** Agent Mail's SQLite store (`barrier.agent_mail_db`, opened readonly; `am robot thread` has only relative ages, so it cannot judge a deadline) and each project's tracker via `collect` (`--raw PROJECT=raw.json` replays one). No network: nothing polls GitHub, and `doc_ref` is read as a local ref.
+**Sources.** `vb read <root> --json` is bounded and must return that root in the exact configured channel. Replies must belong to that thread; missing or contradictory metadata cannot produce MET. Each project's tracker is read via `collect` (`--raw PROJECT=raw.json` replays it); GitHub is not polled.
 
 **Running it every 10 minutes.** `references/barrier.launchd.plist` is a template; the kit never installs it. When a phase opens, render it for that round and phase and load it; when the next phase opens, boot it out and render the next one:
 
 ```sh
 SKILL=<skill dir>; DIR=<private round dir>; PLIST=~/Library/LaunchAgents/com.omp-kit.fleet-round-barrier.plist
+# BOARD_ROOT is the decimal root message ID. BOARD_URL and BOARD_PROFILE select the trusted Board.
+BOARD_CLI=${OMP_KIT_BOARD_CLI:-$(command -v vb)}
 sed -e "s|@BUN@|$(command -v bun)|g" -e "s|@SKILL_DIR@|$SKILL|g" -e "s|@CONFIG@|$DIR/fleet.json|g" \
-    -e "s|@ROUND@|0|g" -e "s|@PHASE@|INSIGHT|g" -e "s|@OPENED_AT@|2026-10-12T14:00:00Z|g" \
+    -e "s|@BOARD_ROOT@|$BOARD_ROOT|g" -e "s|@BOARD_URL@|$BOARD_URL|g" -e "s|@BOARD_PROFILE@|$BOARD_PROFILE|g" \
+    -e "s|@BOARD_CLI@|$BOARD_CLI|g" -e "s|@ROUND@|0|g" -e "s|@PHASE@|INSIGHT|g" -e "s|@OPENED_AT@|2026-10-12T14:00:00Z|g" \
     -e "s|@ROUND_DIR@|$DIR|g" -e "s|@PATH@|$PATH|g" "$SKILL/references/barrier.launchd.plist" > "$PLIST"
 plutil -lint "$PLIST" && launchctl bootstrap "gui/$(id -u)" "$PLIST"
 launchctl bootout "gui/$(id -u)/com.omp-kit.fleet-round-barrier"   # phase over
@@ -143,7 +146,9 @@ judge command from a user timer, or by hand when a phase opens:
 # ~/.config/systemd/user/fleet-round-barrier@.service
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/env bun %h/skills/fleet-round/scripts/fleet-round.ts barrier --config %h/round/fleet.json --round %i --phase INSIGHT --opened-at 2026-10-12T14:00:00Z --state %h/round --out-md %h/round/barrier-%i-INSIGHT.md
+# Substitute the actual root ID. Supply BOARD_URL and BOARD_PROFILE to this unit;
+# let the authenticated Board client resolve its own credentials.
+ExecStart=/usr/bin/env bun %h/skills/fleet-round/scripts/fleet-round.ts barrier --config %h/round/fleet.json --board-root 812 --round %i --phase INSIGHT --opened-at 2026-10-12T14:00:00Z --state %h/round --out-md %h/round/barrier-%i-INSIGHT.md
 ```
 
 ```ini
@@ -154,11 +159,11 @@ OnUnitActiveSec=10min
 WantedBy=timers.target
 ```
 
-Manual fallback (any POSIX shell): `bun "$SKILL/scripts/fleet-round.ts" barrier --config "$DIR/fleet.json" --round 0 --phase INSIGHT --opened-at <ISO> --state "$DIR"` whenever a phase opens. The timer only reports: it never sends mail or pane input.
+Manual fallback: `bun "$SKILL/scripts/fleet-round.ts" barrier --config "$DIR/fleet.json" --board-root "$BOARD_ROOT" --round 0 --phase INSIGHT --opened-at <ISO> --state "$DIR"` whenever a phase opens.
 
 ## Never
 
-- Never write to a tracker, send to a pane, or send Agent Mail. `collect` runs br with `--no-auto-import --no-auto-flush`, and reads identity files directly because Agent Mail's resolver may adopt and rewrite them. `barrier` reads Agent Mail's store readonly; its only writes are its state and output files in the round dir.
+- Never write to a tracker or to the Board. `collect` runs br with `--no-auto-import --no-auto-flush`. `barrier` writes state and reports locally; it only sends to a pane if delivery is explicitly enabled.
 - Never report PASS for something not observed. Extend `references/evidence.md` with an REA capture before trusting a new field.
 
 ## Verification

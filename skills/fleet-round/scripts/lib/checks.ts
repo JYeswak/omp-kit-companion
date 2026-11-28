@@ -304,8 +304,9 @@ export function metrics(tracker: Tracker, results: CheckResult[], missions: numb
 		out.cycles = (dag.cycles as unknown[]).length;
 		out.blocked_on_closed = (dag.blocked_on_closed as unknown[]).length;
 	}
-	const pile = results.find(r => r.name === "pile")?.data;
-	if (pile) out.stale_no_holder = pile.stale_no_holder as number;
+	const pile = results.find(r => r.name === "pile");
+	if (pile?.data && !pile.findings.some(f => f.kind === "stale-holder-unknown"))
+		out.stale_no_holder = pile.data.stale_no_holder as number;
 	return out;
 }
 

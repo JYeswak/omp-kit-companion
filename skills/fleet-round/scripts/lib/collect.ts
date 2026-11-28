@@ -1,34 +1,26 @@
-// Read-only live capture of one project into a RawBundle. br runs with --no-auto-import
-// --no-auto-flush (no database import, no JSONL export); git, tmux and ps only list; identity
-// files are read, never resolved through Agent Mail (whose resolver may adopt and rewrite a file).
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+// Read-only tracker, repository and native Tern capture; no legacy identity directories.
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { missionCandidates } from "./checks.ts";
-import { identityDirName, isRecord, PANE_FORMAT, type RawBundle } from "./model.ts";
+import { runSync } from "../../../../src/kitlib/run.ts";
+import { ternPaneId } from "../../../../src/plane-tern.ts";
+import { isRecord, type RawBundle } from "./model.ts";
 
 export const CONFIG_SCHEMA = "fleet-round.config/v1";
-/** Agent processes seen on the reference host (references/evidence.md): omp launcher and its dist entry. */
-export const DEFAULT_AGENT_MARKERS = ["/.bun/bin/omp", "/pi-coding-agent/dist/cli.js"];
 const BR_READ = ["--json", "--no-auto-import", "--no-auto-flush"];
 const SHOW_CHUNK = 200;
 const MAX_DOC_BYTES = 2 * 1024 * 1024;
-const MAX_IDENTITY_BYTES = 4096;
-/** A pane address a notification may be sent to: tmux session plus pane id. */
+/** A configured expected local seat; not itself proof of an installed pane. */
 export type SeatConfig = { session: string; pane: string };
-/** root: the br tracker; repo: the git repo whose docs hold the mission (default root); doc_ref: the committed ref those docs are read at; director: the seat woken when this project's report is rejected (optional). */
-export type ProjectConfig = { root: string; repo: string; doc_ref: string; identity_keys: string[]; director: SeatConfig | null };
+export type ProjectConfig = { root: string; repo: string; doc_ref: string; holders: Record<string, SeatConfig>; director: SeatConfig | null };
 /** Barrier phases and the report PHASE each one closes (round 0's execute phase is the sort). */
 export const BARRIER_PHASES = { INSIGHT: "insight", AGREE: "agree", SORT: "execute" } as const;
 export type BarrierPhase = keyof typeof BARRIER_PHASES;
-/** database: Agent Mail's SQLite store, read with readonly; mail_project: the Agent Mail project key holding thread fleet-round-<N>; hours: timebox per barrier phase; deliver: wake seats via omp-kit send (default false). */
-export type BarrierConfig = { database: string; mail_project: string; hours: Record<BarrierPhase, number>; deliver: boolean };
+export type BarrierConfig = { board_channel: string | null; hours: Record<BarrierPhase, number>; deliver: boolean };
 export type Config = {
 	projects: Record<string, ProjectConfig>;
 	chief: SeatConfig | null;
-	tmux_sockets: string[];
-	identity_root: string;
-	agent_markers: string[];
 	stale_hours: number;
 	frontier_top: number;
 	approver: string | null;
@@ -43,21 +35,28 @@ export function loadConfig(text: string, where: string): Config {
 	const json: unknown = JSON.parse(text);
 	if (!isRecord(json) || json.schema !== CONFIG_SCHEMA) throw new Error(`${where}: expected "schema": "${CONFIG_SCHEMA}"`);
 	if (!isRecord(json.projects) || Object.keys(json.projects).length === 0) throw new Error(`${where}: projects must name at least one project`);
-	const projects: Record<string, ProjectConfig> = {};
+	const projects: Record<string, ProjectConfig> = Object.create(null);
 	for (const [name, value] of Object.entries(json.projects)) {
 		if (!isRecord(value) || typeof value.root !== "string") throw new Error(`${where}: projects.${name}.root must be a path`);
-		const root = expand(value.root);
-		const keys = value.identity_keys === undefined ? [root] : value.identity_keys;
-		const repo = value.repo === undefined ? root : typeof value.repo === "string" ? expand(value.repo) : null;
+		const root = resolve(expand(value.root));
+		const repo = value.repo === undefined ? root : typeof value.repo === "string" ? resolve(expand(value.repo)) : null;
 		const ref = value.doc_ref === undefined ? "HEAD" : value.doc_ref;
 		if (repo === null || typeof ref !== "string" || ref === "") throw new Error(`${where}: projects.${name}.repo and doc_ref must be strings`);
-		projects[name] = { root, repo, doc_ref: ref, identity_keys: keys.map(expand), director: seat(value.director, `${where}: projects.${name}.director`) };
+		const holders: Record<string, SeatConfig> = Object.create(null);
+		if (value.holders !== undefined && !isRecord(value.holders)) throw new Error(`${where}: projects.${name}.holders must be an object`);
+		const holderEntries = Object.entries(value.holders ?? {});
+		if (holderEntries.length > 64) throw new Error(`${where}: projects.${name}.holders exceeds 64 seats`);
+		const panes = new Set<string>();
+		for (const [holder, rawSeat] of holderEntries) {
+			const field = `${where}: projects.${name}.holders.${holder}`;
+			const binding = seat(rawSeat, field);
+			if (!holder.trim() || !binding || !binding.pane.startsWith("tern:") || ternPaneId(binding.pane) === null || panes.has(binding.pane))
+				throw new Error(`${field}: expected an unambiguous exact Tern pane`);
+			holders[holder] = binding;
+			panes.add(binding.pane);
+		}
+		projects[name] = { root, repo, doc_ref: ref, holders, director: seat(value.director, `${where}: projects.${name}.director`) };
 	}
-	const seats = isRecord(json.seats) ? json.seats : {};
-	const sockets = seats.tmux_sockets ?? [];
-	if (!Array.isArray(sockets) || !sockets.every(s => typeof s === "string")) throw new Error(`${where}: seats.tmux_sockets must be socket paths`);
-	const markers = seats.agent_markers ?? DEFAULT_AGENT_MARKERS;
-	if (!Array.isArray(markers) || !markers.every(m => typeof m === "string" && m.length > 0)) throw new Error(`${where}: seats.agent_markers must be non-empty strings`);
 	const number = (key: string, fallback: number): number => {
 		const value = json[key] ?? fallback;
 		if (typeof value !== "number" || !(value > 0)) throw new Error(`${where}: ${key} must be a positive number`);
@@ -66,9 +65,6 @@ export function loadConfig(text: string, where: string): Config {
 	return {
 		projects,
 		chief: seat(json.chief, `${where}: chief`),
-		tmux_sockets: sockets.map(expand),
-		identity_root: expand(typeof seats.identity_root === "string" ? seats.identity_root : "~/.config/agent-mail/identity"),
-		agent_markers: markers,
 		stale_hours: number("stale_hours", 24),
 		frontier_top: number("frontier_top", 3),
 		approver: typeof json.approver === "string" ? json.approver : null,
@@ -77,7 +73,7 @@ export function loadConfig(text: string, where: string): Config {
 }
 
 function barrierConfig(value: unknown, where: string): BarrierConfig {
-	if (!isRecord(value) || typeof value.agent_mail_db !== "string" || value.agent_mail_db === "" || typeof value.mail_project !== "string" || value.mail_project === "") throw new Error(`${where}: barrier needs agent_mail_db and mail_project paths`);
+	if (!isRecord(value)) throw new Error(`${where}: barrier must be an object`);
 	const hours = isRecord(value.hours) ? value.hours : {};
 	const timeboxes = {} as Record<BarrierPhase, number>;
 	for (const phase of Object.keys(BARRIER_PHASES) as BarrierPhase[]) {
@@ -88,7 +84,8 @@ function barrierConfig(value: unknown, where: string): BarrierConfig {
 	const deliver = value.deliver === undefined ? false : value.deliver;
 	if (typeof deliver !== "boolean") throw new Error(`${where}: barrier.deliver must be a boolean`);
 	if (value.chief !== undefined) throw new Error(`${where}: barrier.chief moved to top-level chief`);
-	return { database: expand(value.agent_mail_db), mail_project: expand(value.mail_project), hours: timeboxes, deliver };
+	return { board_channel: typeof value.board_channel === "string" && value.board_channel.trim() ? value.board_channel : null,
+		hours: timeboxes, deliver };
 }
 
 function seat(value: unknown, where: string): SeatConfig | null {
@@ -98,8 +95,15 @@ function seat(value: unknown, where: string): SeatConfig | null {
 }
 
 function run(argv: string[], cwd: string): { ok: boolean; stdout: string; error: string } {
-	const child = Bun.spawnSync(argv, { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, NO_COLOR: "1" } });
-	return { ok: child.exitCode === 0, stdout: child.stdout.toString(), error: `${argv.slice(0, 3).join(" ")} exited ${child.exitCode}: ${child.stderr.toString().trim().slice(0, 300)}` };
+	try {
+		const child = runSync(argv, { cwd, env: { ...process.env, NO_COLOR: "1" }, deadline_s: 30,
+			max_output_bytes: 16 * 1024 * 1024 });
+		const decoder = new TextDecoder();
+		const ok = child.rc === 0 && !child.timed_out && !child.killed && !child.truncated;
+		return { ok, stdout: ok ? decoder.decode(child.stdout) : "", error: `${argv[0]} ${argv[1]} unavailable (exit ${child.rc})` };
+	} catch {
+		return { ok: false, stdout: "", error: `${argv[0]} ${argv[1]} could not be started` };
+	}
 }
 
 function must(argv: string[], cwd: string): string {
@@ -134,22 +138,11 @@ export function collect(config: Config, project: string): RawBundle {
 		const blob = run(["git", "cat-file", "blob", `${head}:${path}`], repo);
 		if (blob.ok && blob.stdout.length <= MAX_DOC_BYTES) docs[path] = blob.stdout;
 	}
-	const tmux = config.tmux_sockets.map(socket => {
-		if (!existsSync(socket)) return { socket, output: null, error: "socket does not exist" };
-		const result = run(["tmux", "-S", socket, "list-panes", "-a", "-F", PANE_FORMAT], root);
-		return { socket, output: result.ok ? result.stdout : null, error: result.ok ? null : result.error };
-	});
-	const ps = run(["ps", "-A", "-o", "pid=,ppid=,command="], root);
-	const identity = target.identity_keys.map(key => {
-		const dir = join(config.identity_root, identityDirName(key));
-		if (!existsSync(dir) || !statSync(dir).isDirectory()) return { key, dir, files: null };
-		const files: Record<string, string> = {};
-		for (const name of readdirSync(dir).sort()) {
-			const full = join(dir, name);
-			const stat = statSync(full, { throwIfNoEntry: false });
-			if (stat?.isFile() && stat.size <= MAX_IDENTITY_BYTES) files[name] = readFileSync(full, "utf8");
-		}
-		return { key, dir, files };
+	const tern = run(["tern", "inspect", "--json"], root);
+	const bindings = Object.entries(target.holders).map(([name, binding]) => {
+		const paneId = ternPaneId(binding.pane);
+		const observed = tern.ok && paneId !== null ? run(["tern", "process", paneId, "--json"], root) : null;
+		return { name, ...binding, process: observed?.ok ? observed.stdout : null };
 	});
 	return {
 		schema: "fleet-round.raw/v1",
@@ -159,6 +152,6 @@ export function collect(config: Config, project: string): RawBundle {
 		br: { version, list, show: JSON.stringify(shown), ready, policy_yaml: existsSync(policyPath) ? readFileSync(policyPath, "utf8") : null },
 		git: { repo, ref: target.doc_ref, head, ls_files: lsFiles },
 		docs,
-		seats: { tmux, ps: ps.ok ? ps.stdout : null, identity_root: config.identity_root, identity, agent_markers: config.agent_markers },
+		seats: { tern: tern.ok ? tern.stdout : null, tern_error: tern.ok ? null : tern.error, bindings },
 	};
 }

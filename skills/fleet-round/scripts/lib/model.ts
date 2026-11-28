@@ -1,9 +1,8 @@
-// Parse a raw capture bundle (exact br / git / tmux / ps / identity-file output) into the model
-// the checks read. Every field name and enum used here was observed on a real host; the REA
-// evidence ids for each are listed in references/evidence.md. A shape that differs from the
-// observation throws ShapeError naming the field, so a changed br contract fails closed instead of
-// being read as zero beads.
-import { createHash } from "node:crypto";
+// Replay tracker and native Tern observations into the model used by the round checks.
+// Report body text and retired identity files never establish installed seat authority.
+// Tracker shape drift throws ShapeError instead of silently yielding zero beads.
+import { isAbsolute, relative, sep } from "node:path";
+import { discoverTernSeatFromInspection, locateBlock, parseTernJson, parseTernProcess, ternPaneId } from "../../../../src/plane-tern.ts";
 
 export class ShapeError extends Error {}
 
@@ -18,19 +17,14 @@ export type RawBundle = {
 	git: { repo: string; ref: string; head: string; ls_files: string };
 	/** Committed contents (at git.head) of candidate mission docs: repo-root *.md and docs/**.md, keyed by repo-relative path. */
 	docs: Record<string, string>;
+	/** Absent or legacy-only captures do not carry current native evidence. */
 	seats: {
-		/** Output of `tmux list-panes -a -F <PANE_FORMAT>` per socket, or null with the reason it was unavailable. */
-		tmux: { socket: string; output: string | null; error: string | null }[];
-		/** Output of `ps -A -o pid=,ppid=,command=`, or null. */
-		ps: string | null;
-		identity_root: string;
-		/** Identity directory contents per project key: { key, dir, files: {name: content} } or files null when the directory is absent. */
-		identity: { key: string; dir: string; files: Record<string, string> | null }[];
-		agent_markers: string[];
+		tern?: string | null;
+		tern_error?: string | null;
+		bindings?: { name: string; session: string; pane: string; process: string | null }[];
 	};
 };
 
-export const PANE_FORMAT = "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_index}\t#{pane_index}";
 
 /** br built-in statuses (br schema issue, Status enum) used when a tracker has no policy file. */
 export const BR_BUILTIN_STATUSES = ["open", "in_progress", "blocked", "deferred", "draft", "closed", "tombstone", "pinned"];
@@ -175,146 +169,93 @@ export function lastTouch(bead: Bead): number {
 
 // ---- seats -----------------------------------------------------------------------------------
 
-export type Pane = { seat: string; pane_id: string; pane_pid: number; socket: string; composite: string; agent: string | null };
-export type Binding = { name: string; verified: boolean; stale: boolean; file: string };
-export type SeatView = {
-	available: boolean;
-	reasons: string[];
-	panes: Pane[];
-	/** Bindings per pane seat: names bound to that pane in the scanned identity directories. */
-	bindings: Map<string, Binding[]>;
-};
-
-/** Agent Mail identity directory name: first 12 hex chars of SHA-1(project_key) (mcp_agent_mail_rust pane_identity.rs project_hash; observed dirs). */
-export function identityDirName(projectKey: string): string {
-	return createHash("sha1").update(projectKey).digest("hex").slice(0, 12);
-}
-
-/** Agent Mail pane-key sanitizer (pane_identity.rs sanitize_pane_id): strip one leading %, keep [A-Za-z0-9-_], `:`→`-`, others→`_`. */
-export function sanitizePaneKey(paneId: string): string {
-	const stripped = paneId.startsWith("%") ? paneId.slice(1) : paneId;
-	let out = "";
-	for (const ch of stripped) {
-		const code = ch.charCodeAt(0);
-		const alnum = (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
-		out += alnum || ch === "-" || ch === "_" ? ch : ch === ":" ? "-" : "_";
-	}
-	return out === "" ? "unknown" : out;
-}
-
-/** An identity file's content: plain-text name (source contract) or JSON {name, pane_pid?, pane_id?} (observed on this host). */
-function parseBinding(content: string, pane: Pane, file: string): Binding | null {
-	const trimmed = content.trim();
-	if (trimmed === "") return null;
-	if (!trimmed.startsWith("{")) return { name: trimmed, verified: false, stale: false, file };
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(trimmed);
-	} catch {
-		return null;
-	}
-	if (!parsed || typeof parsed !== "object" || !("name" in parsed) || typeof parsed.name !== "string") return null;
-	const name = parsed.name;
-	const panePid = "pane_pid" in parsed ? parsed.pane_pid : undefined;
-	if (typeof panePid !== "number") return { name, verified: false, stale: false, file };
-	const boundPane = "pane_id" in parsed ? parsed.pane_id : undefined;
-	const live = panePid === pane.pane_pid && (boundPane === undefined || boundPane === pane.pane_id);
-	return { name, verified: live, stale: !live, file };
-}
-
-export function parseSeats(bundle: RawBundle): SeatView {
-	const reasons: string[] = [];
-	const panes: Pane[] = [];
-	const { seats } = bundle;
-	if (seats.ps === null) reasons.push("ps output unavailable: agent processes cannot be observed");
-	const children = new Map<number, number[]>();
-	const command = new Map<number, string>();
-	for (const raw of (seats.ps ?? "").split("\n")) {
-		const line = raw.trim();
-		if (line === "") continue;
-		const first = line.indexOf(" ");
-		const rest = line.slice(first + 1).trimStart();
-		const second = rest.indexOf(" ");
-		const pid = Number(line.slice(0, first));
-		const ppid = Number(rest.slice(0, second < 0 ? undefined : second));
-		if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
-		command.set(pid, second < 0 ? "" : rest.slice(second + 1));
-		const list = children.get(ppid) ?? [];
-		list.push(pid);
-		children.set(ppid, list);
-	}
-	const agentIn = (root: number): string | null => {
-		const stack = [root];
-		const seen = new Set<number>();
-		while (stack.length > 0) {
-			const pid = stack.pop()!;
-			if (seen.has(pid)) continue;
-			seen.add(pid);
-			const text = command.get(pid);
-			if (text !== undefined && !text.includes("__omp_worker")) {
-				const argv = text.split(" ").filter(Boolean).slice(0, 2);
-				if (argv.some(arg => seats.agent_markers.some(marker => arg.endsWith(marker)))) return text;
-			}
-			stack.push(...(children.get(pid) ?? []));
-		}
-		return null;
-	};
-	const reachable = seats.tmux.filter(entry => entry.output !== null);
-	if (reachable.length === 0) reasons.push(`tmux unavailable on every configured socket (${seats.tmux.map(t => `${t.socket}: ${t.error ?? "no output"}`).join("; ") || "none configured"})`);
-	for (const entry of reachable) {
-		for (const raw of entry.output!.split("\n")) {
-			if (raw.trim() === "") continue;
-			const fields = raw.split("\t");
-			if (fields.length !== 6) throw new ShapeError(`tmux list-panes (${entry.socket}): expected 6 tab-separated fields, got ${fields.length}: ${JSON.stringify(raw.slice(0, 120))}`);
-			const [seat, paneId, pid, session, window, index] = fields as [string, string, string, string, string, string];
-			const panePid = Number(pid);
-			if (!Number.isInteger(panePid)) throw new ShapeError(`tmux list-panes: pane_pid ${JSON.stringify(pid)} is not an integer`);
-			panes.push({ seat, pane_id: paneId, pane_pid: panePid, socket: entry.socket, composite: `${session}:${window}:${index}`, agent: seats.ps === null ? null : agentIn(panePid) });
-		}
-	}
-	const bindings = new Map<string, Binding[]>();
-	const present = seats.identity.filter(dir => dir.files !== null);
-	if (present.length === 0) reasons.push(`no Agent Mail identity directory exists for ${seats.identity.map(d => `${d.key} (${d.dir})`).join(", ") || "any project key"}`);
-	for (const pane of panes) {
-		const found: Binding[] = [];
-		for (const dir of present) {
-			for (const key of [sanitizePaneKey(pane.pane_id), sanitizePaneKey(pane.composite)]) {
-				const content = dir.files![key];
-				if (content === undefined) continue;
-				const binding = parseBinding(content, pane, `${dir.dir}/${key}`);
-				if (binding) found.push(binding);
-			}
-		}
-		bindings.set(pane.seat, found);
-	}
-	return { available: reasons.length === 0, reasons, panes, bindings };
-}
-
 export type Holder = { status: "LIVE" | "DEAD" | "UNKNOWN"; seat: string | null; reason: string };
+type Pane = { seat: string; pane_id: string; pane_pid: number; agent: string };
+export type SeatView = { available: boolean; reasons: string[]; panes: Pane[]; holders: Map<string, Holder> };
 
-/**
- * Liveness of a bead holder. LIVE: a pane running an agent process carries a verified binding
- * (identity file pane_pid equals the live pane_pid) to the name. UNKNOWN: a source is unavailable,
- * or the only bindings to the name are unverified (plain-text or pid-less legacy files) on agent
- * panes. DEAD: every source was read and no agent pane carries any binding to the name.
- */
-export function holderStatus(name: string | null, view: SeatView): Holder {
-	if (!name) return { status: "DEAD", seat: null, reason: "bead has no assignee" };
-	if (!view.available) return { status: "UNKNOWN", seat: null, reason: view.reasons.join("; ") };
-	let unverified: string | null = null;
-	let stale: string | null = null;
-	for (const pane of view.panes) {
-		for (const binding of view.bindings.get(pane.seat) ?? []) {
-			if (binding.name !== name) continue;
-			if (pane.agent === null) {
-				stale ??= `${pane.seat} binds ${name} (${binding.file}) but runs no agent process`;
+export function parseSeats(bundle: RawBundle, expected?: Readonly<{
+	repo: string; holders: Readonly<Record<string, { session: string; pane: string }>>;
+}>): SeatView {
+	const result: SeatView = { available: false, reasons: [], panes: [], holders: new Map() };
+	const { seats } = bundle;
+	if (typeof seats?.tern !== "string") {
+		result.reasons.push(typeof seats?.tern_error === "string" ? seats.tern_error : "no native Tern inspect capture");
+		return result;
+	}
+	let root: unknown;
+	try { root = parseTernJson(seats.tern); }
+	catch { result.reasons.push("Tern inspect is not readable JSON"); return result; }
+	if (!isRecord(root) || !Array.isArray(root.panes) || !Array.isArray(root.sessions) ||
+		!Array.isArray(seats.bindings) || seats.bindings.length === 0 || !isAbsolute(bundle.git.repo)) {
+		result.reasons.push("Tern inventory, repository, or configured holder bindings unavailable");
+		return result;
+	}
+	if (expected && expected.repo !== bundle.git.repo) {
+		result.reasons.push("Tern capture names a different repository than the configured project");
+		return result;
+	}
+	const rows = new Map<string, Record<string, unknown>[]>();
+	for (const row of root.panes) {
+		if (!isRecord(row)) continue;
+		const id = ternPaneId(String(row.pane));
+		if (id === null) continue;
+		const matches = rows.get(id) ?? [];
+		matches.push(row);
+		rows.set(id, matches);
+	}
+	const names = new Set<string>(), panes = new Set<string>();
+	for (const binding of seats.bindings) {
+		if (!isRecord(binding) || typeof binding.name !== "string" || !binding.name.trim() ||
+			typeof binding.session !== "string" || !binding.session.trim() || typeof binding.pane !== "string" ||
+			!binding.pane.startsWith("tern:") || ternPaneId(binding.pane) === null || names.has(binding.name) || panes.has(binding.pane)) {
+			result.reasons.push("invalid or ambiguous configured holder bindings");
+			return result;
+		}
+		names.add(binding.name);
+		panes.add(binding.pane);
+	}
+	for (const { name, session, pane, process } of seats.bindings) {
+		const id = ternPaneId(pane)!;
+		if (expected) {
+			const configured = expected.holders[name];
+			if (configured?.pane !== pane || configured.session !== session) {
+				const reason = `${name}: captured holder binding does not match the current project configuration`;
+				result.reasons.push(reason);
+				result.holders.set(name, { status: "UNKNOWN", seat: null, reason });
 				continue;
 			}
-			if (binding.verified) return { status: "LIVE", seat: pane.seat, reason: `verified binding ${binding.file} (pane_pid ${pane.pane_pid})` };
-			if (binding.stale) stale ??= `${pane.seat} binding ${binding.file} names ${name} for an earlier pane_pid`;
-			else unverified ??= `${pane.seat} binds ${name} via unverified identity file ${binding.file} (no pane_pid)`;
 		}
+		const matches = rows.get(id);
+		const location = locateBlock(root, id, session);
+		const row = matches?.length === 1 ? matches[0] : undefined;
+		if (location.status === "ok" && row && typeof row.cwd === "string" && isAbsolute(row.cwd)) {
+			const fromRepo = relative(bundle.git.repo, row.cwd);
+			const inside = fromRepo !== ".." && !fromRepo.startsWith(`..${sep}`) && !isAbsolute(fromRepo);
+			if (inside && typeof row.exited === "number" && Number.isFinite(row.exited)) {
+				result.holders.set(name, { status: "DEAD", seat: null, reason: `${name}: the configured ${pane} exited` });
+				continue;
+			}
+			const discovered = discoverTernSeatFromInspection(root, pane, { cwd: bundle.git.repo });
+			if (inside && discovered.status === "FOUND" && typeof process === "string") {
+				const proof = parseTernProcess(process, bundle.git.repo, id);
+				if (proof.status === "FOUND" && proof.foreground.pid > 1) {
+					result.panes.push({ seat: pane, pane_id: id, pane_pid: proof.foreground.pid, agent: proof.foreground.name });
+					result.holders.set(name, { status: "LIVE", seat: pane, reason: `Tern verified ${name} on ${pane} (foreground pid ${proof.foreground.pid})` });
+					continue;
+				}
+			}
+		}
+		const reason = `${name}: configured ${pane} has no matching native Tern process proof`;
+		result.reasons.push(reason);
+		result.holders.set(name, { status: "UNKNOWN", seat: null, reason });
 	}
-	if (unverified) return { status: "UNKNOWN", seat: null, reason: unverified };
-	return { status: "DEAD", seat: null, reason: stale ?? `no agent pane binds ${name} in the scanned identity directories` };
+	result.available = result.reasons.length === 0;
+	return result;
+}
+
+export function holderStatus(name: string | null, view: SeatView): Holder {
+	if (!name) return { status: "DEAD", seat: null, reason: "bead has no assignee" };
+	const proof = view.holders.get(name);
+	if (proof) return proof;
+	return { status: "UNKNOWN", seat: null, reason: view.reasons.join("; ") || `${name}: no configured pane binding` };
 }
