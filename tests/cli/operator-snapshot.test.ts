@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { appendFileSync, chmodSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { activeConcurrentWriterPaths, compareWatched, liveWriterPaths, operatorWatchedPaths, operatorWriteFence, snapshotWatched } from "../../src/operator-snapshot.ts";
 import { ccStateDir, KNOWN_JOBS, plistPath, serviceLabel, type OwnedStatePath } from "../../src/service.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 import { run, runSync } from "../../src/kitlib/run.ts";
+import { writeReceipt, type SelfReplayReceipt } from "../../src/self-replay-receipt.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const roots: string[] = [];
@@ -604,6 +605,41 @@ darwinTest("UPDPOST1 only attributes an existing single-link kit day file under 
 	const concurrent = activeConcurrentWriterPaths(before, after);
 	appendFileSync(linked, "later outside writer\n");
 	expect((await concurrent).has(linked)).toBe(false);
+}, fixtureDeadlineS(30) * 1000);
+
+darwinTest("UPDPOST1 attributes only atomic self-replay receipt writes outside the running postcheck fence", async () => {
+	const { home, paths, stateRoot } = liveHome();
+	const env = { XDG_STATE_HOME: dirname(stateRoot) };
+	const record: SelfReplayReceipt = { schema: 1, bead: "receipt-1", export: "a".repeat(40),
+		acceptance_sha256: "b".repeat(64), actor: "Fixture", time: "2026-11-28T00:00:00Z", boxes: [] };
+	const eligible = writeReceipt(env, record)!;
+	const linked = writeReceipt(env, { ...record, bead: "receipt-linked" })!;
+	const alias = join(home, "receipt-alias");
+	linkSync(linked, alias);
+	const neighbor = join(dirname(eligible), "unrelated.txt");
+	writeFileSync(neighbor, "before\n");
+	const fence = operatorWriteFence(stateRoot)!;
+	const before = snapshotWatched(paths);
+	const attempt = await run([fence.executable, "-p", fence.profile, "/bin/sh", "-c",
+		'printf "isolated writer\\n" >> "$1"', "postcheck", eligible],
+		{ deadline_s: fixtureDeadlineS(), env: { PATH: "/bin:/usr/bin", HOME: home } });
+	expect(attempt.rc).not.toBe(0);
+	expect(new TextDecoder().decode(attempt.stderr)).toContain("Operation not permitted");
+	expect(readFileSync(eligible, "utf8")).not.toContain("isolated writer");
+
+	writeReceipt(env, { ...record, time: "2026-11-28T00:01:00Z" });
+	const fresh = writeReceipt(env, { ...record, bead: "receipt-new" })!;
+	appendFileSync(alias, "unattributed alias\n");
+	appendFileSync(neighbor, "a non-receipt change still fails\n");
+	const after = snapshotWatched(paths);
+	const attributed = liveWriterPaths(before, after, { stateRoot, fence });
+	expect([...attributed.keys()].sort()).toEqual([eligible, fresh].sort());
+	expect(attributed.get(eligible)).toEqual({ source: "write-fence", namespace: dirname(eligible), profile_sha256: fence.profile_sha256 });
+	expect(liveWriterPaths(before, after, { stateRoot, fence: null }).size).toBe(0);
+	expect(compareWatched(before, after, home, undefined, attributed).changed_paths).toEqual([
+		"~/.local/state/omp-kit/self-replay/receipt-linked.json",
+		"~/.local/state/omp-kit/self-replay/unrelated.txt",
+	]);
 }, fixtureDeadlineS(30) * 1000);
 
 test("POSTFENCE negative: with no fence (Linux, no sandbox-exec) or a fence for another state root, every live-fleet write fails", async () => {

@@ -24,6 +24,7 @@ const MAX_LIVE_WRITER_CANDIDATES = 5_000;
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 // cc-spool writes one UTC day file directly under its kit producer directory.
 const KIT_DAY_FILE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl$/;
+const SELF_REPLAY_BEAD = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 function kitDayFile(directory: string, path: string): boolean {
 	if (!path.startsWith(directory) || dirname(path) !== directory) return false;
@@ -31,7 +32,13 @@ function kitDayFile(directory: string, path: string): boolean {
 	return name.length === 16 && KIT_DAY_FILE.test(name);
 }
 
-function spoolFileIdentity(stat: Stats): string | undefined {
+function selfReplayFile(directory: string, path: string): boolean {
+	if (!path.startsWith(directory) || dirname(path) !== directory) return false;
+	const name = basename(path);
+	return name.endsWith(".json") && SELF_REPLAY_BEAD.test(name.slice(0, -5));
+}
+
+function fencedFileIdentity(stat: Stats): string | undefined {
 	if (!stat.isFile() || !Number.isSafeInteger(stat.dev) || !Number.isSafeInteger(stat.ino) ||
 		!Number.isSafeInteger(stat.nlink)) return undefined;
 	return `${stat.nlink}:${stat.dev}:${stat.ino}:${stat.mode}`;
@@ -115,8 +122,11 @@ export function isOwnedState(owned: readonly OwnedStatePath[], path: string): bo
 }
 
 export type WatchedPaths = string[] & { owned?: readonly OwnedStatePath[]; liveState?: readonly string[]; stateRoot?: string | null };
-type KitSpoolSnapshot = { directory: string; physical: string | null; files: Map<string, string> };
-export type WatchedSnapshot = { entries: Map<string, string>; incomplete: string[]; liveState?: string[]; kitSpool?: KitSpoolSnapshot };
+type FencedDirectorySnapshot = { directory: string; physical: string | null; identity: string | null; files: Map<string, string> };
+export type WatchedSnapshot = {
+	entries: Map<string, string>; incomplete: string[]; liveState?: string[];
+	kitSpool?: FencedDirectorySnapshot; selfReplay?: FencedDirectorySnapshot;
+};
 export type WatchedComparison = {
 	unchanged: boolean; complete: boolean; watched: number;
 	changed_paths: string[]; incomplete_paths: string[];
@@ -163,8 +173,11 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 	const entries = new Map<string, string>();
 	const incomplete: string[] = [];
 	const liveState = new Set<string>();
-	const kitSpool: KitSpoolSnapshot | undefined = paths.stateRoot
-		? { directory: fenceNamespaces(paths.stateRoot).kitSpool, physical: null, files: new Map() } : undefined;
+	const namespaces = paths.stateRoot ? fenceNamespaces(paths.stateRoot) : null;
+	const kitSpool: FencedDirectorySnapshot | undefined = namespaces
+		? { directory: namespaces.kitSpool, physical: null, identity: null, files: new Map() } : undefined;
+	const selfReplay: FencedDirectorySnapshot | undefined = namespaces
+		? { directory: namespaces.selfReplay, physical: null, identity: null, files: new Map() } : undefined;
 	for (const root of paths) {
 		if (!isAbsolute(root)) throw new Error("watched paths must be absolute");
 		// Only the state root relaxes: every profile, rule, extension and plugin root keeps the strict caps.
@@ -192,13 +205,15 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 			const mode = (stat.mode & 0o7777).toString(8);
 			if (stat.isSymbolicLink()) { entries.set(path, `link:${readlinkSync(path)}`); return; }
 			if (stat.isFile()) {
-				const spoolIdentity = kitSpool && kitDayFile(kitSpool.directory, path) ? spoolFileIdentity(stat) : undefined;
+				const fencedDirectory = kitSpool && kitDayFile(kitSpool.directory, path) ? kitSpool
+					: selfReplay && selfReplayFile(selfReplay.directory, path) ? selfReplay : undefined;
+				const fileIdentity = fencedDirectory && fencedFileIdentity(stat);
 				// A large state file is recorded by stable metadata, never content-hashed: an append or
 				// rewrite still changes size or mtime, while the bulk never counts toward a byte budget.
 				// The `file:` prefix keeps concurrent-writer attribution working on these entries.
 				if (relaxed && stat.size > MAX_STATE_FILE_HASH_BYTES) {
 					entries.set(path, `file:${mode}:meta:${stat.size}:${stat.mtimeMs}`);
-					if (spoolIdentity !== undefined) kitSpool!.files.set(path, spoolIdentity);
+					if (fileIdentity !== undefined) fencedDirectory!.files.set(path, fileIdentity);
 					return;
 				}
 				if (!relaxed) {
@@ -207,8 +222,8 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 				}
 				try {
 					entries.set(path, `file:${mode}:${createHash("sha256").update(readFileSync(path)).digest("hex")}`);
-					if (spoolIdentity !== undefined && spoolIdentity === spoolFileIdentity(lstatSync(path)))
-						kitSpool!.files.set(path, spoolIdentity);
+					if (fileIdentity !== undefined && fileIdentity === fencedFileIdentity(lstatSync(path)))
+						fencedDirectory!.files.set(path, fileIdentity);
 				} catch { incomplete.push(path); }
 				return;
 			}
@@ -218,8 +233,11 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 			// The watched root itself is by construction kit-relevant and is never skipped.
 			if (path !== root && VOLATILE_CACHE_DIR_NAMES[basename(path)] === true) return;
 			entries.set(path, `dir:${mode}`);
-			if (kitSpool && path === kitSpool.directory) {
-				try { kitSpool.physical = realpathSync(path); } catch { incomplete.push(path); }
+			const fencedDirectory = kitSpool?.directory === path ? kitSpool : selfReplay?.directory === path ? selfReplay : undefined;
+			if (fencedDirectory) {
+				try { fencedDirectory.physical = realpathSync(path); } catch { incomplete.push(path); }
+				if (Number.isSafeInteger(stat.dev) && Number.isSafeInteger(stat.ino))
+					fencedDirectory.identity = `${stat.dev}:${stat.ino}`;
 			}
 			let children: string[];
 			try { children = readdirSync(path).sort(); } catch { incomplete.push(path); return; }
@@ -230,7 +248,8 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 		};
 		visit(root);
 	}
-	return { entries, incomplete, ...(liveState.size ? { liveState: [...liveState].sort() } : {}), ...(kitSpool && { kitSpool }) };
+	return { entries, incomplete, ...(liveState.size ? { liveState: [...liveState].sort() } : {}),
+		...(kitSpool && { kitSpool }), ...(selfReplay && { selfReplay }) };
 }
 function changedWatchedPaths(before: WatchedSnapshot, after: WatchedSnapshot): string[] {
 	const changed = new Set<string>();
@@ -360,7 +379,8 @@ function physicalPath(path: string): string {
 
 function fenceNamespaces(stateRoot: string) {
 	return { composer: join(stateRoot, "composer"), verdicts: join(stateRoot, "full-suite-verdicts"),
-		receipts: join(stateRoot, "disk-stage", "receipts.jsonl"), kitSpool: join(stateRoot, "cc", "spool", "kit") };
+		receipts: join(stateRoot, "disk-stage", "receipts.jsonl"), kitSpool: join(stateRoot, "cc", "spool", "kit"),
+		selfReplay: join(stateRoot, "self-replay") };
 }
 
 /** The write fence for an isolated run, or null where it cannot be applied (not darwin, or no sandbox-exec). */
@@ -368,16 +388,16 @@ export function operatorWriteFence(stateRoot: string | null, platform: NodeJS.Pl
 	executable: string = SANDBOX_EXEC): WriteFence | null {
 	if (!stateRoot || !isAbsolute(stateRoot) || platform !== "darwin" || !existsSync(executable)) return null;
 	const physical = fenceNamespaces(physicalPath(stateRoot));
-	const denied = [physical.composer, physical.verdicts, physical.receipts, physical.kitSpool];
+	const denied = [physical.composer, physical.verdicts, physical.receipts, physical.kitSpool, physical.selfReplay];
 	const parents = new Set<string>();
-	for (const leaf of [physical.receipts, physical.kitSpool])
+	for (const leaf of [physical.receipts, physical.kitSpool, physical.selfReplay])
 		for (let dir = dirname(leaf); dir !== dirname(dir); dir = dirname(dir)) parents.add(dir);
 	const ancestors = [...parents];
 	const quote = (path: string) => JSON.stringify(path);
 	const profile = [
 		"(version 1)",
 		"(allow default)",
-		`(deny file-write* (subpath ${quote(physical.composer)}) (subpath ${quote(physical.verdicts)}) (literal ${quote(physical.receipts)}) (subpath ${quote(physical.kitSpool)}))`,
+		`(deny file-write* (subpath ${quote(physical.composer)}) (subpath ${quote(physical.verdicts)}) (literal ${quote(physical.receipts)}) (subpath ${quote(physical.kitSpool)}) (subpath ${quote(physical.selfReplay)}))`,
 		`(deny file-write-unlink ${ancestors.map(dir => `(literal ${quote(dir)})`).join(" ")})`,
 		'(allow process-exec (literal "/bin/ps") (with no-sandbox))',
 		"",
@@ -404,6 +424,13 @@ export function liveWriterPaths(before: WatchedSnapshot, after: WatchedSnapshot,
 	const spoolFenced = fence?.executable === SANDBOX_EXEC && physicalSpool !== null && physicalSpool !== undefined &&
 		after.kitSpool?.physical === physicalSpool && fence.denied.includes(physicalSpool) &&
 		before.kitSpool?.directory === namespaces.kitSpool && after.kitSpool.directory === namespaces.kitSpool;
+	const priorReplay = before.selfReplay, nextReplay = after.selfReplay;
+	// A self-replay receipt is atomically replaced, so pin the parent directory,
+	// not the file inode. Both file images still have to be single-link receipts.
+	const selfReplayFenced = fence?.executable === SANDBOX_EXEC && priorReplay?.physical != null &&
+		priorReplay.physical === nextReplay?.physical && fence.denied.includes(priorReplay.physical) &&
+		priorReplay.directory === namespaces.selfReplay && nextReplay.directory === namespaces.selfReplay &&
+		priorReplay.identity !== null && priorReplay.identity === nextReplay.identity;
 	const namespaceOf = (path: string) => {
 		if (path === namespaces.receipts) return namespaces.receipts;
 		if (within(namespaces.composer, path)) return namespaces.composer;
@@ -411,6 +438,12 @@ export function liveWriterPaths(before: WatchedSnapshot, after: WatchedSnapshot,
 		if (spoolFenced && kitDayFile(namespaces.kitSpool, path)) {
 			const identity = before.kitSpool?.files.get(path);
 			if (identity?.startsWith("1:") && identity === after.kitSpool?.files.get(path)) return namespaces.kitSpool;
+		}
+		if (selfReplayFenced && selfReplayFile(namespaces.selfReplay, path)) {
+			const oldReceipt = !before.entries.has(path) ||
+				(before.entries.get(path)?.startsWith("file:600:") && priorReplay.files.get(path)?.startsWith("1:"));
+			const newReceipt = after.entries.get(path)?.startsWith("file:600:") && nextReplay.files.get(path)?.startsWith("1:");
+			if (oldReceipt && newReceipt) return namespaces.selfReplay;
 		}
 		return null;
 	};
