@@ -309,6 +309,26 @@ for (const scope of ["base", "override"] as const) {
 	}
 }
 
+test("A5 repo override cannot lower the acceptance completeness invariant", async () => {
+	const api = await scoreApi();
+	if (!api) return;
+	const kitRoot = fixture("acceptance-invariant-kit");
+	const repo = fixture("acceptance-invariant-repo");
+	const home = fixture("acceptance-invariant-home");
+	mkdirSync(join(kitRoot, "config"), { recursive: true });
+	mkdirSync(join(repo, ".omp"), { recursive: true });
+	writeFileSync(join(kitRoot, "config", "planning-score.toml"), readFileSync(join(repoRoot, "config", "planning-score.toml")));
+	writeFileSync(join(repo, ".omp", "planning-score.toml"), "[targets]\nbead_self_contained_acceptance_present_share = 0\n");
+	const config = api.loadPlanningScoreConfig(kitRoot, repo, home);
+	const base = passingSnapshot();
+	const beads = [{ ...base.beads[0]!, acceptance_criteria: "" }];
+	const result = api.scorePlanningSnapshot({ ...base, beads }, config.tuning);
+	expect(result.metrics.bead_self_contained.status).toBe("FAIL");
+	expect(result.metrics.bead_self_contained.target).toMatchObject({ acceptance_present_share: "= 1" });
+	expect(result.metrics.bead_self_contained.evidence?.configured_acceptance_present_share).toBe(0);
+});
+
+
 // PLANPORT1 (ompkit-f1zn5): `planning score` finds the plan from <repo>/.omp/plan.toml and counts review rounds from review files.
 function planConfigRepo(label: string, opts: { reviewFiles: boolean; config: string | null; roundCommits?: number }) {
 	const repo = fixture("plan-config-" + label);
@@ -408,19 +428,107 @@ test("A5 prose acceptance is presence, not test evidence", async () => {
 	expect(unreadable.metrics.bead_self_contained.target).not.toHaveProperty("test_share");
 });
 
-test("A5 acceptance presence respects its target and excludes blank prose", async () => {
+test("A5 acceptance completeness is invariant; density is telemetry and old thresholds cannot waive it", async () => {
 	const api = await scoreApi();
 	if (!api) return;
 	const base = passingSnapshot();
 	const beads = [
-		{ ...base.beads[0]!, acceptance_criteria: "looks good" },
-		{ ...base.beads[1]!, acceptance_criteria: " \n\t " },
+		{ ...base.beads[0]!, acceptance_criteria: "looks good", dependencies: [] },
+		{ ...base.beads[1]!, acceptance_criteria: " \n\t ", dependencies: Array.from({ length: 20 }, (_, i) => ({ depends_on_id: "fake-" + i, type: "blocks" })) },
 	];
-	const strict = { ...tuning, targets: { ...tuning.targets, bead_self_contained_acceptance_present_share: 0.75 } };
-	const quality = api.scorePlanningSnapshot({ ...base, beads }, strict).metrics.bead_self_contained;
-	expect(quality.value).toMatchObject({ acceptance_present_share: 0.5 });
+	const permissive = { ...tuning, targets: { ...tuning.targets,
+		bead_self_contained_acceptance_present_share: 0, bead_self_contained_deps_per_bead: 0 } };
+	const quality = api.scorePlanningSnapshot({ ...base, beads }, permissive).metrics.bead_self_contained;
+	expect(quality.value).toMatchObject({ acceptance_present_share: 0.5, deps_per_bead: 10, applicable_beads: 2 });
+	expect(quality.target).toMatchObject({ acceptance_present_share: "= 1", deps_per_bead: "telemetry only" });
 	expect(quality.status).toBe("FAIL");
+	expect(quality.evidence?.missing_acceptance_ids).toEqual(["b1"]);
 });
+
+test("A5 sparse valid tree and singleton pass; empty and excluded-only cohorts are UNKNOWN", async () => {
+	const api = await scoreApi();
+	if (!api) return;
+	const base = passingSnapshot();
+	const sparse = base.beads.slice(0, 2).map((item) => ({ ...item, dependencies: [] }));
+	expect(api.scorePlanningSnapshot({ ...base, beads: sparse }, tuning).metrics.bead_self_contained.status).toBe("PASS");
+	expect(api.scorePlanningSnapshot({ ...base, beads: [sparse[0]!] }, tuning).metrics.bead_self_contained.status).toBe("PASS");
+	for (const beads of [[], [{ ...sparse[0]!, issue_type: "epic" }], [{ ...sparse[0]!, status: "closed" }]]) {
+		expect(api.scorePlanningSnapshot({ ...base, beads }, tuning).metrics.bead_self_contained.status).toBe("UNKNOWN");
+	}
+});
+
+test("A5 unknown types/statuses remain in scope and missing acceptance dominates", async () => {
+	const api = await scoreApi();
+	if (!api) return;
+	const base = passingSnapshot();
+	const beads = [
+		{ ...base.beads[0]!, acceptance_criteria: "present", issue_type: "custom", status: "open" },
+		{ ...base.beads[1]!, acceptance_criteria: " ", issue_type: "mystery", status: "unrecognized" },
+	];
+	const quality = api.scorePlanningSnapshot({ ...base, beads }, tuning).metrics.bead_self_contained;
+	expect(quality.status).toBe("FAIL");
+	expect(quality.value).toMatchObject({ applicable_beads: 2, acceptance_present_share: 0.5 });
+});
+test("A5 malformed and empty tracker cohorts stay UNKNOWN", async () => {
+	const api = await scoreApi();
+	if (!api) return;
+	const base = passingSnapshot();
+	expect(api.scorePlanningSnapshot({ ...base, beads: null }, tuning).metrics.bead_self_contained.status).toBe("UNKNOWN");
+	expect(api.scorePlanningSnapshot({ ...base, beads: [] }, tuning).metrics.bead_self_contained.status).toBe("UNKNOWN");
+});
+
+// Outside delivery audit planning corpus: keep the exact 22 A5 outcomes.
+// The score tests presence and description length, not DAG validity or approval to build.
+{
+	const task = (id: string, extra: api.PlanningBead = {}): api.PlanningBead => ({
+		id, issue_type: "task", status: "open", labels: ["mission:proof"], title: `Implement ${id}`,
+		description: "A focused product change with named scope, inputs, outputs and a concrete user. ".repeat(5),
+		acceptance_criteria: `The declared ${id} outcome is observable at its intended consumer.`,
+		dependencies: [], ...extra,
+	});
+	const dep = (id: string) => ({ depends_on_id: id, type: "blocks" });
+	const missing = (id: string) => task(id, { acceptance_criteria: "" });
+	const padded = (beads: readonly api.PlanningBead[]) => beads.map((bead) => ({
+		...bead, dependencies: [dep("nonexistent"), dep("nonexistent")],
+	}));
+	const incomplete = [task("present-0"), task("present-1"), missing("missing-2"), missing("missing-3"), missing("missing-4")];
+	const cases: ReadonlyArray<readonly [string, readonly api.PlanningBead[] | null, api.PlanningStatus]> = [
+		["independent_singleton", [task("one")], "PASS"],
+		["independent_three", [task("a"), task("b"), task("c")], "PASS"],
+		["sparse_chain", [task("a"), task("b", { dependencies: [dep("a")] }), task("c", { dependencies: [dep("b")] })], "PASS"],
+		["branching_tree", [task("root"), task("left", { dependencies: [dep("root")] }), task("right", { dependencies: [dep("root")] }), task("leaf", { dependencies: [dep("left")] })], "PASS"],
+		["diamond", [task("root"), task("left", { dependencies: [dep("root")] }), task("right", { dependencies: [dep("root")] }), task("join", { dependencies: [dep("left"), dep("right")] })], "PASS"],
+		["dense_acyclic", Array.from({ length: 4 }, (_, i) => task(`d${i}`, { dependencies: Array.from({ length: i }, (_, j) => dep(`d${j}`)) })), "PASS"],
+		["two_of_five_without_edges", incomplete, "FAIL"],
+		["two_of_five_with_fake_edges", padded(incomplete), "FAIL"],
+		["four_of_five_with_fake_edges", padded([task("complete-0"), task("complete-1"), task("complete-2"), task("complete-3"), missing("fifth")]), "FAIL"],
+		["whitespace_acceptance", padded([task("a"), task("b", { acceptance_criteria: " \n\t " })]), "FAIL"],
+		["nonstring_acceptance", padded([task("a"), task("b", { acceptance_criteria: { text: "not the actual string field" } })]), "FAIL"],
+		["unknown_status_cannot_bypass", padded([task("a"), task("b", { status: "mystery", acceptance_criteria: "" })]), "FAIL"],
+		["unknown_type_cannot_bypass", padded([task("a"), task("b", { issue_type: "mystery", acceptance_criteria: "" })]), "FAIL"],
+		["missing_type_and_status_cannot_bypass", padded([task("a"), task("b", { issue_type: undefined, status: undefined, acceptance_criteria: "" })]), "FAIL"],
+		["active_bead_with_history_and_epic", [
+			task("active"), task("epic", { issue_type: "epic", description: "", acceptance_criteria: "" }),
+			...["closed", "tombstone", "deferred", "parked"].map((status) => task(status, { status, acceptance_criteria: "" })),
+		], "PASS"],
+		["null_tracker", null, "UNKNOWN"],
+		["empty_tracker", [], "UNKNOWN"],
+		["epic_only", [task("epic", { issue_type: "epic", acceptance_criteria: "" })], "UNKNOWN"],
+		["completed_only", padded([task("closed", { status: "closed" })]), "UNKNOWN"],
+		["parked_only", padded([task("parked", { status: "parked" })]), "UNKNOWN"],
+		["unrelated_mission", [task("other", { labels: ["mission:elsewhere"] })], "UNKNOWN"],
+		["short_description_control", [task("short", { title: "short", description: "short", acceptance_criteria: "check", dependencies: [dep("elsewhere")] })], "FAIL"],
+	];
+	const snapshot = { ...passingSnapshot(), stage: "build", mission: "proof", planPath: "PLAN_proof.md" };
+	for (const [id, beads, expected] of cases) {
+		test(`A5 audit vector: ${id}`, () => {
+			const before = JSON.stringify(beads);
+			const quality = api.scorePlanningSnapshot({ ...snapshot, beads }, tuning).metrics.bead_self_contained;
+			expect(quality.status).toBe(expected);
+			expect(JSON.stringify(beads)).toBe(before);
+		});
+	}
+}
 
 test("A6 build stage marks historical planning, conversion and polish metrics NOT_APPLICABLE", async () => {
 	const api = await scoreApi();

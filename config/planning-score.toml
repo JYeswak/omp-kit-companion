@@ -12,8 +12,9 @@ coverage_checks = 1
 polish_rounds = 6
 polish_last_changed = 0.05
 bead_self_contained_median_chars = 300
-bead_self_contained_acceptance_present_share = 0.4
-bead_self_contained_deps_per_bead = 1.0
+bead_self_contained_acceptance_present_share = 1.0
+# Retained for compatibility; dependency density is telemetry, not a threshold.
+bead_self_contained_deps_per_bead = 0.0
 # Initial scope tripwires; file/component breadth does not prove one-hour completion.
 bead_breadth_max_files = 5
 bead_breadth_max_components = 3

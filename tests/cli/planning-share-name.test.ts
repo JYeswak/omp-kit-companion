@@ -14,7 +14,10 @@ test("planning-share-name e2e passes every case and leaves no scratch dir behind
 	const totals = rows.find(row => row.kind === "totals");
 	expect({ rc: result.rc, totals: totals && { cases: totals.cases, failed: totals.failed } },
 		`stdout=${stdout.slice(-2000)} stderr=${new TextDecoder().decode(result.stderr).slice(-1000)}`)
-		.toEqual({ rc: 0, totals: { cases: 8, failed: 0 } });
+		.toEqual({ rc: 0, totals: { cases: 9, failed: 0 } });
+	expect(rows.find(row => row.case === "score-padded-missing")).toMatchObject({
+		exit_code: 1, observed: { status: "FAIL", missing: ["missing-acceptance"] },
+	});
 	const score = rows.find(row => row.case === "score-prose");
 	const command = Array.isArray(score?.command) ? score.command as string[] : [];
 	const repo = command[command.indexOf("--repo") + 1];

@@ -79,7 +79,9 @@ git("config", "user.email", "planning-share@example.invalid")
 (repo / ".beads").mkdir()
 (repo / ".omp").mkdir()
 (repo / "PLAN_share.md").write_text("# Prose-presence fixture; no executed tests claimed\n")
-(repo / ".beads" / "issues.jsonl").write_text(json.dumps({"id": "prose-only-share", "title": "Prose only", "description": "PLAN_share.md " + "detail " * 60, "acceptance_criteria": "looks good", "status": "open", "labels": ["mission:share"], "dependencies": [{"depends_on_id": "fixture-root", "type": "blocks"}]}) + "\n")
+issues = repo / ".beads" / "issues.jsonl"
+prose = {"id": "prose-only-share", "title": "Prose only", "description": "PLAN_share.md " + "detail " * 60, "acceptance_criteria": "looks good", "status": "open", "labels": ["mission:share"], "dependencies": []}
+issues.write_text(json.dumps(prose) + "\n")
 normal_override = '[ci]\nmode = "local"\nbranch = "main"\ncheck = "fixture-only-no-execution-claim"\nreceipts = ".omp/receipts"\n[missions.share]\nstage = "build"\n'
 override = repo / ".omp" / "planning-score.toml"
 override.write_text(normal_override)
@@ -95,9 +97,25 @@ except (KeyError, ValueError, StopIteration):
     print(json.dumps({"kind": "INVALID", "case": "score-startup", "producer": result}), flush=True)
     raise SystemExit(2)
 observed = {"metric": quality, "no_test_share_at_any_depth": no_test_share(rows)}
-record("score-prose", result, {"acceptance_present_share": 1, "metric_status": "PASS", "no_test_share_at_any_depth": True}, observed,
-       result["exit_code"] == 3 and quality["value"].get("acceptance_present_share") == 1 and quality["status"] == "PASS" and no_test_share(rows))
+record("score-prose", result, {"acceptance_present_share": 1, "deps_per_bead": 0, "metric_status": "PASS", "no_test_share_at_any_depth": True}, observed,
+       result["exit_code"] == 3 and quality["value"].get("acceptance_present_share") == 1
+       and quality["value"].get("deps_per_bead") == 0 and quality["status"] == "PASS" and no_test_share(rows))
 # Exit3 is deliberately retained: this fixture has NO local CI receipt. Presence is not execution.
+
+# Padded edges and a legacy threshold cannot admit an incomplete cohort.
+padded_edges = [{"depends_on_id": "missing-target", "type": "blocks"}] * 4
+missing = dict(prose, id="missing-acceptance", acceptance_criteria="", dependencies=padded_edges)
+issues.write_text(json.dumps(dict(prose, dependencies=padded_edges)) + "\n" + json.dumps(missing) + "\n")
+override.write_text(normal_override + "[targets]\nbead_self_contained_acceptance_present_share = 0.0\n")
+result = execute(cli + ["planning", "score", "--repo", str(repo), "--json"], root)
+quality = next(row for row in envelopes(result) if row.get("kind") == "mission")["metrics"]["bead_self_contained"]
+observed = {"status": quality["status"], "applicable": quality["value"].get("applicable_beads"),
+            "density": quality["value"].get("deps_per_bead"), "missing": quality.get("evidence", {}).get("missing_acceptance_ids")}
+record("score-padded-missing", result, {"status": "FAIL", "applicable": 2, "minimum_density": 1, "missing": ["missing-acceptance"]}, observed,
+       result["exit_code"] != 0 and observed["status"] == "FAIL" and observed["applicable"] == 2
+       and isinstance(observed["density"], (float, int)) and observed["density"] >= 1 and observed["missing"] == ["missing-acceptance"])
+issues.write_text(json.dumps(prose) + "\n")
+override.write_text(normal_override)
 
 result = execute(cli + ["planning", "convert", "--plan", str(root / "tests" / "fixtures" / "planning-convert" / "valid.md"), "--mission", "core8", "--dry-run", "--db", str(work / "native-convert"), "--json"], root)
 (work / "convert-producer.json").write_text(json.dumps(result, indent=2) + "\n")

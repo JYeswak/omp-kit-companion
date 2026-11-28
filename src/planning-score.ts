@@ -556,10 +556,17 @@ function scoreOverall(metrics: Record<string, PlanningMetric>): { status: Planni
 }
 type MetricWriter = (name: string, value: unknown, target: unknown, status: PlanningStatus, evidence?: Record<string, unknown>) => void;
 function beadQualityTarget(target: (name: string, fallback: number | boolean) => number | boolean): Record<string, unknown> {
-	return { median_chars: target("bead_self_contained_median_chars", 300), acceptance_present_share: target("bead_self_contained_acceptance_present_share", 0.4), deps_per_bead: target("bead_self_contained_deps_per_bead", 1) };
+	// Legacy overrides remain visible for migration, but cannot waive completeness.
+	return { median_chars: target("bead_self_contained_median_chars", 300), acceptance_present_share: 1, deps_per_bead: "telemetry only" };
 }
 function beadQualityBounds(target: (name: string, fallback: number | boolean) => number | boolean): Record<string, string> {
-	return { median_chars: ">= " + target("bead_self_contained_median_chars", 300), acceptance_present_share: ">= " + target("bead_self_contained_acceptance_present_share", 0.4), deps_per_bead: ">= " + target("bead_self_contained_deps_per_bead", 1) };
+	return { median_chars: ">= " + target("bead_self_contained_median_chars", 300), acceptance_present_share: "= 1", deps_per_bead: "telemetry only" };
+}
+function applicableQualityBead(bead: PlanningBead): boolean {
+	const status = stringValue(bead.status)?.toLowerCase();
+	// Exclude only known historical/non-executable items; unknown values stay in scope.
+	return stringValue(bead.issue_type)?.toLowerCase() !== "epic" &&
+		status !== "closed" && status !== "tombstone" && !isParked(bead);
 }
 function scorePlanPresence(snapshot: PlanningScoreSnapshot, target: (name: string, fallback: number | boolean) => number | boolean, put: MetricWriter): void {
 	if (snapshot.planExists === null || snapshot.beads === null || !snapshot.planPath) { put("plan_present", null, target("plan_present", true), "UNKNOWN"); return; }
@@ -610,16 +617,38 @@ function scorePolishMetrics(snapshot: PlanningScoreSnapshot, commits: readonly P
 function scoreBeadQuality(snapshot: PlanningScoreSnapshot, target: (name: string, fallback: number | boolean) => number | boolean, put: MetricWriter): void {
 	const unknownTarget = beadQualityTarget(target);
 	if (snapshot.beads === null) { put("bead_self_contained", null, unknownTarget, "UNKNOWN"); return; }
-	const beads = safeMissionBeads(snapshot.beads, snapshot.mission, snapshot.planPath);
-	if (!beads?.length) { put("bead_self_contained", null, unknownTarget, "UNKNOWN"); return; }
+	const missionBeads = safeMissionBeads(snapshot.beads, snapshot.mission, snapshot.planPath) ?? [];
+	const beads = missionBeads.filter(applicableQualityBead);
+	if (!beads.length) {
+		put("bead_self_contained", null, unknownTarget, "UNKNOWN", {
+			reason: "no active executable mission beads; no readiness asserted",
+			mission_beads: missionBeads.length, applicable_beads: 0,
+		});
+		return;
+	}
 	const medianChars = median(beads.map((bead) => issueText(bead).length));
-	const acceptancePresentShare = beads.filter((bead) => (stringValue(bead.acceptance_criteria) ?? "").trim().length > 0).length / beads.length;
-	const depsPerBead = beads.reduce((sum, bead) => sum + (Array.isArray(bead.dependencies) ? bead.dependencies.length : 0), 0) / beads.length;
+	const missingAcceptanceIds: string[] = [];
+	let dependencyCount = 0;
+	for (const bead of beads) {
+		if (!(stringValue(bead.acceptance_criteria) ?? "").trim()) missingAcceptanceIds.push(stringValue(bead.id) ?? "UNKNOWN");
+		if (Array.isArray(bead.dependencies)) dependencyCount += bead.dependencies.length;
+	}
+	const acceptancePresentShare = (beads.length - missingAcceptanceIds.length) / beads.length;
+	const depsPerBead = dependencyCount / beads.length;
 	const medianTarget = numberValue(target("bead_self_contained_median_chars", 300)) ?? 300;
-	const acceptancePresentTarget = numberValue(target("bead_self_contained_acceptance_present_share", 0.4)) ?? 0.4;
-	const depsTarget = numberValue(target("bead_self_contained_deps_per_bead", 1)) ?? 1;
-	const status = medianChars !== null && medianChars >= medianTarget && acceptancePresentShare >= acceptancePresentTarget && depsPerBead >= depsTarget ? "PASS" : "FAIL";
-	put("bead_self_contained", { median_chars: medianChars, acceptance_present_share: acceptancePresentShare, deps_per_bead: depsPerBead, mission_beads: beads.length }, beadQualityBounds(target), status);
+	// Preserve the independent description-length diagnostic alongside the hard completeness rule.
+	const descriptionLengthPass = medianChars !== null && medianChars >= medianTarget;
+	const status = descriptionLengthPass && missingAcceptanceIds.length === 0 ? "PASS" : "FAIL";
+	put("bead_self_contained", {
+		median_chars: medianChars, acceptance_present_share: acceptancePresentShare,
+		deps_per_bead: depsPerBead, mission_beads: missionBeads.length, applicable_beads: beads.length,
+	}, beadQualityBounds(target), status, {
+		missing_acceptance_ids: missingAcceptanceIds,
+		excluded_beads: missionBeads.length - beads.length,
+		configured_acceptance_present_share: target("bead_self_contained_acceptance_present_share", 0.4),
+		configured_deps_per_bead: target("bead_self_contained_deps_per_bead", 1),
+		scope: "acceptance presence and description length only; not semantic acceptance or DAG validity",
+	});
 }
 
 function scoreBeadBreadth(snapshot: PlanningScoreSnapshot, target: (name: string, fallback: number | boolean) => number | boolean, put: MetricWriter): void {
@@ -861,11 +890,7 @@ function singleRepoEntry(options: PlanningScoreOptions, fleet: readonly FleetRep
 		...(planConfig ? { planConfig: expandPath(planConfig, home, options.cwd ?? process.cwd()) } : {}) }];
 }
 function targetForMetric(name: string, tuning: PlanningScoreTuning): unknown {
-	if (name === "bead_self_contained") return {
-		median_chars: ">= " + String(tuning.targets.bead_self_contained_median_chars ?? 300),
-		acceptance_present_share: ">= " + String(tuning.targets.bead_self_contained_acceptance_present_share ?? 0.4),
-		deps_per_bead: ">= " + String(tuning.targets.bead_self_contained_deps_per_bead ?? 1),
-	};
+	if (name === "bead_self_contained") return beadQualityBounds((key, fallback) => tuning.targets[key] ?? fallback);
 	if (name === "bead_breadth") return {
 		max_files: tuning.targets.bead_breadth_max_files ?? 5,
 		max_components: tuning.targets.bead_breadth_max_components ?? 3,

@@ -155,10 +155,11 @@ change the target merely to obtain green.
 | `coverage_checks` | `beads(<m>): coverage check N` commits | ≥ 1 | 1.0 |
 | `polish_rounds` | `beads(<m>): polish round N` commits | ≥ 6, or steady earlier | 1.0 |
 | `polish_last_changed` | share of the mission's non-parked-plan beads changed in the last polish round | ≤ 0.05 | 1.0 |
-| `bead_self_contained` | median bead body length; share naming tests from `acceptance_criteria`; deps per bead | ≥ 300 chars; ≥ 0.4; ≥ 1.0 (Jeff's corpus: 48% name tests, 1.46 deps) | 1.0 |
-| `plan_to_code_hours` | verified `[plan] first_commit`, otherwise tagged draft, to first code commit (UTC committer time) | ≤ 24 hours | 1.0 |
-| `plan_ship_ratio_7d` | planning and tracker commits per code commit, last 7 days | ≤ 2.0 by default; repo override allowed | 1.0 |
-| `main_green` | hosted CI or configured local receipt for the declared branch head | PASS; missing receipt/result is UNKNOWN | 1.0 |
+| `bead_self_contained` | active executable mission beads: median body length and share with nonblank `acceptance_criteria`; dependency edges per bead are diagnostic telemetry only | ≥ 300 chars and acceptance share = 1.0; any missing acceptance fails this metric | 1.0 |
+
+The acceptance check measures field presence only, not whether criteria are meaningful, testable or semantically complete. The scorer reports `FAIL` if any applicable bead lacks nonblank acceptance, regardless of a repo's legacy `bead_self_contained_acceptance_present_share` override. Empty or wholly excluded cohorts are `UNKNOWN`, never green. Dependency density is reported for diagnosis; edges cannot compensate for missing acceptance or establish that the DAG is valid. Actual plan admission and external decisions remain with PLANVERDICT1/PLANSTART1.
+
+`planning score --json` retains the `bead_self_contained` metric key and its `value` fields `median_chars`, `acceptance_present_share`, `deps_per_bead`, and `mission_beads`; it adds `applicable_beads`. `target.acceptance_present_share` is the fixed string `= 1`, and `target.deps_per_bead` says `telemetry only`. Missing bead IDs and excluded counts are in `evidence`. Fleet aggregation preserves the same metric key and FAIL-dominant status contract.
 
 **Existing missions.** Set `[missions.<m>] stage = "build"` in `.omp/planning-score.toml` when the mission is already converted and building. It enters at step 7; plan, conversion, coverage and polish metrics (including plan-to-code time) are `NOT_APPLICABLE`, not failed. Bead quality, current plan-to-ship ratio and CI evidence remain scored.
 
