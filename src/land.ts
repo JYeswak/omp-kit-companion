@@ -2341,7 +2341,12 @@ async function exactParentCandidateGate(repo: string, candidate: string, base: s
 	const lines = `${decoder.decode(run.stdout)}\n${decoder.decode(run.stderr)}`.split("\n");
 	const green = run.rc === 0 && !run.timed_out && !run.killed && !run.truncated && lines.some((line) => line.startsWith(`FRESH-GATE: GREEN commit=${candidate}`));
 	if (green) return null;
-	const verdict = [...lines].reverse().find((line) => line.startsWith("FRESH-GATE:")) ?? (run.timed_out ? `timed out after ${deadlineS} s` : `exit ${String(run.rc)} without a FRESH-GATE line`);
+	// A trailing measured-verdict row is timing evidence, not the refusal.
+	const verdict = run.timed_out ? `timed out after ${deadlineS} s`
+		: lines.findLast((line) => /^FRESH-GATE: (?:RED|REFUSED|UNQUALIFIED)\b/.test(line))
+			?? lines.findLast((line) => line.startsWith("staged-members: REFUSED:") || line === "focused shellcheck: findings refuse the push")
+			?? lines.findLast((line) => /^(?:RED|UNQUALIFIED) [a-z][a-z0-9-]* producer_rc=\d+$/.test(line))
+			?? `exit ${String(run.rc)} without a gate diagnostic`;
 	return refused("LAND_PUBLICATION_REFUSED", `The exact candidate ${candidate} did not pass scripts/fresh-gate.sh: ${previewText(verdict, 300)}`, "Fix the failing check in the commit (scripts/fresh-gate.sh --commit SHA shows it) and rebuild the reviewed commit; nothing was created or published.");
 }
 
