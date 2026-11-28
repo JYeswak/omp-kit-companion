@@ -4,6 +4,12 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.159] - 2026-11-28
+
+### Fixed
+
+- Recover an interrupted tag-only release with `--resume-from-draft --version X.Y.Z --source <expected-sha>`: rebuild through every release gate, verify the immutable tag before draft creation, and never re-tag.
+
 ## [0.2.158] - 2026-11-28
 
 ### Fixed
