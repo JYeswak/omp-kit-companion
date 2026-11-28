@@ -93,7 +93,10 @@ test("VERIFYFETCHDIAG1 preserves UNKNOWN and classifies exact-ref lock and incom
 	const { dir, sha, env, marker } = await makeRepo(root);
 	const realGit = Bun.which("git");
 	if (realGit === null) throw new Error("Git is required for the publication fixture");
-	await runOk(["git", "push", "-q", join(root, "origin.git"), "HEAD:main"], dir);
+	// Advance the bare repo from its side; newer Git can update a local tracking ref even on a push by path.
+	const origin = join(root, "origin.git");
+	await runOk(["git", "fetch", "--no-tags", dir, "HEAD:refs/heads/main"], origin);
+	expect(await runOk(["git", "rev-parse", "refs/heads/main"], origin)).toBe(sha);
 	expect(await runOk(["git", "rev-parse", "refs/remotes/origin/main"], dir)).not.toBe(sha);
 	const decoder = new TextDecoder();
 	const verify = async (extra: Record<string, string> = {}) => {
