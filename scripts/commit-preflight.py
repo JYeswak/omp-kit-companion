@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import shutil
 import time
@@ -26,6 +27,7 @@ from kitlib_run import run
 from kitlib_tmp import owned_tmp
 
 HERE = Path(__file__).resolve().parent
+OVNFS_CHECKOUT_NAME = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
 
 # Pinned engine shared with fresh-gate's focused stage. Same tag, default
 # severity and checker options in both runners.
@@ -124,10 +126,8 @@ def note_has_added_line(stdout, env):
     return False
 
 
-def _ovnfs_source_hooks_dir(root: Path, env: dict) -> Optional[tuple]:
-    """PREFLIGHTOVNFS1: in an ovnfs checkout the own hooks dir holds no installed
-    chain, so resolve the source repository's hooks dir instead. Every failure
-    returns None so the caller falls through to today's UNKNOWN message."""
+def _ovnfs_source(root: Path, env: dict) -> Optional[tuple[Path, str]]:
+    """Prove the exact registered checkout and its canonical source directory."""
     which_path = env.get('PATH', os.defpath) if isinstance(env, dict) else os.defpath
     if shutil.which('ovnfs', path=which_path) is None:
         return None
@@ -136,7 +136,7 @@ def _ovnfs_source_hooks_dir(root: Path, env: dict) -> Optional[tuple]:
                       max_output_bytes=1 << 20, env=env)
     except (OSError, ValueError, TypeError):
         return None
-    if listing.timed_out or listing.rc != 0:
+    if listing.timed_out or listing.truncated or listing.rc != 0:
         return None
     try:
         parsed = json.loads(listing.stdout.decode())
@@ -155,12 +155,11 @@ def _ovnfs_source_hooks_dir(root: Path, env: dict) -> Optional[tuple]:
     except OSError:
         return None
     source = None
-    name = None
     for row in rows:
         if not isinstance(row, dict):
             continue
         row_path = row.get('path')
-        if not isinstance(row_path, str):
+        if not isinstance(row_path, str) or not Path(row_path).is_absolute():
             continue
         try:
             if os.path.realpath(row_path) != want:
@@ -169,16 +168,25 @@ def _ovnfs_source_hooks_dir(root: Path, env: dict) -> Optional[tuple]:
             continue
         candidate = row.get('source')
         row_name = row.get('name')
-        if isinstance(candidate, str) and candidate and isinstance(row_name, str) and row_name:
-            source = candidate
-            name = row_name
-        break
-    if source is None or name is None:
+        if (source is not None or not isinstance(candidate, str) or not Path(candidate).is_absolute()
+                or not isinstance(row_name, str) or not row_name):
+            return None
+        try:
+            canonical = Path(candidate).resolve(strict=True)
+            if canonical == Path(want) or not canonical.is_dir():
+                return None
+        except (OSError, RuntimeError):
+            return None
+        source = canonical, row_name
+    return source
+
+
+def _ovnfs_source_hooks_dir(checkout: Optional[tuple[Path, str]], env: dict) -> Optional[tuple[Path, str]]:
+    if checkout is None:
         return None
-    if not os.path.isdir(source):
-        return None
+    source, name = checkout
     try:
-        resolved = run(['git', '-C', source, 'rev-parse', '--git-path', 'hooks'],
+        resolved = run(['git', '-C', str(source), 'rev-parse', '--git-path', 'hooks'],
                        deadline_s=5, grace_s=0.2, max_output_bytes=1 << 20, env=env)
     except (OSError, ValueError, TypeError):
         return None
@@ -186,14 +194,15 @@ def _ovnfs_source_hooks_dir(root: Path, env: dict) -> Optional[tuple]:
         return None
     hooks = Path(os.fsdecode(resolved.stdout).strip())
     if not hooks.is_absolute():
-        hooks = Path(source) / hooks
+        hooks = source / hooks
     chain = hooks / 'hooks.d' / 'pre-commit'
     if not sorted(chain.glob('[0-9][0-9]-omp-kit-staged-*')):
         return None
     return (hooks, name)
 
 
-def installed_checks(root: Path, env: dict) -> tuple[list, int]:
+def installed_checks(root: Path, env: dict, source: Optional[tuple[Path, str]] = None,
+                     *, checkout_known: bool = False) -> tuple[list, int]:
     """Resolve commit's hook location, not PATH or the source checkout's scripts."""
     hooks = Path(os.fsdecode(required(['git', 'rev-parse', '--git-path', 'hooks'], env)).strip())
     if not hooks.is_absolute():
@@ -201,7 +210,7 @@ def installed_checks(root: Path, env: dict) -> tuple[list, int]:
     chain = hooks / 'hooks.d' / 'pre-commit'
     candidates = sorted(chain.glob('[0-9][0-9]-omp-kit-staged-*'))
     if not candidates:
-        fallback = _ovnfs_source_hooks_dir(root, env)
+        fallback = _ovnfs_source_hooks_dir(source if checkout_known else _ovnfs_source(root, env), env)
         if fallback is not None:
             hooks, checkout_name = fallback
             print('installed-gate: using source hooks ' + str(hooks) +
@@ -229,20 +238,20 @@ def installed_checks(root: Path, env: dict) -> tuple[list, int]:
 EXPORT_DIR = 'fresh-gate.export-test.' + '0' * 24 + '/archive'
 
 
-def export_tests(tests: list, env: dict, root: Path, workers: int = 1) -> int:
+def export_tests(tests: list, env: dict, root: Path, export_source: Path, workers: int = 1) -> int:
     """Run each test file in an exact export of the judged index; return failures.
 
     workers > 1 (the `--tests affected` selection) runs each runner's files as one stage with that
     many workers, as fresh-gate's run_affected_tests does; workers == 1 keeps one stage per file.
 
-    EXPORTPARITY1: the export has the gate/verdict layout. Like fresh-gate's
-    make_work it lives under the repository's var/agent-tmp, never the system
-    temp root; it archives the HEAD commit (export-subst stamps package.json
-    source_revision), overlays the judged index's changed bytes, and runs
-    `git init -q` like full-suite-verdict.sh. .git/omp-kit-export.json names
-    HEAD plus the overlay.
+    EXPORTPARITY1: use the same long repository var/agent-tmp layout, stamp
+    HEAD, overlay the judged index, and initialize a history-free Git root.
+    PREFLIGHTNFS1: only the scratch location comes from the registered source
+    of an ovnfs checkout; the judged bytes still come from this checkout.
     """
-    parent = root / 'var' / 'agent-tmp'
+    parent = export_source / 'var' / 'agent-tmp'
+    if export_source != root and not parent.resolve().is_relative_to(export_source):
+        raise RuntimeError('registered ovnfs source scratch escapes its repository')
     parent.mkdir(parents=True, exist_ok=True)
     with owned_tmp('commit-preflight-export', root=str(parent)) as owned:
         return run_export_tests(tests, env, Path(owned), root, workers)
@@ -397,7 +406,20 @@ def main():
             message.write_text('preflight\n')
         elif not message.is_file():
             raise RuntimeError('unreadable --message file')
-        checks, failures = installed_checks(root, env)
+        checkout_name = None
+        checkout_source = None
+        if args.tests:
+            hint = command(git_read_argv('config', '--local', '--null', '--get-all', 'ovnfs.checkout'), env)
+            if hint.timed_out or hint.truncated or hint.rc not in (0, 1):
+                raise RuntimeError('cannot read checkout identity for export tests')
+            if hint.rc == 0:
+                name, delimiter, rest = hint.stdout.partition(b'\0')
+                checkout_name = os.fsdecode(name) if delimiter and not rest else ''
+                if OVNFS_CHECKOUT_NAME.fullmatch(checkout_name):
+                    found = _ovnfs_source(root, env)
+                    if found is not None and found[1] == checkout_name:
+                        checkout_source = found
+        checks, failures = installed_checks(root, env, checkout_source, checkout_known=checkout_name is not None)
         checks.extend((name, ['sh', str(HERE / ('check-staged-' + name + '.sh'))]) for name in
                       ('imports', 'readme', 'fragments', 'regexploit', 'pysafe', 'tempsafe', 'kitlib', 'br-init', 'wallclock', 'embed'))
         checks.append(('portable-paths', ['python3', '-B', str(HERE / 'portable_paths_check.py'), '--staged', '--repo', str(root)]))
@@ -483,12 +505,17 @@ def main():
                 args.tests = []
                 print('UNJUDGED affected-tests: ' + str(error))
         if args.tests:
+            run_count = 0
             try:
-                failures += export_tests(args.tests, env, root, workers)
+                if checkout_name is not None and checkout_source is None:
+                    raise RuntimeError('cannot prove the registered ovnfs source for export test scratch')
+                export_source = checkout_source[0] if checkout_source is not None else root
+                failures += export_tests(args.tests, env, root, export_source, workers)
+                run_count = len(args.tests)
             except (OSError, RuntimeError) as error:
                 failures += 1
                 print('UNJUDGED export-tests: ' + str(error))
-            print(f'commit-preflight: {len(checks)} checks, {failures} refused/unjudged, {time.monotonic() - started:.2f}s; {len(args.tests)} export test file(s) run; no fresh gate run')
+            print(f'commit-preflight: {len(checks)} checks, {failures} refused/unjudged, {time.monotonic() - started:.2f}s; {run_count} export test file(s) run; no fresh gate run')
         elif workers > 1:
             # PREFLIGHTAFFECTED1: the gate selects nothing for these paths, so there is nothing to run.
             print(f'commit-preflight: {len(checks)} checks, {failures} refused/unjudged, {time.monotonic() - started:.2f}s; 0 export test file(s) run; affected selection empty')

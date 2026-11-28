@@ -1,0 +1,1 @@
+- Commit preflight runs affected test exports for ovnfs checkouts under the registered source repository’s scratch directory, while still judging the checkout’s staged bytes. Missing checkout provenance refuses the export instead of trying the mounted filesystem.

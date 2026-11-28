@@ -49,7 +49,7 @@ async function initRepo(dir: string, env: Record<string, string>): Promise<void>
 	await git(dir, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty", "-m", "root [test]"], env);
 }
 
-async function setupPair(name: string): Promise<{ checkout: string; withOvnfs: Record<string, string>; withoutOvnfs: Record<string, string> }> {
+async function setupPair(name: string): Promise<{ checkout: string; source: string; withOvnfs: Record<string, string>; withoutOvnfs: Record<string, string> }> {
 	const root = join(base, name);
 	const seedEnv = cleanEnv(process.env["PATH"] ?? "", { GIT_CEILING_DIRECTORIES: base });
 	const source = join(root, "source");
@@ -77,12 +77,12 @@ async function setupPair(name: string): Promise<{ checkout: string; withOvnfs: R
 	const listing = JSON.stringify({ checkouts: [{ name: name + "-checkout", path: checkout, source }] });
 	const withOvnfs = cleanEnv(bin + delimiter + (process.env["PATH"] ?? ""), { OVNFS_JSON: listing });
 	const withoutOvnfs = cleanEnv(pathWithoutOvnfs());
-	return { checkout, withOvnfs, withoutOvnfs };
+	return { checkout, source, withOvnfs, withoutOvnfs };
 }
 
-async function runPreflight(checkout: string, env: Record<string, string>): Promise<{ rc: number; text: string }> {
+async function runPreflight(checkout: string, env: Record<string, string>, args = ["--files", "probe.txt"]): Promise<{ rc: number; text: string }> {
 	const result = await runFixtureAsync(
-		["python3", "-B", join(kitScripts, "commit-preflight.py"), "--files", "probe.txt"],
+		["python3", "-B", join(kitScripts, "commit-preflight.py"), ...args],
 		{ cwd: checkout, env, floor_s: 60, label: "commit-preflight" },
 	);
 	const decode = new TextDecoder();
@@ -104,4 +104,45 @@ test("preflight without ovnfs keeps the exact no-chain UNKNOWN", { timeout: fixt
 	expect(text).toContain("UNKNOWN installed-gate: no installed hook chain");
 	expect(text).not.toContain(MARKER);
 	expect(rc).toBe(0);
+});
+
+test("PREFLIGHTNFS1: export tests use registered source scratch and refuse missing checkout provenance", { timeout: fixtureDeadlineS(90) * 1000 }, async () => {
+	const name = "local-export";
+	const { checkout, source, withOvnfs, withoutOvnfs } = await setupPair(name);
+	const testPath = "tests/cli/placement.test.py";
+	mkdirSync(join(checkout, "tests/cli"), { recursive: true });
+	const specimen = (repo: string) => [
+		"import os",
+		"from pathlib import Path",
+		`expected = Path(${JSON.stringify(join(repo, "var/agent-tmp"))}).resolve()`,
+		"assert Path.cwd().resolve().is_relative_to(expected), 'export scratch is on the checkout instead of the registered source'",
+		"assert Path(os.environ['TMPDIR']).resolve().is_relative_to(Path.cwd()), 'TMPDIR escaped the export'",
+		"print('preflight export and test scratch on selected source')",
+		"",
+	].join("\n");
+	const args = ["--files", testPath, "--tests", testPath];
+	writeFileSync(join(checkout, testPath), specimen(checkout));
+	const local = await runPreflight(checkout, withoutOvnfs, args);
+	expect(local.rc, local.text).toBe(0);
+	expect(local.text).toContain(`PASS export-test:${testPath}`);
+	await git(checkout, ["config", "--local", "ovnfs.checkout", `${name}-checkout`], withOvnfs);
+	writeFileSync(join(checkout, testPath), specimen(source));
+	const resolved = await runPreflight(checkout, withOvnfs, args);
+	expect(resolved.rc, resolved.text).toBe(0);
+	expect(resolved.text).toContain(`PASS export-test:${testPath}`);
+	expect(resolved.text).toContain("preflight export and test scratch on selected source");
+	const refuses = async (env: Record<string, string>) => {
+		const unresolved = await runPreflight(checkout, env, args);
+		expect(unresolved.rc, unresolved.text).toBe(1);
+		expect(unresolved.text).toContain("UNJUDGED export-tests: cannot prove the registered ovnfs source");
+		expect(unresolved.text).not.toContain(`== export-test:${testPath}`);
+		expect(unresolved.text).toContain("0 export test file(s) run");
+	};
+	await refuses({ ...withOvnfs, OVNFS_JSON: '{"checkouts":[]}' });
+	await refuses({ ...withOvnfs, OVNFS_JSON: JSON.stringify({ checkouts: [{ name: `${name}-checkout`, path: ".", source }] }) });
+	await git(checkout, ["config", "--local", "--replace-all", "ovnfs.checkout", `${name}-checkout `], withOvnfs);
+	await refuses(withOvnfs);
+	await git(checkout, ["config", "--local", "--replace-all", "ovnfs.checkout", `${name}-checkout`], withOvnfs);
+	await git(checkout, ["config", "--local", "--add", "ovnfs.checkout", `${name}-checkout`], withOvnfs);
+	await refuses(withOvnfs);
 });
