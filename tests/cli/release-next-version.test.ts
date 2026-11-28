@@ -181,7 +181,7 @@ test.skipIf(!existsSync(CONVERGE))("planted origin move: a peer push during the 
 
 
 test("AC1 planted failure: a run refused at the tag stage commits nothing and leaves package.json and main unchanged", () => {
-	const f = fixture("nextversion-ac1-fail", "1.2.4");
+	const f = fixture("nextversion-ac1-fail", "1.2.4", false, { productBeads: true });
 	writeFileSync(join(f.origin, "hooks/pre-receive"), "#!/bin/sh\nwhile read -r old new ref; do case \"$ref\" in refs/tags/*) echo 'fixture: tag refused' >&2; exit 1 ;; esac; done\n");
 	chmodSync(join(f.origin, "hooks/pre-receive"), 0o755);
 	const source = f.git(f.repo, "rev-parse", "HEAD");
@@ -189,7 +189,7 @@ test("AC1 planted failure: a run refused at the tag stage commits nothing and le
 	const pkgBefore = readFileSync(join(f.repo, "package.json"), "utf8");
 	// The real tail of the run, from the next-version definition and VERSIONSRC1 tag gate through its post-publish call.
 	const tail = segment("# NEXTVERSION1 (ompkit-d8qic", "\nadvance_next_version\n");
-	const body = `${prelude}${helpers()}\nVERSION=1.2.4; SOURCE=${source}; REPO=fixture/release; DIST="$WORK/dist"\n${tail}`;
+	const body = `${prelude}${helpers()}\nVERSION=1.2.4; SOURCE=${source}; BASE_TAG=v1.2.3; REPO=fixture/release; DIST="$WORK/dist"\n${tail}`;
 	writeFileSync(join(f.work, "tail.sh"), body);
 	const result = runFixture(["bash", join(f.work, "tail.sh"), f.repo, f.work], { cwd: f.repo, env: f.env, floor_s: 60 });
 	const stderr = decode(result.stderr);
@@ -208,7 +208,7 @@ function runPreflight(f: Fixture, version: string, source: string) {
 }
 
 test("AC2: a green origin commit that states the next version is cut as is, with no new commit", () => {
-	const f = fixture("nextversion-ac2", "1.2.4");
+	const f = fixture("nextversion-ac2", "1.2.4", false, { productBeads: true });
 	const main = originMain(f);
 	const result = runPreflight(f, "", "");
 	expect(result.rc, decode(result.stderr)).toBe(0);
@@ -222,7 +222,7 @@ test("AC2: a green origin commit that states the next version is cut as is, with
 }, fixtureDeadlineS(120) * 1_000);
 
 test("AC2 planted refusal: a commit stating the published version is still refused by version-match", () => {
-	const f = fixture("nextversion-ac2-refuse", "1.2.3");
+	const f = fixture("nextversion-ac2-refuse", "1.2.3", false, { productBeads: true });
 	const main = originMain(f);
 	const result = runPreflight(f, "1.2.4", main);
 	const stderr = decode(result.stderr);

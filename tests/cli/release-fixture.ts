@@ -57,7 +57,7 @@ export function legacyReleaseReadme(version: string): string {
 }
 
 /** fullTree: the README-checked inputs (src registry, rules, skills, the real package.json) so the staged README hook can judge commits. */
-export function fixture(label: string, mainVersion: string, fullTree = false): Fixture {
+export function fixture(label: string, mainVersion: string, fullTree = false, { productBeads = false } = {}): Fixture {
 	const work = realpathSync(ownedTmp(label, { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
 	const origin = join(work, "origin.git");
 	const repo = join(work, "repo");
@@ -91,8 +91,9 @@ export function fixture(label: string, mainVersion: string, fullTree = false): F
 	writeFileSync(join(repo, ".github/workflows/release.yml"), "jobs:\n  attest-local:\n    runs-on: ubuntu-latest\n");
 	git(repo, "add", "."); git(repo, "commit", "-qm", "fixture base");
 	git(repo, "remote", "add", "origin", origin);
-	git(repo, "push", "-q", "origin", "main");
 	git(repo, "tag", "v1.2.3"); git(repo, "push", "-q", "origin", "v1.2.3");
+	if (productBeads) seedProductBeads(repo, (args) => git(repo, ...args));
+	git(repo, "push", "-q", "origin", "main");
 	git(repo, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main");
 	const bin = join(work, "bin");
 	mkdirSync(bin);
